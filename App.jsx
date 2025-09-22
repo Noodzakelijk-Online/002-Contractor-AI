@@ -347,7 +347,7 @@ function App() {
       uitbetalingen[afdracht.aanProfielId].totaal += afdrachtBedrag
     })
 
-    return Object.values(uitbetalingen)
+    return Object.entries(uitbetalingen).map(([id, data]) => ({ id, ...data }))
   }
 
   // Bereken totalen
@@ -587,8 +587,8 @@ function App() {
             <CardContent className="p-0">
               <div className="text-xs font-medium text-muted-foreground mb-2">Uitbetalingen</div>
               <div className="space-y-1">
-                {uitbetalingen.map((uitbetaling, index) => (
-                  <div key={index} className="flex justify-between items-center text-xs">
+                {uitbetalingen.map((uitbetaling) => (
+                  <div key={uitbetaling.id} className="flex justify-between items-center text-xs">
                     <span className="font-medium">{uitbetaling.naam}</span>
                     <div className="flex items-center gap-2">
                       {(uitbetaling.ontvangenUurloonAfdrachten > 0 || uitbetaling.ontvangenMargeAfdrachten > 0) && (
