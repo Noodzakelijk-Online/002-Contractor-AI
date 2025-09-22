@@ -237,15 +237,23 @@ function App() {
   const berekenUitbetalingen = () => {
     const uitbetalingen = {}
     
-    // Stap 1: Initialiseer iedereen met hun uurloon
-    personen.forEach(persoon => {
-      const financieel = berekenFinancieel(persoon)
-      uitbetalingen[persoon.profielId] = {
-        naam: persoon.naam,
-        eigenLoon: financieel.kosten,
+    // Stap 1: Initialiseer alle profielen in de uitbetalingen object
+    profielen.forEach(profiel => {
+      uitbetalingen[profiel.id] = {
+        naam: profiel.naam,
+        eigenLoon: 0,
         ontvangenUurloonAfdrachten: 0,
         ontvangenMargeAfdrachten: 0,
-        totaal: financieel.kosten
+        totaal: 0
+      }
+    })
+
+    // Stap 2: Voeg het basisloon toe voor elke actieve persoon
+    personen.forEach(persoon => {
+      const financieel = berekenFinancieel(persoon)
+      if (uitbetalingen[persoon.profielId]) {
+        uitbetalingen[persoon.profielId].eigenLoon += financieel.kosten
+        uitbetalingen[persoon.profielId].totaal += financieel.kosten
       }
     })
 
