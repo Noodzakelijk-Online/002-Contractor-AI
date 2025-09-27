@@ -42,13 +42,19 @@ function ProfileManager({ profielen, setProfielen, personen, setPersonen }) {
         p.id === bewerkProfiel ? { ...p, ...nieuwProfiel } : p
       ))
       // Update ook actieve personen met dit profiel
-      setPersonen(personen.map(p =>
-        p.profielId === bewerkProfiel ? {
-          ...p,
-          naam: nieuwProfiel.naam,
-          uurtariefPersoon: nieuwProfiel.uurtariefPersoon
-        } : p
-      ))
+      const updatedDeductionIds = new Set(nieuwProfiel.afdrachten.map(a => a.id));
+      setPersonen(personen.map(p => {
+        if (p.profielId === bewerkProfiel) {
+          return {
+            ...p,
+            naam: nieuwProfiel.naam,
+            uurtariefPersoon: nieuwProfiel.uurtariefPersoon,
+            // Filter out any active deductions that no longer exist on the profile
+            actieveAfdrachten: p.actieveAfdrachten.filter(id => updatedDeductionIds.has(id))
+          };
+        }
+        return p;
+      }));
     } else {
       // Nieuw profiel
       const profiel = {

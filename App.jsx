@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import usePersistentState from './usePersistentState.js';
 import { Button } from '@/components/ui/button.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
@@ -11,8 +11,8 @@ import Summary from './components/Summary.jsx'
 import './App.css'
 
 function App() {
-  const [personen, setPersonen] = useState([])
-  const [profielen, setProfielen] = useState([])
+  const [personen, setPersonen] = usePersistentState('personen', [])
+  const [profielen, setProfielen] = usePersistentState('profielen', [])
 
   // Functie om een nieuwe persoon toe te voegen vanuit profiel
   const voegPersoonToe = (profielId) => {
