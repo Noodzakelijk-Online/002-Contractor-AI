@@ -1,0 +1,27 @@
+# Environment variables
+.env
+.env.*
+!/.env.example
+
+# Backend specific
+backend/.env
+backend/instance/
+backend/venv/
+
+# Frontend specific
+frontend/node_modules/
+frontend/dist/
+frontend/.DS_Store
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+*.swo
+*.swp
+*.sln
+*.suo
+*.ntvs*
+*.njsproj
+*.pyc
+__pycache__/
