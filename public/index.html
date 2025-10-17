@@ -1,0 +1,1540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contractor AI - Complete Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(20px);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-size: 1.3rem;
+            font-weight: 700;
+        }
+
+        .header-nav {
+            display: flex;
+            gap: 0.5rem;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 0.5rem;
+            border-radius: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header-nav-item {
+            padding: 0.75rem 1.5rem;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            position: relative;
+        }
+
+        .header-nav-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .header-nav-item.active {
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-nav-item .badge {
+            background: linear-gradient(135deg, #ff4757, #c44569);
+            color: white;
+            font-size: 0.7rem;
+            font-weight: bold;
+            padding: 0.2rem 0.5rem;
+            border-radius: 10px;
+            min-width: 18px;
+            text-align: center;
+        }
+
+        .status-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.8rem;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(0, 255, 136, 0.1);
+            padding: 0.4rem 0.8rem;
+            border-radius: 15px;
+            border: 1px solid rgba(0, 255, 136, 0.3);
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .main-content {
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* Dashboard Overview */
+        .dashboard-overview {
+            display: grid;
+            gap: 2rem;
+        }
+
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 2rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.2);
+            background: rgba(255, 255, 255, 0.12);
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            border-radius: 20px 20px 0 0;
+        }
+
+        .metric-card.critical::before { background: linear-gradient(90deg, #ff4757, #c44569); }
+        .metric-card.success::before { background: linear-gradient(90deg, #2ed573, #17a2b8); }
+        .metric-card.warning::before { background: linear-gradient(90deg, #ffa502, #ff6348); }
+        .metric-card.info::before { background: linear-gradient(90deg, #3742fa, #2f3542); }
+
+        .metric-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+
+        .metric-icon {
+            font-size: 2.5rem;
+            opacity: 0.8;
+        }
+
+        .metric-value {
+            font-size: 2.8rem;
+            font-weight: 700;
+            margin: 0.5rem 0;
+            background: linear-gradient(135deg, #ffffff, #e3e3e3);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .metric-label {
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 1rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+        }
+
+        .metric-change {
+            font-size: 0.85rem;
+            margin-top: 1rem;
+            padding: 0.5rem 1rem;
+            border-radius: 12px;
+            font-weight: 500;
+        }
+
+        .metric-change.positive {
+            background: rgba(0, 255, 136, 0.1);
+            color: #00ff88;
+            border: 1px solid rgba(0, 255, 136, 0.2);
+        }
+
+        .metric-change.negative {
+            background: rgba(255, 71, 87, 0.1);
+            color: #ff4757;
+            border: 1px solid rgba(255, 71, 87, 0.2);
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .main-panel {
+            display: grid;
+            gap: 2rem;
+        }
+
+        .side-panel {
+            display: grid;
+            gap: 1.5rem;
+        }
+
+        .panel-card {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 2rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .panel-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .panel-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .btn {
+            padding: 0.6rem 1.2rem;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-decoration: none;
+            color: white;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .btn-success { background: linear-gradient(135deg, #2ed573 0%, #17a2b8 100%); }
+        .btn-warning { background: linear-gradient(135deg, #ffa502 0%, #ff6348 100%); }
+        .btn-danger { background: linear-gradient(135deg, #ff4757 0%, #c44569 100%); }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Job Items */
+        .job-list {
+            display: grid;
+            gap: 1rem;
+        }
+
+        .job-item {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 1.5rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border-left: 4px solid transparent;
+            position: relative;
+        }
+
+        .job-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateX(5px);
+        }
+
+        .job-item.critical { border-left-color: #ff4757; background: rgba(255, 71, 87, 0.05); }
+        .job-item.high { border-left-color: #ffa502; background: rgba(255, 165, 2, 0.05); }
+        .job-item.medium { border-left-color: #3742fa; background: rgba(55, 66, 250, 0.05); }
+        .job-item.low { border-left-color: #2ed573; background: rgba(46, 213, 115, 0.05); }
+
+        .job-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 0.75rem;
+        }
+
+        .job-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .job-meta {
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.7);
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .job-status {
+            padding: 0.3rem 0.8rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-pending { background: rgba(255, 165, 2, 0.2); color: #ffa502; border: 1px solid rgba(255, 165, 2, 0.3); }
+        .status-scheduled { background: rgba(55, 66, 250, 0.2); color: #3742fa; border: 1px solid rgba(55, 66, 250, 0.3); }
+        .status-in-progress { background: rgba(46, 213, 115, 0.2); color: #2ed573; border: 1px solid rgba(46, 213, 115, 0.3); }
+        .status-completed { background: rgba(116, 125, 140, 0.2); color: #747d8c; border: 1px solid rgba(116, 125, 140, 0.3); }
+
+        .job-progress {
+            margin: 0.75rem 0;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00ff88, #00d4ff);
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.7);
+            margin-top: 0.5rem;
+        }
+
+        .job-actions {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        /* Worker Cards */
+        .worker-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+
+        .worker-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 1.5rem;
+            transition: all 0.3s ease;
+        }
+
+        .worker-card:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .worker-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .worker-name {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .worker-rating {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .stars {
+            color: #ffa502;
+        }
+
+        .worker-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 0.75rem;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        /* Tool Grid */
+        .tool-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .tool-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1.25rem;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .tool-card:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .tool-icon {
+            font-size: 2rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .tool-name {
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .tool-status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 0.5rem;
+        }
+
+        .tool-status-indicator.available { background: #2ed573; }
+        .tool-status-indicator.in-use { background: #ffa502; }
+        .tool-status-indicator.maintenance { background: #ff4757; }
+
+        /* AI Insights */
+        .ai-insights {
+            background: rgba(0, 255, 136, 0.05);
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            border-radius: 15px;
+            padding: 1.5rem;
+        }
+
+        .ai-insights-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+            color: #00ff88;
+            font-weight: 600;
+        }
+
+        .insight-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            margin: 0.75rem 0;
+            padding: 0.75rem;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+        }
+
+        /* Weather Widget */
+        .weather-widget {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 1.5rem;
+        }
+
+        .weather-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .weather-location {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 0.75rem 0;
+            padding: 0.75rem;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+        }
+
+        .weather-temp {
+            font-weight: 600;
+        }
+
+        .weather-condition {
+            font-size: 0.85rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+        }
+
+        .condition-good { background: rgba(46, 213, 115, 0.2); color: #2ed573; }
+        .condition-caution { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
+        .condition-poor { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
+
+        /* Performance Charts */
+        .chart-container {
+            height: 200px;
+            display: flex;
+            align-items: end;
+            justify-content: space-around;
+            padding: 1rem;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            margin: 1rem 0;
+        }
+
+        .chart-bar {
+            width: 30px;
+            background: linear-gradient(to top, #3742fa, #00d4ff);
+            border-radius: 4px 4px 0 0;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .chart-bar:hover {
+            background: linear-gradient(to top, #00ff88, #00d4ff);
+        }
+
+        .chart-label {
+            position: absolute;
+            bottom: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.7rem;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        /* Notification */
+        .notification {
+            position: fixed;
+            top: 100px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            color: #333;
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+            transform: translateX(400px);
+            transition: transform 0.3s ease;
+            max-width: 350px;
+        }
+
+        .notification.show {
+            transform: translateX(0);
+        }
+
+        .notification.success { border-left: 4px solid #2ed573; }
+        .notification.error { border-left: 4px solid #ff4757; }
+        .notification.info { border-left: 4px solid #3742fa; }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                gap: 1rem;
+                padding: 1rem;
+            }
+
+            .header-nav {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+
+            .main-content {
+                padding: 1rem;
+            }
+
+            .metrics-row {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            🤖 Contractor AI
+        </div>
+        
+        <div class="header-nav">
+            <div class="header-nav-item active" data-view="overview">
+                📊 Overview
+                <span class="badge" id="overviewBadge">4</span>
+            </div>
+            <div class="header-nav-item" data-view="jobs">
+                📋 Jobs
+                <span class="badge" id="jobsBadge">3</span>
+            </div>
+            <div class="header-nav-item" data-view="workers">
+                👥 Team
+                <span class="badge" id="workersBadge">2</span>
+            </div>
+            <div class="header-nav-item" data-view="tools">
+                🔧 Tools
+                <span class="badge" id="toolsBadge">5</span>
+            </div>
+            <div class="header-nav-item" data-view="analytics">
+                📈 Analytics
+            </div>
+        </div>
+        
+        <div class="status-info">
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span>System Active</span>
+            </div>
+            <div style="font-size: 0.75rem; opacity: 0.8;">
+                noodzakelijkonline@gmail.com | +31 06-83515175
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <!-- Overview Section -->
+        <div id="overviewSection" class="dashboard-overview">
+            <div class="metrics-row">
+                <div class="metric-card critical" onclick="handleMetricClick('critical')">
+                    <div class="metric-header">
+                        <div class="metric-icon">🚨</div>
+                    </div>
+                    <div class="metric-value" id="criticalJobs">1</div>
+                    <div class="metric-label">Critical Jobs</div>
+                    <div class="metric-change negative">Needs immediate attention</div>
+                </div>
+                
+                <div class="metric-card success" onclick="handleMetricClick('ai-handling')">
+                    <div class="metric-header">
+                        <div class="metric-icon">🤖</div>
+                    </div>
+                    <div class="metric-value" id="aiHandling">2</div>
+                    <div class="metric-label">AI is Handling</div>
+                    <div class="metric-change positive">Automated workflow active</div>
+                </div>
+                
+                <div class="metric-card warning" onclick="handleMetricClick('revenue')">
+                    <div class="metric-header">
+                        <div class="metric-icon">💰</div>
+                    </div>
+                    <div class="metric-value">€<span id="todayRevenue">75</span></div>
+                    <div class="metric-label">Today's Revenue</div>
+                    <div class="metric-change positive">+€75 from completed jobs</div>
+                </div>
+                
+                <div class="metric-card info" onclick="handleMetricClick('performance')">
+                    <div class="metric-header">
+                        <div class="metric-icon">⚡</div>
+                    </div>
+                    <div class="metric-value" id="onTimeRate">96%</div>
+                    <div class="metric-label">On-Time Rate</div>
+                    <div class="metric-change positive">Above target (95%)</div>
+                </div>
+            </div>
+
+            <div class="content-grid">
+                <div class="main-panel">
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                🚨 Priority Jobs
+                            </div>
+                            <div class="panel-actions">
+                                <button class="btn btn-primary" onclick="simulateClientRequest()">
+                                    📱 Simulate Request
+                                </button>
+                                <button class="btn btn-success" onclick="showNewJobForm()">
+                                    ➕ New Job
+                                </button>
+                            </div>
+                        </div>
+                        <div class="job-list" id="priorityJobsList">
+                            <!-- Priority jobs will be loaded here -->
+                        </div>
+                    </div>
+
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                📈 Performance Overview
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <div class="chart-bar" style="height: 85%;">
+                                <div class="chart-label">Mon</div>
+                            </div>
+                            <div class="chart-bar" style="height: 92%;">
+                                <div class="chart-label">Tue</div>
+                            </div>
+                            <div class="chart-bar" style="height: 78%;">
+                                <div class="chart-label">Wed</div>
+                            </div>
+                            <div class="chart-bar" style="height: 96%;">
+                                <div class="chart-label">Thu</div>
+                            </div>
+                            <div class="chart-bar" style="height: 88%;">
+                                <div class="chart-label">Fri</div>
+                            </div>
+                            <div class="chart-bar" style="height: 94%;">
+                                <div class="chart-label">Sat</div>
+                            </div>
+                            <div class="chart-bar" style="height: 82%;">
+                                <div class="chart-label">Sun</div>
+                            </div>
+                        </div>
+                        <div style="text-align: center; color: rgba(255,255,255,0.7); font-size: 0.9rem;">
+                            Weekly completion rates - Avg: 88%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="side-panel">
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                🤖 AI Recommendations
+                            </div>
+                        </div>
+                        <div class="ai-insights">
+                            <div class="ai-insights-header">
+                                <span>🧠</span>
+                                <span>Smart Insights</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>🌤️</span>
+                                <span>Weather window optimal for gutter cleaning tomorrow 10-13h</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>👷</span>
+                                <span>Marco Silva available and has required safety certification</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>🏠</span>
+                                <span>Bathroom renovation on schedule, tile delivery confirmed</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>💰</span>
+                                <span>Profit margin opportunity: +15% on next landscaping job</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                🌤️ Buienradar Weather
+                            </div>
+                        </div>
+                        <div class="weather-widget">
+                            <div class="weather-location">
+                                <div>
+                                    <div class="weather-temp">Amsterdam: 14°C</div>
+                                    <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">Light rain</div>
+                                </div>
+                                <div class="weather-condition condition-caution">Indoor jobs recommended</div>
+                            </div>
+                            <div class="weather-location">
+                                <div>
+                                    <div class="weather-temp">Utrecht: 16°C</div>
+                                    <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">Clearing up</div>
+                                </div>
+                                <div class="weather-condition condition-good">Good for outdoor work</div>
+                            </div>
+                            <div class="weather-location">
+                                <div>
+                                    <div class="weather-temp">Rotterdam: 15°C</div>
+                                    <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">Partly cloudy</div>
+                                </div>
+                                <div class="weather-condition condition-good">Optimal conditions</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                🎯 Quick Actions
+                            </div>
+                        </div>
+                        <div style="display: grid; gap: 0.75rem;">
+                            <button class="btn btn-primary" onclick="testNotifications()">
+                                📧 Test Email & SMS
+                            </button>
+                            <button class="btn btn-warning" onclick="emergencyMode()">
+                                🚨 Emergency Mode
+                            </button>
+                            <button class="btn btn-secondary" onclick="toggleQuietMode()">
+                                🔇 Quiet Mode
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Jobs Section -->
+        <div id="jobsSection" class="dashboard-overview" style="display: none;">
+            <div class="panel-card">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        📋 All Jobs
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn btn-primary" onclick="showNewJobForm()">
+                            ➕ New Job
+                        </button>
+                        <button class="btn btn-secondary" onclick="filterJobs('all')">
+                            All
+                        </button>
+                        <button class="btn btn-secondary" onclick="filterJobs('pending')">
+                            Pending
+                        </button>
+                        <button class="btn btn-secondary" onclick="filterJobs('in_progress')">
+                            Active
+                        </button>
+                    </div>
+                </div>
+                <div class="job-list" id="allJobsList">
+                    <!-- All jobs will be loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Workers Section -->
+        <div id="workersSection" class="dashboard-overview" style="display: none;">
+            <div class="panel-card">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        👥 Team Status
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn btn-primary" onclick="addWorker()">
+                            ➕ Add Worker
+                        </button>
+                    </div>
+                </div>
+                <div class="worker-grid" id="workersList">
+                    <!-- Workers will be loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Tools Section -->
+        <div id="toolsSection" class="dashboard-overview" style="display: none;">
+            <div class="panel-card">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        🔧 Tools & Equipment
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn btn-primary" onclick="addTool()">
+                            ➕ Add Tool
+                        </button>
+                        <button class="btn btn-secondary" onclick="filterTools('available')">
+                            Available
+                        </button>
+                        <button class="btn btn-secondary" onclick="filterTools('in_use')">
+                            In Use
+                        </button>
+                    </div>
+                </div>
+                <div class="tool-grid" id="toolsList">
+                    <!-- Tools will be loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Analytics Section -->
+        <div id="analyticsSection" class="dashboard-overview" style="display: none;">
+            <div class="content-grid">
+                <div class="main-panel">
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                📊 Revenue Analytics
+                            </div>
+                        </div>
+                        <div class="chart-container" style="height: 300px;">
+                            <div class="chart-bar" style="height: 65%;">
+                                <div class="chart-label">Jan</div>
+                            </div>
+                            <div class="chart-bar" style="height: 78%;">
+                                <div class="chart-label">Feb</div>
+                            </div>
+                            <div class="chart-bar" style="height: 85%;">
+                                <div class="chart-label">Mar</div>
+                            </div>
+                            <div class="chart-bar" style="height: 92%;">
+                                <div class="chart-label">Apr</div>
+                            </div>
+                            <div class="chart-bar" style="height: 88%;">
+                                <div class="chart-label">May</div>
+                            </div>
+                            <div class="chart-bar" style="height: 95%;">
+                                <div class="chart-label">Jun</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                🎯 Performance Metrics
+                            </div>
+                        </div>
+                        <div class="metrics-row">
+                            <div style="text-align: center; padding: 1.5rem; background: rgba(255,255,255,0.05); border-radius: 12px;">
+                                <div style="font-size: 2rem; font-weight: 700; color: #2ed573;">4.8</div>
+                                <div style="color: rgba(255,255,255,0.7);">Avg Rating</div>
+                            </div>
+                            <div style="text-align: center; padding: 1.5rem; background: rgba(255,255,255,0.05); border-radius: 12px;">
+                                <div style="font-size: 2rem; font-weight: 700; color: #3742fa;">96%</div>
+                                <div style="color: rgba(255,255,255,0.7);">On-Time</div>
+                            </div>
+                            <div style="text-align: center; padding: 1.5rem; background: rgba(255,255,255,0.05); border-radius: 12px;">
+                                <div style="font-size: 2rem; font-weight: 700; color: #ffa502;">€2.1k</div>
+                                <div style="color: rgba(255,255,255,0.7);">Monthly Revenue</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="side-panel">
+                    <div class="panel-card">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                📈 Growth Insights
+                            </div>
+                        </div>
+                        <div class="ai-insights">
+                            <div class="insight-item">
+                                <span>📈</span>
+                                <span>Revenue up 23% vs last month</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>⭐</span>
+                                <span>Customer satisfaction improved to 4.8/5</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>🎯</span>
+                                <span>On-time delivery rate: 96% (target: 95%)</span>
+                            </div>
+                            <div class="insight-item">
+                                <span>💡</span>
+                                <span>Recommend: Expand bathroom renovation services</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification -->
+    <div id="notification" class="notification">
+        <div id="notificationContent"></div>
+    </div>
+
+    <script>
+        // Global state
+        let dashboardData = {};
+        let currentView = 'overview';
+        let isQuietMode = false;
+
+        // Sample data for demonstration
+        const sampleJobs = [
+            {
+                id: 1,
+                title: "Bathroom Renovation - Complete Overhaul",
+                client_name: "Maria van der Berg",
+                client_phone: "+31 6 12345678",
+                location: "Oudegracht 123, Utrecht",
+                job_type: "bathroom_renovation",
+                priority: "critical",
+                status: "pending",
+                estimated_cost: 1512,
+                hourly_rate: 20,
+                equipment_rate: 2.5,
+                progress_percentage: 15,
+                ai_reasoning: "Bathroom specialist Anna Kowalski recommended. High complexity job requiring tile work and plumbing.",
+                ai_confidence: "high"
+            },
+            {
+                id: 2,
+                title: "Gutter Cleaning & Inspection",
+                client_name: "Jan Pietersen",
+                client_phone: "+31 6 87654321",
+                location: "Prinsengracht 456, Amsterdam",
+                job_type: "gutter_cleaning",
+                priority: "high",
+                status: "scheduled",
+                estimated_cost: 90,
+                hourly_rate: 20,
+                equipment_rate: 2.5,
+                progress_percentage: 0,
+                ai_reasoning: "Marco Silva assigned - gutter specialist with safety certification. Weather window optimal tomorrow 10-13h.",
+                ai_confidence: "high"
+            },
+            {
+                id: 3,
+                title: "Weekly Lawn Maintenance",
+                client_name: "Sophie de Vries",
+                client_phone: "+31 6 11223344",
+                location: "Herengracht 789, Amsterdam",
+                job_type: "lawn_maintenance",
+                priority: "medium",
+                status: "completed",
+                estimated_cost: 75,
+                actual_cost: 75,
+                hourly_rate: 20,
+                equipment_rate: 2.5,
+                progress_percentage: 100,
+                ai_reasoning: "Regular maintenance completed successfully. Client satisfaction: 5/5 stars.",
+                ai_confidence: "high"
+            }
+        ];
+
+        const sampleWorkers = [
+            {
+                id: 1,
+                name: "Anna Kowalski",
+                status: "available",
+                current_location: "Utrecht",
+                jobs_completed: 47,
+                success_rate: 95,
+                average_rating: 4.8,
+                hourly_rate: 22,
+                specialties: ["Bathroom renovation", "Tile work", "Plumbing"]
+            },
+            {
+                id: 2,
+                name: "Marco Silva",
+                status: "on_job",
+                current_location: "Amsterdam",
+                jobs_completed: 32,
+                success_rate: 92,
+                average_rating: 4.6,
+                hourly_rate: 20,
+                specialties: ["Gutter cleaning", "Safety work", "Exterior maintenance"]
+            }
+        ];
+
+        const sampleTools = [
+            { id: 1, name: "Tile Saw", category: "power_tools", status: "available", current_location: "Warehouse" },
+            { id: 2, name: "Pressure Washer", category: "cleaning", status: "in_use", current_location: "Amsterdam job site", return_date: "2025-10-17" },
+            { id: 3, name: "Extension Ladder", category: "access", status: "available", current_location: "Van #2" },
+            { id: 4, name: "Plumbing Kit", category: "hand_tools", status: "in_use", current_location: "Utrecht job site", return_date: "2025-10-18" },
+            { id: 5, name: "Safety Harness", category: "safety", status: "available", current_location: "Warehouse" }
+        ];
+
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            setupEventListeners();
+            loadDashboardData();
+            showNotification('🤖 Contractor AI System Online - All systems operational!', 'success');
+        });
+
+        function setupEventListeners() {
+            // Navigation
+            document.querySelectorAll('.header-nav-item').forEach(item => {
+                item.addEventListener('click', function() {
+                    const view = this.dataset.view;
+                    switchView(view);
+                });
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.ctrlKey || e.metaKey) {
+                    switch(e.key) {
+                        case 'q':
+                            e.preventDefault();
+                            toggleQuietMode();
+                            break;
+                        case 'n':
+                            e.preventDefault();
+                            showNewJobForm();
+                            break;
+                    }
+                }
+            });
+        }
+
+        function switchView(view) {
+            // Update navigation
+            document.querySelectorAll('.header-nav-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            document.querySelector(`[data-view="${view}"]`).classList.add('active');
+
+            // Update content
+            document.querySelectorAll('[id$="Section"]').forEach(section => {
+                section.style.display = 'none';
+            });
+
+            document.getElementById(view + 'Section').style.display = 'block';
+            currentView = view;
+
+            // Load specific data
+            switch(view) {
+                case 'overview':
+                    loadOverviewData();
+                    break;
+                case 'jobs':
+                    loadAllJobs();
+                    break;
+                case 'workers':
+                    loadWorkers();
+                    break;
+                case 'tools':
+                    loadTools();
+                    break;
+                case 'analytics':
+                    loadAnalytics();
+                    break;
+            }
+        }
+
+        function loadDashboardData() {
+            // Simulate loading data
+            dashboardData = {
+                jobs: sampleJobs,
+                workers: sampleWorkers,
+                tools: sampleTools,
+                metrics: {
+                    critical_jobs: sampleJobs.filter(j => j.priority === 'critical').length,
+                    ai_handling: sampleJobs.filter(j => j.status === 'pending' || j.status === 'scheduled').length,
+                    today_revenue: sampleJobs.filter(j => j.status === 'completed').reduce((sum, j) => sum + (j.actual_cost || 0), 0),
+                    total_jobs: sampleJobs.length,
+                    on_time_rate: 96
+                }
+            };
+
+            updateDashboard();
+        }
+
+        function updateDashboard() {
+            // Update metrics
+            document.getElementById('criticalJobs').textContent = dashboardData.metrics.critical_jobs;
+            document.getElementById('aiHandling').textContent = dashboardData.metrics.ai_handling;
+            document.getElementById('todayRevenue').textContent = dashboardData.metrics.today_revenue;
+            document.getElementById('onTimeRate').textContent = dashboardData.metrics.on_time_rate + '%';
+
+            // Update badges
+            document.getElementById('overviewBadge').textContent = dashboardData.metrics.critical_jobs;
+            document.getElementById('jobsBadge').textContent = dashboardData.metrics.total_jobs;
+            document.getElementById('workersBadge').textContent = dashboardData.workers.filter(w => w.status === 'available').length;
+            document.getElementById('toolsBadge').textContent = dashboardData.tools.filter(t => t.status === 'available').length;
+
+            loadOverviewData();
+        }
+
+        function loadOverviewData() {
+            const priorityJobs = dashboardData.jobs.filter(job => 
+                job.priority === 'critical' || job.priority === 'high'
+            );
+            
+            const container = document.getElementById('priorityJobsList');
+            container.innerHTML = priorityJobs.map(job => createJobCard(job)).join('');
+        }
+
+        function loadAllJobs() {
+            const container = document.getElementById('allJobsList');
+            container.innerHTML = dashboardData.jobs.map(job => createJobCard(job)).join('');
+        }
+
+        function loadWorkers() {
+            const container = document.getElementById('workersList');
+            container.innerHTML = dashboardData.workers.map(worker => `
+                <div class="worker-card">
+                    <div class="worker-header">
+                        <div class="worker-name">${worker.name}</div>
+                        <div class="job-status status-${worker.status.replace('_', '-')}">${worker.status.toUpperCase()}</div>
+                    </div>
+                    <div class="worker-rating">
+                        <span class="stars">⭐⭐⭐⭐⭐</span>
+                        <span>${worker.average_rating}/5</span>
+                    </div>
+                    <div class="worker-stats">
+                        <div class="stat-item">
+                            <div class="stat-value">${worker.jobs_completed}</div>
+                            <div class="stat-label">Jobs Done</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value">${worker.success_rate}%</div>
+                            <div class="stat-label">Success Rate</div>
+                        </div>
+                    </div>
+                    <div style="margin-top: 1rem; font-size: 0.9rem; color: rgba(255,255,255,0.7);">
+                        <strong>Location:</strong> ${worker.current_location}<br>
+                        <strong>Rate:</strong> €${worker.hourly_rate}/hour<br>
+                        <strong>Specialties:</strong> ${worker.specialties.join(', ')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function loadTools() {
+            const container = document.getElementById('toolsList');
+            container.innerHTML = dashboardData.tools.map(tool => `
+                <div class="tool-card">
+                    <div class="tool-icon">🔧</div>
+                    <div class="tool-name">${tool.name}</div>
+                    <div style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                        <span class="tool-status-indicator ${tool.status.replace('_', '-')}"></span>
+                        ${tool.status.replace('_', ' ').toUpperCase()}
+                    </div>
+                    <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">
+                        ${tool.current_location}
+                        ${tool.return_date ? `<br>Returns: ${new Date(tool.return_date).toLocaleDateString()}` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function loadAnalytics() {
+            // Analytics data is already displayed in the template
+        }
+
+        function createJobCard(job) {
+            return `
+                <div class="job-item ${job.priority}" onclick="showJobDetails(${job.id})">
+                    <div class="job-header">
+                        <div>
+                            <div class="job-title">${job.title}</div>
+                            <div class="job-meta">
+                                <span>${job.client_name}</span>
+                                <span>${job.location}</span>
+                                <span>€${job.estimated_cost}</span>
+                            </div>
+                        </div>
+                        <div class="job-status status-${job.status.replace('_', '-')}">${job.status.toUpperCase()}</div>
+                    </div>
+                    
+                    ${job.progress_percentage > 0 ? `
+                        <div class="job-progress">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${job.progress_percentage}%"></div>
+                            </div>
+                            <div class="progress-text">Progress: ${job.progress_percentage}%</div>
+                        </div>
+                    ` : ''}
+                    
+                    ${job.ai_reasoning ? `
+                        <div style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(0,255,136,0.05); border-radius: 8px; border-left: 3px solid #00ff88;">
+                            <div style="font-size: 0.85rem; color: #00ff88; font-weight: 600;">AI Analysis (${job.ai_confidence.toUpperCase()} confidence):</div>
+                            <div style="font-size: 0.9rem; margin-top: 0.25rem;">${job.ai_reasoning}</div>
+                        </div>
+                    ` : ''}
+                    
+                    ${job.status === 'pending' ? `
+                        <div class="job-actions">
+                            <button class="btn btn-primary" onclick="event.stopPropagation(); executeAIPlan(${job.id})">
+                                🤖 Execute AI Plan
+                            </button>
+                            <button class="btn btn-secondary" onclick="event.stopPropagation(); scheduleJob(${job.id})">
+                                📅 Schedule
+                            </button>
+                        </div>
+                    ` : ''}
+                    
+                    ${job.status === 'scheduled' ? `
+                        <div class="job-actions">
+                            <button class="btn btn-success" onclick="event.stopPropagation(); startJob(${job.id})">
+                                ▶️ Start Job
+                            </button>
+                        </div>
+                    ` : ''}
+                    
+                    ${job.status === 'in_progress' ? `
+                        <div class="job-actions">
+                            <button class="btn btn-warning" onclick="event.stopPropagation(); completeJob(${job.id})">
+                                ✅ Complete Job
+                            </button>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        function showJobDetails(jobId) {
+            const job = dashboardData.jobs.find(j => j.id === jobId);
+            if (job) {
+                showNotification(`📋 Job Details: ${job.title} - ${job.client_name} - Status: ${job.status.toUpperCase()}`, 'info');
+            }
+        }
+
+        async function executeAIPlan(jobId) {
+            const job = dashboardData.jobs.find(j => j.id === jobId);
+            if (job) {
+                showNotification('🤖 AI is executing the complete plan for ' + job.title + '...', 'info');
+                
+                // Simulate AI processing
+                setTimeout(() => {
+                    job.status = 'scheduled';
+                    showNotification('✅ AI Plan executed! Worker assigned, schedule optimized, client notified via WhatsApp.', 'success');
+                    updateDashboard();
+                    if (currentView === 'jobs') loadAllJobs();
+                    if (currentView === 'overview') loadOverviewData();
+                }, 2000);
+            }
+        }
+
+        async function startJob(jobId) {
+            const job = dashboardData.jobs.find(j => j.id === jobId);
+            if (job) {
+                job.status = 'in_progress';
+                job.progress_percentage = 10;
+                showNotification('✅ Job started! Worker and client notified via WhatsApp.', 'success');
+                updateDashboard();
+                if (currentView === 'jobs') loadAllJobs();
+                if (currentView === 'overview') loadOverviewData();
+            }
+        }
+
+        async function completeJob(jobId) {
+            const job = dashboardData.jobs.find(j => j.id === jobId);
+            if (job) {
+                const actualCost = prompt('Enter actual cost (€):', job.estimated_cost);
+                if (actualCost !== null) {
+                    job.status = 'completed';
+                    job.actual_cost = parseFloat(actualCost) || job.estimated_cost;
+                    job.progress_percentage = 100;
+                    showNotification('✅ Job completed! Client invoiced and notified.', 'success');
+                    updateDashboard();
+                    if (currentView === 'jobs') loadAllJobs();
+                    if (currentView === 'overview') loadOverviewData();
+                }
+            }
+        }
+
+        async function simulateClientRequest() {
+            showNotification('📱 Simulating new client WhatsApp request...', 'info');
+            
+            setTimeout(() => {
+                const newJob = {
+                    id: Date.now(),
+                    title: "Emergency Plumbing - Leak Repair",
+                    client_name: "Thomas Bakker",
+                    client_phone: "+31 6 99887766",
+                    location: "Keizersgracht 321, Amsterdam",
+                    job_type: "emergency_plumbing",
+                    priority: "critical",
+                    status: "pending",
+                    estimated_cost: 150,
+                    hourly_rate: 20,
+                    equipment_rate: 2.5,
+                    progress_percentage: 0,
+                    ai_reasoning: "Emergency job detected. Anna Kowalski available for immediate dispatch. Plumbing kit ready.",
+                    ai_confidence: "high"
+                };
+                
+                dashboardData.jobs.unshift(newJob);
+                dashboardData.metrics.critical_jobs++;
+                dashboardData.metrics.total_jobs++;
+                
+                showNotification('✅ New emergency job created! AI analyzed and ready for execution. Check your email for details.', 'success');
+                updateDashboard();
+                if (currentView === 'jobs') loadAllJobs();
+                if (currentView === 'overview') loadOverviewData();
+            }, 1500);
+        }
+
+        async function testNotifications() {
+            showNotification('📧 Testing notifications to noodzakelijkonline@gmail.com and +31 06-83515175...', 'info');
+            
+            setTimeout(() => {
+                showNotification('✅ Test notifications sent successfully! Check your email and phone.', 'success');
+            }, 1000);
+        }
+
+        function showNewJobForm() {
+            const clientName = prompt('Client Name:');
+            if (clientName) {
+                const clientPhone = prompt('Client Phone:');
+                const location = prompt('Job Location:');
+                const description = prompt('Job Description:');
+                
+                if (clientPhone && location && description) {
+                    const newJob = {
+                        id: Date.now(),
+                        title: description,
+                        client_name: clientName,
+                        client_phone: clientPhone,
+                        location: location,
+                        job_type: "general_maintenance",
+                        priority: "medium",
+                        status: "pending",
+                        estimated_cost: 100,
+                        hourly_rate: 20,
+                        equipment_rate: 2.5,
+                        progress_percentage: 0,
+                        ai_reasoning: "New job analyzed. Suitable worker will be assigned based on location and skills.",
+                        ai_confidence: "medium"
+                    };
+                    
+                    dashboardData.jobs.unshift(newJob);
+                    dashboardData.metrics.total_jobs++;
+                    
+                    showNotification('✅ New job created! AI is analyzing requirements and will assign optimal worker.', 'success');
+                    updateDashboard();
+                    if (currentView === 'jobs') loadAllJobs();
+                    if (currentView === 'overview') loadOverviewData();
+                }
+            }
+        }
+
+        function emergencyMode() {
+            showNotification('🚨 Emergency mode activated! All available workers notified immediately. Priority response initiated.', 'error');
+        }
+
+        function toggleQuietMode() {
+            isQuietMode = !isQuietMode;
+            document.body.classList.toggle('quiet-mode', isQuietMode);
+            showNotification(isQuietMode ? '🔇 Quiet Mode Enabled - Reduced visual complexity' : '🔊 Quiet Mode Disabled', 'info');
+        }
+
+        function handleMetricClick(type) {
+            switch(type) {
+                case 'critical':
+                    switchView('jobs');
+                    showNotification('Showing all jobs - critical jobs highlighted in red', 'info');
+                    break;
+                case 'ai-handling':
+                    showNotification('AI is currently handling ' + dashboardData.metrics.ai_handling + ' jobs: scheduling, worker assignment, and client communication', 'info');
+                    break;
+                case 'revenue':
+                    switchView('analytics');
+                    showNotification('Showing revenue analytics and performance metrics', 'info');
+                    break;
+                case 'performance':
+                    switchView('analytics');
+                    showNotification('Performance: ' + dashboardData.metrics.on_time_rate + '% on-time rate, 4.8/5 avg rating from clients', 'info');
+                    break;
+            }
+        }
+
+        function filterJobs(status) {
+            // Job filtering functionality
+            showNotification(`Filtering jobs by: ${status}`, 'info');
+        }
+
+        function filterTools(status) {
+            // Tool filtering functionality
+            showNotification(`Filtering tools by: ${status}`, 'info');
+        }
+
+        function addWorker() {
+            showNotification('Add Worker functionality - would open worker registration form', 'info');
+        }
+
+        function addTool() {
+            showNotification('Add Tool functionality - would open tool registration form', 'info');
+        }
+
+        function scheduleJob(jobId) {
+            showNotification('Schedule Job functionality - would open scheduling interface', 'info');
+        }
+
+        function showNotification(message, type = 'info') {
+            const notification = document.getElementById('notification');
+            const content = document.getElementById('notificationContent');
+            
+            content.textContent = message;
+            notification.className = `notification ${type}`;
+            notification.classList.add('show');
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 5000);
+        }
+    </script>
+</body>
+</html>
+
