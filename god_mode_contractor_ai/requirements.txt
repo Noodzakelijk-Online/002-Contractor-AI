@@ -1,0 +1,34 @@
+# God-Mode Contractor AI - Python Dependencies
+
+# Core Framework
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-SQLAlchemy==3.1.1
+
+# Database
+SQLAlchemy==2.0.23
+
+# AI & ML
+openai==1.6.1
+
+# HTTP & API
+requests==2.31.0
+
+# Data Processing
+python-dateutil==2.8.2
+
+# Computer Vision (optional - install if needed)
+# opencv-python==4.8.1.78
+# Pillow==10.1.0
+
+# Analytics (optional - install if needed)
+# pandas==2.1.4
+# numpy==1.26.2
+# scikit-learn==1.3.2
+
+# Communication (optional - install if needed)
+# twilio==8.11.0  # For SMS
+# python-whatsapp-bot==0.0.1  # For WhatsApp
+
+# Utilities
+python-dotenv==1.0.0
