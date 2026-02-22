@@ -225,15 +225,15 @@ class MultiModalProcessor:
             
             # Perform vision analysis
             if analysis_type == AnalysisType.JOB_PROGRESS:
-                vision_result = self.vision_ai.analyze_job_progress(image_path, context)
+                vision_result = await self.vision_ai.analyze_job_progress(image_path, context)
             elif analysis_type == AnalysisType.QUALITY_ASSESSMENT:
-                vision_result = self.vision_ai.assess_work_quality(image_path, context)
+                vision_result = await self.vision_ai.assess_work_quality(image_path, context)
             elif analysis_type == AnalysisType.SAFETY_INSPECTION:
-                vision_result = self.vision_ai.inspect_safety_compliance(image_path, context)
+                vision_result = await self.vision_ai.inspect_safety_compliance(image_path, context)
             elif analysis_type == AnalysisType.DAMAGE_ASSESSMENT:
-                vision_result = self.vision_ai.analyze_damage_assessment(image_path, context)
+                vision_result = await self.vision_ai.analyze_damage_assessment(image_path, context)
             else:
-                vision_result = self.vision_ai.analyze_job_progress(image_path, context)
+                vision_result = await self.vision_ai.analyze_job_progress(image_path, context)
             
             # Extract text from image if present (OCR)
             ocr_text = self._extract_text_from_image(image_path)
