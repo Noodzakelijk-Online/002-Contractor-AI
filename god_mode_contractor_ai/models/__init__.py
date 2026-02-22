@@ -366,7 +366,7 @@ class IoTSensorData(db.Model):
     reading_status = db.Column(db.String(20))  # normal, warning, critical
     
     # Context
-    metadata = db.Column(db.Text)  # JSON object
+    sensor_metadata = db.Column(db.Text)  # JSON object
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -374,10 +374,12 @@ class IoTSensorData(db.Model):
         return {
             'id': self.id,
             'job_id': self.job_id,
+            'sensor_id': self.sensor_id,
             'sensor_type': self.sensor_type,
             'location': self.location,
             'reading_value': self.reading_value,
             'reading_unit': self.reading_unit,
             'reading_status': self.reading_status,
+            'sensor_metadata': json.loads(self.sensor_metadata) if self.sensor_metadata else {},
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
