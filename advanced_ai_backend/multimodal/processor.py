@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import logging
 import tempfile
 import mimetypes
@@ -335,10 +336,11 @@ class MultiModalProcessor:
             document_path = input_data.content
             
             # Extract text from document
-            document_text = self._extract_text_from_document(document_path)
+            loop = asyncio.get_running_loop()
+            document_text = await loop.run_in_executor(None, self._extract_text_from_document, document_path)
             
             # Extract document metadata
-            doc_metadata = self._extract_document_metadata(document_path)
+            doc_metadata = await loop.run_in_executor(None, self._extract_document_metadata, document_path)
             
             # Process extracted text
             text_input = MultiModalInput(
