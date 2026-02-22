@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import requests
+import asyncio
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import numpy as np
@@ -88,13 +89,13 @@ class ContractorVisionAI:
             'min_image_size': (224, 224)
         }
         
-    def analyze_job_progress(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def analyze_job_progress(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Analyze job progress from site photos
         """
         try:
             # Preprocess image
-            processed_image = self._preprocess_image(image_path)
+            processed_image = await self._preprocess_image(image_path)
             
             # Encode image for AI analysis
             base64_image = self._encode_image_to_base64(processed_image)
@@ -140,22 +141,27 @@ class ContractorVisionAI:
             logger.error(f"Error analyzing job progress: {e}")
             return self._create_fallback_analysis()
     
-    def assess_work_quality(self, image_path: str, context: ImageContext, reference_images: List[str] = None) -> VisionAnalysisResult:
+    async def assess_work_quality(self, image_path: str, context: ImageContext, reference_images: List[str] = None) -> VisionAnalysisResult:
         """
         Assess work quality by comparing with standards and reference images
         """
         try:
-            # Process main image
-            main_image = self._preprocess_image(image_path)
-            base64_main = self._encode_image_to_base64(main_image)
-            
-            # Process reference images if provided
-            reference_data = []
+            # Process main image and reference images concurrently
+            tasks = [self._preprocess_image(image_path)]
             if reference_images:
                 for ref_path in reference_images:
-                    ref_image = self._preprocess_image(ref_path)
-                    ref_base64 = self._encode_image_to_base64(ref_image)
-                    reference_data.append(ref_base64)
+                    tasks.append(self._preprocess_image(ref_path))
+
+            processed_images = await asyncio.gather(*tasks)
+            main_image = processed_images[0]
+            reference_processed = processed_images[1:]
+
+            base64_main = self._encode_image_to_base64(main_image)
+            
+            reference_data = []
+            for ref_image in reference_processed:
+                ref_base64 = self._encode_image_to_base64(ref_image)
+                reference_data.append(ref_base64)
             
             # Create quality assessment prompt
             prompt = self._create_quality_assessment_prompt(context, len(reference_data))
@@ -201,12 +207,12 @@ class ContractorVisionAI:
             logger.error(f"Error assessing work quality: {e}")
             return self._create_fallback_analysis()
     
-    def inspect_safety_compliance(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def inspect_safety_compliance(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Inspect safety compliance from job site photos
         """
         try:
-            processed_image = self._preprocess_image(image_path)
+            processed_image = await self._preprocess_image(image_path)
             base64_image = self._encode_image_to_base64(processed_image)
             
             # Create safety inspection prompt
@@ -245,12 +251,12 @@ class ContractorVisionAI:
             logger.error(f"Error inspecting safety compliance: {e}")
             return self._create_fallback_analysis()
     
-    def identify_materials_and_tools(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def identify_materials_and_tools(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Identify materials and tools in job site photos
         """
         try:
-            processed_image = self._preprocess_image(image_path)
+            processed_image = await self._preprocess_image(image_path)
             base64_image = self._encode_image_to_base64(processed_image)
             
             # Create material identification prompt
@@ -289,14 +295,16 @@ class ContractorVisionAI:
             logger.error(f"Error identifying materials and tools: {e}")
             return self._create_fallback_analysis()
     
-    def compare_before_after(self, before_image: str, after_image: str, context: ImageContext) -> VisionAnalysisResult:
+    async def compare_before_after(self, before_image: str, after_image: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Compare before and after photos to assess transformation
         """
         try:
-            # Process both images
-            before_processed = self._preprocess_image(before_image)
-            after_processed = self._preprocess_image(after_image)
+            # Process both images concurrently
+            before_processed, after_processed = await asyncio.gather(
+                self._preprocess_image(before_image),
+                self._preprocess_image(after_image)
+            )
             
             before_base64 = self._encode_image_to_base64(before_processed)
             after_base64 = self._encode_image_to_base64(after_processed)
@@ -341,12 +349,12 @@ class ContractorVisionAI:
             logger.error(f"Error comparing before/after images: {e}")
             return self._create_fallback_analysis()
     
-    def analyze_damage_assessment(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def analyze_damage_assessment(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Analyze damage in photos for assessment and repair planning
         """
         try:
-            processed_image = self._preprocess_image(image_path)
+            processed_image = await self._preprocess_image(image_path)
             base64_image = self._encode_image_to_base64(processed_image)
             
             # Create damage assessment prompt
@@ -386,8 +394,13 @@ class ContractorVisionAI:
             return self._create_fallback_analysis()
     
     # Image Processing Methods
-    def _preprocess_image(self, image_path: str) -> np.ndarray:
-        """Preprocess image for analysis"""
+    async def _preprocess_image(self, image_path: Any) -> np.ndarray:
+        """Preprocess image for analysis (async wrapper)"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._preprocess_image_sync, image_path)
+
+    def _preprocess_image_sync(self, image_path: Any) -> np.ndarray:
+        """Preprocess image for analysis (blocking)"""
         try:
             # Load image
             if isinstance(image_path, str):
