@@ -22,7 +22,7 @@ from PIL import Image
 import pytesseract
 
 # AI processing
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 # Computer vision
 from vision.computer_vision import ContractorVisionAI, ImageContext, AnalysisType
@@ -85,7 +85,7 @@ class MultiModalProcessor:
     """
     
     def __init__(self):
-        self.client = OpenAI()
+        self.client = AsyncOpenAI()
         self.vision_ai = ContractorVisionAI()
         self.speech_recognizer = sr.Recognizer()
         
@@ -225,15 +225,15 @@ class MultiModalProcessor:
             
             # Perform vision analysis
             if analysis_type == AnalysisType.JOB_PROGRESS:
-                vision_result = self.vision_ai.analyze_job_progress(image_path, context)
+                vision_result = await self.vision_ai.analyze_job_progress(image_path, context)
             elif analysis_type == AnalysisType.QUALITY_ASSESSMENT:
-                vision_result = self.vision_ai.assess_work_quality(image_path, context)
+                vision_result = await self.vision_ai.assess_work_quality(image_path, context)
             elif analysis_type == AnalysisType.SAFETY_INSPECTION:
-                vision_result = self.vision_ai.inspect_safety_compliance(image_path, context)
+                vision_result = await self.vision_ai.inspect_safety_compliance(image_path, context)
             elif analysis_type == AnalysisType.DAMAGE_ASSESSMENT:
-                vision_result = self.vision_ai.analyze_damage_assessment(image_path, context)
+                vision_result = await self.vision_ai.analyze_damage_assessment(image_path, context)
             else:
-                vision_result = self.vision_ai.analyze_job_progress(image_path, context)
+                vision_result = await self.vision_ai.analyze_job_progress(image_path, context)
             
             # Extract text from image if present (OCR)
             ocr_text = self._extract_text_from_image(image_path)
@@ -634,7 +634,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400
@@ -830,7 +830,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300
@@ -934,7 +934,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300
@@ -1063,7 +1063,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400

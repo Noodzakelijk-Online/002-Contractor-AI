@@ -10,7 +10,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import numpy as np
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -71,7 +71,7 @@ class ContractorVisionAI:
     """
     
     def __init__(self):
-        self.client = OpenAI()
+        self.client = AsyncOpenAI()
         self.analysis_history = []
         
         # Initialize computer vision models
@@ -88,7 +88,7 @@ class ContractorVisionAI:
             'min_image_size': (224, 224)
         }
         
-    def analyze_job_progress(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def analyze_job_progress(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Analyze job progress from site photos
         """
@@ -103,7 +103,7 @@ class ContractorVisionAI:
             prompt = self._create_progress_analysis_prompt(context)
             
             # Analyze with GPT-4 Vision
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
@@ -140,7 +140,7 @@ class ContractorVisionAI:
             logger.error(f"Error analyzing job progress: {e}")
             return self._create_fallback_analysis()
     
-    def assess_work_quality(self, image_path: str, context: ImageContext, reference_images: List[str] = None) -> VisionAnalysisResult:
+    async def assess_work_quality(self, image_path: str, context: ImageContext, reference_images: List[str] = None) -> VisionAnalysisResult:
         """
         Assess work quality by comparing with standards and reference images
         """
@@ -181,7 +181,7 @@ class ContractorVisionAI:
                     "image_url": {"url": f"data:image/jpeg;base64,{ref_data}"}
                 })
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=messages,
                 max_tokens=600
@@ -201,7 +201,7 @@ class ContractorVisionAI:
             logger.error(f"Error assessing work quality: {e}")
             return self._create_fallback_analysis()
     
-    def inspect_safety_compliance(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def inspect_safety_compliance(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Inspect safety compliance from job site photos
         """
@@ -212,7 +212,7 @@ class ContractorVisionAI:
             # Create safety inspection prompt
             prompt = self._create_safety_inspection_prompt(context)
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
@@ -245,7 +245,7 @@ class ContractorVisionAI:
             logger.error(f"Error inspecting safety compliance: {e}")
             return self._create_fallback_analysis()
     
-    def identify_materials_and_tools(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def identify_materials_and_tools(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Identify materials and tools in job site photos
         """
@@ -256,7 +256,7 @@ class ContractorVisionAI:
             # Create material identification prompt
             prompt = self._create_material_identification_prompt(context)
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
@@ -289,7 +289,7 @@ class ContractorVisionAI:
             logger.error(f"Error identifying materials and tools: {e}")
             return self._create_fallback_analysis()
     
-    def compare_before_after(self, before_image: str, after_image: str, context: ImageContext) -> VisionAnalysisResult:
+    async def compare_before_after(self, before_image: str, after_image: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Compare before and after photos to assess transformation
         """
@@ -304,7 +304,7 @@ class ContractorVisionAI:
             # Create comparison prompt
             prompt = self._create_comparison_prompt(context)
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
@@ -341,7 +341,7 @@ class ContractorVisionAI:
             logger.error(f"Error comparing before/after images: {e}")
             return self._create_fallback_analysis()
     
-    def analyze_damage_assessment(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
+    async def analyze_damage_assessment(self, image_path: str, context: ImageContext) -> VisionAnalysisResult:
         """
         Analyze damage in photos for assessment and repair planning
         """
@@ -352,7 +352,7 @@ class ContractorVisionAI:
             # Create damage assessment prompt
             prompt = self._create_damage_assessment_prompt(context)
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
