@@ -366,7 +366,7 @@ class IoTSensorData(db.Model):
     reading_status = db.Column(db.String(20))  # normal, warning, critical
     
     # Context
-    metadata = db.Column(db.Text)  # JSON object
+    sensor_metadata = db.Column(db.Text)  # JSON object
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
