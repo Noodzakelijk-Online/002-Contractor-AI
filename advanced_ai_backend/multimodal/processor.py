@@ -3,6 +3,8 @@ import json
 import logging
 import tempfile
 import mimetypes
+import asyncio
+import aiofiles
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union, Tuple
 from dataclasses import dataclass
@@ -335,7 +337,7 @@ class MultiModalProcessor:
             document_path = input_data.content
             
             # Extract text from document
-            document_text = self._extract_text_from_document(document_path)
+            document_text = await self._extract_text_from_document(document_path)
             
             # Extract document metadata
             doc_metadata = self._extract_document_metadata(document_path)
@@ -957,18 +959,18 @@ class MultiModalProcessor:
             return {'summary': 'Voice analysis failed', 'confidence': 0.5}
     
     # Document Processing Methods
-    def _extract_text_from_document(self, document_path: str) -> str:
+    async def _extract_text_from_document(self, document_path: str) -> str:
         """Extract text from various document formats"""
         try:
             file_extension = Path(document_path).suffix.lower()
             
             if file_extension == '.pdf':
-                return self._extract_text_from_pdf(document_path)
+                return await asyncio.get_running_loop().run_in_executor(None, self._extract_text_from_pdf, document_path)
             elif file_extension in ['.docx', '.doc']:
-                return self._extract_text_from_word(document_path)
+                return await asyncio.get_running_loop().run_in_executor(None, self._extract_text_from_word, document_path)
             elif file_extension == '.txt':
-                with open(document_path, 'r', encoding='utf-8') as file:
-                    return file.read()
+                async with aiofiles.open(document_path, 'r', encoding='utf-8') as file:
+                    return await file.read()
             else:
                 raise ValueError(f"Unsupported document format: {file_extension}")
                 
