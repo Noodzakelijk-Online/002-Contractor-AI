@@ -24,7 +24,7 @@ from PIL import Image
 import pytesseract
 
 # AI processing
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # Computer vision
 from vision.computer_vision import ContractorVisionAI, ImageContext, AnalysisType
@@ -87,7 +87,7 @@ class MultiModalProcessor:
     """
     
     def __init__(self):
-        self.client = OpenAI()
+        self.client = AsyncOpenAI()
         self.vision_ai = ContractorVisionAI()
         self.speech_recognizer = sr.Recognizer()
         
@@ -636,7 +636,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400
@@ -832,7 +832,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300
@@ -1065,7 +1065,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400
