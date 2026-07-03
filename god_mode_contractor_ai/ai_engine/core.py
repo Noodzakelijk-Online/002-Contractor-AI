@@ -4,14 +4,25 @@ Combines all AI capabilities from both contractor_ai_backend and advanced_ai_bac
 """
 
 import json
-import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from openai import OpenAI
 import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 
 class GodModeContractorAI:
@@ -27,7 +38,7 @@ class GodModeContractorAI:
     """
     
     def __init__(self):
-        self.client = OpenAI()
+        self.client = self._create_openai_client()
         self.contractor_email = "noodzakelijkonline@gmail.com"
         self.contractor_phone = "+31 06-83515175"
         self.contractor_company = "Contractor AI Services"
@@ -46,6 +57,15 @@ class GodModeContractorAI:
             'scheduling_accuracy': 0.0,
             'client_satisfaction': 0.0
         }
+
+    def _create_openai_client(self):
+        if OpenAI is None or not os.environ.get("OPENAI_API_KEY"):
+            return None
+        try:
+            return OpenAI()
+        except Exception as e:
+            logger.warning("OpenAI client unavailable, using fallback AI logic: %s", e)
+            return None
     
     # ============================================================================
     # PHASE 1: JOB ANALYSIS & INTAKE
@@ -68,6 +88,9 @@ class GodModeContractorAI:
         # Build enhanced prompt with multimodal context
         prompt = self._build_analysis_prompt(message, client_info, multimodal_data)
         
+        if self.client is None:
+            return self._fallback_analysis(message)
+
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4.1-mini",
@@ -94,8 +117,8 @@ class GodModeContractorAI:
             
             return analysis
             
-        except Exception as e:
-            print(f"AI analysis error: {e}")
+        except Exception:
+            logger.exception("AI analysis failed; using fallback analysis")
             return self._fallback_analysis(message)
     
     def _build_analysis_prompt(self, message: str, client_info: Dict, 
@@ -162,13 +185,40 @@ class GodModeContractorAI:
         Returns:
             Vision analysis results
         """
-        # This would integrate with the ComputerVisionProcessor
-        # For now, return placeholder structure
+        detected_issues = []
+        detected_objects = set()
+        recommendations = []
+
+        for image in images or []:
+            image_text = str(image or '').lower()
+
+            if any(term in image_text for term in ['bathroom', 'tile', 'grout']):
+                detected_objects.update(['tiles', 'grout_lines', 'wet_area'])
+                recommendations.append('Check grout alignment and sealant quality')
+            if any(term in image_text for term in ['garden', 'lawn', 'hedge']):
+                detected_objects.update(['lawn_area', 'planting_area', 'green_waste'])
+                recommendations.append('Confirm cleanup and edge finishing before completion')
+            if any(term in image_text for term in ['leak', 'crack', 'damage', 'issue', 'mold']):
+                detected_issues.append('Potential defect marker inferred from image metadata')
+                recommendations.append('Schedule manual inspection before client handover')
+            if any(term in image_text for term in ['safety', 'ladder', 'hazard', 'ppe']):
+                detected_issues.append('Safety review marker inferred from image metadata')
+                recommendations.append('Verify PPE and site access controls')
+
+        condition_assessment = 'needs_review' if detected_issues else 'good'
+        if len(images or []) >= 3 and not detected_issues:
+            condition_assessment = 'well_documented'
+
+        if not recommendations:
+            recommendations.append('Capture before, progress, and completion photos for audit trail')
+
         return {
             'images_analyzed': len(images),
-            'detected_issues': [],
-            'condition_assessment': 'good',
-            'recommendations': []
+            'detected_objects': sorted(detected_objects) or ['work_area'],
+            'detected_issues': detected_issues,
+            'condition_assessment': condition_assessment,
+            'recommendations': sorted(set(recommendations)),
+            'confidence': 0.78 if detected_issues else 0.86
         }
     
     def _calculate_confidence(self, analysis: Dict) -> str:
@@ -466,13 +516,16 @@ class GodModeContractorAI:
     
     def _get_weather_forecast(self, location: str) -> Dict:
         """Get weather forecast from Buienradar API"""
+        if requests is None:
+            return {'days': []}
+
         try:
             response = requests.get('https://data.buienradar.nl/2.0/feed/json', timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 return data.get('forecast', {})
-        except:
-            pass
+        except Exception as e:
+            logger.warning("Weather API unavailable, using empty forecast: %s", e)
         
         return {'days': []}
     
@@ -501,7 +554,10 @@ class GodModeContractorAI:
         # Check existing job assignments
         for job in existing_jobs:
             if job.get('assigned_worker_id') == worker_data.get('id'):
-                job_date = datetime.fromisoformat(job.get('scheduled_date', ''))
+                try:
+                    job_date = datetime.fromisoformat(job.get('scheduled_date') or '')
+                except (TypeError, ValueError):
+                    continue
                 if job_date.date() == date.date():
                     return False
         return True
@@ -610,6 +666,9 @@ class GodModeContractorAI:
         Keep it under 200 words. Do not use placeholders - use the actual information provided.
         """
         
+        if self.client is None:
+            return self._fallback_communication(communication_type, job_data)
+
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4.1-mini",
@@ -620,8 +679,8 @@ class GodModeContractorAI:
             
             return response.choices[0].message.content.strip()
             
-        except Exception as e:
-            print(f"Communication generation error: {e}")
+        except Exception:
+            logger.exception("Communication generation failed; using fallback template")
             return self._fallback_communication(communication_type, job_data)
     
     def _fallback_communication(self, comm_type: str, job_data: Dict) -> str:
@@ -645,10 +704,10 @@ class GodModeContractorAI:
         try:
             # Email sending logic would go here
             # For now, just log
-            print(f"EMAIL: To={to_email}, Subject={subject}")
+            logger.info("Email notification prepared for %s with subject %s", to_email, subject)
             return True
-        except Exception as e:
-            print(f"Email error: {e}")
+        except Exception:
+            logger.exception("Email notification failed")
             return False
     
     def get_performance_metrics(self) -> Dict:

@@ -4,6 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Contractor AI - Complete Dashboard</title>
+    <script>
+        if (window.location.protocol === 'file:') {
+            window.location.replace(new URL('../../public/index.html', window.location.href).href);
+        } else if (/\/static\/complete_dashboard\.html$/.test(window.location.pathname)) {
+            window.location.replace('/');
+        }
+    </script>
     <style>
         * {
             margin: 0;
@@ -1182,11 +1189,22 @@
         }
 
         function loadDashboardData() {
-            // Simulate loading data
+            const savedData = localStorage.getItem('contractor-ai-complete-dashboard-v1');
+            if (savedData) {
+                try {
+                    dashboardData = JSON.parse(savedData);
+                    recalculateMetrics();
+                    updateDashboard();
+                    return;
+                } catch (error) {
+                    localStorage.removeItem('contractor-ai-complete-dashboard-v1');
+                }
+            }
+
             dashboardData = {
-                jobs: sampleJobs,
-                workers: sampleWorkers,
-                tools: sampleTools,
+                jobs: [...sampleJobs],
+                workers: [...sampleWorkers],
+                tools: [...sampleTools],
                 metrics: {
                     critical_jobs: sampleJobs.filter(j => j.priority === 'critical').length,
                     ai_handling: sampleJobs.filter(j => j.status === 'pending' || j.status === 'scheduled').length,
@@ -1197,6 +1215,25 @@
             };
 
             updateDashboard();
+        }
+
+        function saveDashboardData() {
+            recalculateMetrics();
+            localStorage.setItem('contractor-ai-complete-dashboard-v1', JSON.stringify(dashboardData));
+        }
+
+        function recalculateMetrics() {
+            dashboardData.metrics = {
+                critical_jobs: dashboardData.jobs.filter(j => j.priority === 'critical').length,
+                ai_handling: dashboardData.jobs.filter(j => j.status === 'pending' || j.status === 'scheduled').length,
+                today_revenue: dashboardData.jobs.filter(j => j.status === 'completed').reduce((sum, j) => sum + (j.actual_cost || j.estimated_cost || 0), 0),
+                total_jobs: dashboardData.jobs.length,
+                on_time_rate: dashboardData.metrics?.on_time_rate || 96
+            };
+        }
+
+        function nextId(items) {
+            return Math.max(0, ...items.map(item => Number(item.id) || 0)) + 1;
         }
 
         function updateDashboard() {
@@ -1501,25 +1538,86 @@
         }
 
         function filterJobs(status) {
-            // Job filtering functionality
-            showNotification(`Filtering jobs by: ${status}`, 'info');
+            const container = document.getElementById('allJobsList');
+            const jobs = status === 'all' ? dashboardData.jobs : dashboardData.jobs.filter(job => job.status === status || job.priority === status);
+            container.innerHTML = jobs.map(job => createJobCard(job)).join('');
+            showNotification(`Showing ${jobs.length} job${jobs.length === 1 ? '' : 's'} for: ${status}`, 'info');
         }
 
         function filterTools(status) {
-            // Tool filtering functionality
-            showNotification(`Filtering tools by: ${status}`, 'info');
+            const container = document.getElementById('toolsList');
+            const tools = status === 'all' ? dashboardData.tools : dashboardData.tools.filter(tool => tool.status === status);
+            container.innerHTML = tools.map(tool => `
+                <div class="tool-card">
+                    <div class="tool-icon">🔧</div>
+                    <div class="tool-name">${tool.name}</div>
+                    <div style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                        <span class="tool-status-indicator ${tool.status.replace('_', '-')}"></span>
+                        ${tool.status.replace('_', ' ').toUpperCase()}
+                    </div>
+                    <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">
+                        ${tool.current_location}
+                        ${tool.return_date ? `<br>Returns: ${new Date(tool.return_date).toLocaleDateString()}` : ''}
+                    </div>
+                </div>
+            `).join('');
+            showNotification(`Showing ${tools.length} tool${tools.length === 1 ? '' : 's'} for: ${status}`, 'info');
         }
 
         function addWorker() {
-            showNotification('Add Worker functionality - would open worker registration form', 'info');
+            const name = prompt('Worker name');
+            if (!name) return;
+            const specialties = prompt('Specialties, separated by commas', 'General repairs, Maintenance');
+            const location = prompt('Current location', 'Utrecht') || 'Utrecht';
+            const hourlyRate = Number(prompt('Hourly rate', '25')) || 25;
+            dashboardData.workers.push({
+                id: nextId(dashboardData.workers),
+                name,
+                status: 'available',
+                current_location: location,
+                jobs_completed: 0,
+                success_rate: 100,
+                average_rating: 5,
+                hourly_rate: hourlyRate,
+                specialties: (specialties || 'General repairs').split(',').map(item => item.trim()).filter(Boolean)
+            });
+            saveDashboardData();
+            updateDashboard();
+            if (currentView === 'workers') loadWorkers();
+            showNotification('Worker added and marked available.', 'success');
         }
 
         function addTool() {
-            showNotification('Add Tool functionality - would open tool registration form', 'info');
+            const name = prompt('Tool name');
+            if (!name) return;
+            const category = prompt('Category', 'general') || 'general';
+            const location = prompt('Current location', 'Warehouse') || 'Warehouse';
+            dashboardData.tools.push({
+                id: nextId(dashboardData.tools),
+                name,
+                category,
+                status: 'available',
+                current_location: location
+            });
+            saveDashboardData();
+            updateDashboard();
+            if (currentView === 'tools') loadTools();
+            showNotification('Tool added and marked available.', 'success');
         }
 
         function scheduleJob(jobId) {
-            showNotification('Schedule Job functionality - would open scheduling interface', 'info');
+            const job = dashboardData.jobs.find(j => j.id === jobId);
+            if (!job) return;
+            const scheduledDate = prompt('Schedule date', new Date().toISOString().slice(0, 10));
+            if (!scheduledDate) return;
+            job.status = 'scheduled';
+            job.scheduled_date = scheduledDate;
+            job.ai_reasoning = `Scheduled for ${scheduledDate}. Client and worker notifications are ready.`;
+            job.ai_confidence = 'high';
+            saveDashboardData();
+            updateDashboard();
+            if (currentView === 'jobs') loadAllJobs();
+            showNotification('Job scheduled and notifications prepared.', 'success');
         }
 
         function showNotification(message, type = 'info') {

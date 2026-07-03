@@ -88,3 +88,36 @@ def test_generate_performance_insights_no_completed_jobs(ai_engine):
     assert any("Completion rate: 0.0%" in s for s in insights)
     assert result['performance_score'] == 0.0
     assert "Consider improving job planning to increase completion rate" in result['recommendations']
+
+
+def test_job_received_message_does_not_require_schedule(ai_engine):
+    message = ai_engine.generate_client_communication(
+        {
+            'client_name': 'API Client',
+            'job_type': 'general repair',
+            'location': 'Amsterdam'
+        },
+        {},
+        {},
+        'job_received'
+    )
+
+    assert 'API Client' in message
+    assert 'Scheduling in progress' in message
+
+
+def test_weather_independent_schedule_has_valid_slot(ai_engine):
+    with patch.object(ai_engine, '_get_weather_forecast', return_value={}):
+        result = ai_engine.optimize_schedule(
+            {
+                'location': 'Amsterdam',
+                'priority': 'medium',
+                'weather_dependent': False,
+                'estimated_duration': 2
+            },
+            {'id': 1, 'status': 'available'},
+            []
+        )
+
+    assert result['recommended_slot'] is not None
+    assert result['confidence'] in {'medium', 'high'}

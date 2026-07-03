@@ -4,6 +4,15 @@ import json
 
 db = SQLAlchemy()
 
+
+def _loads_json(value, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
 class Job(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
@@ -28,6 +37,7 @@ class Job(db.Model):
     scheduled_end = db.Column(db.DateTime, nullable=True)
     actual_start = db.Column(db.DateTime, nullable=True)
     actual_end = db.Column(db.DateTime, nullable=True)
+    actual_duration = db.Column(db.Float, default=0.0)
     buffer_time = db.Column(db.Integer, default=30)  # minutes
     
     # Worker assignment
@@ -35,6 +45,7 @@ class Job(db.Model):
     
     # Requirements and details
     required_tools = db.Column(db.Text, nullable=True)  # JSON string
+    required_skills = db.Column(db.Text, nullable=True)  # JSON string
     materials_needed = db.Column(db.Text, nullable=True)  # JSON string
     special_requirements = db.Column(db.Text, nullable=True)
     weather_dependent = db.Column(db.Boolean, default=False)
@@ -77,15 +88,17 @@ class Job(db.Model):
             'scheduled_end': self.scheduled_end.isoformat() if self.scheduled_end else None,
             'actual_start': self.actual_start.isoformat() if self.actual_start else None,
             'actual_end': self.actual_end.isoformat() if self.actual_end else None,
+            'actual_duration': self.actual_duration,
             'buffer_time': self.buffer_time,
             'assigned_worker_id': self.assigned_worker_id,
-            'required_tools': json.loads(self.required_tools) if self.required_tools else [],
-            'materials_needed': json.loads(self.materials_needed) if self.materials_needed else [],
+            'required_tools': _loads_json(self.required_tools, []),
+            'required_skills': _loads_json(self.required_skills, []),
+            'materials_needed': _loads_json(self.materials_needed, []),
             'special_requirements': self.special_requirements,
             'weather_dependent': self.weather_dependent,
             'progress_percentage': self.progress_percentage,
-            'tasks_completed': json.loads(self.tasks_completed) if self.tasks_completed else [],
-            'photos': json.loads(self.photos) if self.photos else [],
+            'tasks_completed': _loads_json(self.tasks_completed, []),
+            'photos': _loads_json(self.photos, []),
             'ai_confidence': self.ai_confidence,
             'ai_reasoning': self.ai_reasoning,
             'ai_risks': self.ai_risks,
@@ -123,11 +136,11 @@ class Worker(db.Model):
             'name': self.name,
             'phone': self.phone,
             'email': self.email,
-            'skills': json.loads(self.skills) if self.skills else [],
-            'certifications': json.loads(self.certifications) if self.certifications else [],
+            'skills': _loads_json(self.skills, []),
+            'certifications': _loads_json(self.certifications, []),
             'hourly_rate': self.hourly_rate,
             'success_rate': self.success_rate,
-            'availability': json.loads(self.availability) if self.availability else {},
+            'availability': _loads_json(self.availability, {}),
             'current_location': self.current_location,
             'status': self.status,
             'jobs_completed': self.jobs_completed,
@@ -213,7 +226,7 @@ class AIDecision(db.Model):
             'id': self.id,
             'job_id': self.job_id,
             'decision_type': self.decision_type,
-            'decision_data': json.loads(self.decision_data) if self.decision_data else {},
+            'decision_data': _loads_json(self.decision_data, {}),
             'confidence_level': self.confidence_level,
             'reasoning': self.reasoning,
             'risks': self.risks,

@@ -1,18 +1,38 @@
 import json
-import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from openai import OpenAI
 import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 class ContractorAI:
     def __init__(self):
-        self.client = OpenAI()
+        self.client = self._create_openai_client()
         self.contractor_email = "noodzakelijkonline@gmail.com"
         self.contractor_phone = "+31 06-83515175"
+
+    def _create_openai_client(self):
+        if OpenAI is None or not os.environ.get("OPENAI_API_KEY"):
+            return None
+        try:
+            return OpenAI()
+        except Exception as e:
+            logger.warning("OpenAI client unavailable, using fallback AI logic: %s", e)
+            return None
         
     def analyze_job_request(self, message: str, client_info: Dict) -> Dict:
         """Phase 1: Analyze incoming job request and extract requirements"""
@@ -38,6 +58,9 @@ class ContractorAI:
         Be realistic and practical in your analysis.
         """
         
+        if self.client is None:
+            return self._fallback_analysis(message)
+
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4.1-mini",
@@ -50,8 +73,8 @@ class ContractorAI:
             
             return analysis
             
-        except Exception as e:
-            print(f"AI analysis error: {e}")
+        except Exception:
+            logger.exception("AI analysis failed; using fallback analysis")
             return self._fallback_analysis(message)
     
     def _fallback_analysis(self, message: str) -> Dict:
@@ -137,25 +160,29 @@ class ContractorAI:
         
         # Calculate optimal time slots
         optimal_slots = []
-        base_date = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        now = datetime.now()
+        base_date = now.replace(hour=9, minute=0, second=0, microsecond=0)
         
         for day_offset in range(7):  # Look ahead 7 days
             check_date = base_date + timedelta(days=day_offset)
             
             # Skip weekends for most jobs (unless emergency)
-            if check_date.weekday() >= 5 and job_data.get('urgency') != 'emergency':
+            urgency = job_data.get('urgency', job_data.get('priority'))
+            if check_date.weekday() >= 5 and urgency not in ['critical', 'emergency']:
                 continue
             
             # Check weather if job is weather dependent
+            day_weather = weather_forecast.get(check_date.strftime('%Y-%m-%d'), {})
             if job_data.get('weather_dependent', False):
-                day_weather = weather_forecast.get(check_date.strftime('%Y-%m-%d'), {})
                 if day_weather.get('rain_probability', 0) > 50:
                     continue
             
             # Find available time slots
             for hour in range(9, 17):  # 9 AM to 5 PM
                 slot_start = check_date.replace(hour=hour)
-                slot_end = slot_start + timedelta(hours=job_data.get('estimated_duration', 4))
+                if slot_start <= now + timedelta(minutes=30):
+                    continue
+                slot_end = slot_start + timedelta(hours=job_data.get('estimated_duration') or 4)
                 
                 # Check if worker is available
                 if self._is_worker_available(worker_data, slot_start, slot_end, existing_jobs):
@@ -195,6 +222,9 @@ class ContractorAI:
     
     def _get_weather_forecast(self, location: str) -> Dict:
         """Get weather forecast from Buienradar API"""
+        if requests is None:
+            return {}
+
         try:
             # Simplified weather data - in production, integrate with actual Buienradar API
             base_date = datetime.now().date()
@@ -212,7 +242,7 @@ class ContractorAI:
             return forecast
             
         except Exception as e:
-            print(f"Weather API error: {e}")
+            logger.warning("Weather API unavailable, using empty forecast: %s", e)
             return {}
     
     def _is_worker_available(self, worker: Dict, start_time: datetime, end_time: datetime, existing_jobs: List[Dict]) -> bool:
@@ -225,8 +255,11 @@ class ContractorAI:
         # Check against existing scheduled jobs
         for job in existing_jobs:
             if job.get('assigned_worker_id') == worker.get('id'):
-                job_start = datetime.fromisoformat(job.get('scheduled_start', ''))
-                job_end = datetime.fromisoformat(job.get('scheduled_end', ''))
+                try:
+                    job_start = datetime.fromisoformat(job.get('scheduled_start') or '')
+                    job_end = datetime.fromisoformat(job.get('scheduled_end') or '')
+                except (TypeError, ValueError):
+                    continue
                 
                 # Check for overlap
                 if not (end_time <= job_start or start_time >= job_end):
@@ -276,7 +309,13 @@ class ContractorAI:
     
     def generate_client_communication(self, job_data: Dict, worker_data: Dict, schedule_data: Dict, communication_type: str) -> str:
         """Generate appropriate client communication"""
-        
+        recommended_slot = schedule_data.get('recommended_slot') or {}
+        scheduled_start = recommended_slot.get('start')
+        try:
+            schedule_label = datetime.fromisoformat(scheduled_start).strftime('%A, %B %d at %I:%M %p')
+        except (TypeError, ValueError):
+            schedule_label = 'the confirmed appointment time'
+
         templates = {
             'job_received': f"""
 Hi {job_data.get('client_name', 'there')}! 👋
@@ -297,7 +336,7 @@ Manus AI Contractor Assistant
 Great news! 🎉
 
 ✅ {worker_data.get('name', 'Worker')} has been assigned to your job
-📅 Scheduled for {datetime.fromisoformat(schedule_data['recommended_slot']['start']).strftime('%A, %B %d at %I:%M %p')}
+📅 Scheduled for {schedule_label}
 ⭐ Success rate: {worker_data.get('success_rate', 95)}%
 🛠️ Specialist in: {', '.join(worker_data.get('skills', [])[:3])}
 
@@ -337,39 +376,36 @@ Thank you for choosing our service! 🙏
         """Send email notification"""
         try:
             # In production, use proper SMTP configuration
-            print(f"EMAIL TO: {to_email}")
-            print(f"SUBJECT: {subject}")
-            print(f"MESSAGE: {message}")
-            print("=" * 50)
+            logger.info("Email notification prepared for %s with subject %s", to_email, subject)
+            logger.debug("Email notification body: %s", message)
             
             # Simulate sending to contractor
             if to_email == self.contractor_email:
-                print(f"📧 CONTRACTOR NOTIFICATION SENT TO: {self.contractor_email}")
+                logger.info("Contractor email notification simulated for %s", self.contractor_email)
                 return True
             
             return True
             
-        except Exception as e:
-            print(f"Email sending error: {e}")
+        except Exception:
+            logger.exception("Email notification failed")
             return False
     
     def send_sms_notification(self, to_phone: str, message: str) -> bool:
         """Send SMS notification"""
         try:
             # In production, integrate with SMS service like Twilio
-            print(f"SMS TO: {to_phone}")
-            print(f"MESSAGE: {message}")
-            print("=" * 50)
+            logger.info("SMS notification prepared for %s", to_phone)
+            logger.debug("SMS notification body: %s", message)
             
             # Simulate sending to contractor
             if to_phone == self.contractor_phone:
-                print(f"📱 CONTRACTOR SMS SENT TO: {self.contractor_phone}")
+                logger.info("Contractor SMS notification simulated for %s", self.contractor_phone)
                 return True
             
             return True
             
-        except Exception as e:
-            print(f"SMS sending error: {e}")
+        except Exception:
+            logger.exception("SMS notification failed")
             return False
     
     def make_autonomous_decision(self, decision_type: str, context: Dict) -> Dict:

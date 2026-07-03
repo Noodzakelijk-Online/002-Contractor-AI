@@ -1,16 +1,47 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog.jsx'
 import { Checkbox } from '@/components/ui/checkbox.jsx'
-import { Trash2, Plus, Calculator, Euro, Users, Settings, Save, Edit } from 'lucide-react'
+import { Trash2, Plus, Calculator, Users, Settings, Save, Edit, Download, RotateCcw } from 'lucide-react'
 import './App.css'
 
+const STORAGE_KEY = 'urenregistratie-calculator-v1'
+
+const createId = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+const loadSavedState = () => {
+  if (typeof window === 'undefined') {
+    return { personen: [], profielen: [] }
+  }
+
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY)
+    if (!saved) {
+      return { personen: [], profielen: [] }
+    }
+
+    const parsed = JSON.parse(saved)
+    return {
+      personen: Array.isArray(parsed.personen) ? parsed.personen : [],
+      profielen: Array.isArray(parsed.profielen) ? parsed.profielen : []
+    }
+  } catch {
+    return { personen: [], profielen: [] }
+  }
+}
+
 function App() {
-  const [personen, setPersonen] = useState([])
-  const [profielen, setProfielen] = useState([])
+  const [savedState] = useState(loadSavedState)
+  const [personen, setPersonen] = useState(savedState.personen)
+  const [profielen, setProfielen] = useState(savedState.profielen)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [bewerkProfiel, setBewerkProfiel] = useState(null)
   const [nieuwProfiel, setNieuwProfiel] = useState({
@@ -19,13 +50,17 @@ function App() {
     afdrachten: []
   })
 
+  useEffect(() => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ personen, profielen }))
+  }, [personen, profielen])
+
   // Functie om een nieuwe persoon toe te voegen vanuit profiel
   const voegPersoonToe = (profielId) => {
     const profiel = profielen.find(p => p.id === profielId)
     if (!profiel) return
 
     const persoonData = {
-      id: Date.now().toString(),
+      id: createId(),
       profielId: profiel.id,
       naam: profiel.naam,
       uurtariefPersoon: profiel.uurtariefPersoon,
@@ -70,8 +105,8 @@ function App() {
     setPersonen(personen.map(p => 
       p.id === persoonId ? {
         ...p,
-        actieveAfdrachten: actief 
-          ? [...p.actieveAfdrachten, afdrachtId]
+        actieveAfdrachten: actief === true
+          ? [...new Set([...p.actieveAfdrachten, afdrachtId])]
           : p.actieveAfdrachten.filter(id => id !== afdrachtId)
       } : p
     ))
@@ -115,11 +150,11 @@ function App() {
     } else {
       // Nieuw profiel
       const profiel = {
-        id: Date.now().toString(),
+        id: createId(),
         ...nieuwProfiel,
         afdrachten: nieuwProfiel.afdrachten.map(a => ({
           ...a,
-          id: Date.now().toString() + Math.random()
+          id: createId()
         }))
       }
       setProfielen([...profielen, profiel])
@@ -138,7 +173,7 @@ function App() {
     setNieuwProfiel({
       ...nieuwProfiel,
       afdrachten: [...nieuwProfiel.afdrachten, {
-        id: Date.now().toString(),
+        id: createId(),
         basis: 'uurloon', // 'uurloon' of 'marge'
         type: 'percentage',
         waarde: 0,
@@ -240,13 +275,19 @@ function App() {
     // Stap 1: Initialiseer iedereen met hun uurloon
     personen.forEach(persoon => {
       const financieel = berekenFinancieel(persoon)
-      uitbetalingen[persoon.profielId] = {
-        naam: persoon.naam,
-        eigenLoon: financieel.kosten,
-        ontvangenUurloonAfdrachten: 0,
-        ontvangenMargeAfdrachten: 0,
-        totaal: financieel.kosten
+
+      if (!uitbetalingen[persoon.profielId]) {
+        uitbetalingen[persoon.profielId] = {
+          naam: persoon.naam,
+          eigenLoon: 0,
+          ontvangenUurloonAfdrachten: 0,
+          ontvangenMargeAfdrachten: 0,
+          totaal: 0
+        }
       }
+
+      uitbetalingen[persoon.profielId].eigenLoon += financieel.kosten
+      uitbetalingen[persoon.profielId].totaal += financieel.kosten
     })
 
     // Stap 2: Bereken totale marge pool
@@ -257,7 +298,7 @@ function App() {
     })
 
     // Stap 3: Verdeel marge volgens hiërarchische afdrachten
-    let resterendeMarge = totaleMarge
+    let resterendeMarge = Math.max(0, totaleMarge)
 
     // Eerst: Uurloon afdrachten (prioriteit 1)
     personen.forEach(persoon => {
@@ -342,6 +383,28 @@ function App() {
     return Object.values(uitbetalingen)
   }
 
+  const exporteerGegevens = () => {
+    const exportData = {
+      geëxporteerdOp: new Date().toISOString(),
+      profielen,
+      personen,
+      totalen,
+      uitbetalingen
+    }
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `urenregistratie-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const resetWerkblad = () => {
+    setPersonen([])
+    startNieuwProfiel()
+  }
+
   // Bereken totalen
   const berekenTotalen = () => {
     const totalen = personen.reduce((acc, persoon) => {
@@ -370,14 +433,34 @@ function App() {
             </h1>
           </div>
           
-          {/* Settings Button */}
-          <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 text-xs">
-                <Settings className="h-3 w-3 mr-1" />
-                Profielen
-              </Button>
-            </DialogTrigger>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={exporteerGegevens}
+              disabled={personen.length === 0 && profielen.length === 0}
+            >
+              <Download className="h-3 w-3 mr-1" />
+              Export
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={resetWerkblad}
+              disabled={personen.length === 0}
+            >
+              <RotateCcw className="h-3 w-3 mr-1" />
+              Leeg uren
+            </Button>
+            <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm" className="h-7 text-xs">
+                  <Settings className="h-3 w-3 mr-1" />
+                  Profielen
+                </Button>
+              </DialogTrigger>
             <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>Persoon Profielen Beheren</DialogTitle>
@@ -559,7 +642,8 @@ function App() {
                 </div>
               </div>
             </DialogContent>
-          </Dialog>
+            </Dialog>
+          </div>
         </div>
 
         {/* Vereenvoudigd Overzicht */}

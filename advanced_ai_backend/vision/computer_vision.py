@@ -11,7 +11,11 @@ import asyncio
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import numpy as np
-from openai import OpenAI
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,11 +76,20 @@ class ContractorVisionAI:
     """
     
     def __init__(self):
-        self.client = OpenAI()
+        self.client = self._create_openai_client()
         self.analysis_history = []
         
         # Initialize computer vision models
         self._setup_cv_models()
+
+    def _create_openai_client(self):
+        if OpenAI is None or not os.environ.get("OPENAI_API_KEY"):
+            return None
+        try:
+            return OpenAI()
+        except Exception as e:
+            logger.warning("OpenAI client unavailable, using fallback vision logic: %s", e)
+            return None
         
     def _setup_cv_models(self):
         """Setup computer vision models and configurations"""

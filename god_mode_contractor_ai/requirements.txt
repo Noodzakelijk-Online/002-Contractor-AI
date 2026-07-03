@@ -6,7 +6,7 @@ Flask-CORS==4.0.0
 Flask-SQLAlchemy==3.1.1
 
 # Database
-SQLAlchemy==2.0.23
+SQLAlchemy==2.0.50
 
 # AI & ML
 openai==1.6.1

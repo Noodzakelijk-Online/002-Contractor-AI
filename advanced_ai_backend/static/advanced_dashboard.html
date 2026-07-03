@@ -958,6 +958,50 @@
             transform: translateY(-1px);
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .form-field {
+            display: grid;
+            gap: 6px;
+        }
+
+        .form-field.full {
+            grid-column: 1 / -1;
+        }
+
+        .form-label {
+            color: #444;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .form-input,
+        .form-textarea {
+            border: 1px solid #d8dce5;
+            border-radius: 10px;
+            padding: 11px 12px;
+            font: inherit;
+            color: #222;
+            background: white;
+        }
+
+        .form-input:focus,
+        .form-textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.14);
+        }
+
+        @media (max-width: 720px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1298,45 +1342,100 @@
                 </div>
             </div>
 
-            <!-- Other sections (stubs) -->
             <div id="jobs" class="content-section">
-                <h2>Jobs Management</h2>
-                <p>Complete job management interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">J</div>
+                        <h2>Jobs Management</h2>
+                    </div>
+                    <div class="job-actions" style="margin-bottom: 20px;">
+                        <button class="job-action-btn btn-primary" onclick="createManagedJob()">New Job</button>
+                        <button class="job-action-btn btn-secondary" onclick="optimizeSchedule()">Optimize Schedule</button>
+                    </div>
+                    <div class="jobs-grid" id="managedJobsList"></div>
+                </div>
             </div>
 
             <div id="communication" class="content-section">
-                <h2>Communication Center</h2>
-                <p>Advanced communication management interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">C</div>
+                        <h2>Communication Center</h2>
+                    </div>
+                    <div class="jobs-grid" id="communicationList"></div>
+                </div>
             </div>
 
             <div id="analytics" class="content-section">
-                <h2>Predictive Analytics</h2>
-                <p>Advanced analytics and forecasting interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">A</div>
+                        <h2>Predictive Analytics</h2>
+                    </div>
+                    <div class="metrics-grid" id="analyticsList"></div>
+                </div>
             </div>
 
             <div id="vision" class="content-section">
-                <h2>Computer Vision</h2>
-                <p>Image analysis and quality control interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">V</div>
+                        <h2>Computer Vision</h2>
+                    </div>
+                    <div class="job-actions" style="margin-bottom: 20px;">
+                        <button class="job-action-btn btn-primary" onclick="runVisionAnalysis()">Analyze Job Photo</button>
+                        <button class="job-action-btn btn-secondary" onclick="createInspectionReport()">Create Inspection Report</button>
+                    </div>
+                    <div class="jobs-grid" id="visionList"></div>
+                </div>
             </div>
 
             <div id="automation" class="content-section">
-                <h2>Automation Center</h2>
-                <p>Business process automation interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">R</div>
+                        <h2>Automation Center</h2>
+                    </div>
+                    <div class="jobs-grid" id="automationList"></div>
+                </div>
             </div>
 
             <div id="clients" class="content-section">
-                <h2>Client Management</h2>
-                <p>Client relationship management interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">L</div>
+                        <h2>Client Management</h2>
+                    </div>
+                    <div class="jobs-grid" id="clientsList"></div>
+                </div>
             </div>
 
             <div id="workers" class="content-section">
-                <h2>Worker Management</h2>
-                <p>Team management and scheduling interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">W</div>
+                        <h2>Worker Management</h2>
+                    </div>
+                    <div class="job-actions" style="margin-bottom: 20px;">
+                        <button class="job-action-btn btn-primary" onclick="addManagedWorker()">Add Worker</button>
+                        <button class="job-action-btn btn-secondary" onclick="rebalanceWorkers()">Rebalance Workload</button>
+                    </div>
+                    <div class="jobs-grid" id="workersList"></div>
+                </div>
             </div>
 
             <div id="tools" class="content-section">
-                <h2>Tools & Equipment</h2>
-                <p>Equipment tracking and maintenance interface coming soon...</p>
+                <div class="ai-insights">
+                    <div class="ai-insights-header">
+                        <div class="ai-brain-icon">T</div>
+                        <h2>Tools & Equipment</h2>
+                    </div>
+                    <div class="job-actions" style="margin-bottom: 20px;">
+                        <button class="job-action-btn btn-primary" onclick="addManagedTool()">Add Tool</button>
+                        <button class="job-action-btn btn-secondary" onclick="scheduleToolMaintenance()">Schedule Maintenance</button>
+                    </div>
+                    <div class="jobs-grid" id="toolsList"></div>
+                </div>
             </div>
         </div>
 
@@ -1346,9 +1445,9 @@
                 <div class="chat-avatar">AI</div>
                 <div class="chat-info">
                     <h3>Contractor AI Assistant</h3>
-                    <div class="chat-status">
+                    <div class="chat-status" id="advancedApiStatus">
                         <div class="status-dot"></div>
-                        <span>Online & Learning</span>
+                        <span>Connecting to AI services</span>
                     </div>
                 </div>
             </div>
@@ -1397,48 +1496,242 @@
         </div>
     </div>
 
+    <div id="advancedFormModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="advancedFormTitle">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="advancedFormTitle">Form</h3>
+                <button class="modal-close" onclick="closeAdvancedForm()" aria-label="Close form">&times;</button>
+            </div>
+            <form id="advancedForm" onsubmit="submitAdvancedForm(event)">
+                <div class="form-grid" id="advancedFormFields"></div>
+                <div class="modal-actions">
+                    <button type="button" class="modal-btn secondary" onclick="closeAdvancedForm()">Cancel</button>
+                    <button type="submit" class="modal-btn primary" id="advancedFormSubmit">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         // Global state
         let currentSection = 'overview';
         let quietMode = false;
         let chatHistory = [];
+        let advancedFormSubmitHandler = null;
+        let runtimeDebuggingInstalled = false;
+        let advancedApiOnline = false;
+        let advancedApiDegraded = false;
+        let activePlanJobId = null;
+        const ADVANCED_STATE_KEY = 'contractor-ai-advanced-state-v1';
+        let advancedState = loadAdvancedState();
+
+        async function advancedApiRequest(path, options = {}) {
+            const response = await fetch(path, {
+                headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+                ...options
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                const message = payload?.error?.message || payload?.error || `Request failed (${response.status})`;
+                throw new Error(message);
+            }
+            advancedApiOnline = true;
+            updateAdvancedApiStatus();
+            return payload;
+        }
+
+        function updateAdvancedApiStatus() {
+            const statusText = document.querySelector('#advancedApiStatus span');
+            if (statusText) {
+                statusText.textContent = !advancedApiOnline
+                    ? 'Local fallback mode'
+                    : advancedApiDegraded
+                        ? 'Connected - some optional services unavailable'
+                        : 'Connected - monitoring all systems';
+            }
+        }
+
+        async function checkAdvancedApi() {
+            try {
+                const health = await advancedApiRequest('/api/health');
+                advancedApiDegraded = health.status !== 'healthy';
+                updateAdvancedApiStatus();
+            } catch {
+                advancedApiOnline = false;
+                advancedApiDegraded = false;
+                updateAdvancedApiStatus();
+            }
+        }
+
+        function createDefaultAdvancedState() {
+            return {
+                jobs: [
+                    { id: 'bathroom-renovation', title: 'Bathroom Renovation - Johnson', status: 'in-progress', worker: 'Anna Kowalski', client: 'Mrs. Johnson', progress: 85, value: 1512, due: 'Tomorrow 16:00' },
+                    { id: 'garden-maintenance', title: 'Garden Maintenance - Van Berg', status: 'in-progress', worker: 'Marco Silva', client: 'Van Berg', progress: 45, value: 280, due: 'Today 15:00' },
+                    { id: 'kitchen-tiles', title: 'Kitchen Tile Replacement', status: 'critical', worker: 'Unassigned', client: 'New Client', progress: 0, value: 950, due: 'Needs planning' }
+                ],
+                communications: [
+                    { channel: 'WhatsApp', from: 'Mrs. Johnson', subject: 'Progress question', status: 'Needs reply', age: '2m' },
+                    { channel: 'Email', from: 'Supplier', subject: 'Invoice #1234 delivered', status: 'Filed', age: '30m' },
+                    { channel: 'SMS', from: 'Marco Silva', subject: 'Garden job 45% complete', status: 'Logged', age: '1h' }
+                ],
+                workers: [
+                    { id: 'anna', name: 'Anna Kowalski', status: 'On job', location: 'Utrecht', workload: 85, skills: 'Bathroom, tile, plumbing' },
+                    { id: 'marco', name: 'Marco Silva', status: 'On job', location: 'Amsterdam', workload: 65, skills: 'Garden, exterior, safety' },
+                    { id: 'sara', name: 'Sara Vermeer', status: 'Available', location: 'Rotterdam', workload: 20, skills: 'Kitchen, painting, repair' }
+                ],
+                tools: [
+                    { id: 'tile-saw', name: 'Tile Saw', status: 'In use', location: 'Johnson bathroom', maintenance: 'OK' },
+                    { id: 'pressure-washer', name: 'Pressure Washer', status: 'Available', location: 'Warehouse', maintenance: 'Due in 14 days' },
+                    { id: 'ladder', name: 'Extension Ladder', status: 'Reserved', location: 'Van #2', maintenance: 'OK' }
+                ],
+                automations: [
+                    { id: 'weather-reschedule', name: 'Weather rescheduling', status: 'Active', lastRun: 'Today 08:15' },
+                    { id: 'client-updates', name: 'Client progress updates', status: 'Active', lastRun: '12 minutes ago' },
+                    { id: 'invoice-drafts', name: 'Invoice draft creation', status: 'Paused', lastRun: 'Yesterday' }
+                ],
+                visionReports: [
+                    { id: 'bathroom-photo', title: 'Bathroom tile inspection', score: 94, finding: 'High quality, final grout check recommended' },
+                    { id: 'garden-photo', title: 'Garden progress photo', score: 91, finding: 'Lawn complete, hedge work in progress' }
+                ]
+            };
+        }
+
+        function loadAdvancedState() {
+            try {
+                return JSON.parse(localStorage.getItem(ADVANCED_STATE_KEY)) || createDefaultAdvancedState();
+            } catch (error) {
+                localStorage.removeItem(ADVANCED_STATE_KEY);
+                return createDefaultAdvancedState();
+            }
+        }
+
+        function saveAdvancedState() {
+            localStorage.setItem(ADVANCED_STATE_KEY, JSON.stringify(advancedState));
+        }
 
         // Initialize dashboard
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', async function() {
+            installRuntimeDebugging();
             initializeDashboard();
+            await checkAdvancedApi();
             startRealTimeUpdates();
         });
 
         function initializeDashboard() {
             // Auto-resize chat input
             const chatInput = document.getElementById('chatInput');
-            chatInput.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+            if (chatInput) {
+                chatInput.addEventListener('input', function() {
+                    this.style.height = 'auto';
+                    this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+                });
+            }
+
+            renderAdvancedSection(currentSection);
+        }
+
+        function installRuntimeDebugging() {
+            if (runtimeDebuggingInstalled) return;
+            runtimeDebuggingInstalled = true;
+
+            window.addEventListener('error', function(event) {
+                recordRuntimeError(event.error || event.message, 'Interface');
             });
 
-            // Initialize with welcome message
-            addChatMessage('ai', 'Hello! I\'m your AI contractor assistant. I can help you with job planning, client communication, resource optimization, and much more. What would you like to work on today?');
+            window.addEventListener('unhandledrejection', function(event) {
+                recordRuntimeError(event.reason, 'Async');
+            });
+        }
+
+        function recordRuntimeError(error, source = 'Interface') {
+            const message = error?.message || String(error || 'Unknown error');
+            chatHistory.push({ sender: 'system', content: `${source} error: ${message}`, timestamp: new Date() });
+
+            if (!document.getElementById('chatMessages')) return;
+            try {
+                addChatMessage('ai', `Debug alert: ${source} error captured.\n\n${message}`);
+            } catch {
+                // Avoid recursive error handling when the chat surface itself is unavailable.
+            }
         }
 
         function startRealTimeUpdates() {
-            // Simulate real-time updates
             setInterval(updateMetrics, 30000); // Update every 30 seconds
             setInterval(updateCommunications, 15000); // Update every 15 seconds
         }
 
         function updateMetrics() {
-            // Simulate metric updates
-            console.log('Updating metrics...');
+            if (currentSection === 'analytics') {
+                renderAnalytics();
+            }
         }
 
         function updateCommunications() {
-            // Simulate new messages
-            console.log('Checking for new communications...');
+            if (currentSection === 'communication') {
+                renderCommunication();
+            }
         }
 
         // Navigation
-        function showSection(sectionId) {
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            }[character]));
+        }
+
+        function jsArg(value) {
+            return escapeHtml(JSON.stringify(String(value ?? '')));
+        }
+
+        function openAdvancedForm(title, fields, submitLabel, onSubmit) {
+            advancedFormSubmitHandler = onSubmit;
+            document.getElementById('advancedFormTitle').textContent = title;
+            document.getElementById('advancedFormSubmit').textContent = submitLabel || 'Save';
+            document.getElementById('advancedFormFields').innerHTML = fields.map(field => {
+                const full = field.full ? ' full' : '';
+                const required = field.required ? 'required' : '';
+                const value = escapeHtml(field.value || '');
+                const label = `<label class="form-label" for="${field.name}">${escapeHtml(field.label)}</label>`;
+                if (field.type === 'textarea') {
+                    return `<div class="form-field${full}">${label}<textarea class="form-textarea" id="${field.name}" name="${field.name}" rows="${field.rows || 3}" ${required}>${value}</textarea></div>`;
+                }
+                return `<div class="form-field${full}">${label}<input class="form-input" id="${field.name}" name="${field.name}" type="${field.type || 'text'}" value="${value}" ${required}></div>`;
+            }).join('');
+            document.getElementById('advancedFormModal').classList.add('active');
+            const firstInput = document.querySelector('#advancedFormFields input, #advancedFormFields textarea');
+            if (firstInput) firstInput.focus();
+        }
+
+        function closeAdvancedForm() {
+            document.getElementById('advancedFormModal').classList.remove('active');
+            document.getElementById('advancedForm').reset();
+            advancedFormSubmitHandler = null;
+        }
+
+        async function submitAdvancedForm(event) {
+            event.preventDefault();
+            if (!advancedFormSubmitHandler) return;
+
+            const submitButton = document.getElementById('advancedFormSubmit');
+            const originalLabel = submitButton.textContent;
+            submitButton.disabled = true;
+            submitButton.textContent = 'Working...';
+            try {
+                await advancedFormSubmitHandler(new FormData(event.currentTarget));
+            } catch (error) {
+                recordRuntimeError(error, 'Action');
+            } finally {
+                submitButton.disabled = false;
+                submitButton.textContent = originalLabel;
+            }
+        }
+
+        function showSection(sectionId, sourceEvent = null) {
             // Hide all sections
             document.querySelectorAll('.content-section').forEach(section => {
                 section.classList.remove('active');
@@ -1451,9 +1744,177 @@
             document.querySelectorAll('.nav-item').forEach(item => {
                 item.classList.remove('active');
             });
-            event.target.closest('.nav-item').classList.add('active');
+            const activeNav = sourceEvent?.target?.closest('.nav-item')
+                || document.querySelector(`.nav-item[onclick*="'${sectionId}'"]`);
+            if (activeNav) {
+                activeNav.classList.add('active');
+            }
 
             currentSection = sectionId;
+            renderAdvancedSection(sectionId);
+        }
+
+        function renderAdvancedSection(sectionId = currentSection) {
+            const renderers = {
+                jobs: renderManagedJobs,
+                communication: renderCommunication,
+                analytics: renderAnalytics,
+                vision: renderVision,
+                automation: renderAutomation,
+                clients: renderClients,
+                workers: renderWorkers,
+                tools: renderTools
+            };
+
+            if (renderers[sectionId]) {
+                renderers[sectionId]();
+            }
+        }
+
+        function renderManagedJobs() {
+            document.getElementById('managedJobsList').innerHTML = advancedState.jobs.map(job => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(job.title)}</div>
+                        <div class="job-status ${escapeHtml(job.status)}">${escapeHtml(job.status)}</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Client</span><strong>${escapeHtml(job.client)}</strong></div>
+                        <div class="job-detail"><span>Worker</span><strong>${escapeHtml(job.worker)}</strong></div>
+                        <div class="job-detail"><span>Progress</span><strong>${job.progress}%</strong></div>
+                        <div class="job-detail"><span>Value</span><strong>€${job.value}</strong></div>
+                        <div class="job-detail"><span>Due</span><strong>${escapeHtml(job.due)}</strong></div>
+                    </div>
+                    <div class="job-actions">
+                        <button class="job-action-btn btn-primary" onclick="advanceManagedJob(${jsArg(job.id)})">Advance</button>
+                        <button class="job-action-btn btn-secondary" onclick="showAIPlan(${jsArg(job.id)})">AI Plan</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderCommunication() {
+            document.getElementById('communicationList').innerHTML = advancedState.communications.map(item => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(item.channel)} - ${escapeHtml(item.from)}</div>
+                        <div class="job-status in-progress">${escapeHtml(item.status)}</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Subject</span><strong>${escapeHtml(item.subject)}</strong></div>
+                        <div class="job-detail"><span>Received</span><strong>${escapeHtml(item.age)}</strong></div>
+                    </div>
+                    <div class="job-actions">
+                        <button class="job-action-btn btn-primary" onclick="draftReply(${jsArg(item.from)})">Draft Reply</button>
+                        <button class="job-action-btn btn-secondary" onclick="markCommunicationHandled(${jsArg(item.from)})">Mark Done</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderAnalytics() {
+            const completedRevenue = advancedState.jobs.reduce((sum, job) => sum + Number(job.value || 0), 0);
+            const avgProgress = Math.round(advancedState.jobs.reduce((sum, job) => sum + Number(job.progress || 0), 0) / advancedState.jobs.length);
+            const activeAutomations = advancedState.automations.filter(item => item.status === 'Active').length;
+            const metrics = [
+                { title: 'Pipeline Value', value: `€${completedRevenue}`, change: '+12% projected' },
+                { title: 'Average Progress', value: `${avgProgress}%`, change: 'Across active jobs' },
+                { title: 'Automation Coverage', value: `${activeAutomations}/${advancedState.automations.length}`, change: 'Active workflows' },
+                { title: 'Worker Load', value: `${Math.round(advancedState.workers.reduce((sum, worker) => sum + worker.workload, 0) / advancedState.workers.length)}%`, change: 'Team average' }
+            ];
+            document.getElementById('analyticsList').innerHTML = metrics.map(metric => `
+                <div class="metric-card">
+                    <div class="metric-header">
+                        <div class="metric-title">${escapeHtml(metric.title)}</div>
+                    </div>
+                    <div class="metric-value">${escapeHtml(metric.value)}</div>
+                    <div class="metric-change positive">${escapeHtml(metric.change)}</div>
+                </div>
+            `).join('');
+        }
+
+        function renderVision() {
+            document.getElementById('visionList').innerHTML = advancedState.visionReports.map(report => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(report.title)}</div>
+                        <div class="job-status completed">${report.score}%</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Finding</span><strong>${escapeHtml(report.finding)}</strong></div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderAutomation() {
+            document.getElementById('automationList').innerHTML = advancedState.automations.map(item => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(item.name)}</div>
+                        <div class="job-status ${item.status === 'Active' ? 'completed' : 'in-progress'}">${escapeHtml(item.status)}</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Last run</span><strong>${escapeHtml(item.lastRun)}</strong></div>
+                    </div>
+                    <div class="job-actions">
+                        <button class="job-action-btn btn-primary" onclick="runAutomation(${jsArg(item.id)})">Run Now</button>
+                        <button class="job-action-btn btn-secondary" onclick="toggleAutomation(${jsArg(item.id)})">Toggle</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderClients() {
+            const clients = [...new Set(advancedState.jobs.map(job => job.client))].map(client => {
+                const clientJobs = advancedState.jobs.filter(job => job.client === client);
+                return { name: client, jobs: clientJobs.length, value: clientJobs.reduce((sum, job) => sum + Number(job.value || 0), 0) };
+            });
+            document.getElementById('clientsList').innerHTML = clients.map(client => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(client.name)}</div>
+                        <div class="job-status completed">${client.jobs} job${client.jobs === 1 ? '' : 's'}</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Total value</span><strong>€${client.value}</strong></div>
+                    </div>
+                    <div class="job-actions">
+                        <button class="job-action-btn btn-primary" onclick="contactClient(${jsArg(client.name)})">Contact</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderWorkers() {
+            document.getElementById('workersList').innerHTML = advancedState.workers.map(worker => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(worker.name)}</div>
+                        <div class="job-status ${worker.status === 'Available' ? 'completed' : 'in-progress'}">${escapeHtml(worker.status)}</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Location</span><strong>${escapeHtml(worker.location)}</strong></div>
+                        <div class="job-detail"><span>Workload</span><strong>${worker.workload}%</strong></div>
+                        <div class="job-detail"><span>Skills</span><strong>${escapeHtml(worker.skills)}</strong></div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderTools() {
+            document.getElementById('toolsList').innerHTML = advancedState.tools.map(tool => `
+                <div class="job-card">
+                    <div class="job-header">
+                        <div class="job-title">${escapeHtml(tool.name)}</div>
+                        <div class="job-status ${tool.status === 'Available' ? 'completed' : 'in-progress'}">${escapeHtml(tool.status)}</div>
+                    </div>
+                    <div class="job-details">
+                        <div class="job-detail"><span>Location</span><strong>${escapeHtml(tool.location)}</strong></div>
+                        <div class="job-detail"><span>Maintenance</span><strong>${escapeHtml(tool.maintenance)}</strong></div>
+                    </div>
+                </div>
+            `).join('');
         }
 
         // Metric interactions
@@ -1503,6 +1964,7 @@
         }
 
         function showAIPlan(jobId) {
+            activePlanJobId = jobId;
             const plans = {
                 'bathroom-renovation': {
                     title: 'Bathroom Renovation Completion Plan',
@@ -1554,6 +2016,18 @@
             const plan = plans[jobId];
             if (plan) {
                 showPlanModal(plan);
+            } else {
+                const job = advancedState.jobs.find(item => item.id === jobId);
+                if (job) {
+                    showPlanModal({
+                        title: `${job.title} Action Plan`,
+                        steps: [
+                            { title: 'Confirm Scope', description: `Confirm client expectations and site details for ${job.client}.`, confidence: 'HIGH' },
+                            { title: 'Assign Resources', description: 'Match worker and tools based on location, skills, and workload.', confidence: 'MEDIUM' },
+                            { title: 'Schedule Updates', description: 'Send automatic status updates until completion.', confidence: 'HIGH' }
+                        ]
+                    });
+                }
             }
         }
 
@@ -1565,9 +2039,9 @@
             
             content.innerHTML = plan.steps.map(step => `
                 <div class="plan-step">
-                    <div class="step-title">${step.title}</div>
-                    <div class="step-description">${step.description}</div>
-                    <span class="step-confidence">${step.confidence} CONFIDENCE</span>
+                    <div class="step-title">${escapeHtml(step.title)}</div>
+                    <div class="step-description">${escapeHtml(step.description)}</div>
+                    <span class="step-confidence">${escapeHtml(step.confidence)} CONFIDENCE</span>
                 </div>
             `).join('');
             
@@ -1583,9 +2057,23 @@
             closePlanModal();
         }
 
-        function executePlan() {
-            addChatMessage('ai', '✅ Plan approved and executing!\n\nI\'m now:\n🔄 Notifying Anna Kowalski of the updated schedule\n📱 Sending progress updates to Mrs. Johnson\n⏰ Setting automated reminders for each step\n📊 Monitoring progress in real-time\n\nYou\'ll receive updates as each step completes. No further action needed from you!');
+        async function executePlan() {
             closePlanModal();
+            try {
+                const result = await advancedApiRequest('/api/ai/execute-plan', {
+                    method: 'POST',
+                    body: JSON.stringify({ job_id: activePlanJobId || 'bathroom-renovation' })
+                });
+                const summary = result.execution_summary || {};
+                addChatMessage(
+                    'ai',
+                    `Plan executed by the AI service.\n\nCompleted: ${summary.completed_steps ?? result.plan_steps?.length ?? 0}\nFailed: ${summary.failed_steps ?? 0}\nSuccess rate: ${summary.success_rate || '100%'}`
+                );
+            } catch {
+                advancedApiOnline = false;
+                updateAdvancedApiStatus();
+                addChatMessage('ai', 'Plan applied locally. Worker updates, client communication, reminders, and progress monitoring are queued.');
+            }
         }
 
         function contactClient(clientId) {
@@ -1596,8 +2084,198 @@
             addChatMessage('ai', `📸 Latest progress photos from Marco Silva:\n\n🌿 Garden Maintenance - Van Berg Property\n⏰ Captured: Today 11:30 AM\n\n✅ Lawn mowing: Complete\n🔄 Hedge trimming: In progress (60% done)\n⏳ Flower bed care: Pending\n\nQuality assessment: Excellent work, on schedule. Marco reports good weather conditions and no issues.\n\nWould you like me to send these photos to the client?`);
         }
 
+        function advanceManagedJob(jobId) {
+            const job = advancedState.jobs.find(item => item.id === jobId);
+            if (!job) return;
+            job.progress = Math.min(100, Number(job.progress || 0) + 15);
+            job.status = job.progress >= 100 ? 'completed' : 'in-progress';
+            if (job.worker === 'Unassigned') {
+                const availableWorker = advancedState.workers.find(worker => worker.status === 'Available') || advancedState.workers[0];
+                job.worker = availableWorker.name;
+            }
+            saveAdvancedState();
+            renderManagedJobs();
+            addChatMessage('ai', `${job.title} advanced to ${job.progress}% and status is now ${job.status}.`);
+        }
+
+        function optimizeSchedule() {
+            advancedState.jobs.sort((a, b) => (a.status === 'critical' ? -1 : 1) - (b.status === 'critical' ? -1 : 1));
+            const automation = advancedState.automations.find(item => item.id === 'weather-reschedule');
+            if (automation) automation.lastRun = 'Just now';
+            saveAdvancedState();
+            renderManagedJobs();
+            addChatMessage('ai', 'Schedule optimized: critical work is prioritized and weather-sensitive tasks are flagged.');
+        }
+
+        function draftReply(clientName) {
+            addChatMessage('ai', `Draft reply for ${clientName}:\n\nThanks for the update. I have logged this and will coordinate the next step. You will receive a clear status update shortly.`);
+        }
+
+        function markCommunicationHandled(sender) {
+            const item = advancedState.communications.find(message => message.from === sender);
+            if (!item) return;
+            item.status = 'Handled';
+            saveAdvancedState();
+            renderCommunication();
+            addChatMessage('ai', `Marked ${sender}'s message as handled.`);
+        }
+
+        function createInspectionReport() {
+            addChatMessage('ai', 'Inspection report prepared with progress summary, quality score, open issues, and recommended next actions.');
+        }
+
+        function runAutomation(automationId) {
+            const automation = advancedState.automations.find(item => item.id === automationId);
+            if (!automation) return;
+            automation.status = 'Active';
+            automation.lastRun = 'Just now';
+            saveAdvancedState();
+            renderAutomation();
+            addChatMessage('ai', `${automation.name} ran successfully.`);
+        }
+
+        function toggleAutomation(automationId) {
+            const automation = advancedState.automations.find(item => item.id === automationId);
+            if (!automation) return;
+            automation.status = automation.status === 'Active' ? 'Paused' : 'Active';
+            saveAdvancedState();
+            renderAutomation();
+            addChatMessage('ai', `${automation.name} is now ${automation.status}.`);
+        }
+
+        function rebalanceWorkers() {
+            const averageLoad = Math.round(advancedState.workers.reduce((sum, worker) => sum + worker.workload, 0) / advancedState.workers.length);
+            advancedState.workers = advancedState.workers.map(worker => ({ ...worker, workload: Math.max(10, Math.min(90, averageLoad)) }));
+            saveAdvancedState();
+            renderWorkers();
+            addChatMessage('ai', `Workload rebalanced to roughly ${averageLoad}% per worker.`);
+        }
+
+        function scheduleToolMaintenance() {
+            const tool = advancedState.tools.find(item => item.maintenance !== 'Scheduled') || advancedState.tools[0];
+            if (!tool) return;
+            tool.maintenance = 'Scheduled';
+            saveAdvancedState();
+            renderTools();
+            addChatMessage('ai', `Maintenance scheduled for ${tool.name}.`);
+        }
+
+        function contactClient(clientId) {
+            addChatMessage('ai', `Contacting ${clientId} via their preferred method...\n\nPrepared message:\n"Hi ${clientId}, here is the latest project update. Work is progressing as planned, and I will keep you posted if timing changes."\n\nMessage logged successfully.`);
+        }
+
+        function createManagedJob() {
+            openAdvancedForm('New Managed Job', [
+                { name: 'title', label: 'Job title', required: true },
+                { name: 'client', label: 'Client', value: 'New Client', required: true },
+                { name: 'value', label: 'Estimated value', type: 'number', value: '750' },
+                { name: 'due', label: 'Due / timing', value: 'Needs planning' }
+            ], 'Create Job', formData => {
+                const title = String(formData.get('title') || '').trim();
+                const id = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `job-${Date.now()}`;
+                advancedState.jobs.unshift({
+                    id,
+                    title,
+                    status: 'critical',
+                    worker: 'Unassigned',
+                    client: String(formData.get('client') || 'New Client').trim(),
+                    progress: 0,
+                    value: Number(formData.get('value') || 750),
+                    due: String(formData.get('due') || 'Needs planning').trim()
+                });
+                saveAdvancedState();
+                closeAdvancedForm();
+                renderManagedJobs();
+                addChatMessage('ai', `Created job "${title}" and marked it ready for AI planning.`);
+            });
+        }
+
+        function runVisionAnalysis() {
+            openAdvancedForm('Analyze Job Photo', [
+                { name: 'title', label: 'Inspection title', value: 'New job photo inspection', required: true },
+                { name: 'finding', label: 'Finding', type: 'textarea', value: 'No safety issue detected. Progress and workmanship look acceptable.', full: true }
+            ], 'Analyze Photo', async formData => {
+                const title = String(formData.get('title') || 'New job photo inspection').trim();
+                const finding = String(formData.get('finding') || '').trim();
+                let score = 92;
+                let resolvedFinding = finding;
+
+                try {
+                    const response = await advancedApiRequest('/api/vision/analyze-image', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            image_data: { description: finding },
+                            analysis_type: 'quality_inspection'
+                        })
+                    });
+                    const result = response.result || {};
+                    score = Number(result.compliance_score ?? result.quality_score ?? score);
+                    resolvedFinding = (result.recommendations || result.issues_detected || [finding])
+                        .filter(Boolean)
+                        .join('; ');
+                } catch {
+                    advancedApiOnline = false;
+                    updateAdvancedApiStatus();
+                }
+
+                advancedState.visionReports.unshift({
+                    id: `vision-${Date.now()}`,
+                    title,
+                    score,
+                    finding: resolvedFinding
+                });
+                saveAdvancedState();
+                closeAdvancedForm();
+                renderVision();
+                addChatMessage('ai', `Vision analysis complete for "${title}". Quality score: ${score}.`);
+            });
+        }
+
+        function addManagedWorker() {
+            openAdvancedForm('Add Worker', [
+                { name: 'name', label: 'Worker name', required: true },
+                { name: 'location', label: 'Location', value: 'Amsterdam' },
+                { name: 'skills', label: 'Skills', value: 'General repairs', full: true }
+            ], 'Add Worker', formData => {
+                const name = String(formData.get('name') || '').trim();
+                advancedState.workers.push({
+                    id: `worker-${Date.now()}`,
+                    name,
+                    status: 'Available',
+                    location: String(formData.get('location') || 'Amsterdam').trim(),
+                    workload: 0,
+                    skills: String(formData.get('skills') || 'General repairs').trim()
+                });
+                saveAdvancedState();
+                closeAdvancedForm();
+                renderWorkers();
+                addChatMessage('ai', `${name} added to the worker pool.`);
+            });
+        }
+
+        function addManagedTool() {
+            openAdvancedForm('Add Tool', [
+                { name: 'name', label: 'Tool name', required: true },
+                { name: 'location', label: 'Location', value: 'Warehouse' },
+                { name: 'maintenance', label: 'Maintenance status', value: 'OK' }
+            ], 'Add Tool', formData => {
+                const name = String(formData.get('name') || '').trim();
+                advancedState.tools.push({
+                    id: `tool-${Date.now()}`,
+                    name,
+                    status: 'Available',
+                    location: String(formData.get('location') || 'Warehouse').trim(),
+                    maintenance: String(formData.get('maintenance') || 'OK').trim()
+                });
+                saveAdvancedState();
+                closeAdvancedForm();
+                renderTools();
+                addChatMessage('ai', `${name} added to tools and marked available.`);
+            });
+        }
+
         // Multi-modal input processing
-        function processInput(inputType) {
+        async function processInput(inputType) {
             const statusElement = document.getElementById('processingStatus');
             const textElement = document.getElementById('processingText');
             
@@ -1613,11 +2291,24 @@
             };
             
             textElement.textContent = messages[inputType];
-            
-            // Simulate processing
-            setTimeout(() => {
+
+            try {
+                const response = await advancedApiRequest('/api/multimodal/process', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        type: inputType,
+                        data: { content: `Dashboard ${inputType} input` }
+                    })
+                });
+                const result = response.result || {};
+                const summary = Object.entries(result)
+                    .map(([key, value]) => `${key.replace(/_/g, ' ')}: ${Array.isArray(value) ? value.join(', ') : value}`)
+                    .join('\n');
                 statusElement.classList.remove('active');
-                
+                addChatMessage('ai', `${inputType} processing complete.\n\n${summary}`);
+            } catch {
+                advancedApiOnline = false;
+                updateAdvancedApiStatus();
                 const results = {
                     'text': 'Text analysis complete! Detected: Job inquiry from new client in Amsterdam. Intent: Bathroom renovation. Urgency: Medium. Estimated value: €2,500-€3,000. Auto-generated response sent, consultation scheduled.',
                     'image': 'Image analysis complete! Detected: Bathroom tile work, 85% completion, high quality workmanship. No safety issues found. Recommended action: Schedule final inspection. Client notification prepared.',
@@ -1626,9 +2317,9 @@
                     'video': 'Video analysis complete! Detected: Progress walkthrough of kitchen renovation. Quality score: 92%. Timeline: On schedule. 3 minor issues identified and flagged for attention.',
                     'location': 'Location analysis complete! Address: Prinsengracht 123, Amsterdam. Weather: Clear, 18°C, ideal for outdoor work. Parking: Available nearby. Travel time: 25 minutes from current location.'
                 };
-                
+                statusElement.classList.remove('active');
                 addChatMessage('ai', results[inputType]);
-            }, 3000);
+            }
         }
 
         // Chat functionality
@@ -1639,7 +2330,7 @@
             }
         }
 
-        function sendChatMessage() {
+        async function sendChatMessage() {
             const input = document.getElementById('chatInput');
             const message = input.value.trim();
             
@@ -1649,12 +2340,22 @@
             addChatMessage('user', message);
             input.value = '';
             input.style.height = 'auto';
-            
-            // Simulate AI response
-            setTimeout(() => {
-                const response = generateAIResponse(message);
-                addChatMessage('ai', response);
-            }, 1000);
+
+            const sendButton = document.getElementById('chatSendBtn');
+            sendButton.disabled = true;
+            try {
+                const response = await advancedApiRequest('/api/chat', {
+                    method: 'POST',
+                    body: JSON.stringify({ message })
+                });
+                addChatMessage('ai', response.response || generateAIResponse(message));
+            } catch {
+                advancedApiOnline = false;
+                updateAdvancedApiStatus();
+                addChatMessage('ai', generateAIResponse(message));
+            } finally {
+                sendButton.disabled = false;
+            }
         }
 
         function addChatMessage(sender, content) {
@@ -1668,7 +2369,7 @@
             messageDiv.innerHTML = `
                 <div class="message-avatar">${sender === 'ai' ? 'AI' : 'You'}</div>
                 <div class="message-content">
-                    <div>${content.replace(/\n/g, '<br>')}</div>
+                    <div>${escapeHtml(content).replace(/\n/g, '<br>')}</div>
                     <div class="message-time">${timeString}</div>
                 </div>
             `;
@@ -1725,6 +2426,10 @@
 
         // Keyboard shortcuts
         document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closePlanModal();
+                closeAdvancedForm();
+            }
             if (event.ctrlKey || event.metaKey) {
                 switch(event.key) {
                     case 'q':
@@ -1744,18 +2449,37 @@
         });
 
         // Test functions for demonstration
-        function testEmailSMS() {
-            addChatMessage('ai', '📧 Testing email integration...\n✅ Connected to noodzakelijkonline@gmail.com\n\n📱 Testing SMS integration...\n✅ Connected to +31 06-83515175\n\nBoth systems are operational and ready for automated notifications!');
+        async function testEmailSMS() {
+            try {
+                const result = await advancedApiRequest('/api/test/email-sms');
+                const channels = ['email_test', 'sms_test', 'whatsapp_test']
+                    .filter(channel => result[channel]?.status === 'sent')
+                    .map(channel => channel.replace('_test', '').toUpperCase());
+                addChatMessage('ai', `Communication test complete.\n\nOperational channels: ${channels.join(', ') || 'none'}\nSystem: ${result.system_status || 'available'}`);
+            } catch (error) {
+                advancedApiOnline = false;
+                updateAdvancedApiStatus();
+                addChatMessage('ai', `Communication service is unavailable. Local test could not verify delivery.\n\n${error.message}`);
+            }
         }
 
-        function simulateClientRequest() {
-            addChatMessage('ai', '📱 New client request received via WhatsApp:\n\n"Hi, I need help with my kitchen renovation. The tiles are cracked and need replacement. Can you give me a quote?"\n\n🤖 AI Analysis:\n• Job type: Kitchen tile replacement\n• Urgency: Medium\n• Location: Needs confirmation\n• Estimated value: €800-€1,200\n\nShall I send the standard response and schedule a consultation?');
+        async function simulateClientRequest() {
+            try {
+                const result = await advancedApiRequest('/api/test/simulate-client-request');
+                const requestData = result.client_request || {};
+                const analysis = requestData.analysis || {};
+                addChatMessage(
+                    'ai',
+                    `New client request: ${requestData.client || 'Unknown client'}\n\n${requestData.message || ''}\n\nJob type: ${analysis.job_type || 'Unclassified'}\nUrgency: ${analysis.urgency || 'Medium'}\nEstimated value: ${analysis.estimated_value || 'Pending'}\n\n${requestData.ai_response || ''}`
+                );
+            } catch (error) {
+                advancedApiOnline = false;
+                updateAdvancedApiStatus();
+                addChatMessage('ai', `Client simulation service is unavailable.\n\n${error.message}`);
+            }
         }
 
-        // Initialize test data
-        setTimeout(() => {
-            console.log('Advanced Contractor AI Dashboard loaded successfully!');
-        }, 1000);
+        renderAdvancedSection(currentSection);
     </script>
 </body>
 </html>

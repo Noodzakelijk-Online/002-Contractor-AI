@@ -8,7 +8,6 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 import logging
-import websockets
 from dataclasses import dataclass
 
 @dataclass
@@ -43,6 +42,8 @@ class ARIoTIntegration:
         self.iot_devices = {}
         self.ar_sessions = {}
         self.websocket_connections = {}
+        self.monitoring_tasks = {}
+        self.broadcast_history = {}
         self.initialize_systems()
     
     def initialize_systems(self):
@@ -103,8 +104,8 @@ class ARIoTIntegration:
             }
             
         except Exception as e:
-            self.logger.error(f"Error creating AR session: {str(e)}")
-            return {'error': str(e)}
+            self.logger.exception("Error creating AR session")
+            return {'error': 'ar_session_creation_failed'}
     
     def _create_ar_visualization(self, job_data: Dict, location: Dict) -> Dict[str, Any]:
         """Create AR visualization configuration based on job type"""
@@ -292,8 +293,8 @@ class ARIoTIntegration:
             }
             
         except Exception as e:
-            self.logger.error(f"Error updating AR progress: {str(e)}")
-            return {'error': str(e)}
+            self.logger.exception("Error updating AR progress")
+            return {'error': 'ar_progress_update_failed'}
     
     # IoT Integration Functions
     async def register_iot_device(self, device_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -340,8 +341,8 @@ class ARIoTIntegration:
             }
             
         except Exception as e:
-            self.logger.error(f"Error registering IoT device: {str(e)}")
-            return {'error': str(e)}
+            self.logger.exception("Error registering IoT device")
+            return {'error': 'iot_device_registration_failed'}
     
     def _configure_device_features(self, device_config: Dict) -> Dict[str, Any]:
         """Configure device-specific features based on type"""
@@ -425,8 +426,8 @@ class ARIoTIntegration:
             }
             
         except Exception as e:
-            self.logger.error(f"Error processing IoT data: {str(e)}")
-            return {'error': str(e)}
+            self.logger.exception("Error processing IoT data")
+            return {'error': 'iot_data_processing_failed'}
     
     def _process_device_data(self, device: IoTDevice, sensor_data: Dict) -> Dict[str, Any]:
         """Process sensor data based on device type"""
@@ -556,8 +557,8 @@ class ARIoTIntegration:
             }
             
         except Exception as e:
-            self.logger.error(f"Error getting IoT dashboard data: {str(e)}")
-            return {'error': str(e)}
+            self.logger.exception("Error getting IoT dashboard data")
+            return {'error': 'iot_dashboard_failed'}
     
     # Integration and Communication Functions
     async def integrate_ar_iot(self, ar_session_id: str, iot_device_ids: List[str]) -> Dict[str, Any]:
@@ -608,8 +609,8 @@ class ARIoTIntegration:
             }
             
         except Exception as e:
-            self.logger.error(f"Error integrating AR and IoT: {str(e)}")
-            return {'error': str(e)}
+            self.logger.exception("Error integrating AR and IoT")
+            return {'error': 'ar_iot_integration_failed'}
     
     def _configure_ar_iot_integration(self, device: IoTDevice, ar_session: Dict) -> Dict[str, Any]:
         """Configure AR-IoT integration based on device type"""
@@ -715,13 +716,51 @@ class ARIoTIntegration:
     
     async def _broadcast_ar_update(self, session_id: str, update_data: Dict):
         """Broadcast AR update to connected clients"""
-        # Implementation would use WebSocket connections
-        pass
+        update = {
+            **update_data,
+            'session_id': session_id,
+            'broadcast_at': datetime.now().isoformat()
+        }
+        self.broadcast_history.setdefault(session_id, []).append(update)
+
+        stale_connections = []
+        for connection_id, connection in self.websocket_connections.get(session_id, {}).items():
+            try:
+                await connection.send(json.dumps(update))
+            except Exception as exc:
+                self.logger.warning("Failed to broadcast AR update to %s: %s", connection_id, exc)
+                stale_connections.append(connection_id)
+
+        for connection_id in stale_connections:
+            self.websocket_connections.get(session_id, {}).pop(connection_id, None)
+
+        return {
+            'session_id': session_id,
+            'delivered': len(self.websocket_connections.get(session_id, {})) - len(stale_connections),
+            'stored': True,
+            'stale_connections': stale_connections
+        }
     
     async def _setup_device_monitoring(self, device: IoTDevice):
         """Setup monitoring for specific device"""
-        # Implementation would configure device-specific monitoring
-        pass
+        interval_seconds = 30
+        if device.device_type in {'environment_sensor', 'safety_monitor'}:
+            interval_seconds = 15
+        elif device.device_type in {'tool_tracker', 'asset_tracker'}:
+            interval_seconds = 60
+
+        self.monitoring_tasks[device.device_id] = {
+            'device_id': device.device_id,
+            'device_type': device.device_type,
+            'interval_seconds': interval_seconds,
+            'last_checked': datetime.now().isoformat(),
+            'alerts': self._check_device_alerts(device, device.data),
+            'endpoints': self._generate_device_endpoints(device.device_id)
+        }
+
+        device.data.setdefault('monitoring_enabled', True)
+        device.data.setdefault('monitoring_interval', interval_seconds)
+        return self.monitoring_tasks[device.device_id]
     
     def _generate_device_endpoints(self, device_id: str) -> Dict[str, str]:
         """Generate API endpoints for device"""

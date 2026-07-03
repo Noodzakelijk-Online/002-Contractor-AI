@@ -24,7 +24,10 @@ from PIL import Image
 import pytesseract
 
 # AI processing
-from openai import AsyncOpenAI
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    AsyncOpenAI = None
 
 # Computer vision
 from vision.computer_vision import ContractorVisionAI, ImageContext, AnalysisType
@@ -87,7 +90,7 @@ class MultiModalProcessor:
     """
     
     def __init__(self):
-        self.client = AsyncOpenAI()
+        self.client = self._create_openai_client()
         self.vision_ai = ContractorVisionAI()
         self.speech_recognizer = sr.Recognizer()
         
@@ -96,6 +99,15 @@ class MultiModalProcessor:
         
         # Initialize processors
         self._setup_processors()
+
+    def _create_openai_client(self):
+        if AsyncOpenAI is None or not os.environ.get("OPENAI_API_KEY"):
+            return None
+        try:
+            return AsyncOpenAI()
+        except Exception as e:
+            logger.warning("OpenAI client unavailable, using fallback multimodal logic: %s", e)
+            return None
         
     def _setup_processors(self):
         """Setup various processors and configurations"""
@@ -936,7 +948,7 @@ class MultiModalProcessor:
             Format as JSON.
             """
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300
@@ -1034,8 +1046,8 @@ class MultiModalProcessor:
                             'subject': reader.metadata.get('/Subject', ''),
                             'creator': reader.metadata.get('/Creator', '')
                         })
-                except:
-                    pass
+                except Exception as metadata_error:
+                    logger.debug(f"Could not read PDF metadata: {metadata_error}")
             
             return metadata
             
@@ -1087,27 +1099,114 @@ class MultiModalProcessor:
             logger.error(f"Error analyzing document context: {e}")
             return {'summary': 'Document analysis failed', 'confidence': 0.5}
     
-    # Video Processing Methods (Stubs - would require more advanced video processing libraries)
     def _extract_video_frames(self, video_path: str) -> List[str]:
         """Extract key frames from video"""
-        # Placeholder implementation
-        # In a real implementation, you would use OpenCV or similar to extract frames
-        return []
+        try:
+            if not video_path or not Path(video_path).exists():
+                return []
+
+            try:
+                import cv2
+            except ImportError:
+                logger.info("OpenCV is not available; skipping frame extraction for %s", video_path)
+                return []
+
+            capture = cv2.VideoCapture(video_path)
+            if not capture.isOpened():
+                return []
+
+            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if frame_count <= 0:
+                capture.release()
+                return []
+
+            sample_points = sorted(set([
+                0,
+                frame_count // 4,
+                frame_count // 2,
+                (frame_count * 3) // 4,
+                max(frame_count - 1, 0)
+            ]))
+            frame_paths = []
+
+            for frame_index in sample_points:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                success, frame = capture.read()
+                if not success:
+                    continue
+
+                temp_frame = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                temp_frame.close()
+                cv2.imwrite(temp_frame.name, frame)
+                frame_paths.append(temp_frame.name)
+
+            capture.release()
+            return frame_paths
+
+        except Exception as e:
+            logger.error(f"Error extracting video frames: {e}")
+            return []
     
     def _extract_audio_from_video(self, video_path: str) -> str:
         """Extract audio track from video"""
-        # Placeholder implementation
-        # In a real implementation, you would use ffmpeg or similar
-        return ""
+        try:
+            if not video_path or not Path(video_path).exists():
+                return ""
+
+            audio = AudioSegment.from_file(video_path)
+            if len(audio) == 0:
+                return ""
+
+            temp_audio = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            temp_audio.close()
+            audio.export(temp_audio.name, format='wav')
+            return temp_audio.name
+
+        except Exception as e:
+            logger.info("Audio extraction from video unavailable for %s: %s", video_path, e)
+            return ""
     
     async def _analyze_video_context(self, input_data: MultiModalInput, frame_results: List, audio_result) -> Dict[str, Any]:
         """Analyze video in business context"""
-        # Placeholder implementation
+        video_path = str(input_data.content or '')
+        metadata = dict(input_data.metadata or {})
+        file_info = {}
+
+        if video_path and Path(video_path).exists():
+            path = Path(video_path)
+            stats = path.stat()
+            file_info = {
+                'filename': path.name,
+                'file_size': stats.st_size,
+                'modified': datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                'extension': path.suffix.lower()
+            }
+
+        issues = []
+        recommendations = []
+        if not frame_results:
+            issues.append('No key frames extracted')
+            recommendations.append('Attach progress photos if video tooling is unavailable')
+        else:
+            recommendations.append('Review extracted key frames for quality, safety, and progress checkpoints')
+
+        if audio_result:
+            recommendations.append('Review extracted audio for client or worker instructions')
+
+        if metadata.get('purpose') == 'completion':
+            recommendations.append('Prepare completion summary and client handover note')
+        elif metadata.get('purpose') == 'issue':
+            issues.append('Issue-focused video requires manual review')
+            recommendations.append('Create corrective action item before closing the job')
+
         return {
-            'summary': 'Video analysis completed',
-            'confidence': 0.7,
-            'duration': 0,
-            'frame_count': len(frame_results)
+            'summary': 'Video analysis completed with extracted media context',
+            'confidence': 0.78 if frame_results else 0.55,
+            'frame_count': len(frame_results),
+            'audio_extracted': bool(audio_result),
+            'file_info': file_info,
+            'issues': issues,
+            'recommendations': recommendations
         }
     
     # Location Processing Methods
@@ -1266,7 +1365,7 @@ class MultiModalProcessor:
                 'success_rate': status_counts.get('completed', 0) / total_processed
             }
             
-        except Exception as e:
-            logger.error(f"Error getting processing stats: {e}")
-            return {'error': str(e)}
+        except Exception:
+            logger.exception("Error getting processing stats")
+            return {'error': 'processing_stats_failed'}
 

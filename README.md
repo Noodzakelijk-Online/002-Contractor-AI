@@ -1,190 +1,178 @@
-# Advanced Contractor AI Automation System
+# Contractor.AI
 
-A revolutionary AI-powered automation system for contractor and maintenance services businesses. This system provides complete business automation with multi-modal communication, intelligent scheduling, and autonomous decision-making.
+Contractor.AI is a local-first operating system prototype for contractor, maintenance, garden, renovation, handyman, and small construction teams. The current app is centered on a persisted operating ledger that tracks jobs from intake through planning, field execution, approvals, finance, and aftercare.
 
-## 🚀 Features
+The product goal is practical coordination: reduce Robert's manual follow-up, keep client and worker commitments visible, and make consequential actions approval-gated before anything external is sent or committed.
 
-### Core Automation
-- **Intelligent Job Scheduling** - AI automatically assigns workers based on skills, availability, and location
-- **Multi-Modal Communication** - WhatsApp, Email, SMS integration for seamless client and worker coordination
-- **Weather Integration** - Buienradar API for optimal outdoor work scheduling
-- **Real-Time Progress Tracking** - Computer vision analysis of job site photos
-- **Predictive Analytics** - Business intelligence and demand forecasting
+## What Works Now
 
-### AI Capabilities
-- **Conversational AI** - Natural language processing for client intake and worker coordination
-- **Computer Vision** - Automatic progress monitoring and quality control from photos
-- **Predictive Intelligence** - Failure prediction, demand forecasting, client behavior analysis
-- **Autonomous Learning** - Self-improving algorithms that get better over time
+- Node/Express dashboard and API in `server.js`.
+- Static operational dashboard in `public/index.html`.
+- SQLite-backed operating ledger in `operating-ledger.js`.
+- Durable local records for clients, jobs, tasks, quotes, workers, tools, materials, assignments, documents, progress, communication, time logs, expenses, invoices, approvals, audit events, route plans, weather assessments, safety/quality records, aftercare, recurring plans, and finance handoff packages.
+- Local upload handling for job evidence and documents under `UPLOAD_DIR`.
+- Approval gates for quotes, invoices, external communication, high-risk schedule/status changes, finance actions, worker/tool conflicts, safety/quality signoff, and other consequential records.
+- Production/remote dashboard access guard with bearer token, `X-Contractor-AI-Token`, `X-API-Key`, or browser Basic Auth support.
+- Destructive dashboard actions retain records and route archive/delete intent through approval records instead of silently removing operational history.
+- Autonomous cycle endpoints that create internal drafts, tasks, checks, reminders, invoice drafts, and approval-gated communications without sending external messages.
+- Node test coverage for the operating ledger, dispatch, field assurance, finance, inventory, workforce, client follow-up, learning profiles, schedule approvals, and autonomous open loops.
 
-### Business Management
-- **Complete Job Lifecycle** - From client request to completion and billing
-- **Resource Optimization** - Tool availability tracking and conflict resolution
-- **Client Portal** - Professional interface for clients to track projects
-- **Worker Coordination** - Real-time team management and task assignment
+The Python backends under `advanced_ai_backend/`, `contractor_ai_backend/`, and `god_mode_contractor_ai/` remain prototype layers. Treat their mock fallbacks as development scaffolding, not production AI services.
 
-## 🎯 Quick Start
+## Local Setup
 
-### Option 1: Web Application (Recommended)
-```bash
-# Install dependencies
+Requirements:
+
+- Node.js 22.x
+- npm
+- Windows 11 PowerShell, or another shell with equivalent commands
+
+Install dependencies:
+
+```powershell
 npm install
+```
 
-# Start the application
+Create local configuration:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Start the local app:
+
+```powershell
 npm start
-
-# Access at http://localhost:3000
 ```
 
-### Option 2: Advanced Python Backend
-```bash
-# Navigate to backend
-cd advanced_ai_backend
+Open:
 
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Start the AI engine
-python main_advanced.py
-
-# Access at http://localhost:5001
+```text
+http://localhost:3000
 ```
 
-## 📊 Dashboard Features
+The default local runtime paths are:
 
-### Overview Mode
-- **Real-time metrics** - Critical jobs, AI handling status, revenue tracking
-- **Weather integration** - Location-specific forecasts for all job sites
-- **Team status** - Live worker availability and current assignments
-- **AI insights** - Smart recommendations for schedule optimization
+- `./data/server-state.json`
+- `./data/contractor-ledger.sqlite`
+- `./data/uploads`
 
-### Job Focus Mode
-- **Detailed job view** - Complete information for single job focus
-- **AI chat interface** - Direct conversation with AI for job-specific decisions
-- **Multi-modal input** - Upload photos, voice messages, documents
-- **Client communication** - Integrated WhatsApp/email conversation threads
+These paths are ignored by git. Do not commit local databases, uploaded client files, photos, invoices, or runtime state.
 
-## 🔧 Configuration
+## Configuration
 
-### Contact Information
-Update your contact details in `server.js`:
-```javascript
-const CONTRACTOR_CONFIG = {
-  email: 'your-email@gmail.com',
-  phone: '+31-your-phone-number',
-  company: 'Your Company Name',
-  services: ['Your', 'Services', 'List']
-};
+Use `.env` for local settings. The supported root settings are documented in `.env.example`:
+
+- `PORT`
+- `NODE_ENV`
+- `STATE_FILE`
+- `LEDGER_DB_FILE`
+- `UPLOAD_DIR`
+- `MAX_UPLOAD_BYTES`
+- `CORS_ORIGINS`
+- `CONTRACTOR_AI_REQUIRE_AUTH`
+- `CONTRACTOR_AI_AUTH_TOKEN`
+
+Do not put secrets in committed files. The current app is designed for local-first use. In production, dashboard/API authentication is required unless `CONTRACTOR_AI_REQUIRE_AUTH=false` is explicitly set for a trusted private host. Use transport security before exposing the app over a tunnel or public network.
+
+## Main API Areas
+
+Core:
+
+- `GET /api/health`
+- `GET /api/dashboard`
+- `GET /api/ledger/debug`
+- `GET /api/audit`
+
+Ledger:
+
+- `POST /api/ledger/intake`
+- `GET /api/ledger/jobs`
+- `GET /api/ledger/jobs/:id`
+- `PUT /api/ledger/jobs/:id`
+- `POST /api/ledger/jobs/:id/tasks`
+- `POST /api/ledger/jobs/:id/quote`
+- `POST /api/ledger/jobs/:id/assignments`
+- `POST /api/ledger/jobs/:id/tools`
+- `POST /api/ledger/jobs/:id/materials`
+- `POST /api/ledger/jobs/:id/documents`
+- `POST /api/ledger/jobs/:id/progress`
+- `POST /api/ledger/jobs/:id/communication`
+- `POST /api/ledger/jobs/:id/time-logs`
+- `POST /api/ledger/jobs/:id/expenses`
+- `POST /api/ledger/jobs/:id/invoices`
+- `POST /api/ledger/jobs/:id/closeout`
+
+Operations:
+
+- `GET /api/ledger/dispatch`
+- `GET /api/ledger/field-assurance`
+- `GET /api/ledger/finance`
+- `GET /api/ledger/inventory`
+- `GET /api/ledger/workforce`
+- `GET /api/ledger/client-success`
+- `POST /api/weather/assess`
+- `POST /api/schedule/recommend`
+- `POST /api/schedule/prepare-dispatch`
+- `POST /api/ledger/autonomous-cycle`
+
+Approvals:
+
+- `GET /api/approvals`
+- `POST /api/approvals/:id/resolve`
+- `POST /api/ledger/approvals/:id/resolve`
+
+Legacy-compatible endpoints such as `/api/jobs`, `/api/workers`, and `/api/tools` still exist for the older dashboard flows, but the operating-ledger endpoints are the authoritative local workflow.
+
+## Safety Model
+
+Contractor.AI may create internal drafts and records automatically, including tasks, tool lists, route plans, weather checks, worker instructions, aftercare drafts, recurring-service preparations, and invoice drafts.
+
+The app must not silently:
+
+- send external client or worker messages;
+- send quotes or invoices;
+- commit Robert to dates, scope, supplier spend, or payment actions;
+- delete records or uploaded files without an approval-backed archive flow;
+- mark high-risk work complete;
+- bypass approval records for consequential actions.
+
+Approval records and audit events are the source of truth for consequential actions.
+
+## Tests
+
+Run the Node test suite:
+
+```powershell
+npm test
 ```
 
-### API Integrations
-- **Buienradar Weather** - Dutch weather data for job scheduling
-- **Email/SMS** - Notification system integration
-- **WhatsApp Business** - Client and worker communication
-- **Computer Vision** - Photo analysis for progress tracking
+Run a production build:
 
-## 🏗️ Architecture
-
-### Frontend
-- **Modern Web Interface** - Responsive design for desktop and mobile
-- **Real-time Updates** - Live data synchronization
-- **Multi-parameter Dashboard** - Rich data visualization
-- **Autism-friendly Design** - Reduced cognitive load, consistent navigation
-
-### Backend
-- **Node.js/Express** - Web application server
-- **Python AI Engine** - Advanced decision-making and automation
-- **Multi-modal Processing** - Text, image, voice, document analysis
-- **Predictive Analytics** - Business intelligence and forecasting
-
-### Integrations
-- **Communication Hub** - WhatsApp, Email, SMS coordination
-- **Weather Services** - Buienradar API for Dutch weather data
-- **Computer Vision** - Image analysis for job progress tracking
-- **IoT Support** - Sensor integration for advanced monitoring
-
-## 📱 Mobile Support
-
-The system is fully responsive and works on:
-- **Desktop browsers** - Full dashboard experience
-- **Mobile phones** - Touch-optimized interface
-- **Tablets** - Hybrid desktop/mobile experience
-- **Progressive Web App** - Add to home screen for app-like experience
-
-## 🔐 Security
-
-- **HTTPS encryption** - All communications secured
-- **Authentication system** - Secure access control
-- **Data privacy** - GDPR compliant data handling
-- **API security** - Rate limiting and input validation
-
-## 🚀 Deployment Options
-
-### Vercel (Serverless)
-```bash
-npm install -g vercel
-vercel deploy --prod
-```
-
-### Traditional Hosting
-```bash
-# Build for production
+```powershell
 npm run build
-
-# Deploy to your server
-# Copy files to web server directory
 ```
 
-### Docker (Optional)
-```bash
-# Build container
-docker build -t contractor-ai .
+If a sandboxed environment blocks Vite from reading `vite.config.js`, rerun the same build in a normal local shell.
 
-# Run container
-docker run -p 3000:3000 contractor-ai
+## Project Structure
+
+```text
+server.js                  Express API, dashboard serving, legacy compatibility
+operating-ledger.js         SQLite operating ledger and autonomous workflow logic
+autonomous-engine.js        In-memory planning engine used by legacy/demo flows
+public/index.html           Main dashboard UI
+tests/                      Node test suite for ledger and operations
+advanced_ai_backend/        Prototype Python AI backend
+contractor_ai_backend/      Prototype Python contractor backend
+god_mode_contractor_ai/     Prototype Python automation backend
 ```
 
-## 📈 Business Impact
+## Current Gaps
 
-This system transforms contractor businesses by:
-- **90% automation** - Reduces manual coordination tasks
-- **Improved efficiency** - Optimal scheduling and resource utilization
-- **Better client experience** - Professional communication and transparency
-- **Predictive maintenance** - Prevent issues before they occur
-- **Data-driven growth** - Business intelligence for strategic decisions
+- External communication providers are not wired for real sending.
+- Python AI services still contain mock fallback behavior.
+- Database migrations are embedded in the ledger initialization rather than managed as separate migration files.
+- Postgres, HAI, and FAB integrations are intentionally not implemented yet.
 
-## 🛠️ Development
-
-### Project Structure
-```
-├── server.js              # Main Express server
-├── package.json           # Node.js dependencies
-├── vercel.json           # Vercel deployment config
-├── public/               # Frontend assets
-│   └── index.html        # Main dashboard
-├── advanced_ai_backend/  # Python AI engine
-├── contractor_ai_backend/ # Additional backend modules
-└── README.md            # This file
-```
-
-### API Endpoints
-- `GET /api/dashboard` - Dashboard data
-- `GET /api/jobs` - Job management
-- `POST /api/ai/chat` - AI conversation
-- `POST /api/simulate/client-request` - Client simulation
-- `POST /api/test/notifications` - Email/SMS testing
-
-## 📞 Support
-
-For questions or support:
-- **Email**: noodzakelijkonline@gmail.com
-- **Phone**: +31 06-83515175
-- **GitHub**: Create an issue in this repository
-
-## 📄 License
-
-MIT License - See LICENSE file for details
-
----
-
-**Built with ❤️ for modern contractor businesses**
+The next useful work is to keep replacing legacy mock surfaces with persisted ledger data, add transport/security hardening for any remote deployment, and continue tightening autonomous workflows around approval-gated drafts.

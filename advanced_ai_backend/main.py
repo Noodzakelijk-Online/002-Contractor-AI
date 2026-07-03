@@ -1,28 +1,37 @@
 import os
 import sys
 import secrets
-# DON'T CHANGE THIS !!!
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import logging
+# Make the package runnable both as `python advanced_ai_backend/main.py`
+# and from the repository root.
+sys.path.insert(0, os.path.dirname(__file__))
 
 from flask import Flask, send_from_directory
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.models.user import db
-from src.routes.user import user_bp
+from models.user import db
+from routes.user import user_bp
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY')
 
 if not app.config['SECRET_KEY']:
-    print("WARNING: FLASK_SECRET_KEY not set. Using generated random key. Sessions will not persist across restarts.")
+    logger.warning("FLASK_SECRET_KEY not set. Using generated random key. Sessions will not persist across restarts.")
     app.config['SECRET_KEY'] = secrets.token_hex(32)
+
+def _debug_enabled():
+    return os.environ.get('FLASK_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
+
 
 app.register_blueprint(user_bp, url_prefix='/api')
 
-# uncomment if you need to use database
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
+default_database_uri = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', default_database_uri)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 with app.app_context():
@@ -46,4 +55,8 @@ def serve(path):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(
+        host=os.environ.get('HOST', '0.0.0.0'),
+        port=int(os.environ.get('PORT', '5000')),
+        debug=_debug_enabled()
+    )

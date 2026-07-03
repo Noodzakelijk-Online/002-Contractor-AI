@@ -9,6 +9,15 @@ import json
 db = SQLAlchemy()
 
 
+def _loads_json(value, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
 class Job(db.Model):
     """Enhanced Job model with all features"""
     __tablename__ = 'jobs'
@@ -76,32 +85,45 @@ class Job(db.Model):
     predictive_insights = db.relationship('PredictiveInsight', backref='job', lazy=True, cascade='all, delete-orphan')
     
     def to_dict(self):
+        progress = self.progress_percentage or 0
         return {
             'id': self.id,
             'title': self.title,
+            'client': self.client_name,
             'client_name': self.client_name,
             'client_phone': self.client_phone,
             'client_email': self.client_email,
+            'phone': self.client_phone,
+            'email': self.client_email,
+            'address': self.location,
             'location': self.location,
             'job_type': self.job_type,
+            'jobType': self.job_type,
             'job_subcategory': self.job_subcategory,
             'complexity_score': self.complexity_score,
             'priority': self.priority,
             'status': self.status,
             'scheduled_date': self.scheduled_date.isoformat() if self.scheduled_date else None,
+            'startDate': self.scheduled_date.date().isoformat() if self.scheduled_date else None,
             'estimated_duration': self.estimated_duration,
             'assigned_worker_id': self.assigned_worker_id,
-            'required_tools': json.loads(self.required_tools) if self.required_tools else [],
-            'materials_needed': json.loads(self.materials_needed) if self.materials_needed else [],
-            'required_skills': json.loads(self.required_skills) if self.required_skills else [],
+            'required_tools': _loads_json(self.required_tools, []),
+            'tools': _loads_json(self.required_tools, []),
+            'materials_needed': _loads_json(self.materials_needed, []),
+            'required_skills': _loads_json(self.required_skills, []),
             'special_requirements': self.special_requirements,
+            'safety_considerations': _loads_json(self.safety_considerations, []),
             'estimated_cost': self.estimated_cost,
+            'estimatedCost': self.estimated_cost,
             'actual_cost': self.actual_cost,
-            'cost_breakdown': json.loads(self.cost_breakdown) if self.cost_breakdown else {},
+            'actualCost': self.actual_cost,
+            'cost_breakdown': _loads_json(self.cost_breakdown, {}),
             'ai_confidence': self.ai_confidence,
             'ai_reasoning': self.ai_reasoning,
             'weather_dependent': self.weather_dependent,
-            'progress_percentage': self.progress_percentage,
+            'progress_percentage': progress,
+            'progress': progress,
+            'quality_checkpoints': _loads_json(self.quality_checkpoints, []),
             'quality_score': self.quality_score,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -144,20 +166,35 @@ class Worker(db.Model):
     jobs = db.relationship('Job', backref='assigned_worker', lazy=True)
     
     def to_dict(self):
+        skills = _loads_json(self.skills, [])
+        specializations = _loads_json(self.specializations, [])
+        current_job = Job.query.get(self.current_job_id) if self.current_job_id else None
         return {
             'id': self.id,
             'name': self.name,
             'phone': self.phone,
             'email': self.email,
-            'skills': json.loads(self.skills) if self.skills else [],
-            'certifications': json.loads(self.certifications) if self.certifications else [],
+            'skills': skills,
+            'certifications': _loads_json(self.certifications, []),
+            'specializations': specializations,
+            'specialties': specializations or skills,
             'status': self.status,
+            'current_job_id': self.current_job_id,
+            'currentJob': current_job.title if current_job else None,
+            'current_location': current_job.location if current_job else None,
             'success_rate': self.success_rate,
+            'successRate': self.success_rate,
             'on_time_rate': self.on_time_rate,
             'quality_rating': self.quality_rating,
+            'average_rating': self.quality_rating,
+            'rating': self.quality_rating,
             'total_jobs_completed': self.total_jobs_completed,
+            'jobs_completed': self.total_jobs_completed,
+            'completedJobs': self.total_jobs_completed,
             'years_experience': self.years_experience,
-            'job_history': json.loads(self.job_history) if self.job_history else []
+            'job_history': _loads_json(self.job_history, []),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
 
@@ -182,13 +219,23 @@ class Tool(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
+        assigned_job = Job.query.get(self.assigned_to_job_id) if self.assigned_to_job_id else None
+        current_location = assigned_job.location if assigned_job else 'Warehouse'
         return {
             'id': self.id,
             'name': self.name,
             'category': self.category,
             'status': self.status,
             'assigned_to_job_id': self.assigned_to_job_id,
-            'condition': self.condition
+            'assigned_to_worker_id': self.assigned_to_worker_id,
+            'current_location': current_location,
+            'currentLocation': current_location,
+            'last_maintenance': self.last_maintenance.isoformat() if self.last_maintenance else None,
+            'next_maintenance_due': self.next_maintenance_due.isoformat() if self.next_maintenance_due else None,
+            'return_date': self.next_maintenance_due.date().isoformat() if self.next_maintenance_due else None,
+            'returnDate': self.next_maintenance_due.date().isoformat() if self.next_maintenance_due else None,
+            'condition': self.condition,
+            'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
 
@@ -231,6 +278,10 @@ class Communication(db.Model):
             'message_type': self.message_type,
             'has_attachment': self.has_attachment,
             'attachment_type': self.attachment_type,
+            'attachment_url': self.attachment_url,
+            'sent': self.sent,
+            'delivered': self.delivered,
+            'read': self.read,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
@@ -263,7 +314,7 @@ class AIDecision(db.Model):
             'id': self.id,
             'job_id': self.job_id,
             'decision_type': self.decision_type,
-            'decision_data': json.loads(self.decision_data) if self.decision_data else {},
+            'decision_data': _loads_json(self.decision_data, {}),
             'confidence_level': self.confidence_level,
             'reasoning': self.reasoning,
             'executed': self.executed,
@@ -299,12 +350,14 @@ class VisionAnalysis(db.Model):
         return {
             'id': self.id,
             'job_id': self.job_id,
+            'image_url': self.image_url,
             'image_type': self.image_type,
-            'detected_objects': json.loads(self.detected_objects) if self.detected_objects else [],
-            'detected_issues': json.loads(self.detected_issues) if self.detected_issues else [],
+            'detected_objects': _loads_json(self.detected_objects, []),
+            'detected_issues': _loads_json(self.detected_issues, []),
             'quality_assessment': self.quality_assessment,
             'progress_estimate': self.progress_estimate,
-            'recommendations': json.loads(self.recommendations) if self.recommendations else [],
+            'recommendations': _loads_json(self.recommendations, []),
+            'confidence': self.confidence,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
@@ -339,11 +392,13 @@ class PredictiveInsight(db.Model):
             'id': self.id,
             'job_id': self.job_id,
             'insight_type': self.insight_type,
-            'insight_data': json.loads(self.insight_data) if self.insight_data else {},
+            'insight_data': _loads_json(self.insight_data, {}),
             'prediction': self.prediction,
             'confidence': self.confidence,
             'impact_level': self.impact_level,
-            'recommended_actions': json.loads(self.recommended_actions) if self.recommended_actions else [],
+            'recommended_actions': _loads_json(self.recommended_actions, []),
+            'actual_outcome': self.actual_outcome,
+            'accuracy_score': self.accuracy_score,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
@@ -366,7 +421,7 @@ class IoTSensorData(db.Model):
     reading_status = db.Column(db.String(20))  # normal, warning, critical
     
     # Context
-    metadata = db.Column(db.Text)  # JSON object
+    metadata_json = db.Column('metadata', db.Text)  # JSON object
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -374,10 +429,12 @@ class IoTSensorData(db.Model):
         return {
             'id': self.id,
             'job_id': self.job_id,
+            'sensor_id': self.sensor_id,
             'sensor_type': self.sensor_type,
             'location': self.location,
             'reading_value': self.reading_value,
             'reading_unit': self.reading_unit,
             'reading_status': self.reading_status,
+            'metadata': _loads_json(self.metadata_json, {}),
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

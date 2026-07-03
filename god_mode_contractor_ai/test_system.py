@@ -14,16 +14,16 @@ def test_imports():
     
     try:
         from models import db, Job, Worker, Tool, Communication, AIDecision
-        print("✅ Models imported successfully")
+        print("[ok] Models imported successfully")
     except Exception as e:
-        print(f"❌ Models import failed: {e}")
+        print(f"[fail] Models import failed: {e}")
         return False
     
     try:
         from ai_engine.core import GodModeContractorAI
-        print("✅ AI Engine imported successfully")
+        print("[ok] AI Engine imported successfully")
     except Exception as e:
-        print(f"❌ AI Engine import failed: {e}")
+        print(f"[fail] AI Engine import failed: {e}")
         return False
     
     return True
@@ -35,15 +35,15 @@ def test_ai_engine():
     try:
         from ai_engine.core import GodModeContractorAI
         ai = GodModeContractorAI()
-        print("✅ AI Engine initialized successfully")
+        print("[ok] AI Engine initialized successfully")
         
         # Test basic functionality
         metrics = ai.get_performance_metrics()
-        print(f"✅ AI metrics: {metrics}")
+        print(f"[ok] AI metrics: {metrics}")
         
         return True
     except Exception as e:
-        print(f"❌ AI Engine test failed: {e}")
+        print(f"[fail] AI Engine test failed: {e}")
         return False
 
 def test_database_models():
@@ -60,23 +60,23 @@ def test_database_models():
             job_type="testing",
             complexity_score=5
         )
-        print("✅ Job model created")
+        print("[ok] Job model created")
         
         worker = Worker(
             name="Test Worker",
             skills='["testing"]'
         )
-        print("✅ Worker model created")
+        print("[ok] Worker model created")
         
         tool = Tool(
             name="Test Tool",
             category="testing"
         )
-        print("✅ Tool model created")
+        print("[ok] Tool model created")
         
         return True
     except Exception as e:
-        print(f"❌ Database models test failed: {e}")
+        print(f"[fail] Database models test failed: {e}")
         return False
 
 def main():
@@ -93,10 +93,10 @@ def main():
     
     print("\n" + "=" * 60)
     if all_passed:
-        print("✅ ALL TESTS PASSED!")
+        print("[ok] ALL TESTS PASSED!")
         print("God-Mode system is ready to run.")
     else:
-        print("❌ SOME TESTS FAILED")
+        print("[fail] SOME TESTS FAILED")
         print("Please check the errors above.")
     print("=" * 60)
     

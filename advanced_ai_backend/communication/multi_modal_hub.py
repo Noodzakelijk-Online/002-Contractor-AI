@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from enum import Enum
 import requests
 import re
-from openai import OpenAI
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,9 +67,9 @@ class MultiModalCommunicationHub:
     with AI-powered message processing and automated responses
     """
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.ai_client = OpenAI()
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+        self.ai_client = self._create_openai_client()
         self.message_queue = []
         self.conversation_history = {}
         
@@ -73,6 +77,15 @@ class MultiModalCommunicationHub:
         self._setup_email_client()
         self._setup_sms_client()
         self._setup_whatsapp_client()
+
+    def _create_openai_client(self):
+        if OpenAI is None or not os.environ.get("OPENAI_API_KEY"):
+            return None
+        try:
+            return OpenAI()
+        except Exception as e:
+            logger.warning("OpenAI client unavailable, using fallback communication logic: %s", e)
+            return None
         
     def _setup_email_client(self):
         """Setup email client configuration"""

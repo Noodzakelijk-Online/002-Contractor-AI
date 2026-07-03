@@ -1,56 +1,178 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, g
 from flask_cors import CORS
 import os
 import sys
 import logging
+import secrets
+import importlib
 from datetime import datetime
+from uuid import uuid4
+from werkzeug.exceptions import HTTPException
 
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Import all advanced contractor AI modules
-try:
-    from ai_engine.core import AdvancedContractorAI
-    from communication.multi_modal_hub import MultiModalCommunicationHub
-    from vision.computer_vision import ComputerVisionProcessor
-    from multimodal.processor import MultiModalProcessor
-    from analytics.predictive_engine import PredictiveAnalyticsEngine
-    from ar_iot.ar_integration import ARIoTIntegration
-except ImportError as e:
-    print(f"Warning: Could not import all modules: {e}")
-    # Create mock classes for demonstration
-    class MockAI:
-        def process_conversation(self, message):
-            return f"AI Response to: {message}"
-    
-    AdvancedContractorAI = MockAI
-    MultiModalCommunicationHub = MockAI
-    ComputerVisionProcessor = MockAI
-    MultiModalProcessor = MockAI
-    PredictiveAnalyticsEngine = MockAI
-    ARIoTIntegration = MockAI
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+component_errors = {}
+
+
+def _load_component(name, module_name, class_name):
+    try:
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)
+    except Exception as exc:
+        component_errors[name] = f'{type(exc).__name__}: {exc}'
+        logger.warning("%s component unavailable: %s", name, exc)
+        return None
+
+
+ContractorAIEngine = _load_component('ai_engine', 'ai_engine.core', 'ContractorAIEngine')
+MultiModalCommunicationHub = _load_component(
+    'communication_hub',
+    'communication.multi_modal_hub',
+    'MultiModalCommunicationHub'
+)
+ComputerVisionProcessor = _load_component(
+    'vision_processor',
+    'vision.computer_vision',
+    'ContractorVisionAI'
+)
+MultiModalProcessor = _load_component(
+    'multimodal_processor',
+    'multimodal.processor',
+    'MultiModalProcessor'
+)
+PredictiveAnalyticsEngine = _load_component(
+    'analytics_engine',
+    'analytics.predictive_engine',
+    'PredictiveAnalyticsEngine'
+)
+ARIoTIntegration = _load_component(
+    'ar_iot_system',
+    'ar_iot.ar_integration',
+    'ARIoTIntegration'
+)
+
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY')
+if not app.config['SECRET_KEY']:
+    logger.warning("FLASK_SECRET_KEY not set. Using a generated development key.")
+    app.config['SECRET_KEY'] = secrets.token_hex(32)
+
+
+def _cors_origins():
+    configured = os.environ.get(
+        'CORS_ORIGINS',
+        'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173'
+    )
+    return [origin.strip() for origin in configured.split(',') if origin.strip()]
+
+
+def _debug_enabled():
+    return os.environ.get('FLASK_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
+
+
+CORS(app, resources={r"/api/*": {"origins": _cors_origins()}})
+
+
+@app.before_request
+def attach_request_id():
+    g.request_id = request.headers.get('X-Request-Id') or str(uuid4())
+
+
+@app.after_request
+def add_request_id_header(response):
+    response.headers['X-Request-Id'] = request_id()
+    return response
+
+
+def request_id():
+    return getattr(g, 'request_id', None) or request.headers.get('X-Request-Id') or str(uuid4())
+
+
+def _json_error(message, status=500, code='internal_error', exc=None, details=None):
+    if isinstance(exc, HTTPException):
+        status = exc.code or status
+        code = exc.name.lower().replace(' ', '_')
+        message = exc.description or message
+    elif exc is not None:
+        logger.exception(message)
+
+    payload = {
+        'error': {
+            'code': code,
+            'message': message,
+            'requestId': request_id()
+        }
+    }
+    if details is not None and app.debug:
+        payload['error']['details'] = details
+
+    response = jsonify(payload)
+    response.status_code = status
+    return response
+
+
+def _decision_to_payload(decision):
+    decision_type = getattr(decision, 'decision_type', None)
+    if hasattr(decision_type, 'value'):
+        decision_type = decision_type.value
+
+    return {
+        'decisionType': decision_type,
+        'confidence': getattr(decision, 'confidence', None),
+        'reasoning': getattr(decision, 'reasoning', ''),
+        'recommendedActions': getattr(decision, 'recommended_actions', []),
+        'supportingData': getattr(decision, 'supporting_data', {}),
+        'riskFactors': getattr(decision, 'risk_factors', []),
+        'estimatedImpact': getattr(decision, 'estimated_impact', {}),
+        'requiresApproval': bool(getattr(decision, 'requires_approval', True))
+    }
 
 # Initialize all AI systems
-try:
-    ai_engine = AdvancedContractorAI()
-    communication_hub = MultiModalCommunicationHub()
-    vision_processor = ComputerVisionProcessor()
-    multimodal_processor = MultiModalProcessor()
-    analytics_engine = PredictiveAnalyticsEngine()
-    ar_iot_system = ARIoTIntegration()
-    
-    logger.info("All contractor AI systems initialized successfully")
-except Exception as e:
-    logger.error(f"Error initializing AI systems: {str(e)}")
-    ai_engine = None
+ai_engine = None
+communication_hub = None
+vision_processor = None
+multimodal_processor = None
+analytics_engine = None
+ar_iot_system = None
+
+
+def _initialize_component(name, component_class):
+    if component_class is None:
+        return None
+    try:
+        return component_class()
+    except Exception as exc:
+        component_errors[name] = f'{type(exc).__name__}: {exc}'
+        logger.exception("Could not initialize %s", name)
+        return None
+
+
+ai_engine = _initialize_component('ai_engine', ContractorAIEngine)
+communication_hub = _initialize_component('communication_hub', MultiModalCommunicationHub)
+vision_processor = _initialize_component('vision_processor', ComputerVisionProcessor)
+multimodal_processor = _initialize_component('multimodal_processor', MultiModalProcessor)
+analytics_engine = _initialize_component('analytics_engine', PredictiveAnalyticsEngine)
+ar_iot_system = _initialize_component('ar_iot_system', ARIoTIntegration)
+
+logger.info(
+    "Advanced systems initialized: %s",
+    ', '.join(
+        name for name, component in {
+            'ai_engine': ai_engine,
+            'communication_hub': communication_hub,
+            'vision_processor': vision_processor,
+            'multimodal_processor': multimodal_processor,
+            'analytics_engine': analytics_engine,
+            'ar_iot_system': ar_iot_system
+        }.items() if component
+    ) or 'none'
+)
 
 # Serve static files
 @app.route('/')
@@ -64,16 +186,44 @@ def static_files(filename):
 # Health check endpoint
 @app.route('/api/health')
 def health_check():
+    systems = {
+        'ai_engine': 'online' if ai_engine else 'offline',
+        'communication_hub': 'online' if communication_hub else 'offline',
+        'vision_processor': 'online' if vision_processor else 'offline',
+        'multimodal_processor': 'online' if multimodal_processor else 'offline',
+        'analytics_engine': 'online' if analytics_engine else 'offline',
+        'ar_iot_system': 'online' if ar_iot_system else 'offline'
+    }
+    healthy = all(status == 'online' for status in systems.values())
     return jsonify({
-        'status': 'healthy',
+        'status': 'healthy' if healthy else 'degraded',
+        'requestId': request_id(),
         'timestamp': datetime.now().isoformat(),
-        'systems': {
-            'ai_engine': 'online' if ai_engine else 'offline',
-            'communication_hub': 'online',
-            'vision_processor': 'online',
-            'analytics_engine': 'online',
-            'ar_iot_system': 'online'
-        }
+        'systems': systems,
+        'unavailableReasons': component_errors
+    })
+
+
+@app.route('/api/debug/diagnostics')
+def debug_diagnostics():
+    systems = {
+        'ai_engine': bool(ai_engine),
+        'communication_hub': bool(communication_hub),
+        'vision_processor': bool(vision_processor),
+        'multimodal_processor': bool(multimodal_processor),
+        'analytics_engine': bool(analytics_engine),
+        'ar_iot_system': bool(ar_iot_system)
+    }
+    return jsonify({
+        'status': 'ok' if all(systems.values()) else 'attention',
+        'requestId': request_id(),
+        'generatedAt': datetime.now().isoformat(),
+        'environment': {
+            'debug': app.debug,
+            'corsOrigins': _cors_origins()
+        },
+        'systems': systems,
+        'unavailableReasons': component_errors
     })
 
 # Dashboard data endpoint
@@ -114,9 +264,9 @@ def get_dashboard_data():
             'ai_insights': [
                 {
                     'title': 'Weather Impact Alert',
-                    'description': 'Heavy rain expected tomorrow 14:00-18:00. I\'ve automatically rescheduled 3 outdoor jobs and notified clients.',
+                    'description': 'Heavy rain expected tomorrow 14:00-18:00. Outdoor schedule changes and client messages are drafted for approval.',
                     'confidence': 'HIGH',
-                    'actions_taken': ['Rescheduled outdoor jobs', 'Notified clients', 'Updated worker schedules']
+                    'actions_taken': ['Created reschedule proposals', 'Drafted client messages', 'Flagged worker schedule changes for approval']
                 },
                 {
                     'title': 'Resource Optimization',
@@ -150,14 +300,13 @@ def get_dashboard_data():
         return jsonify(dashboard_data)
         
     except Exception as e:
-        logger.error(f"Error getting dashboard data: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Dashboard data failed', exc=e)
 
 # AI Chat endpoint
 @app.route('/api/chat', methods=['POST'])
 def ai_chat():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         user_message = data.get('message', '')
         
         if not user_message:
@@ -165,8 +314,8 @@ def ai_chat():
         
         # Simulate intelligent AI responses
         ai_responses = {
-            'schedule': 'I can help you optimize the schedule. Based on weather data and worker availability, I recommend moving the outdoor jobs to Friday and focusing on indoor work tomorrow.',
-            'weather': 'Current weather shows rain expected tomorrow afternoon. I\'ve already adjusted schedules and notified affected clients. All outdoor work has been rescheduled.',
+            'schedule': 'I can help optimize the schedule. Based on weather data and worker availability, I recommend drafting a move of outdoor jobs to Friday and keeping indoor work tomorrow. Robert approval is required before committing.',
+            'weather': 'Current weather shows rain expected tomorrow afternoon. I can draft schedule changes and client updates, but I will not move appointments or notify clients without approval.',
             'tools': 'Tool inventory shows the pressure washer is available. Marco Silva can pick it up from the depot at 8:00 AM for the Van Berg garden maintenance.',
             'client': 'Mrs. Johnson is very satisfied with the bathroom progress. I\'ve sent her progress photos and she\'s approved the tile selection. Project on track for completion tomorrow.',
             'worker': 'Anna Kowalski is performing excellently - 98% on-time rate and 4.9/5 client satisfaction. Marco Silva needs a quality check reminder for the garden project.',
@@ -188,22 +337,53 @@ def ai_chat():
             'confidence': 'HIGH',
             'context_used': ['current_jobs', 'weather_data', 'worker_status', 'client_history'],
             'suggested_actions': [
-                'Review updated schedule',
-                'Confirm with affected clients',
+                'Review proposed schedule',
+                'Approve or reject affected client drafts',
                 'Check tool availability'
             ],
             'timestamp': datetime.now().isoformat()
         })
         
     except Exception as e:
-        logger.error(f"Error in AI chat: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('AI chat failed', exc=e)
+
+
+@app.route('/api/ai/analyze-job-request', methods=['POST'])
+def analyze_job_request():
+    try:
+        if ai_engine is None:
+            return _json_error(
+                'AI engine unavailable',
+                status=503,
+                code='ai_engine_unavailable',
+                details=component_errors.get('ai_engine')
+            )
+
+        job_data = request.get_json() or {}
+        decision = ai_engine.analyze_job_request(job_data)
+
+        return jsonify({
+            'success': True,
+            'requestId': request_id(),
+            'jobRequest': job_data,
+            'decision': _decision_to_payload(decision),
+            'safety': {
+                'externalMessagesSent': False,
+                'clientCommitmentsMade': False,
+                'purchasesMade': False,
+                'approvalRequiredForConsequentialActions': True
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+
+    except Exception as e:
+        return _json_error('Job request analysis failed', exc=e)
 
 # Multi-modal input processing
 @app.route('/api/multimodal/process', methods=['POST'])
 def process_multimodal_input():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         input_type = data.get('type', 'text')
         input_data = data.get('data', {})
         
@@ -245,8 +425,7 @@ def process_multimodal_input():
         })
         
     except Exception as e:
-        logger.error(f"Error processing multimodal input: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Multimodal processing failed', exc=e)
 
 # Predictive analytics endpoint
 @app.route('/api/analytics/business-performance')
@@ -284,8 +463,7 @@ def get_business_performance():
         return jsonify(performance_data)
         
     except Exception as e:
-        logger.error(f"Error getting business performance: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Business performance failed', exc=e)
 
 @app.route('/api/analytics/demand-forecast')
 def get_demand_forecast():
@@ -317,14 +495,13 @@ def get_demand_forecast():
         return jsonify(forecast_data)
         
     except Exception as e:
-        logger.error(f"Error getting demand forecast: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Demand forecast failed', exc=e)
 
 # AR/IoT integration endpoints
 @app.route('/api/ar/create-session', methods=['POST'])
 def create_ar_session():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         job_id = data.get('job_id', 'bathroom-renovation')
         location = data.get('location', {})
         
@@ -348,13 +525,12 @@ def create_ar_session():
         return jsonify(session_data)
         
     except Exception as e:
-        logger.error(f"Error creating AR session: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('AR session creation failed', exc=e)
 
 @app.route('/api/iot/register-device', methods=['POST'])
 def register_iot_device():
     try:
-        device_config = request.get_json()
+        device_config = request.get_json() or {}
         device_id = device_config.get('device_id', f'device_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
         
         registration_result = {
@@ -379,8 +555,7 @@ def register_iot_device():
         return jsonify(registration_result)
         
     except Exception as e:
-        logger.error(f"Error registering IoT device: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('IoT device registration failed', exc=e)
 
 @app.route('/api/iot/dashboard')
 def get_iot_dashboard():
@@ -435,45 +610,52 @@ def get_iot_dashboard():
         return jsonify(dashboard_data)
         
     except Exception as e:
-        logger.error(f"Error getting IoT dashboard: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('IoT dashboard failed', exc=e)
 
 # Communication hub endpoints
 @app.route('/api/communication/send-message', methods=['POST'])
 def send_message():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         channel = data.get('channel', 'whatsapp')
         recipient = data.get('recipient', 'noodzakelijkonline@gmail.com')
         message = data.get('message', 'Test message from Contractor AI')
+        approval_id = f"approval_msg_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         result = {
             'success': True,
+            'approval_required': True,
+            'approval_id': approval_id,
             'channel': channel,
             'recipient': recipient,
-            'message_id': f'msg_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-            'status': 'sent',
-            'delivery_time': '2.3s',
+            'message_id': f'draft_msg_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+            'message_preview': message,
+            'status': 'pending_approval',
+            'delivery_time': None,
+            'not_sent': True,
+            'safeguard': 'External messages are saved as drafts until Robert approves the exact recipient and body.',
             'timestamp': datetime.now().isoformat()
         }
         
         return jsonify(result)
         
     except Exception as e:
-        logger.error(f"Error sending message: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Message sending failed', exc=e)
 
 @app.route('/api/communication/process-incoming', methods=['POST'])
 def process_incoming_message():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         
         result = {
             'success': True,
             'message_processed': True,
             'intent_detected': 'job_inquiry',
-            'ai_response_sent': True,
-            'follow_up_scheduled': True,
+            'ai_response_sent': False,
+            'draft_response_created': True,
+            'follow_up_scheduled': False,
+            'approval_required': True,
+            'safeguard': 'Incoming messages can create internal drafts, but no external response or commitment is sent automatically.',
             'confidence': 'HIGH',
             'processing_time': '0.8s',
             'timestamp': datetime.now().isoformat()
@@ -482,14 +664,13 @@ def process_incoming_message():
         return jsonify(result)
         
     except Exception as e:
-        logger.error(f"Error processing incoming message: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Incoming message processing failed', exc=e)
 
 # Computer vision endpoints
 @app.route('/api/vision/analyze-image', methods=['POST'])
 def analyze_image():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         image_data = data.get('image_data')
         analysis_type = data.get('analysis_type', 'progress_tracking')
         
@@ -526,8 +707,7 @@ def analyze_image():
         })
         
     except Exception as e:
-        logger.error(f"Error analyzing image: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Image analysis failed', exc=e)
 
 # Test endpoints for demonstration
 @app.route('/api/test/email-sms')
@@ -560,8 +740,7 @@ def test_email_sms():
         return jsonify(result)
         
     except Exception as e:
-        logger.error(f"Error in test email/SMS: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Email and SMS test failed', exc=e)
 
 @app.route('/api/test/simulate-client-request')
 def simulate_client_request():
@@ -627,86 +806,94 @@ def simulate_client_request():
         })
         
     except Exception as e:
-        logger.error(f"Error simulating client request: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('Client request simulation failed', exc=e)
 
 # Advanced AI plan execution endpoint
 @app.route('/api/ai/execute-plan', methods=['POST'])
 def execute_ai_plan():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         job_id = data.get('job_id', 'bathroom-renovation')
         
-        # Simulate AI plan execution
+        # Build an approval-gated plan. Consequential external actions are never executed here.
         execution_plan = {
             'job_id': job_id,
             'plan_steps': [
                 {
                     'step': 1,
-                    'action': 'Notify worker (Anna Kowalski)',
+                    'action': 'Draft worker instruction (Anna Kowalski)',
                     'message': 'Priority update: Complete grouting by 15:00 today due to weather forecast',
-                    'status': 'completed',
-                    'duration': '0.2s'
+                    'status': 'pending_approval',
+                    'duration': None,
+                    'approval_required': True
                 },
                 {
                     'step': 2,
-                    'action': 'Update client (Mrs. Johnson)',
+                    'action': 'Draft client update (Mrs. Johnson)',
                     'message': 'Your bathroom renovation is 85% complete. We\'re on track for completion tomorrow at 16:00.',
-                    'status': 'completed',
-                    'duration': '0.5s'
+                    'status': 'pending_approval',
+                    'duration': None,
+                    'approval_required': True
                 },
                 {
                     'step': 3,
-                    'action': 'Reschedule outdoor work',
+                    'action': 'Propose outdoor work reschedule',
                     'message': 'Moved garden maintenance to Friday due to rain forecast',
-                    'status': 'completed',
-                    'duration': '0.3s'
+                    'status': 'pending_approval',
+                    'duration': None,
+                    'approval_required': True
                 },
                 {
                     'step': 4,
-                    'action': 'Order additional materials',
+                    'action': 'Draft additional material request',
                     'message': 'Ordered 2kg extra grout for quality finish - delivery tomorrow 9:00 AM',
-                    'status': 'completed',
-                    'duration': '1.2s'
+                    'status': 'pending_approval',
+                    'duration': None,
+                    'approval_required': True
                 },
                 {
                     'step': 5,
                     'action': 'Update project timeline',
                     'message': 'Timeline optimized: completion moved to tomorrow 16:00 (2 hours earlier)',
-                    'status': 'completed',
-                    'duration': '0.1s'
+                    'status': 'drafted',
+                    'duration': '0.1s',
+                    'approval_required': False
                 }
             ],
             'execution_summary': {
                 'total_steps': 5,
-                'completed_steps': 5,
+                'completed_steps': 1,
+                'pending_approval_steps': 4,
                 'failed_steps': 0,
-                'total_time': '2.3s',
-                'success_rate': '100%'
+                'total_time': '0.1s',
+                'success_rate': '20%',
+                'safeguard': 'Only internal draft state was changed. No worker/client notification, schedule commitment, or material order was executed.'
             },
             'impact_analysis': {
-                'time_saved': '2 hours',
-                'cost_optimization': '+€45 (avoided weather delays)',
-                'client_satisfaction': '+15% (proactive communication)',
-                'worker_efficiency': '+8% (optimized schedule)'
+                'potential_time_saved': '2 hours after approval',
+                'cost_optimization': '+45 EUR potential avoided weather delays',
+                'client_satisfaction': 'Potential uplift after approved proactive communication',
+                'worker_efficiency': 'Potential uplift after approved schedule changes'
             },
+            'approval_required': True,
+            'approval_policy': 'External communication, schedule commitments, purchases, and worker instructions require explicit approval.',
             'timestamp': datetime.now().isoformat()
         }
         
         return jsonify(execution_plan)
         
     except Exception as e:
-        logger.error(f"Error executing AI plan: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return _json_error('AI plan execution failed', exc=e)
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
+    return _json_error('Endpoint not found', status=404, code='not_found')
 
 @app.errorhandler(500)
 def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
+    logger.exception("Unhandled advanced backend error")
+    return _json_error('Internal server error', status=500, code='internal_error')
 
 if __name__ == '__main__':
     logger.info("Starting Advanced Contractor AI System...")
@@ -718,5 +905,9 @@ if __name__ == '__main__':
     logger.info("- Advanced AI conversation and planning")
     logger.info(f"- Contact integration: noodzakelijkonline@gmail.com, +31 06-83515175")
     
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(
+        host=os.environ.get('HOST', '0.0.0.0'),
+        port=int(os.environ.get('PORT', '5001')),
+        debug=_debug_enabled()
+    )
 

@@ -8,10 +8,12 @@ def initialize_demo_data(app=None):
     if app is None:
         from main import app
     
-    with app.app_context():
-        # Clear existing data
-        db.drop_all()
-        db.create_all()
+    app_context = app.app_context()
+    app_context.push()
+
+    # Clear existing data
+    db.drop_all()
+    db.create_all()
     
     # Create workers
     workers = [
@@ -282,9 +284,9 @@ def initialize_demo_data(app=None):
         db.session.add(decision)
     
     db.session.commit()
+    app_context.pop()
     print("Demo data initialized successfully!")
 
 if __name__ == "__main__":
-    from src.models.job import db
     initialize_demo_data()
 
