@@ -45,6 +45,20 @@ test('dashboard publishes persisted ledger records as the primary command-center
   assert.ok(Array.isArray(dashboard.body.ledgerJobs));
   assert.ok(Array.isArray(dashboard.body.ledgerWorkers));
   assert.ok(Array.isArray(dashboard.body.ledgerTools));
+  assert.deepEqual(
+    dashboard.body.jobs.map(job => job.id).sort(),
+    dashboard.body.ledgerJobs.map(job => job.id).sort()
+  );
+  assert.deepEqual(
+    dashboard.body.workers.map(worker => worker.id).sort(),
+    dashboard.body.ledgerWorkers.map(worker => worker.id).sort()
+  );
+  assert.deepEqual(
+    dashboard.body.tools.map(tool => tool.id).sort(),
+    dashboard.body.ledgerTools.map(tool => tool.id).sort()
+  );
+  assert.equal(dashboard.body.metrics.ledgerOnly, true);
+  assert.equal(dashboard.body.metrics.onTimeRate, null);
   const persistedJob = dashboard.body.ledgerJobs.find(job => job.id === intake.body.job.id);
   assert.ok(persistedJob);
   assert.equal(persistedJob.source, 'ledger');

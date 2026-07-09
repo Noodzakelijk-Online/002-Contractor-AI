@@ -48,7 +48,7 @@ test('notification test endpoint is a dry-run draft and never reports live deliv
   }
 });
 
-test('simulated client request creates a draft plan by default instead of applying commitments', async t => {
+test('sample client request endpoint is retired and cannot create non-ledger jobs', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -56,28 +56,23 @@ test('simulated client request creates a draft plan by default instead of applyi
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
+  const before = await request(baseUrl, '/api/dashboard');
+  assert.equal(before.response.status, 200);
+
   const result = await request(baseUrl, '/api/simulate/client-request', {
     method: 'POST',
     body: JSON.stringify({ scenario: 'Garden maintenance' })
   });
 
-  assert.equal(result.response.status, 200);
-  assert.equal(result.body.status, 'analyzed_with_draft_plan');
-  assert.equal(result.body.deliveryMode, 'draft_only');
-  assert.equal(result.body.notSent, true);
-  assert.equal(result.body.execution, null);
-  assert.equal(result.body.job.status, 'pending');
-  assert.ok(result.body.nextSteps.includes('draft_client_update'));
-  assert.ok(!result.body.nextSteps.includes('notify_client'));
+  assert.equal(result.response.status, 410);
+  assert.equal(result.body.error.code, 'simulation_retired');
 
-  const clientUpdate = result.body.plan.actions.find(action => action.type === 'draft_client_update');
-  assert.ok(clientUpdate);
-  assert.equal(clientUpdate.status, 'draft');
-  assert.equal(clientUpdate.requiresApproval, true);
-  assert.equal(clientUpdate.notSent, true);
+  const after = await request(baseUrl, '/api/dashboard');
+  assert.equal(after.response.status, 200);
+  assert.deepEqual(after.body.jobs.map(job => job.id).sort(), before.body.jobs.map(job => job.id).sort());
 });
 
-test('legacy client chat uses approval-safe draft wording', async t => {
+test('legacy simulated chat endpoint is retired', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -90,11 +85,8 @@ test('legacy client chat uses approval-safe draft wording', async t => {
     body: JSON.stringify({ message: 'What client updates are ready?' })
   });
 
-  assert.equal(result.response.status, 200);
-  assert.match(result.body.response, /draft/i);
-  assert.match(result.body.response, /approval/i);
-  assert.doesNotMatch(result.body.response, /I've sent/i);
-  assert.doesNotMatch(result.body.response, /\bsent her\b/i);
+  assert.equal(result.response.status, 410);
+  assert.equal(result.body.error.code, 'legacy_chat_retired');
 });
 
 test('legacy autonomous cycle previews by default instead of mutating job state', async t => {

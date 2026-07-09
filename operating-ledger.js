@@ -12314,11 +12314,14 @@ class ContractorOperatingLedger {
         .map(value => String(value || '').trim())
         .filter(Boolean)
     );
+    const maxActions = Number.isFinite(Number(options.maxActions ?? options.max_actions))
+      ? Math.max(1, Math.min(25, Number(options.maxActions ?? options.max_actions)))
+      : null;
     const preview = this.nextActions().filter(action => {
       if (actionTypeFilter.size && !actionTypeFilter.has(normalizeStatus(action.type, ''))) return false;
       if (jobFilter.size && action.jobId && !jobFilter.has(action.jobId)) return false;
       return true;
-    });
+    }).slice(0, maxActions || undefined);
     const applied = [];
     const blocked = [];
 

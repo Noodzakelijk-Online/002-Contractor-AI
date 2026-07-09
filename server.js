@@ -4677,28 +4677,21 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.get('/api/dashboard', (req, res) => {
-  const dashboardJobs = mergedLegacyAndLedgerJobs();
-  const dashboardWorkers = mergedLegacyAndLedgerWorkers();
-  const dashboardTools = mergedLegacyAndLedgerTools();
-  // Retain the established merged collections for compatibility, while exposing
-  // the durable ledger collections explicitly for the command-center dashboard.
   const ledgerJobs = operatingLedger.listJobs({ limit: 500 }).map(mapLedgerJobForLegacy);
   const ledgerWorkers = operatingLedger.listWorkers({ limit: 500 }).map(mapLedgerWorkerForLegacy);
   const ledgerTools = operatingLedger.listTools({ limit: 500 }).map(mapLedgerToolForLegacy);
-  const dashboardState = {
-    jobs: dashboardJobs,
-    workers: dashboardWorkers,
-    tools: dashboardTools
-  };
-  const criticalJobs = dashboardJobs.filter(job => job.priority === 'critical').length;
-  const aiHandling = dashboardJobs.filter(job => job.status === 'in_progress').length;
-  const today = new Date().toISOString().split('T')[0];
-  const todayRevenue = dashboardJobs
-    .filter(job => job.status === 'completed' && (job.estimatedCompletion || job.startDate || '').slice(0, 10) === today)
-    .reduce((sum, job) => sum + Number(job.actualCost || job.estimatedCost || 0), 0);
-  const autonomousSummary = autonomousEngine.summarizeState(dashboardState);
   const ledgerSummary = operatingLedger.dashboardSummary();
   const weather = operatingLedger.weatherOverview();
+  const criticalJobs = ledgerJobs.filter(job => job.priority === 'critical').length;
+  const aiHandling = ledgerJobs.filter(job => job.status === 'in_progress').length;
+  const ledgerInsights = (ledgerSummary.nextActions || []).slice(0, 8).map(action => ({
+    title: action.label || action.type || 'Ledger action',
+    description: action.message || 'A persisted contractor record needs review.',
+    confidence: 'ledger',
+    actionType: action.type || null,
+    requiresApproval: action.requiresApproval === true,
+    jobId: action.jobId || null
+  }));
 
   res.json({
     apiVersion: '1.1.0',
@@ -4707,13 +4700,13 @@ app.get('/api/dashboard', (req, res) => {
     metrics: {
       criticalJobs,
       aiHandling,
-      todayRevenue,
-      onTimeRate: 94,
-      autonomousSummary
+      todayRevenue: 0,
+      onTimeRate: null,
+      ledgerOnly: true
     },
-    jobs: dashboardJobs,
-    workers: dashboardWorkers,
-    tools: dashboardTools,
+    jobs: ledgerJobs,
+    workers: ledgerWorkers,
+    tools: ledgerTools,
     ledgerJobs,
     ledgerWorkers,
     ledgerTools,
@@ -4725,7 +4718,7 @@ app.get('/api/dashboard', (req, res) => {
     },
     ledger: ledgerSummary,
     weather,
-    aiInsights: autonomousEngine.generateInsights(dashboardState)
+    aiInsights: ledgerInsights
   });
 });
 
@@ -5767,18 +5760,24 @@ app.post('/api/construction/autonomous-review', (req, res) => {
 app.post('/api/operations/cycle', (req, res) => {
   const payload = req.body || {};
   const maxActions = Math.max(1, Math.min(25, Number(payload.maxActions || 8)));
-  const jobCycle = autonomousEngine.runAutonomousCycle(currentState(), { maxActions });
+  const jobCycle = operatingLedger.runAutonomousCycle({
+    actor: payload.actor || 'operations_cycle',
+    maxActions,
+    jobIds: payload.jobIds || payload.job_ids,
+    actionTypes: payload.actionTypes || payload.action_types
+  });
   const constructionReview = runConstructionAutopilot();
   const capabilityGapPlan = buildContractorCapabilityGapPlan();
+  const ledgerMetrics = jobCycle.dashboard?.metrics || {};
   const summary = {
-    jobActions: jobCycle.actions?.length || 0,
-    jobAlerts: jobCycle.alerts?.length || 0,
-    jobInsights: jobCycle.insights?.length || 0,
+    jobActions: jobCycle.applied?.length || 0,
+    jobAlerts: jobCycle.blocked?.length || 0,
+    jobInsights: jobCycle.preview?.length || 0,
     constructionActions: constructionReview.actions?.length || 0,
     constructionInsights: constructionReview.insights?.length || 0,
-    pendingJobs: jobCycle.stateSummary?.pendingJobs || 0,
-    scheduledJobs: jobCycle.stateSummary?.scheduledJobs || 0,
-    inProgressJobs: jobCycle.stateSummary?.inProgressJobs || 0,
+    pendingJobs: ledgerMetrics.openJobs || 0,
+    scheduledJobs: Number(operatingLedger.listJobs({ status: 'scheduled' }).length || 0),
+    inProgressJobs: Number(operatingLedger.listJobs({ status: 'in_progress' }).length || 0),
     activeProjects: constructionReview.summary?.activeProjects || 0,
     openRfis: constructionReview.summary?.openRfis || 0,
     openSafetyActions: constructionReview.summary?.openSafetyActions || 0,
@@ -7188,6 +7187,14 @@ app.post('/api/ai/chat', (req, res) => {
 });
 
 app.post('/api/simulate/client-request', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'simulation_retired',
+      message: 'Sample client requests are retired. Create a persisted job through /api/ledger/intake instead.',
+      requestId: req.requestId
+    }
+  });
+
   const scenarios = [
     {
       client: 'Emma Bakker',
@@ -7242,6 +7249,14 @@ app.post('/api/simulate/client-request', (req, res) => {
 
 // AI Chat endpoint
 app.post('/api/legacy/ai/chat', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'legacy_chat_retired',
+      message: 'Legacy simulated chat is retired. Use the persisted command plan and ledger views instead.',
+      requestId: req.requestId
+    }
+  });
+
   const message = String(req.body?.message || '');
 
   // Simple AI response simulation
@@ -7271,6 +7286,14 @@ app.post('/api/legacy/ai/chat', (req, res) => {
 
 // Simulate client request
 app.post('/api/legacy/simulate/client-request', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'simulation_retired',
+      message: 'Sample client requests are retired. Create a persisted job through /api/ledger/intake instead.',
+      requestId: req.requestId
+    }
+  });
+
   const clientRequests = [
     {
       client: 'Emma Bakker',

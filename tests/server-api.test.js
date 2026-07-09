@@ -817,18 +817,21 @@ test('operations cycle combines job AI and Build autonomous review', async t => 
   assert.equal(cycle.response.status, 200);
   assert.equal(cycle.body.success, true);
   assert.equal(cycle.body.source, 'server');
-  assert.ok(cycle.body.jobCycle.actions.some(action => action.jobId === job.body.id));
+  assert.ok(cycle.body.jobCycle.preview.some(action => action.jobId === job.body.ledgerJobId));
   assert.ok(cycle.body.summary.jobActions >= 1);
-  assert.equal(cycle.body.summary.jobActions, cycle.body.jobCycle.actions.length);
+  assert.equal(cycle.body.summary.jobActions, cycle.body.jobCycle.applied.length);
   assert.equal(cycle.body.summary.constructionActions, cycle.body.constructionReview.actions.length);
   assert.ok(Array.isArray(cycle.body.constructionReview.insights));
   assert.ok(Array.isArray(cycle.body.capabilities));
 
   const dashboard = await request(baseUrl, '/api/dashboard');
   assert.equal(dashboard.response.status, 200);
-  const updatedJob = dashboard.body.jobs.find(item => item.id === job.body.id);
+  const updatedJob = dashboard.body.jobs.find(item => item.id === job.body.ledgerJobId);
   assert.ok(updatedJob);
-  assert.notEqual(updatedJob.status, 'pending');
+  assert.equal(updatedJob.source, 'ledger');
+  const ledgerDetail = await request(baseUrl, `/api/ledger/jobs/${job.body.ledgerJobId}`);
+  assert.equal(ledgerDetail.response.status, 200);
+  assert.ok(ledgerDetail.body.job.audit.some(event => event.action.startsWith('autonomous_')));
   assert.ok(dashboard.body.construction.data.lastReview || dashboard.body.construction.lastReview);
 });
 
@@ -1143,7 +1146,11 @@ test('upload analysis routes job evidence into construction records', async t =>
   assert.equal(dashboard.response.status, 200);
   assert.ok(dashboard.body.construction.data.formsChecklists.some(record => record.id === upload.body.records.formsChecklist.id));
   assert.ok(dashboard.body.construction.data.incidents.some(record => record.id === upload.body.records.incident.id));
-  assert.ok(dashboard.body.jobs.find(job => job.id === 1).ai.reasoning.includes('unsafe-access-photo.jpg'));
+  assert.ok(!dashboard.body.jobs.some(job => job.id === 1));
+  const ledgerDetail = await request(baseUrl, `/api/ledger/jobs/${upload.body.ledgerDocument.jobId}`);
+  assert.equal(ledgerDetail.response.status, 200);
+  assert.ok(ledgerDetail.body.job.documents.some(document => document.id === upload.body.ledgerDocument.id));
+  assert.ok(ledgerDetail.body.job.audit.some(event => event.action === 'store_document'));
 });
 
 test('multipart field upload stores local evidence and links ledger document', async t => {

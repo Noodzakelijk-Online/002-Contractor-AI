@@ -1990,7 +1990,7 @@
                                 <button class="btn btn-secondary" onclick="runLedgerCycle(false)">
                                     Safe Drafts
                                 </button>
-                                <button class="btn btn-primary" onclick="simulateClientRequest()">
+                                <button class="btn btn-primary" type="button" data-testid="priority-new-intake" onclick="showLedgerIntakeForm()">
                                     📱 Simulate Request
                                 </button>
                                 <button class="btn btn-success" onclick="showNewJobForm()">
@@ -4664,6 +4664,8 @@
                 newIntakeButton.textContent = 'New Intake';
                 newIntakeButton.setAttribute('onclick', 'showLedgerIntakeForm()');
             }
+            const primaryIntakeButton = document.querySelector('[data-testid="priority-new-intake"]');
+            if (primaryIntakeButton) primaryIntakeButton.textContent = 'New Intake';
             const resetButton = document.querySelector('button[onclick="resetDashboardData()"]');
             if (resetButton) {
                 resetButton.textContent = shouldUseServer() ? 'Refresh Ledger Cache' : 'Retry Ledger Connection';
@@ -4698,6 +4700,17 @@
         function buildOverviewInsights() {
             const insights = [];
             const serverInsights = Array.isArray(dashboardData.aiInsights) ? dashboardData.aiInsights : [];
+            const isLedgerPrimary = dashboardData.dashboardSource === 'ledger' && dashboardData.ledger?.metrics;
+            if (isLedgerPrimary) {
+                return serverInsights.slice(0, 6).map(insight => ({
+                    icon: 'Ledger',
+                    text: typeof insight === 'string'
+                        ? insight
+                        : insight.description || insight.message || insight.title || 'A persisted ledger action needs review.',
+                    action: 'open-ledger-command-plan',
+                    command: 'Open command plan'
+                }));
+            }
             serverInsights.slice(0, 2).forEach(insight => {
                 const message = typeof insight === 'string'
                     ? insight
@@ -4786,6 +4799,7 @@
 
         function runOverviewInsightAction(action) {
             const route = {
+                'open-ledger-command-plan': () => showLedgerCommandPlan(),
                 'run-ai-engine': () => runAutonomousEngine(),
                 'open-critical-jobs': () => {
                     switchView('jobs');

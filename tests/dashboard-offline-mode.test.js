@@ -16,5 +16,8 @@ test('offline dashboard never hydrates sample or cached contractor records', () 
 test('offline dashboard intercepts command buttons and routes new jobs to the API-backed intake flow', () => {
   assert.match(dashboardSource, /Start the local Contractor\.AI API before creating or changing operational records\./);
   assert.match(dashboardSource, /if \(!shouldUseServer\(\)\) \{\s*showNotification\('Start the local API before creating a job intake\.'/s);
+  assert.match(dashboardSource, /data-testid="priority-new-intake"/);
+  assert.match(dashboardSource, /onclick="showLedgerIntakeForm\(\)"/);
+  assert.doesNotMatch(dashboardSource, /onclick="simulateClientRequest\(\)"/);
   assert.match(dashboardSource, /Retry Ledger Connection/);
 });
