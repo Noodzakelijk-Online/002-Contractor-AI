@@ -53,6 +53,32 @@ class LocalOperatingEngineTests(unittest.TestCase):
         action_types = [action['type'] for action in decision.recommended_actions]
         self.assertIn('request_missing_client_information', action_types)
 
+    def test_local_image_analysis_requires_review_instead_of_inventing_progress(self):
+        engine = self.core.ContractorAIEngine()
+        context = self.core.JobContext(
+            job_id=42,
+            job_type='renovation',
+            priority='high',
+            location='Amsterdam',
+            client_preferences={},
+            required_skills=['tiling'],
+            required_tools=['tile_cutter'],
+            estimated_duration=12,
+            weather_dependent=False,
+            complexity_score=6
+        )
+
+        decision = engine.analyze_image_for_job_progress('/tmp/site-photo.jpg', context)
+
+        self.assertEqual(decision.confidence, 0.0)
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.supporting_data['analysisStatus'], 'manual_review_required')
+        self.assertIn('vision_analysis_unavailable', decision.risk_factors)
+        action_types = {action['type'] for action in decision.recommended_actions}
+        self.assertIn('capture_field_evidence', action_types)
+        self.assertIn('request_quality_review', action_types)
+        self.assertNotIn('update_progress', action_types)
+
     def test_advanced_api_does_not_send_or_commit_without_approval(self):
         main_advanced = importlib.import_module('main_advanced')
         main_advanced.ai_engine = self.core.ContractorAIEngine()
@@ -77,20 +103,54 @@ class LocalOperatingEngineTests(unittest.TestCase):
                 'recipient': 'client@example.test',
                 'message': 'We can start tomorrow.'
             })
-            self.assertEqual(message_response.status_code, 200)
-            message = message_response.get_json()
-            self.assertEqual(message['status'], 'pending_approval')
-            self.assertTrue(message['not_sent'])
+            self.assertEqual(message_response.status_code, 501)
+            message_error = message_response.get_json()['error']
+            self.assertEqual(message_error['code'], 'ledger_communication_unavailable')
 
             plan_response = client.post('/api/ai/execute-plan', json={'job_id': 'job-123'})
-            self.assertEqual(plan_response.status_code, 200)
-            plan = plan_response.get_json()
-            self.assertTrue(plan['approval_required'])
-            self.assertEqual(plan['execution_summary']['pending_approval_steps'], 4)
-            self.assertTrue(any(
-                step['status'] == 'pending_approval'
-                for step in plan['plan_steps']
-            ))
+            self.assertEqual(plan_response.status_code, 501)
+            plan_error = plan_response.get_json()['error']
+            self.assertEqual(plan_error['code'], 'ledger_execution_unavailable')
+
+            vision_response = client.post('/api/vision/analyze-image', json={
+                'image_data': 'unverified-image-input',
+                'analysis_type': 'progress_tracking'
+            })
+            self.assertEqual(vision_response.status_code, 501)
+            vision_error = vision_response.get_json()['error']
+            self.assertEqual(vision_error['code'], 'vision_analysis_unavailable')
+            self.assertNotIn('completion_percentage', str(vision_error))
+
+    def test_advanced_endpoints_refuse_unverified_operational_claims(self):
+        main_advanced = importlib.import_module('main_advanced')
+        main_advanced.app.config['TESTING'] = True
+
+        endpoints = [
+            ('post', '/api/chat', {}, 'conversational_ai_unavailable'),
+            ('post', '/api/multimodal/process', {}, 'multimodal_processing_unavailable'),
+            ('get', '/api/analytics/business-performance', None, 'ledger_analytics_unavailable'),
+            ('get', '/api/analytics/demand-forecast', None, 'demand_forecasting_unavailable'),
+            ('post', '/api/ar/create-session', {}, 'ar_integration_unavailable'),
+            ('post', '/api/iot/register-device', {}, 'iot_integration_unavailable'),
+            ('get', '/api/iot/dashboard', None, 'iot_integration_unavailable'),
+            ('post', '/api/communication/process-incoming', {}, 'ledger_communication_unavailable'),
+            ('get', '/api/test/email-sms', None, 'test_notification_delivery_unavailable'),
+            ('get', '/api/test/simulate-client-request', None, 'test_client_request_simulation_unavailable')
+        ]
+
+        with main_advanced.app.test_client() as client:
+            health = client.get('/api/health')
+            self.assertEqual(health.status_code, 200)
+            health_payload = health.get_json()
+            self.assertEqual(health_payload['status'], 'analysis_only')
+            self.assertEqual(health_payload['systems']['ai_engine'], 'online')
+            self.assertNotEqual(health_payload['systems']['analytics_engine'], 'online')
+
+            for method, path, payload, code in endpoints:
+                with self.subTest(path=path):
+                    response = getattr(client, method)(path, json=payload) if payload is not None else getattr(client, method)(path)
+                    self.assertEqual(response.status_code, 501)
+                    self.assertEqual(response.get_json()['error']['code'], code)
 
     def test_advanced_dashboard_is_a_read_only_node_ledger_proxy(self):
         main_advanced = importlib.import_module('main_advanced')

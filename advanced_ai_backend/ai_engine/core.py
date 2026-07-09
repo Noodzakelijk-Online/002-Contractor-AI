@@ -253,64 +253,39 @@ class ContractorAIEngine:
     
     def analyze_image_for_job_progress(self, image_path: str, job_context: JobContext) -> AIDecision:
         """
-        Analyze job site images to assess progress and quality
+        Request a review of job site images without fabricating visual findings.
+
+        This prototype does not have a verified vision provider or a local CV
+        model. It must therefore never infer progress, quality, PPE use, or
+        safety conditions from an image path alone.
         """
-        try:
-            # For now, simulate computer vision analysis
-            # In production, this would use actual image analysis
-            
-            analysis_prompt = f"""
-            Analyze this job site image for a {job_context.job_type} project.
-            
-            Job Context:
-            - Type: {job_context.job_type}
-            - Priority: {job_context.priority}
-            - Expected completion: {job_context.estimated_duration} hours
-            
-            Please provide:
-            1. Progress assessment (0-100%)
-            2. Quality observations
-            3. Safety compliance check
-            4. Any issues or concerns
-            5. Recommendations for next steps
-            
-            Return as JSON with fields: progress_percentage, quality_score, safety_issues, observations, recommendations
-            """
-            
-            # Simulate AI vision analysis
-            mock_analysis = {
-                "progress_percentage": 75,
-                "quality_score": 0.9,
-                "safety_issues": [],
-                "observations": [
-                    "Work area is clean and organized",
-                    "Materials are properly stored",
-                    "Progress appears on schedule"
-                ],
-                "recommendations": [
-                    "Continue current approach",
-                    "Schedule quality check before final phase"
-                ]
-            }
-            
-            return AIDecision(
-                decision_type=AIDecisionType.QUALITY_ASSESSMENT,
-                confidence=0.85,
-                reasoning=f"Image analysis shows {mock_analysis['progress_percentage']}% completion with high quality standards maintained.",
-                recommended_actions=[
-                    {
-                        'type': 'update_progress',
-                        'progress_percentage': mock_analysis['progress_percentage']
-                    }
-                ],
-                supporting_data=mock_analysis,
-                risk_factors=[],
-                estimated_impact={'quality': 0.9, 'timeline': 0.95}
-            )
-            
-        except Exception as e:
-            logger.error(f"Error analyzing image: {e}")
-            return self._create_fallback_decision()
+        return AIDecision(
+            decision_type=AIDecisionType.QUALITY_ASSESSMENT,
+            confidence=0.0,
+            reasoning=(
+                'No verified computer-vision provider is configured. '
+                'Progress, quality, and safety must be reviewed by a qualified person before this image affects the job ledger.'
+            ),
+            recommended_actions=[
+                {
+                    'type': 'capture_field_evidence',
+                    'message': 'Store the image as job evidence with its source and capture context.'
+                },
+                {
+                    'type': 'request_quality_review',
+                    'message': 'Create an approval-gated quality or safety review; do not update progress from this image automatically.'
+                }
+            ],
+            supporting_data={
+                'imagePath': image_path,
+                'jobType': job_context.job_type,
+                'analysisStatus': 'manual_review_required',
+                'provider': 'not_configured'
+            },
+            risk_factors=['vision_analysis_unavailable', 'unverified_field_evidence'],
+            estimated_impact={},
+            requires_approval=True
+        )
     
     def generate_client_communication(self, communication_context: Dict[str, Any]) -> str:
         """

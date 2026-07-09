@@ -7,6 +7,7 @@ import secrets
 import importlib
 from datetime import datetime
 from uuid import uuid4
+from functools import wraps
 from werkzeug.exceptions import HTTPException
 from ledger_bridge import LedgerBridgeError, NodeLedgerBridge
 
@@ -119,6 +120,20 @@ def _json_error(message, status=500, code='internal_error', exc=None, details=No
     return response
 
 
+def requires_verified_provider(capability):
+    """Prevent prototype endpoints from returning invented operational results."""
+    def decorator(handler):
+        @wraps(handler)
+        def unavailable(*args, **kwargs):
+            return _json_error(
+                f'{capability} is unavailable because no verified provider and ledger-backed workflow are configured.',
+                status=501,
+                code=f'{capability}_unavailable'
+            )
+        return unavailable
+    return decorator
+
+
 def _decision_to_payload(decision):
     decision_type = getattr(decision, 'decision_type', None)
     if hasattr(decision_type, 'value'):
@@ -176,6 +191,12 @@ logger.info(
     ) or 'none'
 )
 
+
+def _capability_status(component, verified=False):
+    if component is None:
+        return 'offline'
+    return 'online' if verified else 'disabled_unverified'
+
 # Serve static files
 @app.route('/')
 def index():
@@ -196,16 +217,15 @@ def static_files(filename):
 @app.route('/api/health')
 def health_check():
     systems = {
-        'ai_engine': 'online' if ai_engine else 'offline',
-        'communication_hub': 'online' if communication_hub else 'offline',
-        'vision_processor': 'online' if vision_processor else 'offline',
-        'multimodal_processor': 'online' if multimodal_processor else 'offline',
-        'analytics_engine': 'online' if analytics_engine else 'offline',
-        'ar_iot_system': 'online' if ar_iot_system else 'offline'
+        'ai_engine': _capability_status(ai_engine, verified=True),
+        'communication_hub': _capability_status(communication_hub),
+        'vision_processor': _capability_status(vision_processor),
+        'multimodal_processor': _capability_status(multimodal_processor),
+        'analytics_engine': _capability_status(analytics_engine),
+        'ar_iot_system': _capability_status(ar_iot_system)
     }
-    healthy = all(status == 'online' for status in systems.values())
     return jsonify({
-        'status': 'healthy' if healthy else 'degraded',
+        'status': 'analysis_only' if systems['ai_engine'] == 'online' else 'degraded',
         'requestId': request_id(),
         'timestamp': datetime.now().isoformat(),
         'systems': systems,
@@ -218,15 +238,15 @@ def health_check():
 @app.route('/api/debug/diagnostics')
 def debug_diagnostics():
     systems = {
-        'ai_engine': bool(ai_engine),
-        'communication_hub': bool(communication_hub),
-        'vision_processor': bool(vision_processor),
-        'multimodal_processor': bool(multimodal_processor),
-        'analytics_engine': bool(analytics_engine),
-        'ar_iot_system': bool(ar_iot_system)
+        'ai_engine': _capability_status(ai_engine, verified=True),
+        'communication_hub': _capability_status(communication_hub),
+        'vision_processor': _capability_status(vision_processor),
+        'multimodal_processor': _capability_status(multimodal_processor),
+        'analytics_engine': _capability_status(analytics_engine),
+        'ar_iot_system': _capability_status(ar_iot_system)
     }
     return jsonify({
-        'status': 'ok' if all(systems.values()) else 'attention',
+        'status': 'analysis_only' if systems['ai_engine'] == 'online' else 'attention',
         'requestId': request_id(),
         'generatedAt': datetime.now().isoformat(),
         'environment': {
@@ -326,6 +346,7 @@ def get_dashboard_data():
 
 # AI Chat endpoint
 @app.route('/api/chat', methods=['POST'])
+@requires_verified_provider('conversational_ai')
 def ai_chat():
     try:
         data = request.get_json() or {}
@@ -403,6 +424,7 @@ def analyze_job_request():
 
 # Multi-modal input processing
 @app.route('/api/multimodal/process', methods=['POST'])
+@requires_verified_provider('multimodal_processing')
 def process_multimodal_input():
     try:
         data = request.get_json() or {}
@@ -451,6 +473,7 @@ def process_multimodal_input():
 
 # Predictive analytics endpoint
 @app.route('/api/analytics/business-performance')
+@requires_verified_provider('ledger_analytics')
 def get_business_performance():
     try:
         timeframe = request.args.get('timeframe', '30d')
@@ -488,6 +511,7 @@ def get_business_performance():
         return _json_error('Business performance failed', exc=e)
 
 @app.route('/api/analytics/demand-forecast')
+@requires_verified_provider('demand_forecasting')
 def get_demand_forecast():
     try:
         horizon_days = int(request.args.get('horizon', 30))
@@ -521,6 +545,7 @@ def get_demand_forecast():
 
 # AR/IoT integration endpoints
 @app.route('/api/ar/create-session', methods=['POST'])
+@requires_verified_provider('ar_integration')
 def create_ar_session():
     try:
         data = request.get_json() or {}
@@ -550,6 +575,7 @@ def create_ar_session():
         return _json_error('AR session creation failed', exc=e)
 
 @app.route('/api/iot/register-device', methods=['POST'])
+@requires_verified_provider('iot_integration')
 def register_iot_device():
     try:
         device_config = request.get_json() or {}
@@ -580,6 +606,7 @@ def register_iot_device():
         return _json_error('IoT device registration failed', exc=e)
 
 @app.route('/api/iot/dashboard')
+@requires_verified_provider('iot_integration')
 def get_iot_dashboard():
     try:
         dashboard_data = {
@@ -636,6 +663,7 @@ def get_iot_dashboard():
 
 # Communication hub endpoints
 @app.route('/api/communication/send-message', methods=['POST'])
+@requires_verified_provider('ledger_communication')
 def send_message():
     try:
         data = request.get_json() or {}
@@ -665,6 +693,7 @@ def send_message():
         return _json_error('Message sending failed', exc=e)
 
 @app.route('/api/communication/process-incoming', methods=['POST'])
+@requires_verified_provider('ledger_communication')
 def process_incoming_message():
     try:
         data = request.get_json() or {}
@@ -691,48 +720,15 @@ def process_incoming_message():
 # Computer vision endpoints
 @app.route('/api/vision/analyze-image', methods=['POST'])
 def analyze_image():
-    try:
-        data = request.get_json() or {}
-        image_data = data.get('image_data')
-        analysis_type = data.get('analysis_type', 'progress_tracking')
-        
-        analyses = {
-            'progress_tracking': {
-                'completion_percentage': 85,
-                'quality_score': 92,
-                'issues_detected': ['Minor grout gap in corner'],
-                'next_steps': ['Complete grout touch-up', 'Install final fixtures'],
-                'estimated_time_remaining': '4 hours'
-            },
-            'quality_inspection': {
-                'overall_quality': 'excellent',
-                'defects_found': 0,
-                'compliance_score': 98,
-                'recommendations': ['No issues detected', 'Ready for client inspection']
-            },
-            'safety_monitoring': {
-                'safety_violations': 0,
-                'ppe_compliance': 100,
-                'hazards_detected': [],
-                'safety_score': 95
-            }
-        }
-        
-        result = analyses.get(analysis_type, analyses['progress_tracking'])
-        
-        return jsonify({
-            'success': True,
-            'analysis_type': analysis_type,
-            'result': result,
-            'processing_time': '1.2s',
-            'timestamp': datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        return _json_error('Image analysis failed', exc=e)
+    return _json_error(
+        'Computer-vision analysis is unavailable because no verified vision provider is configured. Store the image as evidence and request a qualified review instead.',
+        status=501,
+        code='vision_analysis_unavailable'
+    )
 
 # Test endpoints for demonstration
 @app.route('/api/test/email-sms')
+@requires_verified_provider('test_notification_delivery')
 def test_email_sms():
     try:
         result = {
@@ -765,6 +761,7 @@ def test_email_sms():
         return _json_error('Email and SMS test failed', exc=e)
 
 @app.route('/api/test/simulate-client-request')
+@requires_verified_provider('test_client_request_simulation')
 def simulate_client_request():
     try:
         scenarios = [
@@ -832,6 +829,7 @@ def simulate_client_request():
 
 # Advanced AI plan execution endpoint
 @app.route('/api/ai/execute-plan', methods=['POST'])
+@requires_verified_provider('ledger_execution')
 def execute_ai_plan():
     try:
         data = request.get_json() or {}
