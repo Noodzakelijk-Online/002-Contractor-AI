@@ -2,11 +2,14 @@ import importlib
 import os
 import sys
 import unittest
+from unittest import mock
 
 
 ADVANCED_BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ADVANCED_BACKEND_ROOT not in sys.path:
     sys.path.insert(0, ADVANCED_BACKEND_ROOT)
+
+from ledger_bridge import LedgerBridgeError
 
 
 class LocalOperatingEngineTests(unittest.TestCase):
@@ -88,6 +91,40 @@ class LocalOperatingEngineTests(unittest.TestCase):
                 step['status'] == 'pending_approval'
                 for step in plan['plan_steps']
             ))
+
+    def test_advanced_dashboard_is_a_read_only_node_ledger_proxy(self):
+        main_advanced = importlib.import_module('main_advanced')
+        main_advanced.app.config['TESTING'] = True
+        node_dashboard = {
+            'source': 'node',
+            'ledger': {'metrics': {'openJobs': 2}},
+            'jobs': [{'id': 'job_1', 'title': 'Persisted ledger job'}]
+        }
+
+        with mock.patch.object(main_advanced.ledger_bridge, 'get_dashboard', return_value=node_dashboard) as proxy:
+            with main_advanced.app.test_client() as client:
+                response = client.get('/api/dashboard', headers={'X-Request-Id': 'advanced-proxy-test'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), node_dashboard)
+        proxy.assert_called_once_with('advanced-proxy-test')
+
+    def test_advanced_dashboard_returns_a_clear_error_when_the_ledger_is_unavailable(self):
+        main_advanced = importlib.import_module('main_advanced')
+        main_advanced.app.config['TESTING'] = True
+
+        with mock.patch.object(
+            main_advanced.ledger_bridge,
+            'get_dashboard',
+            side_effect=LedgerBridgeError('Ledger is unavailable', code='ledger_unavailable')
+        ):
+            with main_advanced.app.test_client() as client:
+                response = client.get('/api/dashboard')
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertEqual(payload['error']['code'], 'ledger_unavailable')
+        self.assertEqual(payload['error']['message'], 'Ledger is unavailable')
 
 
 if __name__ == '__main__':

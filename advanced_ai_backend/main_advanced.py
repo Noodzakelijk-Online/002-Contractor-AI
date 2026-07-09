@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory, g
+from flask import Flask, jsonify, request, redirect, send_from_directory, g
 from flask_cors import CORS
 import os
 import sys
@@ -8,6 +8,7 @@ import importlib
 from datetime import datetime
 from uuid import uuid4
 from werkzeug.exceptions import HTTPException
+from ledger_bridge import LedgerBridgeError, NodeLedgerBridge
 
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -77,6 +78,7 @@ def _debug_enabled():
 
 
 CORS(app, resources={r"/api/*": {"origins": _cors_origins()}})
+ledger_bridge = NodeLedgerBridge()
 
 
 @app.before_request
@@ -177,7 +179,14 @@ logger.info(
 # Serve static files
 @app.route('/')
 def index():
-    return send_from_directory('static', 'advanced_dashboard.html')
+    dashboard_url = ledger_bridge.dashboard_url()
+    if dashboard_url:
+        return redirect(dashboard_url)
+    return _json_error(
+        'The Node operating ledger dashboard is not configured for the advanced analysis service.',
+        status=503,
+        code='ledger_not_configured'
+    )
 
 @app.route('/static/<path:filename>')
 def static_files(filename):
@@ -200,6 +209,8 @@ def health_check():
         'requestId': request_id(),
         'timestamp': datetime.now().isoformat(),
         'systems': systems,
+        'ledgerBridge': ledger_bridge.status(),
+        'primaryDashboard': 'node_operating_ledger',
         'unavailableReasons': component_errors
     })
 
@@ -223,12 +234,13 @@ def debug_diagnostics():
             'corsOrigins': _cors_origins()
         },
         'systems': systems,
+        'ledgerBridge': ledger_bridge.status(),
         'unavailableReasons': component_errors
     })
 
-# Dashboard data endpoint
-@app.route('/api/dashboard')
-def get_dashboard_data():
+# Deprecated fixture retained temporarily for developer reference only. It is
+# intentionally not registered as an HTTP route.
+def legacy_demo_dashboard_data():
     try:
         dashboard_data = {
             'metrics': {
@@ -301,6 +313,16 @@ def get_dashboard_data():
         
     except Exception as e:
         return _json_error('Dashboard data failed', exc=e)
+
+@app.route('/api/dashboard')
+def get_dashboard_data():
+    try:
+        return jsonify(ledger_bridge.get_dashboard(request_id()))
+    except LedgerBridgeError as error:
+        return _json_error(error.message, status=error.status_code, code=error.code)
+    except Exception as error:
+        return _json_error('Node ledger dashboard proxy failed', exc=error)
+
 
 # AI Chat endpoint
 @app.route('/api/chat', methods=['POST'])

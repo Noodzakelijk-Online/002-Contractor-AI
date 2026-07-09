@@ -188,7 +188,7 @@ god_mode_contractor_ai/     Prototype Python automation backend
 ## Current Gaps
 
 - External communication providers are not wired for real sending.
-- Python AI services still contain mock fallback behavior.
+- Python AI services still contain mock fallback behavior. `advanced_ai_backend` is now analysis-only and proxies dashboard reads to the Node ledger when `CONTRACTOR_LEDGER_API_URL` is configured; it does not generate a separate dashboard fallback.
 - Database migrations are embedded in the ledger initialization rather than managed as separate migration files.
 - Postgres, HAI, and FAB integrations are intentionally not implemented yet.
 
