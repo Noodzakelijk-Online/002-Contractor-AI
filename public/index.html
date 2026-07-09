@@ -1872,6 +1872,11 @@
                 justify-content: center;
             }
         }
+
+        #operatingLedgerCard #ledgerCommandPanel .detail-grid > .detail-tile:nth-child(n + 9),
+        #operatingLedgerCard #ledgerCommandPanel .ledger-suite-roadmap {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -1921,40 +1926,40 @@
         <!-- Overview Section -->
         <div id="overviewSection" class="dashboard-overview">
             <div class="metrics-row">
-                <div class="metric-card critical" onclick="handleMetricClick('critical')">
+                <div class="metric-card critical" onclick="showLedgerApprovals()">
                     <div class="metric-header">
                         <div class="metric-icon">🚨</div>
                     </div>
                     <div class="metric-value" id="criticalJobs">1</div>
-                    <div class="metric-label">Critical Jobs</div>
-                    <div class="metric-change negative">Needs immediate attention</div>
+                    <div class="metric-label">Needs review</div>
+                    <div class="metric-change negative">Approval-controlled decisions</div>
                 </div>
 
-                <div class="metric-card success" onclick="handleMetricClick('ai-handling')">
+                <div class="metric-card success" onclick="showLedgerCommandPlan()">
                     <div class="metric-header">
                         <div class="metric-icon">🤖</div>
                     </div>
                     <div class="metric-value" id="aiHandling">2</div>
-                    <div class="metric-label">AI is Handling</div>
-                    <div class="metric-change positive">Automated workflow active</div>
+                    <div class="metric-label">Next actions</div>
+                    <div class="metric-change positive">Ranked across active work</div>
                 </div>
 
-                <div class="metric-card warning" onclick="handleMetricClick('revenue')">
+                <div class="metric-card warning" onclick="showLedgerJobs()">
                     <div class="metric-header">
                         <div class="metric-icon">💰</div>
                     </div>
-                    <div class="metric-value" id="todayRevenue">EUR 75</div>
-                    <div class="metric-label">Today's Revenue</div>
-                    <div class="metric-change positive" id="todayRevenueChange">EUR 75 from completed jobs</div>
+                    <div class="metric-value" id="todayRevenue">0</div>
+                    <div class="metric-label">Open jobs</div>
+                    <div class="metric-change positive" id="todayRevenueChange">Persisted operating ledger</div>
                 </div>
 
-                <div class="metric-card info" onclick="handleMetricClick('performance')">
+                <div class="metric-card info" onclick="showLedgerDispatch()">
                     <div class="metric-header">
                         <div class="metric-icon">⚡</div>
                     </div>
-                    <div class="metric-value" id="onTimeRate">96%</div>
-                    <div class="metric-label">On-Time Rate</div>
-                    <div class="metric-change positive">Above target (95%)</div>
+                    <div class="metric-value" id="onTimeRate">0</div>
+                    <div class="metric-label">Dispatch ready</div>
+                    <div class="metric-change positive">Safe to mobilize</div>
                 </div>
             </div>
 
@@ -1979,11 +1984,11 @@
                                 🚨 Priority Jobs
                             </div>
                             <div class="panel-actions">
-                                <button class="btn btn-primary" onclick="runOperationsCycle()">
-                                    Operations Cycle
+                                <button class="btn btn-primary" onclick="showLedgerCommandPlan()">
+                                    Today Plan
                                 </button>
-                                <button class="btn btn-secondary" onclick="runAutonomousEngine()">
-                                    AI Engine
+                                <button class="btn btn-secondary" onclick="runLedgerCycle(false)">
+                                    Safe Drafts
                                 </button>
                                 <button class="btn btn-primary" onclick="simulateClientRequest()">
                                     📱 Simulate Request
@@ -2001,22 +2006,19 @@
                     <div class="panel-card" id="operatingLedgerCard" data-testid="operating-ledger-card">
                         <div class="panel-header">
                             <div class="panel-title">
-                                Operating Ledger
+                                Today's Command Center
                             </div>
                             <div class="panel-actions">
-                                <button class="btn btn-primary" type="button" data-testid="ledger-run-cycle" onclick="runLedgerCycle(false)">Run Ledger</button>
+                                <button class="btn btn-primary" type="button" data-testid="ledger-run-cycle" onclick="runLedgerCycle(false)">Safe Drafts</button>
                                 <button class="btn btn-success" type="button" data-testid="ledger-new-intake" onclick="showLedgerIntakeForm()">New Intake</button>
-                                <button class="btn btn-secondary" type="button" data-testid="ledger-jobs" onclick="showLedgerJobs()">Jobs</button>
+                                <button class="btn btn-secondary" type="button" data-testid="ledger-command-plan" onclick="showLedgerCommandPlan()">Today Plan</button>
+                                <button class="btn btn-secondary" type="button" data-testid="ledger-approvals" onclick="showLedgerApprovals()">Approvals</button>
                                 <button class="btn btn-secondary" type="button" data-testid="ledger-dispatch" onclick="showLedgerDispatch()">Dispatch</button>
                                 <button class="btn btn-secondary" type="button" data-testid="ledger-workforce" onclick="showLedgerWorkforce()">Crew</button>
                                 <button class="btn btn-secondary" type="button" data-testid="ledger-inventory" onclick="showLedgerInventory()">Inventory</button>
-                                <button class="btn btn-secondary" type="button" data-testid="ledger-field-assurance" onclick="showLedgerFieldAssurance()">Field</button>
                                 <button class="btn btn-secondary" type="button" data-testid="ledger-finance" onclick="showLedgerFinance()">Finance</button>
                                 <button class="btn btn-secondary" type="button" data-testid="ledger-client-success" onclick="showLedgerClientSuccess()">Clients</button>
-                                <button class="btn btn-secondary" type="button" data-testid="ledger-approvals" onclick="showLedgerApprovals()">Approvals</button>
-                                <button class="btn btn-secondary" type="button" data-testid="ledger-audit" onclick="showLedgerAudit()">Audit</button>
-                                <button class="btn btn-secondary" type="button" data-testid="ledger-market-map" onclick="showContractorSuiteBlueprint()">Market Map</button>
-                                <button class="btn btn-secondary" type="button" data-testid="ledger-details" onclick="showLedgerDetails()">Details</button>
+                                <button class="btn btn-secondary" type="button" data-testid="ledger-details" onclick="showLedgerDetails()">Full Ledger</button>
                             </div>
                         </div>
                         <div id="ledgerCommandPanel"></div>
@@ -3376,9 +3378,16 @@
         }
 
         function normalizeDashboardPayload(payload = {}) {
-            const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
-            const workers = Array.isArray(payload.workers) ? payload.workers : [];
-            const tools = Array.isArray(payload.tools) ? payload.tools : [];
+            const legacyJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+            const legacyWorkers = Array.isArray(payload.workers) ? payload.workers : [];
+            const legacyTools = Array.isArray(payload.tools) ? payload.tools : [];
+            const ledgerJobs = Array.isArray(payload.ledgerJobs) ? payload.ledgerJobs : [];
+            const ledgerWorkers = Array.isArray(payload.ledgerWorkers) ? payload.ledgerWorkers : [];
+            const ledgerTools = Array.isArray(payload.ledgerTools) ? payload.ledgerTools : [];
+            const useLedgerPrimary = payload.dashboardSource === 'ledger' && ledgerJobs.length > 0;
+            const jobs = useLedgerPrimary ? ledgerJobs : legacyJobs;
+            const workers = useLedgerPrimary ? ledgerWorkers : legacyWorkers;
+            const tools = useLedgerPrimary ? ledgerTools : legacyTools;
             const ledger = payload.ledger && typeof payload.ledger === 'object'
                 ? payload.ledger
                 : null;
@@ -3390,7 +3399,8 @@
                 ledger,
                 aiInsights: Array.isArray(payload.aiInsights) ? payload.aiInsights : [],
                 weather: payload.weather && typeof payload.weather === 'object' ? payload.weather : null,
-                source: payload.source || (payload.apiVersion ? 'node' : 'god-mode')
+                source: payload.source || (payload.apiVersion ? 'node' : 'god-mode'),
+                dashboardSource: useLedgerPrimary ? 'ledger' : 'legacy_compat'
             };
         }
 
@@ -3456,14 +3466,15 @@
                     ledger: normalized.ledger,
                     aiInsights: normalized.aiInsights,
                     weather: normalized.weather,
-                    metrics: calculateMetrics(normalized.jobs)
+                    metrics: calculateMetrics(normalized.jobs),
+                    dashboardSource: normalized.dashboardSource
                 };
                 lastServerSync = new Date();
                 setSystemStatus('online', normalized.source);
                 updateDashboard();
                 saveDashboardData();
                 if (!silent) {
-                    addActivity('Server synchronized', `${normalized.jobs.length} jobs loaded from ${normalized.source}.`, 'success');
+                    addActivity('Server synchronized', `${normalized.jobs.length} ${normalized.dashboardSource === 'ledger' ? 'persisted ledger' : 'compatibility'} jobs loaded from ${normalized.source}.`, 'success');
                 }
                 return true;
             } catch (error) {
@@ -4624,20 +4635,41 @@
 
         function updateDashboard() {
             dashboardData.metrics = calculateMetrics(dashboardData.jobs);
+            const ledgerMetrics = dashboardData.ledger?.metrics || {};
+            const isLedgerPrimary = dashboardData.dashboardSource === 'ledger' && dashboardData.ledger?.metrics;
+            const nextActions = Array.isArray(dashboardData.ledger?.nextActions) ? dashboardData.ledger.nextActions : [];
+
+            // Put the persisted command center ahead of compatibility views.
+            const commandCard = document.getElementById('operatingLedgerCard');
+            const mainPanel = commandCard?.parentElement;
+            if (commandCard && mainPanel && mainPanel.firstElementChild !== commandCard) {
+                mainPanel.insertBefore(commandCard, mainPanel.firstElementChild);
+            }
+            const queueTitle = document.getElementById('priorityJobsList')
+                ?.closest('.panel-card')
+                ?.querySelector('.panel-title');
+            if (queueTitle) queueTitle.textContent = 'Ledger Job Queue';
+            const newIntakeButton = document.querySelector('button[onclick="showNewJobForm()"]');
+            if (newIntakeButton && isLedgerPrimary) {
+                newIntakeButton.textContent = 'New Intake';
+                newIntakeButton.setAttribute('onclick', 'showLedgerIntakeForm()');
+            }
 
             // Update metrics
-            document.getElementById('criticalJobs').textContent = dashboardData.metrics.critical_jobs;
-            document.getElementById('aiHandling').textContent = dashboardData.metrics.ai_handling;
-            document.getElementById('todayRevenue').textContent = formatCurrency(dashboardData.metrics.today_revenue);
+            document.getElementById('criticalJobs').textContent = isLedgerPrimary ? (ledgerMetrics.pendingApprovals || 0) : dashboardData.metrics.critical_jobs;
+            document.getElementById('aiHandling').textContent = isLedgerPrimary ? nextActions.length : dashboardData.metrics.ai_handling;
+            document.getElementById('todayRevenue').textContent = isLedgerPrimary ? (ledgerMetrics.openJobs || 0) : formatCurrency(dashboardData.metrics.today_revenue);
             const revenueChange = document.getElementById('todayRevenueChange');
             if (revenueChange) {
-                revenueChange.textContent = `${formatCurrency(dashboardData.metrics.today_revenue)} from completed jobs`;
+                revenueChange.textContent = isLedgerPrimary
+                    ? 'Persisted operating ledger'
+                    : `${formatCurrency(dashboardData.metrics.today_revenue)} from completed jobs`;
             }
-            document.getElementById('onTimeRate').textContent = dashboardData.metrics.on_time_rate + '%';
+            document.getElementById('onTimeRate').textContent = isLedgerPrimary ? (ledgerMetrics.dispatchReadyJobs || 0) : dashboardData.metrics.on_time_rate + '%';
 
             // Update badges
-            document.getElementById('overviewBadge').textContent = dashboardData.metrics.critical_jobs;
-            document.getElementById('jobsBadge').textContent = dashboardData.metrics.total_jobs;
+            document.getElementById('overviewBadge').textContent = isLedgerPrimary ? (ledgerMetrics.pendingApprovals || 0) : dashboardData.metrics.critical_jobs;
+            document.getElementById('jobsBadge').textContent = isLedgerPrimary ? (ledgerMetrics.openJobs || 0) : dashboardData.metrics.total_jobs;
             document.getElementById('workersBadge').textContent = dashboardData.workers.filter(w => w.status === 'available').length;
             document.getElementById('toolsBadge').textContent = dashboardData.tools.filter(t => t.status === 'available').length;
             document.getElementById('constructionBadge').textContent = dashboardData.construction?.summary?.activeProjects || 0;
@@ -4894,7 +4926,7 @@
                         <div class="detail-value">${escapeHtml(metrics.openJobs || 0)}</div>
                         <div class="detail-label">open jobs</div>
                     </button>
-                    <button class="detail-tile" type="button" data-testid="ledger-command-plan" onclick="showLedgerCommandPlan()">
+                    <button class="detail-tile" type="button" data-testid="ledger-command-plan-summary" onclick="showLedgerCommandPlan()">
                         <div class="detail-value">${escapeHtml(nextActions.length || 0)}</div>
                         <div class="detail-label">command plan</div>
                     </button>
@@ -5348,7 +5380,7 @@
             }, { missing: 0, open: 0, coverage: 0 });
             const averageCoverage = Math.round(totals.coverage / Math.max(1, vendors.length));
             return `
-                <div class="detail-section">
+                <div class="detail-section ledger-suite-roadmap">
                     <div class="contractor-suite-header">
                         <div>
                             <div class="action-queue-title">Best-of-suite roadmap</div>
@@ -13669,6 +13701,7 @@
             const aiReasoning = escapeHtml(job.ai_reasoning);
             const aiConfidence = escapeHtml(job.ai_confidence || '');
             const jobId = JSON.stringify(job.id);
+            const ledgerBacked = job.source === 'ledger' || Boolean(job.ledgerJobId);
             const readOnlyArchive = isArchivedJob(job);
             const archiveNote = normalizeStatus(job.status) === 'pending_archive_approval'
                 ? 'Archive approval is pending. The job is retained and locked until approval is resolved.'
@@ -13710,7 +13743,7 @@
                         </div>
                     ` : ''}
 
-                    ${!readOnlyArchive && job.status === 'pending' ? `
+                    ${!ledgerBacked && !readOnlyArchive && job.status === 'pending' ? `
                         <div class="job-actions">
                             <button class="btn btn-primary" onclick="event.stopPropagation(); executeAIPlan(${jobId})">
                                 🤖 Execute AI Plan
@@ -13721,7 +13754,7 @@
                         </div>
                     ` : ''}
 
-                    ${!readOnlyArchive && job.status === 'scheduled' ? `
+                    ${!ledgerBacked && !readOnlyArchive && job.status === 'scheduled' ? `
                         <div class="job-actions">
                             <button class="btn btn-success" onclick="event.stopPropagation(); startJob(${jobId})">
                                 ▶️ Start Job
@@ -13729,7 +13762,7 @@
                         </div>
                     ` : ''}
 
-                    ${!readOnlyArchive && job.status === 'in_progress' ? `
+                    ${!ledgerBacked && !readOnlyArchive && job.status === 'in_progress' ? `
                         <div class="job-actions">
                             <button class="btn btn-warning" onclick="event.stopPropagation(); completeJob(${jobId})">
                                 ✅ Complete Job
@@ -13737,7 +13770,9 @@
                         </div>
                     ` : ''}
                     <div class="job-actions">
-                        ${readOnlyArchive
+                        ${ledgerBacked
+                            ? `<button class="btn btn-primary" onclick="event.stopPropagation(); showLedgerJobDetail(${JSON.stringify(String(job.ledgerJobId || job.id))})">Open Ledger</button>`
+                            : readOnlyArchive
                             ? `<button class="btn btn-secondary" onclick="event.stopPropagation(); showJobDetails(${jobId})">View Retained Detail</button>`
                             : `
                                 <button class="btn btn-secondary" onclick="event.stopPropagation(); editJob(${jobId})">Edit</button>
@@ -14751,6 +14786,10 @@
         }
 
         function showNewJobForm() {
+            if (shouldUseServer()) {
+                showLedgerIntakeForm();
+                return;
+            }
             openFormModal('New Job', [
                 { name: 'clientName', label: 'Client name', required: true },
                 { name: 'clientPhone', label: 'Client phone', required: true },
@@ -15710,6 +15749,10 @@
         function showJobDetails(jobId) {
             const job = findDashboardJob(jobId);
             if (!job) return;
+            if (job.source === 'ledger' && shouldUseServer()) {
+                showLedgerJobDetail(job.ledgerJobId || job.id);
+                return;
+            }
 
             const worker = (dashboardData.workers || []).find(item =>
                 String(item.id) === String(job.assigned_worker_id || job.assignedWorkerId || '')

@@ -4676,6 +4676,11 @@ app.get('/api/dashboard', (req, res) => {
   const dashboardJobs = mergedLegacyAndLedgerJobs();
   const dashboardWorkers = mergedLegacyAndLedgerWorkers();
   const dashboardTools = mergedLegacyAndLedgerTools();
+  // Retain the established merged collections for compatibility, while exposing
+  // the durable ledger collections explicitly for the command-center dashboard.
+  const ledgerJobs = operatingLedger.listJobs({ limit: 500 }).map(mapLedgerJobForLegacy);
+  const ledgerWorkers = operatingLedger.listWorkers({ limit: 500 }).map(mapLedgerWorkerForLegacy);
+  const ledgerTools = operatingLedger.listTools({ limit: 500 }).map(mapLedgerToolForLegacy);
   const dashboardState = {
     jobs: dashboardJobs,
     workers: dashboardWorkers,
@@ -4693,6 +4698,7 @@ app.get('/api/dashboard', (req, res) => {
   res.json({
     apiVersion: '1.1.0',
     source: 'node',
+    dashboardSource: 'ledger',
     metrics: {
       criticalJobs,
       aiHandling,
@@ -4703,6 +4709,9 @@ app.get('/api/dashboard', (req, res) => {
     jobs: dashboardJobs,
     workers: dashboardWorkers,
     tools: dashboardTools,
+    ledgerJobs,
+    ledgerWorkers,
+    ledgerTools,
     construction: {
       summary: constructionSummary(),
       data: construction,
