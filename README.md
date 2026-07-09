@@ -11,6 +11,7 @@ The product goal is practical coordination: reduce Robert's manual follow-up, ke
 - SQLite-backed operating ledger in `operating-ledger.js`.
 - Durable local records for clients, jobs, tasks, quotes, workers, tools, materials, assignments, documents, progress, communication, time logs, expenses, invoices, approvals, audit events, route plans, weather assessments, safety/quality records, aftercare, recurring plans, and finance handoff packages.
 - Local upload handling for job evidence and documents under `UPLOAD_DIR`.
+- Operator-triggered live weather assessments through Open-Meteo, persisted with forecast provenance and converted into approval-gated schedule recommendations when risk is detected.
 - Approval gates for quotes, invoices, external communication, high-risk schedule/status changes, finance actions, worker/tool conflicts, safety/quality signoff, and other consequential records.
 - Approval-gated client portal links with hashed local tokens, a restricted client-facing job view, inbound client requests, expiry, revocation, and audit history.
 - Production/remote dashboard access guard with bearer token, `X-Contractor-AI-Token`, `X-API-Key`, or browser Basic Auth support.
@@ -73,6 +74,8 @@ Use `.env` for local settings. The supported root settings are documented in `.e
 - `CORS_ORIGINS`
 - `CONTRACTOR_AI_REQUIRE_AUTH`
 - `CONTRACTOR_AI_AUTH_TOKEN`
+- `WEATHER_PROVIDER_ENABLED`
+- `WEATHER_PROVIDER_TIMEOUT_MS`
 
 Do not put secrets in committed files. The current app is designed for local-first use. In production, dashboard/API authentication is required unless `CONTRACTOR_AI_REQUIRE_AUTH=false` is explicitly set for a trusted private host. Use transport security before exposing the app over a tunnel or public network.
 
@@ -137,6 +140,8 @@ Legacy-compatible endpoints such as `/api/jobs`, `/api/workers`, and `/api/tools
 ## Safety Model
 
 Contractor.AI may create internal drafts and records automatically, including tasks, tool lists, route plans, weather checks, worker instructions, aftercare drafts, recurring-service preparations, and invoice drafts.
+
+Live weather is fetched only when the operator selects a live assessment for a job. Each result records its forecast time, provider, location coordinates, and weather values in the job ledger. If the provider is disabled or unavailable, Contractor.AI records nothing and returns an explicit error; operators can still submit a manual field assessment with its own recommendation.
 
 The app must not silently:
 

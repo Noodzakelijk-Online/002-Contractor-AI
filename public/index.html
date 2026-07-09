@@ -2078,7 +2078,7 @@
                     <div class="panel-card">
                         <div class="panel-header">
                             <div class="panel-title">
-                                🌤️ Buienradar Weather
+                                Weather Readiness
                             </div>
                         </div>
                         <div class="weather-widget" id="weatherWidget">
@@ -4860,12 +4860,13 @@
             const container = document.getElementById('weatherWidget');
             if (!container) return;
             const weather = dashboardData.weather || {};
-            const precipitation = Number(weather.precipitation || 0);
-            const condition = weather.condition || (precipitation > 45 ? 'Rain risk' : 'Clear enough');
-            const temperature = weather.temperature !== undefined ? `${weather.temperature}\u00B0C` : 'n/a';
+            const hasAssessment = weather.source && weather.source !== 'not_assessed';
+            const precipitation = hasAssessment ? Number(weather.precipitation || 0) : null;
+            const condition = weather.condition || 'Assessment required';
+            const temperature = weather.temperature !== null && weather.temperature !== '' && Number.isFinite(Number(weather.temperature)) ? `${weather.temperature}\u00B0C` : 'n/a';
             const recommendation = weather.recommendation || 'Review field schedule against local conditions before dispatch.';
-            const outdoorStatus = precipitation > 45 ? 'Indoor jobs recommended' : 'Good for outdoor work';
-            const outdoorClass = precipitation > 45 ? 'condition-caution' : 'condition-good';
+            const outdoorStatus = !hasAssessment ? 'Assessment required' : weather.status === 'risk' || precipitation > 45 ? 'Indoor jobs recommended' : 'Good for outdoor work';
+            const outdoorClass = !hasAssessment || weather.status === 'risk' || precipitation > 45 ? 'condition-caution' : 'condition-good';
             const activeOutdoorJobs = (dashboardData.jobs || []).filter(job => {
                 const text = `${job.title} ${job.job_type} ${job.location}`.toLowerCase();
                 return ['gutter', 'garden', 'roof', 'exterior', 'outdoor'].some(term => text.includes(term))
@@ -4885,12 +4886,12 @@
                         <div class="weather-temp">${activeOutdoorJobs}</div>
                         <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">active outdoor-sensitive job(s)</div>
                     </div>
-                    <div class="weather-condition ${outdoorClass}">${precipitation}% rain risk</div>
+                    <div class="weather-condition ${outdoorClass}">${hasAssessment ? `${precipitation}% rain risk` : 'Not assessed'}</div>
                 </div>
                 <div class="weather-location">
                     <div>
                         <div class="weather-temp">Recommendation</div>
-                        <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">${escapeHtml(recommendation)}</div>
+                        <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7);">${escapeHtml(recommendation)}${weather.provider ? ` Source: ${escapeHtml(weather.provider)}.` : ''}</div>
                     </div>
                 </div>
                 <div class="weather-actions">
@@ -8016,6 +8017,10 @@
                 jobId = fallback.id;
             }
             openFormModal('Weather Assessment', [
+                { name: 'assessmentMode', label: 'Assessment source', type: 'select', value: 'live', options: [
+                    { value: 'live', label: 'Live forecast (Open-Meteo)' },
+                    { value: 'manual', label: 'Manual field assessment' }
+                ], full: true },
                 { name: 'condition', label: 'Condition', type: 'select', value: 'workable', options: [
                     { value: 'workable', label: 'Workable' },
                     { value: 'rain_risk', label: 'Rain risk' },
@@ -8025,14 +8030,18 @@
                 { name: 'precipitationPercent', label: 'Precipitation percent', type: 'number', value: '35' },
                 { name: 'recommendation', label: 'Recommendation', type: 'textarea', rows: 4, full: true }
             ], 'Assess Weather', async formData => {
-                const result = await apiRequest('/api/weather/assess', {
-                    method: 'POST',
-                    body: JSON.stringify({
+                const assessmentMode = String(formData.get('assessmentMode') || 'live');
+                const payload = assessmentMode === 'live'
+                    ? { jobId, live: true }
+                    : {
                         jobId,
                         condition: formData.get('condition'),
                         precipitationPercent: Number(formData.get('precipitationPercent') || 0),
                         recommendation: String(formData.get('recommendation') || '').trim()
-                    })
+                    };
+                const result = await apiRequest('/api/weather/assess', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
                 });
                 if (result.dashboard) {
                     dashboardData.ledger = result.dashboard;
@@ -8049,7 +8058,7 @@
                     await showLedgerScheduleRecommendation(jobId);
                     return;
                 }
-                showNotification('Weather assessment recorded.', 'success');
+                showNotification(assessmentMode === 'live' ? 'Live weather forecast recorded.' : 'Manual weather assessment recorded.', 'success');
                 showLedgerJobDetail(jobId);
             });
         }
@@ -13701,14 +13710,17 @@
             const aiReasoning = escapeHtml(job.ai_reasoning);
             const aiConfidence = escapeHtml(job.ai_confidence || '');
             const jobId = JSON.stringify(job.id);
+            const jobIdAttribute = escapeHtml(jobId);
             const ledgerBacked = job.source === 'ledger' || Boolean(job.ledgerJobId);
+            const ledgerJobId = escapeHtml(JSON.stringify(String(job.ledgerJobId || job.id)));
+            const ledgerOpenTestId = escapeHtml(`ledger-job-open-${String(job.ledgerJobId || job.id).replace(/[^a-zA-Z0-9_-]/g, '_')}`);
             const readOnlyArchive = isArchivedJob(job);
             const archiveNote = normalizeStatus(job.status) === 'pending_archive_approval'
                 ? 'Archive approval is pending. The job is retained and locked until approval is resolved.'
                 : 'Archived record retained for audit, closeout, and historical reporting.';
 
             return `
-                <div class="job-item ${job.priority}" onclick="showJobDetails(${jobId})">
+                <div class="job-item ${job.priority}" onclick="showJobDetails(${jobIdAttribute})">
                     <div class="job-header">
                         <div>
                             <div class="job-title">${title}</div>
@@ -13745,10 +13757,10 @@
 
                     ${!ledgerBacked && !readOnlyArchive && job.status === 'pending' ? `
                         <div class="job-actions">
-                            <button class="btn btn-primary" onclick="event.stopPropagation(); executeAIPlan(${jobId})">
+                            <button class="btn btn-primary" onclick="event.stopPropagation(); executeAIPlan(${jobIdAttribute})">
                                 🤖 Execute AI Plan
                             </button>
-                            <button class="btn btn-secondary" onclick="event.stopPropagation(); scheduleJob(${jobId})">
+                            <button class="btn btn-secondary" onclick="event.stopPropagation(); scheduleJob(${jobIdAttribute})">
                                 📅 Schedule
                             </button>
                         </div>
@@ -13756,7 +13768,7 @@
 
                     ${!ledgerBacked && !readOnlyArchive && job.status === 'scheduled' ? `
                         <div class="job-actions">
-                            <button class="btn btn-success" onclick="event.stopPropagation(); startJob(${jobId})">
+                            <button class="btn btn-success" onclick="event.stopPropagation(); startJob(${jobIdAttribute})">
                                 ▶️ Start Job
                             </button>
                         </div>
@@ -13764,19 +13776,19 @@
 
                     ${!ledgerBacked && !readOnlyArchive && job.status === 'in_progress' ? `
                         <div class="job-actions">
-                            <button class="btn btn-warning" onclick="event.stopPropagation(); completeJob(${jobId})">
+                            <button class="btn btn-warning" onclick="event.stopPropagation(); completeJob(${jobIdAttribute})">
                                 ✅ Complete Job
                             </button>
                         </div>
                     ` : ''}
                     <div class="job-actions">
                         ${ledgerBacked
-                            ? `<button class="btn btn-primary" onclick="event.stopPropagation(); showLedgerJobDetail(${JSON.stringify(String(job.ledgerJobId || job.id))})">Open Ledger</button>`
+                            ? `<button class="btn btn-primary" type="button" data-testid="${ledgerOpenTestId}" onclick="event.stopPropagation(); showLedgerJobDetail(${ledgerJobId})">Open Ledger</button>`
                             : readOnlyArchive
-                            ? `<button class="btn btn-secondary" onclick="event.stopPropagation(); showJobDetails(${jobId})">View Retained Detail</button>`
+                            ? `<button class="btn btn-secondary" onclick="event.stopPropagation(); showJobDetails(${jobIdAttribute})">View Retained Detail</button>`
                             : `
-                                <button class="btn btn-secondary" onclick="event.stopPropagation(); editJob(${jobId})">Edit</button>
-                                <button class="btn btn-warning" onclick="event.stopPropagation(); deleteJob(${jobId})">Delete</button>
+                                <button class="btn btn-secondary" onclick="event.stopPropagation(); editJob(${jobIdAttribute})">Edit</button>
+                                <button class="btn btn-warning" onclick="event.stopPropagation(); deleteJob(${jobIdAttribute})">Delete</button>
                             `}
                     </div>
                 </div>

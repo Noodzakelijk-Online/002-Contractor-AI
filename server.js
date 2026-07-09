@@ -5,10 +5,14 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { AutonomousContractorEngine } = require('./autonomous-engine');
 const { ContractorOperatingLedger, LEDGER_CAPABILITY_BLUEPRINT, JOB_OPERATING_PLAYBOOKS } = require('./operating-ledger');
+const { OpenMeteoWeatherService } = require('./weather-service');
 
 const app = express();
 const port = process.env.PORT || 3000;
 const autonomousEngine = new AutonomousContractorEngine();
+const weatherService = new OpenMeteoWeatherService({
+  enabled: process.env.WEATHER_PROVIDER_ENABLED !== 'false'
+});
 const dataDir = path.join(__dirname, 'data');
 const stateFile = process.env.STATE_FILE
   ? path.resolve(process.env.STATE_FILE)
@@ -3880,9 +3884,9 @@ const operatingLedger = new ContractorOperatingLedger({
   logger: log
 });
 
-function handleLedgerRequest(req, res, action, successStatus = 200) {
+async function handleLedgerRequest(req, res, action, successStatus = 200) {
   try {
-    const payload = action();
+    const payload = await action();
     return res.status(successStatus).json(payload);
   } catch (error) {
     const statusCode = error.statusCode || 500;
@@ -3890,7 +3894,7 @@ function handleLedgerRequest(req, res, action, successStatus = 200) {
       req,
       res,
       statusCode,
-      statusCode === 404 ? 'not_found' : statusCode === 400 ? 'bad_request' : statusCode === 409 ? 'conflict' : 'ledger_error',
+      error.code || (statusCode === 404 ? 'not_found' : statusCode === 400 ? 'bad_request' : statusCode === 409 ? 'conflict' : 'ledger_error'),
       error.message || 'Ledger request failed',
       serializeError(error)
     );
@@ -4694,6 +4698,7 @@ app.get('/api/dashboard', (req, res) => {
     .reduce((sum, job) => sum + Number(job.actualCost || job.estimatedCost || 0), 0);
   const autonomousSummary = autonomousEngine.summarizeState(dashboardState);
   const ledgerSummary = operatingLedger.dashboardSummary();
+  const weather = operatingLedger.weatherOverview();
 
   res.json({
     apiVersion: '1.1.0',
@@ -4719,13 +4724,7 @@ app.get('/api/dashboard', (req, res) => {
       operatingCatalog: buildContractorOperatingCatalog()
     },
     ledger: ledgerSummary,
-    weather: {
-      location: 'Amsterdam',
-      condition: 'Partly Cloudy',
-      temperature: 16,
-      precipitation: 20,
-      recommendation: 'Good conditions for outdoor work'
-    },
+    weather,
     aiInsights: autonomousEngine.generateInsights(dashboardState)
   });
 });
@@ -5642,12 +5641,39 @@ app.post('/api/communication', (req, res) => {
 });
 
 app.post('/api/weather/assess', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
+  return handleLedgerRequest(req, res, async () => {
     const jobId = req.body?.jobId || req.body?.job_id;
     const actor = req.body?.actor || 'dashboard';
-    const weather = operatingLedger.assessWeather(jobId, req.body || {}, { actor });
-    const job = operatingLedger.getJobDetail(jobId, { includeAudit: true });
-    const recommendationPayload = { ...(req.body || {}) };
+    let job = operatingLedger.getJobDetail(jobId, { includeAudit: true });
+    const input = req.body || {};
+    const liveRequested = input.live === true || input.useLiveWeather === true || input.use_live_weather === true;
+    const defaultForecastAt = input.forecastAt
+      || input.forecast_at
+      || job.scheduledStart
+      || job.targetCompletion
+      || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const liveForecast = liveRequested
+      ? await weatherService.assess({
+          ...input,
+          location: input.location || job.address || job.city || job.region,
+          address: input.address || job.address,
+          city: input.city || job.city,
+          region: input.region || job.region,
+          forecastAt: defaultForecastAt
+        })
+      : null;
+    const weatherPayload = liveForecast
+      ? {
+          ...input,
+          ...liveForecast,
+          source: liveForecast.source,
+          provider: liveForecast.provider,
+          weatherSensitive: input.weatherSensitive ?? input.weather_sensitive
+        }
+      : input;
+    const weather = operatingLedger.assessWeather(jobId, weatherPayload, { actor });
+    job = operatingLedger.getJobDetail(jobId, { includeAudit: true });
+    const recommendationPayload = { ...weatherPayload };
     if (!recommendationPayload.plannedStart && !recommendationPayload.planned_start) {
       const existingStart = job.scheduledStart || job.scheduled_start || job.plannedStart || job.planned_start || job.targetCompletion || job.requestedDate || job.requested_date;
       const start = existingStart ? new Date(existingStart) : new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -5661,6 +5687,12 @@ app.post('/api/weather/assess', (req, res) => {
     return {
       success: true,
       weather,
+      provider: liveForecast ? {
+        name: liveForecast.provider.name,
+        source: liveForecast.source,
+        fetchedAt: liveForecast.fetchedAt,
+        weatherDescription: liveForecast.weatherDescription
+      } : { name: 'manual_assessment', source: 'manual' },
       recommendation,
       nextActions: recommendation.nextActions || [],
       nextAction: (recommendation.nextActions || [])[0] || null,

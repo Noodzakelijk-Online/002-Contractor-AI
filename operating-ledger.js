@@ -7028,7 +7028,14 @@ class ContractorOperatingLedger {
         weatherSensitive: isOutdoor,
         source: payload.source || 'local_assessment',
         windKph: payload.windKph ?? payload.wind_kph ?? null,
-        temperatureC: payload.temperatureC ?? payload.temperature_c ?? null
+        windGustKph: payload.windGustKph ?? payload.wind_gust_kph ?? null,
+        temperatureC: payload.temperatureC ?? payload.temperature_c ?? null,
+        weatherCode: payload.weatherCode ?? payload.weather_code ?? null,
+        weatherDescription: payload.weatherDescription ?? payload.weather_description ?? null,
+        provider: payload.provider || null,
+        fetchedAt: payload.fetchedAt ?? payload.fetched_at ?? null,
+        latitude: payload.latitude ?? payload.lat ?? null,
+        longitude: payload.longitude ?? payload.lng ?? payload.lon ?? null
       }),
       timestamp
     );
@@ -7038,6 +7045,47 @@ class ContractorOperatingLedger {
       this.audit({ entityType: 'weather_assessment', entityId: id, jobId, action: 'assess_weather', actor: options.actor || 'Contractor.AI', after: weather });
     }
     return weather;
+  }
+
+  weatherOverview() {
+    const row = this.db.prepare(`
+      SELECT schedule_weather.*, jobs.title AS job_title
+      FROM schedule_weather
+      JOIN jobs ON jobs.id = schedule_weather.job_id
+      WHERE jobs.status NOT IN ('completed', 'cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval')
+      ORDER BY schedule_weather.created_at DESC
+      LIMIT 1
+    `).get();
+    if (!row) {
+      return {
+        status: 'not_assessed',
+        location: 'No assessed location',
+        condition: 'assessment_required',
+        temperature: null,
+        precipitation: null,
+        recommendation: 'Record a job weather assessment before committing outdoor work.',
+        source: 'not_assessed',
+        jobTitle: null,
+        forecastAt: null
+      };
+    }
+    const weather = this.mapWeather(row);
+    return {
+      status: ['rain_risk', 'wind_risk', 'storm_risk', 'visibility_risk'].includes(weather.condition) || weather.precipitationPercent >= 60 ? 'risk' : 'workable',
+      location: weather.location,
+      condition: weather.data?.weatherDescription || weather.condition,
+      temperature: weather.data?.temperatureC ?? null,
+      precipitation: weather.precipitationPercent,
+      windKph: weather.data?.windKph ?? null,
+      windGustKph: weather.data?.windGustKph ?? null,
+      recommendation: weather.recommendation,
+      source: weather.data?.source || 'local_assessment',
+      provider: weather.data?.provider?.name || null,
+      jobId: weather.jobId,
+      jobTitle: row.job_title,
+      forecastAt: weather.forecastAt,
+      assessedAt: weather.createdAt
+    };
   }
 
   scheduleRecommendationWindow(job = {}, payload = {}) {
@@ -10735,6 +10783,8 @@ class ContractorOperatingLedger {
       toolReservations: this.count('tool_reservations'),
       pendingToolReservations: Number(this.db.prepare("SELECT COUNT(*) AS count FROM tool_reservations WHERE status = 'pending_approval'").get().count || 0),
       toolReservationConflicts: toolReservationConflicts.length,
+      weatherAssessments: this.count('schedule_weather'),
+      weatherRisks: Number(this.db.prepare("SELECT COUNT(*) AS count FROM schedule_weather WHERE precipitation_percent >= 60 OR condition IN ('rain_risk', 'wind_risk', 'storm_risk', 'visibility_risk')").get().count || 0),
       openClientHandoverApprovals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND approval_type IN ('submittal_approval', 'client_selection_approval', 'punch_item_closeout', 'warranty_claim_resolution')").get().count || 0),
       dispatchReadyJobs: Number(this.db.prepare(`
         SELECT COUNT(DISTINCT jobs.id) AS count
