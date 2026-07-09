@@ -5,9 +5,13 @@ import logging
 # Make the package runnable both as `python advanced_ai_backend/main.py`
 # and from the repository root.
 sys.path.insert(0, os.path.dirname(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-from flask import Flask, send_from_directory
+from flask import Flask, jsonify, redirect, request
 from dotenv import load_dotenv
+from ledger_bridge import LedgerBridgeError, NodeLedgerBridge
 
 load_dotenv()
 
@@ -28,6 +32,49 @@ def _debug_enabled():
     return os.environ.get('FLASK_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
 
 
+ledger_bridge = NodeLedgerBridge()
+
+
+def _legacy_mutations_enabled():
+    return os.environ.get('CONTRACTOR_AI_ENABLE_LEGACY_PYTHON_MUTATIONS', '').lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _ledger_error(error):
+    return jsonify({
+        'error': {
+            'code': error.code,
+            'message': error.message,
+            'authoritativeSource': 'node_operating_ledger'
+        }
+    }), error.status_code
+
+
+@app.before_request
+def enforce_node_ledger_authority():
+    if request.path == '/api/dashboard':
+        try:
+            return jsonify(ledger_bridge.get_dashboard(request.headers.get('X-Request-Id')))
+        except LedgerBridgeError as error:
+            return _ledger_error(error)
+
+    if request.path == '/api/health':
+        return jsonify({
+            'status': 'compatibility_only',
+            'service': 'advanced_ai_backend.main',
+            'legacyMutationsEnabled': _legacy_mutations_enabled(),
+            'ledgerBridge': ledger_bridge.status()
+        })
+
+    if request.path.startswith('/api/') and not _legacy_mutations_enabled():
+        return jsonify({
+            'error': {
+                'code': 'legacy_backend_disabled',
+                'message': 'This Python backend is a disabled compatibility shim. Use the Node operating ledger API on the configured Contractor.AI service.',
+                'authoritativeSource': 'node_operating_ledger'
+            }
+        }), 410
+
+
 app.register_blueprint(user_bp, url_prefix='/api')
 
 default_database_uri = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
@@ -40,18 +87,18 @@ with app.app_context():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
-    static_folder_path = app.static_folder
-    if static_folder_path is None:
-            return "Static folder not configured", 404
-
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
-    else:
-        index_path = os.path.join(static_folder_path, 'index.html')
-        if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
-        else:
-            return "index.html not found", 404
+    dashboard_url = ledger_bridge.dashboard_url()
+    if path in {'', 'index.html'} and dashboard_url:
+        return redirect(dashboard_url)
+    if path in {'', 'index.html'}:
+        return jsonify({
+            'error': {
+                'code': 'ledger_not_configured',
+                'message': 'Configure CONTRACTOR_LEDGER_API_URL before opening the Contractor.AI dashboard.',
+                'authoritativeSource': 'node_operating_ledger'
+            }
+        }), 503
+    return jsonify({'error': {'code': 'not_found', 'message': 'Static legacy dashboard assets are disabled.'}}), 404
 
 
 if __name__ == '__main__':

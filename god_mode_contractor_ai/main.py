@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+from advanced_ai_backend.ledger_bridge import LedgerBridgeError, NodeLedgerBridge
 dashboard_static_folder = os.path.join(project_root, 'public')
 app = Flask(__name__, static_folder=dashboard_static_folder, static_url_path='')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY')
@@ -55,11 +58,37 @@ def _debug_enabled():
 
 
 CORS(app, resources={r"/api/*": {"origins": _cors_origins()}})
+ledger_bridge = NodeLedgerBridge()
+
+
+def _legacy_mutations_enabled():
+    return os.environ.get('CONTRACTOR_AI_ENABLE_LEGACY_PYTHON_MUTATIONS', '').lower() in {'1', 'true', 'yes', 'on'}
 
 
 @app.before_request
 def attach_request_id():
     g.request_id = request.headers.get('X-Request-Id') or str(uuid4())
+    if request.path == '/api/dashboard':
+        try:
+            return jsonify(ledger_bridge.get_dashboard(request_id()))
+        except LedgerBridgeError as error:
+            return _json_error(error.message, status=error.status_code, code=error.code)
+
+    if request.path == '/api/health':
+        return jsonify({
+            'status': 'compatibility_only',
+            'requestId': request_id(),
+            'service': 'god_mode_contractor_ai',
+            'legacyMutationsEnabled': _legacy_mutations_enabled(),
+            'ledgerBridge': ledger_bridge.status()
+        })
+
+    if request.path.startswith('/api/') and not _legacy_mutations_enabled():
+        return _json_error(
+            'This Python backend is a disabled compatibility shim. Use the Node operating ledger API on the configured Contractor.AI service.',
+            status=410,
+            code='legacy_backend_disabled'
+        )
 
 
 @app.after_request
@@ -766,32 +795,20 @@ with app.app_context():
 
 @app.route('/')
 def index():
-    """Serve main dashboard"""
-    static_folder = app.static_folder
-    if static_folder and os.path.exists(os.path.join(static_folder, 'index.html')):
-        return send_from_directory(static_folder, 'index.html')
-    return jsonify({
-        'message': 'God-Mode Contractor AI API',
-        'version': '1.0.0',
-        'status': 'online',
-        'features': [
-            'Job Analysis & Planning',
-            'Worker Assignment',
-            'Intelligent Scheduling',
-            'Multi-Modal Communication',
-            'Computer Vision',
-            'Predictive Analytics',
-            'IoT Integration'
-        ]
-    })
+    """Redirect dashboard traffic to the authoritative Node operating ledger."""
+    dashboard_url = ledger_bridge.dashboard_url()
+    if dashboard_url:
+        return redirect(dashboard_url)
+    return _json_error(
+        'Configure CONTRACTOR_LEDGER_API_URL before opening the Contractor.AI dashboard.',
+        status=503,
+        code='ledger_not_configured'
+    )
 
 @app.route('/<path:path>')
 def serve_static(path):
-    """Serve static files"""
-    static_folder = app.static_folder
-    if static_folder and os.path.exists(os.path.join(static_folder, path)):
-        return send_from_directory(static_folder, path)
-    return jsonify({'error': 'File not found'}), 404
+    """Static copies of the dashboard are disabled to avoid a split operating state."""
+    return _json_error('Static legacy dashboard assets are disabled.', status=404, code='not_found')
 
 
 # ============================================================================
