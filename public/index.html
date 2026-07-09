@@ -3417,7 +3417,7 @@
                 ? `${source === 'god-mode' ? 'God-Mode' : 'Server'} Online`
                 : status === 'connecting'
                     ? 'Connecting'
-                    : 'Local Mode';
+                    : 'Ledger Unavailable';
             indicator.title = lastServerSync
                 ? `Last server sync: ${lastServerSync.toLocaleString()}`
                 : 'No server synchronization yet';
@@ -3526,6 +3526,9 @@
         }
 
         function saveDashboardData() {
+            // Browser storage is only a cache of a successful ledger read, never
+            // an offline source of contractor jobs or operational decisions.
+            if (!shouldUseServer()) return;
             localStorage.setItem(STORAGE_KEY, JSON.stringify({
                 jobs: Array.isArray(dashboardData.jobs) ? dashboardData.jobs : [],
                 workers: Array.isArray(dashboardData.workers) ? dashboardData.workers : [],
@@ -3582,9 +3585,8 @@
                 return;
             }
 
-            await loadDashboardData(true);
-            showNotification('Dashboard restored to local demo data.', 'success');
-            addActivity('Dashboard reset', 'Local demo data restored.', 'info');
+            await loadDashboardData();
+            showNotification('The ledger is still unavailable. No local job data was created.', 'warning');
         }
 
         function escapeHtml(value) {
@@ -4467,8 +4469,8 @@
             showNotification(
                 shouldUseServer()
                     ? 'Contractor AI connected and synchronized.'
-                    : 'Contractor AI running in local mode.',
-                'success'
+                    : 'Ledger unavailable. This dashboard is read-only until the local API is running.',
+                shouldUseServer() ? 'success' : 'warning'
             );
         });
 
@@ -4480,6 +4482,15 @@
             window.addEventListener('unhandledrejection', function(event) {
                 recordRuntimeError(event.reason, 'Async');
             });
+
+            document.addEventListener('click', function(event) {
+                if (shouldUseServer()) return;
+                const control = event.target.closest('button[onclick], [data-testid][onclick]');
+                if (!control || control.matches('#systemStatusIndicator, [data-offline-allowed], #formModal .modal-close')) return;
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                showNotification('Start the local Contractor.AI API before creating or changing operational records.', 'warning');
+            }, true);
 
             // Navigation
             document.querySelectorAll('.header-nav-item').forEach(item => {
@@ -4589,8 +4600,8 @@
             }
         }
 
-        async function loadDashboardData(forceDemo = false) {
-            if (!forceDemo && await syncDashboardFromServer({ silent: true })) {
+        async function loadDashboardData() {
+            if (await syncDashboardFromServer({ silent: true })) {
                 const cachedActivity = loadSavedDashboardData()?.activityLog;
                 activityLog = Array.isArray(cachedActivity) && cachedActivity.length
                     ? cachedActivity
@@ -4600,37 +4611,36 @@
                 return;
             }
 
-            const savedData = forceDemo ? null : loadSavedDashboardData();
-            const jobs = savedData ? savedData.jobs : sampleJobs;
-            const workers = savedData ? savedData.workers : sampleWorkers;
-            const tools = savedData ? savedData.tools : sampleTools;
-            const construction = savedData ? savedData.construction : sampleConstruction;
-            const ledger = savedData?.ledger || null;
-            const aiInsights = savedData?.aiInsights || [];
-            const weather = savedData?.weather || {
-                location: 'Amsterdam',
-                recommendation: 'Good conditions for indoor planning and near-term field coordination.'
-            };
-            activityLog = Array.isArray(savedData?.activityLog)
-                ? savedData.activityLog
-                : [
-                    { title: 'Dashboard loaded', detail: 'System ready for autonomous planning.', time: new Date().toISOString(), type: 'info' }
-                ];
-
             dashboardData = {
-                jobs: jobs.map(normalizeJob),
-                workers: workers.map(normalizeWorker),
-                tools: tools.map(normalizeTool),
-                construction: normalizeConstructionPayload(construction),
-                ledger,
-                aiInsights,
-                weather,
-                metrics: calculateMetrics(jobs)
+                jobs: [],
+                workers: [],
+                tools: [],
+                construction: normalizeConstructionPayload({}),
+                ledger: null,
+                aiInsights: [],
+                weather: {
+                    status: 'not_assessed',
+                    location: 'Ledger unavailable',
+                    condition: 'assessment_required',
+                    temperature: null,
+                    precipitation: null,
+                    recommendation: 'Start the local API to load persisted weather assessments.',
+                    source: 'not_assessed'
+                },
+                metrics: calculateMetrics([]),
+                dashboardSource: 'offline'
             };
+            activityLog = [{
+                title: 'Ledger unavailable',
+                detail: CAN_USE_API
+                    ? 'The local API could not be reached. No cached or sample contractor data is shown.'
+                    : 'This page was opened as a file. Start Contractor.AI and open it through the local API.',
+                time: new Date().toISOString(),
+                type: 'warning'
+            }];
 
             setSystemStatus('offline', 'local');
             updateDashboard();
-            saveDashboardData();
         }
 
         function updateDashboard() {
@@ -4653,6 +4663,11 @@
             if (newIntakeButton && isLedgerPrimary) {
                 newIntakeButton.textContent = 'New Intake';
                 newIntakeButton.setAttribute('onclick', 'showLedgerIntakeForm()');
+            }
+            const resetButton = document.querySelector('button[onclick="resetDashboardData()"]');
+            if (resetButton) {
+                resetButton.textContent = shouldUseServer() ? 'Refresh Ledger Cache' : 'Retry Ledger Connection';
+                resetButton.setAttribute('data-offline-allowed', 'true');
             }
 
             // Update metrics
@@ -14798,76 +14813,11 @@
         }
 
         function showNewJobForm() {
-            if (shouldUseServer()) {
-                showLedgerIntakeForm();
+            if (!shouldUseServer()) {
+                showNotification('Start the local API before creating a job intake.', 'warning');
                 return;
             }
-            openFormModal('New Job', [
-                { name: 'clientName', label: 'Client name', required: true },
-                { name: 'clientPhone', label: 'Client phone', required: true },
-                { name: 'location', label: 'Location', required: true },
-                { name: 'priority', label: 'Priority', type: 'select', value: 'medium', options: [
-                    { value: 'low', label: 'Low' },
-                    { value: 'medium', label: 'Medium' },
-                    { value: 'high', label: 'High' },
-                    { value: 'critical', label: 'Critical' }
-                ] },
-                { name: 'estimatedCost', label: 'Estimated cost', type: 'number', value: '100' },
-                { name: 'description', label: 'Job description', type: 'textarea', required: true, full: true }
-            ], 'Create Job', async formData => {
-                const description = String(formData.get('description') || '').trim();
-                const newJob = {
-                    id: createId(),
-                    title: description,
-                    client_name: String(formData.get('clientName') || '').trim(),
-                    client_phone: String(formData.get('clientPhone') || '').trim(),
-                    location: String(formData.get('location') || '').trim(),
-                    job_type: "general_maintenance",
-                    priority: formData.get('priority') || 'medium',
-                    status: "pending",
-                    estimated_cost: Number(formData.get('estimatedCost') || 100),
-                    hourly_rate: 20,
-                    equipment_rate: 2.5,
-                    progress_percentage: 0,
-                    ai_reasoning: "New job analyzed. Suitable worker will be assigned based on location and skills.",
-                    ai_confidence: "medium"
-                };
-
-                if (shouldUseServer()) {
-                    await apiRequest('/api/jobs', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            title: newJob.title,
-                            client: newJob.client_name,
-                            client_name: newJob.client_name,
-                            phone: newJob.client_phone,
-                            client_phone: newJob.client_phone,
-                            address: newJob.location,
-                            location: newJob.location,
-                            description,
-                            message: description,
-                            urgency: newJob.priority,
-                            priority: newJob.priority,
-                            estimatedCost: newJob.estimated_cost,
-                            estimated_cost: newJob.estimated_cost
-                        })
-                    });
-                    await syncDashboardFromServer({ silent: true });
-                    closeFormModal();
-                    showNotification('New job created and analyzed by the server.', 'success');
-                    addActivity('Job created', `${newJob.client_name} - ${newJob.title}`, 'success');
-                    refreshCurrentView();
-                    return;
-                }
-
-                dashboardData.jobs.unshift(newJob);
-                closeFormModal();
-                showNotification('New job created. AI is ready to assign and schedule it.', 'success');
-                addActivity('Job created', `${newJob.client_name} - ${newJob.title}`, 'success');
-                updateDashboard();
-                saveDashboardData();
-                refreshCurrentView();
-            });
+            showLedgerIntakeForm();
         }
 
         function releaseLocalJobResources(job) {
