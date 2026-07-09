@@ -7182,8 +7182,13 @@ app.delete('/api/tools/:id', (req, res) => {
 });
 
 app.post('/api/ai/chat', (req, res) => {
-  const message = String(req.body?.message || '');
-  res.json(autonomousEngine.chat(message, currentState()));
+  return res.status(501).json({
+    error: {
+      code: 'chat_unavailable',
+      message: 'Conversational AI is unavailable until a verified provider is configured. Use the persisted command plan and ledger views instead.',
+      requestId: req.requestId
+    }
+  });
 });
 
 app.post('/api/simulate/client-request', (req, res) => {

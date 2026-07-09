@@ -89,6 +89,22 @@ test('legacy simulated chat endpoint is retired', async t => {
   assert.equal(result.body.error.code, 'legacy_chat_retired');
 });
 
+test('conversational AI fails closed until a verified provider is configured', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const result = await request(baseUrl, '/api/ai/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message: 'What should I do next?' })
+  });
+
+  assert.equal(result.response.status, 501);
+  assert.equal(result.body.error.code, 'chat_unavailable');
+});
+
 test('legacy autonomous cycle previews by default instead of mutating job state', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));

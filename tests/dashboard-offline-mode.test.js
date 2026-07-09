@@ -18,6 +18,7 @@ test('offline dashboard intercepts command buttons and routes new jobs to the AP
   assert.match(dashboardSource, /if \(!shouldUseServer\(\)\) \{\s*showNotification\('Start the local API before creating a job intake\.'/s);
   assert.match(dashboardSource, /data-testid="priority-new-intake"/);
   assert.match(dashboardSource, /onclick="showLedgerIntakeForm\(\)"/);
+  assert.match(dashboardSource, /const useLedgerPrimary = payload\.dashboardSource === 'ledger';/);
   assert.doesNotMatch(dashboardSource, /onclick="simulateClientRequest\(\)"/);
   assert.match(dashboardSource, /Retry Ledger Connection/);
 });
