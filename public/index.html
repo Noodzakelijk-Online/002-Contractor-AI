@@ -3490,6 +3490,12 @@
             return CAN_USE_API && apiStatus === 'online';
         }
 
+        function requireConstructionApi(operation) {
+            if (shouldUseServer()) return true;
+            showNotification(`${operation} requires the Contractor.AI API so the record remains durable and auditable.`, 'warning');
+            return false;
+        }
+
         function createId() {
             if (window.crypto && window.crypto.randomUUID) {
                 return window.crypto.randomUUID();
@@ -4224,6 +4230,7 @@
         }
 
         async function installConstructionSuiteBaseline() {
+            if (!requireConstructionApi('Suite blueprint installation')) return [];
             dashboardData.construction = normalizeConstructionPayload(dashboardData.construction || {});
             const baseline = createConstructionSuiteBaselineRecords();
             const added = [];
@@ -10724,6 +10731,7 @@
         }
 
         async function runConstructionWorkflow(workflowKey, options = {}) {
+            if (!requireConstructionApi('Construction workflows')) return null;
             const playbook = getConstructionWorkflow(workflowKey);
             if (!playbook) {
                 showNotification('Workflow playbook not found.', 'error');
@@ -12038,6 +12046,7 @@
         }
 
         async function runConstructionReview() {
+            if (!requireConstructionApi('Construction review')) return;
             showNotification('AI review is checking cost, RFI, submittal, safety, and resource risk...', 'info');
             if (shouldUseServer()) {
                 try {
@@ -12186,6 +12195,7 @@
         }
 
         function showConstructionForm() {
+            if (!requireConstructionApi('Construction records')) return;
             const template = getConstructionAcceleratorTemplate(currentConstructionCollection);
             const projectOptions = [
                 { value: '', label: 'None' },
@@ -13408,6 +13418,7 @@
         }
 
         async function runConstructionActionBatch(limit = 3, options = {}) {
+            if (!requireConstructionApi('Construction action batches')) return;
             refreshConstructionSummary();
             const queue = options.items || buildConstructionActionQueue(limit);
             if (!queue.length) {
@@ -13480,6 +13491,7 @@
         }
 
         async function runConstructionAction(collection, id, status) {
+            if (!requireConstructionApi('Construction actions')) return;
             const record = getConstructionRecords(collection).find(item => String(item.id) === String(id));
             if (!record) return;
             const label = constructionItemLabel(record, collection);
@@ -13511,6 +13523,7 @@
         }
 
         async function updateConstructionStatus(collection, id, status) {
+            if (!requireConstructionApi('Construction status updates')) return;
             const record = getConstructionRecords(collection).find(item => String(item.id) === String(id));
             if (!record) return;
             const label = constructionItemLabel(record, collection);
@@ -13540,6 +13553,7 @@
         }
 
         function editConstructionRecord(collection, id) {
+            if (!requireConstructionApi('Construction record editing')) return;
             const record = getConstructionRecords(collection).find(item => String(item.id) === String(id));
             if (!record) return;
             const module = CONSTRUCTION_COLLECTIONS.find(item => item.key === collection);
@@ -13590,6 +13604,7 @@
         }
 
         async function deleteConstructionRecord(collection, id) {
+            if (!requireConstructionApi('Construction archive requests')) return;
             const records = getConstructionRecords(collection);
             const index = records.findIndex(item => String(item.id) === String(id));
             if (index === -1) return;
@@ -14423,6 +14438,7 @@
         }
 
         async function runOperationsCycle() {
+            if (!requireConstructionApi('Operations cycles')) return;
             showNotification('Operations cycle is coordinating jobs, Build controls, and autonomous review...', 'info');
             if (shouldUseServer()) {
                 try {
@@ -14456,6 +14472,7 @@
         }
 
         async function runAutonomousEngine() {
+            if (!requireConstructionApi('Autonomous engine runs')) return;
             showNotification('AI engine is reviewing jobs, workers, tools, and schedule...', 'info');
             if (shouldUseServer()) {
                 try {

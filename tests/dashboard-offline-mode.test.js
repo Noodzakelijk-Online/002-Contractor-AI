@@ -22,3 +22,10 @@ test('offline dashboard intercepts command buttons and routes new jobs to the AP
   assert.doesNotMatch(dashboardSource, /onclick="simulateClientRequest\(\)"/);
   assert.match(dashboardSource, /Retry Ledger Connection/);
 });
+
+test('construction mutations require the durable API instead of creating offline records', () => {
+  assert.match(dashboardSource, /function requireConstructionApi\(operation\)/);
+  assert.match(dashboardSource, /async function runConstructionReview\(\) \{\s*if \(!requireConstructionApi\('Construction review'\)\) return;/s);
+  assert.match(dashboardSource, /async function runConstructionActionBatch\(limit = 3, options = \{\}\) \{\s*if \(!requireConstructionApi\('Construction action batches'\)\) return;/s);
+  assert.match(dashboardSource, /function showConstructionForm\(\) \{\s*if \(!requireConstructionApi\('Construction records'\)\) return;/s);
+});
