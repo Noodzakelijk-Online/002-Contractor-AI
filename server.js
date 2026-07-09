@@ -5366,6 +5366,26 @@ app.post('/api/ledger/jobs/:id/aftercare', (req, res) => {
   }), 201);
 });
 
+app.patch('/api/ledger/jobs/:id/lifecycle/:recordType/:recordId', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.transitionLifecycleRecord(
+      req.params.id,
+      req.params.recordType,
+      req.params.recordId,
+      req.body || {},
+      { actor: req.body?.actor || 'dashboard' }
+    );
+    return {
+      success: true,
+      record: result.record,
+      approval: result.approval,
+      approvalRequired: result.approvalRequired,
+      job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+});
+
 app.post('/api/ledger/jobs/:id/recurring-plans', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,

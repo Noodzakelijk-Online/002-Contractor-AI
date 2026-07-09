@@ -5198,7 +5198,7 @@
         function showLedgerActionForm(action, formHandler, fallbackHandler, missingMessage = 'No job context was found for this action.') {
             const jobId = ledgerActionJobId(action);
             if (jobId) {
-                formHandler(jobId);
+                formHandler(jobId, action);
                 return true;
             }
             if (typeof fallbackHandler === 'function') {
@@ -5467,19 +5467,19 @@
                 create_site_access_gate: showLedgerSiteAccessForm,
                 clear_site_access: showLedgerSiteAccessForm,
                 prepare_site_access: showLedgerSiteAccessForm,
-                resolve_observation: showLedgerObservationForm,
-                resolve_incident: showLedgerIncidentForm,
-                review_incident: showLedgerIncidentForm,
+                resolve_observation: (jobId, action) => showLedgerLifecycleTransitionForm(jobId, 'observation', action?.observationId),
+                resolve_incident: (jobId, action) => showLedgerLifecycleTransitionForm(jobId, 'incident', action?.incidentId),
+                review_incident: (jobId, action) => showLedgerLifecycleTransitionForm(jobId, 'incident', action?.incidentId),
                 safety_review: showLedgerSafetyForm,
                 complete_safety_check: showLedgerSafetyForm,
                 create_quality_check: showLedgerQualityForm,
                 complete_quality_review: showLedgerQualityForm,
                 create_punch_item: showLedgerPunchItemForm,
-                resolve_punch_item: showLedgerPunchItemForm,
+                resolve_punch_item: (jobId, action) => showLedgerLifecycleTransitionForm(jobId, 'punch_item', action?.punchItemId),
                 open_warranty_claim: showLedgerWarrantyClaimForm,
-                resolve_warranty_claim: showLedgerWarrantyClaimForm,
+                resolve_warranty_claim: (jobId, action) => showLedgerLifecycleTransitionForm(jobId, 'warranty_claim', action?.warrantyClaimId),
                 aftercare_follow_up: showLedgerAftercareForm,
-                complete_aftercare: showLedgerAftercareForm,
+                complete_aftercare: (jobId, action) => showLedgerLifecycleTransitionForm(jobId, 'aftercare', action?.aftercareId),
                 recurring_job_due: showLedgerRecurringForm,
                 propose_recurring_plan: showLedgerRecurringForm,
                 create_budget_line: showLedgerBudgetLineForm,
@@ -8625,6 +8625,93 @@
                 dashboardData.ledger = result.dashboard || dashboardData.ledger;
                 closeFormModal();
                 showNotification('Inspection saved. Completed, passed, or failed inspections require approval.', 'success');
+                showLedgerJobDetail(jobId);
+            });
+        }
+
+        function showLedgerLifecycleTransitionForm(jobId, recordType, recordId) {
+            const configs = {
+                observation: {
+                    label: 'Observation',
+                    defaultStatus: 'resolved',
+                    statuses: [
+                        { value: 'in_progress', label: 'Corrective work in progress' },
+                        { value: 'resolved', label: 'Resolved - approval required' },
+                        { value: 'closed', label: 'Closed - approval required' }
+                    ],
+                    detailLabel: 'Corrective action and evidence'
+                },
+                incident: {
+                    label: 'Incident',
+                    defaultStatus: 'resolved',
+                    statuses: [
+                        { value: 'under_review', label: 'Under review' },
+                        { value: 'escalated', label: 'Escalated - approval required' },
+                        { value: 'resolved', label: 'Resolved - approval required' },
+                        { value: 'closed', label: 'Closed - approval required' }
+                    ],
+                    detailLabel: 'Resolution and evidence'
+                },
+                punch_item: {
+                    label: 'Punch Item',
+                    defaultStatus: 'resolved',
+                    statuses: [
+                        { value: 'in_progress', label: 'Correction in progress' },
+                        { value: 'resolved', label: 'Resolved - approval required' },
+                        { value: 'verified', label: 'Verified - approval required' },
+                        { value: 'closed', label: 'Closed - approval required' }
+                    ],
+                    detailLabel: 'Correction and verification evidence'
+                },
+                warranty_claim: {
+                    label: 'Warranty Claim',
+                    defaultStatus: 'resolved',
+                    statuses: [
+                        { value: 'under_review', label: 'Under review' },
+                        { value: 'resolved', label: 'Resolved - approval required' },
+                        { value: 'rejected', label: 'Rejected - approval required' },
+                        { value: 'closed', label: 'Closed - approval required' }
+                    ],
+                    detailLabel: 'Resolution and supporting evidence'
+                },
+                aftercare: {
+                    label: 'Aftercare Item',
+                    defaultStatus: 'completed',
+                    statuses: [
+                        { value: 'in_progress', label: 'Follow-up in progress' },
+                        { value: 'completed', label: 'Completed' },
+                        { value: 'closed', label: 'Closed' }
+                    ],
+                    detailLabel: 'Follow-up outcome'
+                }
+            };
+            const config = configs[String(recordType || '')];
+            if (!config || !recordId) {
+                showLedgerJobDetail(jobId);
+                showNotification('The selected record could not be identified. Review the job ledger before creating a new record.', 'warning');
+                return;
+            }
+            openFormModal(`Update ${config.label}`, [
+                { name: 'status', label: 'Outcome', type: 'select', value: config.defaultStatus, options: config.statuses },
+                { name: 'notes', label: config.detailLabel, type: 'textarea', rows: 4, required: true, full: true },
+                { name: 'evidence', label: 'Photo or document references', type: 'textarea', rows: 2, full: true }
+            ], 'Save Transition', async formData => {
+                const result = await apiRequest(`/api/ledger/jobs/${encodeURIComponent(jobId)}/lifecycle/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                        status: formData.get('status'),
+                        notes: String(formData.get('notes') || '').trim(),
+                        evidence: ledgerSplitList(formData.get('evidence')),
+                        actor: 'dashboard'
+                    })
+                });
+                dashboardData.ledger = result.dashboard || dashboardData.ledger;
+                closeFormModal();
+                const outcome = result.approvalRequired
+                    ? 'The transition is stored and waiting for explicit approval.'
+                    : 'The record was updated in the operating ledger.';
+                showNotification(outcome, result.approvalRequired ? 'warning' : 'success');
+                addActivity(`${config.label} updated`, outcome, result.approvalRequired ? 'warning' : 'success');
                 showLedgerJobDetail(jobId);
             });
         }

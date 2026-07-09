@@ -6766,6 +6766,260 @@ class ContractorOperatingLedger {
     return aftercare;
   }
 
+  transitionLifecycleRecord(jobId, recordType, recordId, payload = {}, options = {}) {
+    this.requireJob(jobId);
+    const actor = options.actor || 'Contractor.AI';
+    const normalizedType = normalizeStatus(recordType, '');
+    const config = {
+      observation: {
+        table: 'observation_records',
+        targetType: 'observation_record',
+        map: row => this.mapObservation(row),
+        label: 'observation',
+        allowedStatuses: new Set(['open', 'in_progress', 'resolved', 'closed']),
+        approvalStatuses: new Set(['resolved', 'closed']),
+        approvalForHighRisk: true,
+        terminalStatuses: new Set(['resolved', 'closed']),
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            responsible: payload.responsible || payload.owner || row.responsible,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            closedAt: next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE observation_records
+            SET title = ?, status = ?, responsible = ?, due_at = ?, closed_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.responsible, values.dueAt, values.closedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      incident: {
+        table: 'incident_records',
+        targetType: 'incident_record',
+        map: row => this.mapIncident(row),
+        label: 'incident',
+        allowedStatuses: new Set(['reported', 'under_review', 'escalated', 'resolved', 'closed']),
+        approvalStatuses: new Set(['escalated', 'resolved', 'closed']),
+        approvalForHighRisk: true,
+        terminalStatuses: new Set(['resolved', 'closed']),
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            resolvedAt: next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE incident_records
+            SET title = ?, status = ?, resolved_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.resolvedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      punch_item: {
+        table: 'punch_items',
+        targetType: 'punch_item',
+        map: row => this.mapPunchItem(row),
+        label: 'punch item',
+        allowedStatuses: new Set(['open', 'in_progress', 'resolved', 'verified', 'closed']),
+        approvalStatuses: new Set(['resolved', 'verified', 'closed']),
+        terminalStatuses: new Set(['resolved', 'verified', 'closed']),
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            assignee: payload.assignee || payload.owner || row.assignee,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            closedAt: next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE punch_items
+            SET title = ?, status = ?, assignee = ?, due_at = ?, closed_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.assignee, values.dueAt, values.closedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      warranty_claim: {
+        table: 'warranty_claims',
+        targetType: 'warranty_claim',
+        map: row => this.mapWarrantyClaim(row),
+        label: 'warranty claim',
+        allowedStatuses: new Set(['open', 'under_review', 'resolved', 'rejected', 'closed']),
+        approvalStatuses: new Set(['resolved', 'rejected', 'closed']),
+        terminalStatuses: new Set(['resolved', 'rejected', 'closed']),
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            resolvedAt: next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE warranty_claims
+            SET title = ?, status = ?, due_at = ?, resolved_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.dueAt, values.resolvedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      aftercare: {
+        table: 'aftercare_items',
+        targetType: null,
+        map: row => this.mapAftercareItem(row),
+        label: 'aftercare item',
+        allowedStatuses: new Set(['open', 'in_progress', 'completed', 'closed']),
+        approvalStatuses: new Set(),
+        terminalStatuses: new Set(['completed', 'closed']),
+        update(row, next) {
+          return {
+            status: next.status,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            owner: payload.owner || payload.assignee || row.owner,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            completedAt: next.closedAt,
+            notes: payload.notes || payload.note || row.notes
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE aftercare_items
+            SET title = ?, status = ?, owner = ?, due_at = ?, completed_at = ?, notes = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.owner, values.dueAt, values.completedAt, values.notes, toJson(values.data), timestamp, recordId, jobId);
+        }
+      }
+    }[normalizedType];
+
+    if (!config) {
+      const error = new Error('Unsupported lifecycle record type');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return this.transaction(() => {
+      const row = this.db.prepare(`SELECT * FROM ${config.table} WHERE id = ? AND job_id = ?`).get(recordId, jobId);
+      if (!row) {
+        const error = new Error(`${config.label} not found for this job`);
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const requestedStatus = normalizeStatus(payload.status, row.status);
+      if (!config.allowedStatuses.has(requestedStatus)) {
+        const error = new Error(`Unsupported ${config.label} status`);
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const before = config.map(row);
+      const timestamp = nowIso();
+      const highRiskTransition = config.approvalForHighRisk === true
+        && ['high', 'critical'].includes(normalizePriority(row.severity));
+      const needsApproval = normalizeBoolean(
+        payload.requiresApproval,
+        config.approvalStatuses.has(requestedStatus) || highRiskTransition
+      );
+      const existingData = fromJson(row.data_json, {});
+      const transition = {
+        requestedStatus,
+        note: payload.notes || payload.note || null,
+        correctiveAction: payload.correctiveAction || payload.corrective_action || null,
+        resolution: payload.resolution || null,
+        evidence: normalizeList(payload.evidence || payload.photos),
+        requestedBy: actor,
+        requestedAt: timestamp
+      };
+      const nextData = {
+        ...existingData,
+        requestedStatus,
+        lifecycleTransition: transition
+      };
+      const storedStatus = needsApproval && config.approvalStatuses.has(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+      const next = {
+        status: storedStatus,
+        approvalId: row.approval_id || null,
+        data: nextData,
+        closedAt: config.terminalStatuses.has(requestedStatus) && !needsApproval
+          ? (payload.closedAt || payload.closed_at || payload.resolvedAt || payload.resolved_at || timestamp)
+          : null
+      };
+
+      let approval = null;
+      if (needsApproval && config.targetType) {
+        const pending = this.db.prepare(`
+          SELECT * FROM approvals
+          WHERE target_type = ? AND target_id = ? AND status = 'pending'
+          ORDER BY created_at DESC
+          LIMIT 1
+        `).get(config.targetType, recordId);
+        if (pending) {
+          this.db.prepare(`
+            UPDATE approvals
+            SET summary = ?, reason = ?, data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(
+            `Approve ${config.label} transition to ${requestedStatus}`,
+            `Changing this ${config.label} to ${requestedStatus} can affect safety, closeout, or client commitments and requires explicit review.`,
+            toJson({ requestedStatus, transition }),
+            timestamp,
+            pending.id
+          );
+          approval = this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.id));
+        } else {
+          approval = this.createApproval({
+            targetType: config.targetType,
+            targetId: recordId,
+            jobId,
+            approvalType: `${normalizedType}_lifecycle_transition`,
+            summary: `Approve ${config.label} transition to ${requestedStatus}`,
+            reason: `Changing this ${config.label} to ${requestedStatus} can affect safety, closeout, or client commitments and requires explicit review.`,
+            data: { requestedStatus, transition }
+          }, { actor, audit: false });
+        }
+        next.approvalId = approval.id;
+      }
+
+      const values = config.update(row, next);
+      config.save.call(this, recordId, values, timestamp);
+      const afterRow = this.db.prepare(`SELECT * FROM ${config.table} WHERE id = ?`).get(recordId);
+      const record = config.map(afterRow);
+      this.audit({
+        entityType: config.targetType || 'aftercare_item',
+        entityId: recordId,
+        jobId,
+        action: `transition_${normalizedType}`,
+        actor,
+        before,
+        after: record,
+        metadata: {
+          requestedStatus,
+          approvalId: approval?.id || null,
+          approvalRequired: Boolean(approval)
+        }
+      });
+      return { record, approval, approvalRequired: Boolean(approval) };
+    });
+  }
+
   createRecurringPlan(jobId, payload = {}, options = {}) {
     const job = this.requireJob(jobId);
     const actor = options.actor || 'Contractor.AI';
@@ -8928,9 +9182,24 @@ class ContractorOperatingLedger {
         if (overdueReplies.length || waitingReplies.length) nextActions.push({ type: 'client_reply_follow_up', label: 'Draft client reply follow-up', requiresApproval: true });
         if (pendingSelections.length && !overdueSelections.length) nextActions.push({ type: 'review_client_selection', label: 'Review pending client selection', requiresApproval: false });
         if (closeoutMissing) nextActions.push({ type: 'prepare_closeout', label: 'Create closeout pack and client handover draft', requiresApproval: true });
-        if (openPunchItems.length) nextActions.push({ type: 'resolve_punch_item', label: 'Resolve punch item before acceptance', requiresApproval: true });
-        if (openWarrantyClaims.length) nextActions.push({ type: 'resolve_warranty_claim', label: 'Resolve warranty or aftercare claim', requiresApproval: true });
-        if (dueAftercare.length) nextActions.push({ type: 'complete_aftercare', label: 'Complete aftercare follow-up', requiresApproval: false });
+        if (openPunchItems.length) nextActions.push({
+          type: 'resolve_punch_item',
+          label: 'Resolve punch item before acceptance',
+          punchItemId: openPunchItems[0].id,
+          requiresApproval: true
+        });
+        if (openWarrantyClaims.length) nextActions.push({
+          type: 'resolve_warranty_claim',
+          label: 'Resolve warranty or aftercare claim',
+          warrantyClaimId: openWarrantyClaims[0].id,
+          requiresApproval: true
+        });
+        if (dueAftercare.length) nextActions.push({
+          type: 'complete_aftercare',
+          label: 'Complete aftercare follow-up',
+          aftercareId: dueAftercare[0].id,
+          requiresApproval: false
+        });
         if (!activeRecurringPlans.length && completedStatuses.has(jobStatus) && /garden|maintenance|clean|service|aftercare|warranty/i.test(`${detail.jobType} ${detail.title}`)) {
           nextActions.push({ type: 'propose_recurring_plan', label: 'Propose recurring maintenance plan', requiresApproval: true });
         }
@@ -9795,7 +10064,12 @@ class ContractorOperatingLedger {
         const fieldStatus = this.classifyFieldAssuranceReadiness(flags);
         const nextActions = [];
         if (flags.approvalRequired) nextActions.push({ type: 'review_field_approval', label: 'Review field assurance approval gates', requiresApproval: false });
-        if (openIncidents.length) nextActions.push({ type: 'resolve_incident', label: 'Resolve open incident before work proceeds', requiresApproval: true });
+        if (openIncidents.length) nextActions.push({
+          type: 'resolve_incident',
+          label: 'Resolve open incident before work proceeds',
+          incidentId: openIncidents[0].id,
+          requiresApproval: true
+        });
         if (siteAccessBlocks.length) nextActions.push({ type: 'clear_site_access', label: 'Clear site access and orientation blockers', requiresApproval: true });
         if (safetyGap) nextActions.push({ type: 'prepare_safety_pack', label: 'Prepare JHA, SDS, safety talk, and access evidence', requiresApproval: false });
         if (jhas.length) nextActions.push({ type: 'review_jha', label: 'Review JHA and work method controls', requiresApproval: true });
@@ -9804,10 +10078,20 @@ class ContractorOperatingLedger {
         if (submittalReviews.length) nextActions.push({ type: 'review_submittal', label: 'Review submittal package before procurement or install', requiresApproval: true });
         if (permitReviews.length || expiringPermits.length) nextActions.push({ type: 'review_permit', label: 'Resolve permit or compliance expiry risk', requiresApproval: true });
         if (inspectionReviews.length) nextActions.push({ type: 'review_inspection', label: 'Review inspection defects and sign-off', requiresApproval: true });
-        if (openObservations.length) nextActions.push({ type: 'resolve_observation', label: 'Close safety or quality observation', requiresApproval: true });
+        if (openObservations.length) nextActions.push({
+          type: 'resolve_observation',
+          label: 'Close safety or quality observation',
+          observationId: openObservations[0].id,
+          requiresApproval: true
+        });
         if (qualityOpen.length) nextActions.push({ type: 'complete_quality_review', label: 'Complete quality review and defect decision', requiresApproval: true });
         if (safetyOpen.length && !openIncidents.length) nextActions.push({ type: 'complete_safety_check', label: 'Complete safety check and hazard decision', requiresApproval: true });
-        if (punchOpen.length) nextActions.push({ type: 'resolve_punch_item', label: 'Resolve punch item before acceptance', requiresApproval: true });
+        if (punchOpen.length) nextActions.push({
+          type: 'resolve_punch_item',
+          label: 'Resolve punch item before acceptance',
+          punchItemId: punchOpen[0].id,
+          requiresApproval: true
+        });
         if (evidenceMissing) nextActions.push({ type: 'capture_field_evidence', label: 'Capture photo, document, field report, or progress evidence', requiresApproval: false });
 
         return {
