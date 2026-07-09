@@ -12,6 +12,7 @@ The product goal is practical coordination: reduce Robert's manual follow-up, ke
 - Durable local records for clients, jobs, tasks, quotes, workers, tools, materials, assignments, documents, progress, communication, time logs, expenses, invoices, approvals, audit events, route plans, weather assessments, safety/quality records, aftercare, recurring plans, and finance handoff packages.
 - Local upload handling for job evidence and documents under `UPLOAD_DIR`.
 - Approval gates for quotes, invoices, external communication, high-risk schedule/status changes, finance actions, worker/tool conflicts, safety/quality signoff, and other consequential records.
+- Approval-gated client portal links with hashed local tokens, a restricted client-facing job view, inbound client requests, expiry, revocation, and audit history.
 - Production/remote dashboard access guard with bearer token, `X-Contractor-AI-Token`, `X-API-Key`, or browser Basic Auth support.
 - Destructive dashboard actions retain records and route archive/delete intent through approval records instead of silently removing operational history.
 - Autonomous cycle endpoints that create internal drafts, tasks, checks, reminders, invoice drafts, and approval-gated communications without sending external messages.
@@ -102,6 +103,15 @@ Ledger:
 - `POST /api/ledger/jobs/:id/expenses`
 - `POST /api/ledger/jobs/:id/invoices`
 - `POST /api/ledger/jobs/:id/closeout`
+- `GET /api/ledger/jobs/:id/client-portal-access`
+- `POST /api/ledger/jobs/:id/client-portal-access`
+- `POST /api/ledger/client-portal-access/:id/revoke`
+
+Client portal:
+
+- `GET /client-portal.html#token=<portal-token>`
+- `GET /api/client-portal/:token`
+- `POST /api/client-portal/:token/messages`
 
 Operations:
 
@@ -138,6 +148,8 @@ The app must not silently:
 - bypass approval records for consequential actions.
 
 Approval records and audit events are the source of truth for consequential actions.
+
+Client portal links are disabled until their corresponding approval is resolved. The database stores only a SHA-256 hash of the access token; the raw link is shown to the operator once when it is created. The portal exposes only client-safe job context and records messages as inbound requests. It cannot approve scope, price, dates, safety, or payment decisions.
 
 ## Tests
 

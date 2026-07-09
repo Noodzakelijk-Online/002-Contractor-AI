@@ -9,7 +9,7 @@
     "dev": "node server.js",
     "lint": "eslint .",
     "serve": "node server.js",
-    "test": "node --test tests/approval-decision.test.js tests/auth-guard.test.js tests/autonomous-engine.test.js tests/autonomous-finance.test.js tests/autonomous-open-loops.test.js tests/client-followup.test.js tests/client-success.test.js tests/communication-safety.test.js tests/dispatch-readiness.test.js tests/field-assurance.test.js tests/finance-readiness.test.js tests/inventory-readiness.test.js tests/job-evidence-cost.test.js tests/job-playbooks.test.js tests/learning-profile.test.js tests/legacy-job-subresources.test.js tests/legacy-ledger-compat.test.js tests/legacy-resource-compat.test.js tests/schedule-approval.test.js tests/server-api.test.js tests/workforce-readiness.test.js"
+    "test": "node --test tests/approval-decision.test.js tests/auth-guard.test.js tests/autonomous-engine.test.js tests/autonomous-finance.test.js tests/autonomous-open-loops.test.js tests/client-followup.test.js tests/client-portal.test.js tests/client-success.test.js tests/communication-safety.test.js tests/dispatch-readiness.test.js tests/field-assurance.test.js tests/finance-readiness.test.js tests/inventory-readiness.test.js tests/job-evidence-cost.test.js tests/job-playbooks.test.js tests/learning-profile.test.js tests/legacy-job-subresources.test.js tests/legacy-ledger-compat.test.js tests/legacy-resource-compat.test.js tests/schedule-approval.test.js tests/server-api.test.js tests/workforce-readiness.test.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.0.1",

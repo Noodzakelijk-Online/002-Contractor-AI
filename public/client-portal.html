@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Contractor.AI - Uw project</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, sans-serif; color: #172221; background: #f4f7f5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; }
+    header { background: #173f38; color: #fff; padding: 1.25rem max(1rem, calc((100% - 1040px) / 2)); }
+    header strong { display: block; font-size: 1.1rem; }
+    header span { color: #d5e8e2; font-size: .9rem; }
+    main { max-width: 1040px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
+    h1 { font-size: clamp(1.55rem, 3vw, 2.35rem); margin: 0 0 .4rem; }
+    h2 { font-size: 1.05rem; margin: 0 0 .85rem; }
+    p { line-height: 1.5; }
+    .notice { border-left: 4px solid #357e6c; background: #e8f3ef; padding: .8rem 1rem; margin: 1rem 0; }
+    .error { border-left-color: #b54747; background: #fcebec; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+    section { background: #fff; border: 1px solid #d9e2de; border-radius: 6px; padding: 1rem; }
+    section.wide { grid-column: 1 / -1; }
+    .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin: 1rem 0 0; }
+    .fact { padding: .7rem; background: #f7f9f8; border: 1px solid #e3eae6; }
+    .label { color: #5f6e69; display: block; font-size: .78rem; margin-bottom: .2rem; }
+    .status { display: inline-block; border-radius: 999px; padding: .25rem .6rem; background: #dff2e9; color: #165743; font-size: .8rem; font-weight: 700; text-transform: capitalize; }
+    ul { margin: 0; padding-left: 1.1rem; }
+    li { margin: .45rem 0; line-height: 1.4; }
+    form { display: grid; gap: .7rem; }
+    label { font-weight: 700; font-size: .9rem; }
+    input, textarea { width: 100%; border: 1px solid #aebdb7; border-radius: 4px; font: inherit; padding: .65rem; }
+    textarea { min-height: 8rem; resize: vertical; }
+    button { justify-self: start; border: 0; border-radius: 4px; background: #1d6d5e; color: #fff; cursor: pointer; font: inherit; font-weight: 700; padding: .7rem 1rem; }
+    button:disabled { cursor: wait; opacity: .65; }
+    .muted { color: #5f6e69; }
+    .hidden { display: none; }
+    @media (max-width: 640px) { .grid, .facts { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header><strong>Contractor.AI</strong><span>Veilige projectinzage</span></header>
+  <main>
+    <div id="loading" class="notice">Uw project wordt geladen...</div>
+    <div id="error" class="notice error hidden"></div>
+    <div id="portal" class="hidden">
+      <h1 id="job-title"></h1>
+      <p id="job-description" class="muted"></p>
+      <div id="job-status" class="status"></div>
+      <div class="facts">
+        <div class="fact"><span class="label">Werkadres</span><span id="job-address"></span></div>
+        <div class="fact"><span class="label">Voortgang</span><span id="job-progress"></span></div>
+        <div class="fact"><span class="label">Gepland</span><span id="job-schedule"></span></div>
+        <div class="fact"><span class="label">Verwachte afronding</span><span id="job-target"></span></div>
+      </div>
+      <div class="grid">
+        <section><h2>Afspraak</h2><ul id="visits"></ul></section>
+        <section><h2>Keuzes</h2><ul id="selections"></ul></section>
+        <section class="wide"><h2>Projectupdates</h2><ul id="updates"></ul></section>
+        <section class="wide"><h2>Beschikbare documenten</h2><ul id="documents"></ul></section>
+        <section class="wide">
+          <h2>Stuur een bericht</h2>
+          <p class="muted">Uw bericht komt als verzoek in het projectdossier. Het is geen bevestiging van prijs, planning, extra werk of veiligheid.</p>
+          <form id="message-form">
+            <div><label for="subject">Onderwerp</label><input id="subject" name="subject" maxlength="240" value="Vraag over mijn project"></div>
+            <div><label for="body">Bericht</label><textarea id="body" name="body" maxlength="5000" required></textarea></div>
+            <button id="send" type="submit">Verstuur bericht</button>
+            <div id="message-result" class="muted" aria-live="polite"></div>
+          </form>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script>
+    const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+    const byId = id => document.getElementById(id);
+    const formatDate = value => value ? new Intl.DateTimeFormat('nl-NL', { dateStyle: 'medium', timeStyle: value.includes('T') ? 'short' : undefined }).format(new Date(value)) : 'Nog niet gepland';
+    const list = (id, items, makeText, emptyText) => {
+      const node = byId(id);
+      node.replaceChildren();
+      if (!items.length) {
+        const item = document.createElement('li');
+        item.textContent = emptyText;
+        node.append(item);
+        return;
+      }
+      items.forEach(entry => {
+        const item = document.createElement('li');
+        item.textContent = makeText(entry);
+        node.append(item);
+      });
+    };
+    const showError = text => {
+      byId('loading').classList.add('hidden');
+      byId('error').textContent = text;
+      byId('error').classList.remove('hidden');
+    };
+    async function loadPortal() {
+      if (token.length < 32) return showError('Deze projectlink is ongeldig of verlopen. Vraag om een nieuwe link.');
+      try {
+        const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.error?.message || 'Deze projectlink is niet beschikbaar.');
+        const job = payload.job;
+        byId('job-title').textContent = job.title || 'Uw project';
+        byId('job-description').textContent = job.description || 'Projectinformatie wordt bijgewerkt.';
+        byId('job-status').textContent = String(job.status || 'in behandeling').replace(/_/g, ' ');
+        byId('job-address').textContent = job.address || 'Wordt bevestigd';
+        byId('job-progress').textContent = `${Math.round(Number(job.progressPercent || 0))}%`;
+        byId('job-schedule').textContent = job.scheduledStart ? `${formatDate(job.scheduledStart)}${job.scheduledEnd ? ` tot ${formatDate(job.scheduledEnd)}` : ''}` : 'Nog niet gepland';
+        byId('job-target').textContent = formatDate(job.targetCompletion);
+        list('visits', job.siteVisits || [], item => `${item.visitType || 'Afspraak'}: ${item.status || 'gepland'} - ${formatDate(item.scheduledAt)}`, 'Nog geen afspraak gepland.');
+        list('selections', job.selections || [], item => `${item.title || 'Keuze'}: ${String(item.status || 'open').replace(/_/g, ' ')}${item.dueAt ? ` - uiterlijk ${formatDate(item.dueAt)}` : ''}`, 'Er staan geen keuzes open.');
+        list('updates', job.updates || [], item => `${item.subject || 'Projectupdate'}: ${item.body || ''}`, 'Er zijn nog geen gepubliceerde projectupdates.');
+        list('documents', job.documents || [], item => `${item.title || 'Document'} (${item.type || 'document'})`, 'Er zijn nog geen documenten beschikbaar.');
+        byId('loading').classList.add('hidden');
+        byId('portal').classList.remove('hidden');
+      } catch (error) {
+        showError(error.message || 'Deze projectlink is niet beschikbaar.');
+      }
+    }
+    byId('message-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const send = byId('send');
+      const result = byId('message-result');
+      send.disabled = true;
+      result.textContent = 'Bericht wordt opgeslagen...';
+      try {
+        const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/messages`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject: byId('subject').value, body: byId('body').value })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.error?.message || 'Bericht kon niet worden opgeslagen.');
+        byId('body').value = '';
+        result.textContent = 'Uw bericht is toegevoegd aan het projectdossier.';
+      } catch (error) {
+        result.textContent = error.message || 'Bericht kon niet worden opgeslagen.';
+      } finally {
+        send.disabled = false;
+      }
+    });
+    loadPortal();
+  </script>
+</body>
+</html>

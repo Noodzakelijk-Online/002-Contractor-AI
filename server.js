@@ -362,6 +362,11 @@ function log(level, message, meta = {}) {
   }
 }
 
+function logSafeRequestPath(req) {
+  return String(req.originalUrl || req.path || '')
+    .replace(/(\/api\/client-portal\/)[^/?#]+/g, '$1[redacted]');
+}
+
 function sendError(req, res, statusCode, code, message, details) {
   const payload = {
     error: {
@@ -408,7 +413,8 @@ function extractAuthToken(req) {
 }
 
 function requireDashboardAuth(req, res, next) {
-  if (!dashboardAuthRequired || req.method === 'OPTIONS' || req.path === '/api/health') {
+  const clientPortalRoute = /^\/api\/client-portal\/[^/]+(?:\/messages)?$/.test(req.path);
+  if (!dashboardAuthRequired || req.method === 'OPTIONS' || req.path === '/api/health' || req.path === '/client-portal.html' || clientPortalRoute) {
     return next();
   }
 
@@ -458,7 +464,7 @@ app.use((req, res, next) => {
     log(level, 'api_request', {
       requestId: req.requestId,
       method: req.method,
-      path: req.originalUrl,
+      path: logSafeRequestPath(req),
       statusCode,
       durationMs: Date.now() - startedAt
     });
@@ -4383,12 +4389,12 @@ function resolveUploadLedgerJobDetail(payload = {}, actor = 'upload_api') {
 
   try {
     return operatingLedger.getJobDetail(submittedJobId);
-  } catch (error) {
+  } catch {
     const fallbackLedgerId = legacyLedgerJobId(submittedJobId);
     if (fallbackLedgerId && fallbackLedgerId !== String(submittedJobId)) {
       try {
         return operatingLedger.getJobDetail(fallbackLedgerId);
-      } catch (_) {
+      } catch {
         return null;
       }
     }
@@ -5172,6 +5178,49 @@ app.get('/api/ledger/communications', (req, res) => {
     summary: operatingLedger.communicationSummary(),
     dashboard: operatingLedger.dashboardSummary()
   }));
+});
+
+app.get('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    access: operatingLedger.listClientPortalAccess(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    access: operatingLedger.createClientPortalAccess(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/client-portal-access/:id/revoke', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    access: operatingLedger.revokeClientPortalAccess(req.params.id, { actor: req.body?.actor || 'dashboard' })
+  }));
+});
+
+app.get('/api/client-portal/:token', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.getClientPortalSnapshot(req.params.token)
+  }));
+});
+
+app.post('/api/client-portal/:token/messages', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.addClientPortalMessage(req.params.token, req.body || {});
+    return {
+      success: true,
+      deliveryMode: 'record_only',
+      notSent: false,
+      approvalRequired: false,
+      ...result
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/documents', (req, res) => {

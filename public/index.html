@@ -6957,6 +6957,52 @@
             }
         }
 
+        function copyLedgerPortalLink() {
+            const input = document.getElementById('ledgerPortalLink');
+            if (!input) return;
+            input.select();
+            if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(input.value)
+                    .then(() => showNotification('Portal link copied. Share it only after the approval is complete.', 'success'))
+                    .catch(() => showNotification('Select and copy the portal link manually.', 'warning'));
+                return;
+            }
+            showNotification('Select and copy the portal link manually.', 'info');
+        }
+
+        function showLedgerClientPortalForm(jobId) {
+            if (!shouldUseServer()) {
+                showNotification('Client portal access requires the server API.', 'warning');
+                return;
+            }
+            const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+            openFormModal('Create Client Portal Access', [
+                { name: 'label', label: 'Portal label', value: 'Client job portal', required: true, full: true },
+                { name: 'expiresAt', label: 'Access expires', type: 'date', value: expiry, required: true }
+            ], 'Create Approval Draft', async formData => {
+                const created = await apiRequest(`/api/ledger/jobs/${encodeURIComponent(jobId)}/client-portal-access`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        label: String(formData.get('label') || 'Client job portal').trim(),
+                        expiresAt: String(formData.get('expiresAt') || '').trim(),
+                        source: 'dashboard'
+                    })
+                });
+                const access = created.access || {};
+                const portalLink = `${window.location.origin}/client-portal.html#token=${encodeURIComponent(access.portalToken || '')}`;
+                dashboardData.ledger = created.dashboard || dashboardData.ledger;
+                closeFormModal();
+                openCustomModal('Client Portal Access Draft', `
+                    <div class="detail-note">This restricted portal link remains inactive until its approval is resolved. It contains no invoices, costs, supplier data, worker details, audit events, or internal notes. Client messages remain requests, not approval evidence.</div>
+                    <div class="form-field full"><label class="form-label" for="ledgerPortalLink">One-time access link</label><input class="form-input" id="ledgerPortalLink" readonly value="${escapeHtml(portalLink)}"></div>
+                    <div class="ledger-toolbar"><button class="btn btn-primary" type="button" onclick="copyLedgerPortalLink()">Copy Link</button><button class="btn btn-secondary" type="button" onclick="showLedgerApprovals('pending')">Review Approval</button></div>
+                `, 'Close');
+                await syncDashboardFromServer({ silent: true });
+                addActivity('Client portal access drafted', `Approval ${access.approval?.id || 'pending'} created.`, 'warning');
+                showNotification('Client portal access is pending approval.', 'success');
+            });
+        }
+
         async function runLedgerCommunicationScan() {
             await runLedgerCycle(false);
             await showLedgerCommunications('waiting');
@@ -7195,6 +7241,7 @@
                         <button class="btn btn-primary" type="button" onclick="showLedgerTimeLogForm('${escapeHtml(job.id)}')">Add Time</button>
                         <button class="btn btn-primary" type="button" onclick="showLedgerExpenseForm('${escapeHtml(job.id)}')">Add Expense</button>
                         <button class="btn btn-primary" type="button" onclick="showLedgerDocumentForm('${escapeHtml(job.id)}')">Document/Photo</button>
+                        <button class="btn btn-secondary" type="button" onclick="showLedgerClientPortalForm('${escapeHtml(job.id)}')">Client Portal</button>
                         <button class="btn btn-secondary" type="button" onclick="showLedgerQuoteForm('${escapeHtml(job.id)}')">Draft Quote</button>
                         <button class="btn btn-secondary" type="button" onclick="showLedgerTaskForm('${escapeHtml(job.id)}')">Add Task</button>
                         <button class="btn btn-secondary" type="button" onclick="showLedgerAssignmentForm('${escapeHtml(job.id)}')">Assign Worker</button>
@@ -7369,6 +7416,7 @@
                         })}
                         ${ledgerList('Progress', job.progress || [], item => `<div class="health-row"><strong>${escapeHtml(item.status)}</strong><span>${escapeHtml(item.note || '')}</span></div>`)}
                         ${ledgerList('Communication', job.communications || [], item => `<div class="health-row"><strong>${escapeHtml(item.subject || item.channel)}</strong><span>${escapeHtml(item.status)} / ${escapeHtml(item.direction)}</span></div>`)}
+                        ${ledgerList('Client portal access', job.portalAccess || [], item => `<div class="health-row"><strong>${escapeHtml(item.data?.label || 'Client job portal')}</strong><span>${escapeHtml(item.status)} / expires ${escapeHtml(ledgerDate(item.expiresAt))}${item.approvalId ? ` / approval ${escapeHtml(item.approvalId)}` : ''}${item.revokedAt ? ' / revoked' : ''}</span></div>`)}
                         ${ledgerList('Time and expenses', [...(job.timeLogs || []), ...(job.expenses || [])], item => `<div class="health-row"><strong>${escapeHtml(item.workDate || item.category || 'Record')}</strong><span>${escapeHtml(item.hours ? `${item.hours}h` : formatCurrency(item.amount || 0))}</span></div>`)}
                         ${ledgerList('Quality checks', job.qualityChecks || [], item => `<div class="health-row"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.status)} / ${escapeHtml(item.result)}${item.approvalId ? ` / approval ${escapeHtml(item.approvalId)}` : ''}</span></div>`)}
                         ${ledgerList('Safety checks', job.safetyChecks || [], item => `<div class="health-row"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.status)} / ${escapeHtml(item.riskLevel)}</span></div>`)}

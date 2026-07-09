@@ -1394,6 +1394,21 @@ class ContractorOperatingLedger {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS client_portal_access (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        client_id TEXT REFERENCES clients(id) ON DELETE SET NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending_approval',
+        approval_id TEXT,
+        expires_at TEXT NOT NULL,
+        last_accessed_at TEXT,
+        revoked_at TEXT,
+        data_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY,
         target_type TEXT NOT NULL,
@@ -1497,6 +1512,7 @@ class ContractorOperatingLedger {
       CREATE INDEX IF NOT EXISTS idx_worker_instructions_job ON worker_instructions(job_id);
       CREATE INDEX IF NOT EXISTS idx_communications_job ON communication_records(job_id);
       CREATE INDEX IF NOT EXISTS idx_communications_status ON communication_records(direction, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_client_portal_access_job ON client_portal_access(job_id, status, expires_at);
       CREATE INDEX IF NOT EXISTS idx_tool_reservations_tool ON tool_reservations(tool_id, tool_name, status);
       CREATE INDEX IF NOT EXISTS idx_learning_profiles_confidence ON job_learning_profiles(confidence, updated_at);
       CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
@@ -7454,6 +7470,12 @@ class ContractorOperatingLedger {
 
       if (status === 'approved') {
         this.applyApprovalTarget(before.target_type, before.target_id);
+      } else if (before.target_type === 'client_portal_access') {
+        this.db.prepare(`
+          UPDATE client_portal_access
+          SET status = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(status, timestamp, timestamp, before.target_id);
       }
 
       const after = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -7642,6 +7664,21 @@ class ContractorOperatingLedger {
         .run(approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'communication') {
       this.db.prepare("UPDATE communication_records SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
+    } else if (targetType === 'client_portal_access') {
+      const access = this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(targetId);
+      if (access && access.status === 'pending_approval') {
+        this.db.prepare("UPDATE client_portal_access SET status = 'active', updated_at = ? WHERE id = ?")
+          .run(timestamp, targetId);
+        this.audit({
+          entityType: 'client_portal_access',
+          entityId: targetId,
+          jobId: access.job_id,
+          action: 'activate_client_portal_access',
+          actor: 'approval',
+          before: this.mapClientPortalAccess(access),
+          after: this.mapClientPortalAccess(this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(targetId))
+        });
+      }
     } else if (targetType === 'assignment') {
       const assignment = this.db.prepare('SELECT data_json FROM assignments WHERE id = ?').get(targetId);
       const data = fromJson(assignment?.data_json, {});
@@ -7996,6 +8033,206 @@ class ContractorOperatingLedger {
         AND target_type = 'communication'
     `).get().count || 0);
     return summary;
+  }
+
+  mapClientPortalAccess(row) {
+    if (!row) return null;
+    const expiresAt = row.expires_at || null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      clientId: row.client_id,
+      status: row.status,
+      approvalId: row.approval_id,
+      expiresAt,
+      lastAccessedAt: row.last_accessed_at || null,
+      revokedAt: row.revoked_at || null,
+      expired: Boolean(expiresAt && Date.parse(expiresAt) <= Date.now()),
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  portalAccessError() {
+    const error = new Error('Client portal access is unavailable');
+    error.statusCode = 404;
+    return error;
+  }
+
+  createClientPortalAccess(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const requestedExpiry = payload.expiresAt || payload.expires_at;
+      const defaultExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      const expiresAt = new Date(requestedExpiry || defaultExpiry);
+      if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+        const error = new Error('Client portal expiry must be a future date');
+        error.statusCode = 400;
+        throw error;
+      }
+      if (expiresAt.getTime() > Date.now() + 365 * 24 * 60 * 60 * 1000) {
+        const error = new Error('Client portal expiry cannot be more than one year ahead');
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const id = makeId('portal');
+      const portalToken = crypto.randomBytes(32).toString('base64url');
+      const tokenHash = crypto.createHash('sha256').update(portalToken).digest('hex');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO client_portal_access (
+          id, job_id, client_id, token_hash, status, approval_id, expires_at, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending_approval', NULL, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        job.client_id,
+        tokenHash,
+        expiresAt.toISOString(),
+        toJson({
+          label: normalizeText(payload.label, 'Client job portal'),
+          scope: 'client_job_status',
+          createdFrom: payload.source || 'operator_dashboard'
+        }),
+        timestamp,
+        timestamp
+      );
+
+      const approval = this.createApproval({
+        targetType: 'client_portal_access',
+        targetId: id,
+        jobId,
+        approvalType: 'client_portal_access',
+        requestedBy: options.actor || 'Contractor.AI',
+        summary: `Approve client portal access for ${normalizeText(job.title, 'job')}`,
+        reason: 'A portal link exposes a restricted client-facing job view. Confirm the intended client and expiry before enabling access.',
+        data: { expiresAt: expiresAt.toISOString(), label: normalizeText(payload.label, 'Client job portal') }
+      }, { actor: options.actor || 'Contractor.AI' });
+      this.db.prepare('UPDATE client_portal_access SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+
+      const access = this.mapClientPortalAccess(this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'client_portal_access',
+        entityId: id,
+        jobId,
+        action: 'create_client_portal_access',
+        actor: options.actor || 'Contractor.AI',
+        after: access,
+        metadata: { approvalId: approval.id, tokenStoredAsHash: true }
+      });
+      return { ...access, portalToken, approval };
+    });
+  }
+
+  listClientPortalAccess(jobId) {
+    this.requireJob(jobId);
+    return this.db.prepare('SELECT * FROM client_portal_access WHERE job_id = ? ORDER BY created_at DESC')
+      .all(jobId)
+      .map(row => this.mapClientPortalAccess(row));
+  }
+
+  revokeClientPortalAccess(accessId, options = {}) {
+    return this.transaction(() => {
+      const beforeRow = this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(accessId);
+      if (!beforeRow) throw this.portalAccessError();
+      const before = this.mapClientPortalAccess(beforeRow);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE client_portal_access
+        SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, timestamp, accessId);
+      const after = this.mapClientPortalAccess(this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(accessId));
+      this.audit({
+        entityType: 'client_portal_access',
+        entityId: accessId,
+        jobId: after.jobId,
+        action: 'revoke_client_portal_access',
+        actor: options.actor || 'Contractor.AI',
+        before,
+        after
+      });
+      return after;
+    });
+  }
+
+  getClientPortalSnapshot(portalToken) {
+    const token = String(portalToken || '').trim();
+    if (token.length < 32) throw this.portalAccessError();
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const row = this.db.prepare(`
+      SELECT * FROM client_portal_access
+      WHERE token_hash = ? AND status = 'active'
+      LIMIT 1
+    `).get(tokenHash);
+    if (!row || !row.expires_at || Date.parse(row.expires_at) <= Date.now()) {
+      if (row && row.status === 'active') {
+        this.db.prepare("UPDATE client_portal_access SET status = 'expired', updated_at = ? WHERE id = ?")
+          .run(nowIso(), row.id);
+      }
+      throw this.portalAccessError();
+    }
+
+    this.db.prepare('UPDATE client_portal_access SET last_accessed_at = ?, updated_at = ? WHERE id = ?')
+      .run(nowIso(), nowIso(), row.id);
+    const detail = this.getJobDetail(row.job_id, { includeAudit: false });
+    const clientVisibleMessages = detail.communications
+      .filter(item => item.direction === 'outbound' && (item.status === 'client_visible' || item.data?.clientVisible === true))
+      .slice(0, 20)
+      .map(item => ({ subject: item.subject || 'Project update', body: item.body || '', createdAt: item.createdAt }));
+    const clientVisibleDocuments = detail.documents
+      .filter(item => item.data?.clientVisible === true)
+      .slice(0, 20)
+      .map(item => ({ id: item.id, title: item.title, type: item.type, status: item.status, createdAt: item.createdAt }));
+
+    return {
+      portal: {
+        accessId: row.id,
+        expiresAt: row.expires_at,
+        label: fromJson(row.data_json).label || 'Client job portal'
+      },
+      job: {
+        id: detail.id,
+        title: detail.title,
+        serviceType: detail.jobType,
+        description: detail.description,
+        address: detail.address,
+        status: detail.status,
+        progressPercent: detail.progressPercent,
+        scheduledStart: detail.scheduledStart,
+        scheduledEnd: detail.scheduledEnd,
+        targetCompletion: detail.targetCompletion,
+        siteVisits: detail.siteVisits.slice(0, 10).map(item => ({ visitType: item.visitType, status: item.status, scheduledAt: item.scheduledAt })),
+        selections: detail.clientSelections.slice(0, 10).map(item => ({ title: item.title, status: item.status, dueAt: item.dueAt, decidedAt: item.decidedAt })),
+        updates: clientVisibleMessages,
+        documents: clientVisibleDocuments
+      }
+    };
+  }
+
+  addClientPortalMessage(portalToken, payload = {}, options = {}) {
+    const snapshot = this.getClientPortalSnapshot(portalToken);
+    const body = String(payload.body || payload.message || '').trim().slice(0, 5000);
+    if (!body) {
+      const error = new Error('Client portal message body is required');
+      error.statusCode = 400;
+      throw error;
+    }
+    const subject = String(payload.subject || 'Client portal message').trim().slice(0, 240) || 'Client portal message';
+    const communication = this.addCommunication(snapshot.job.id, {
+      channel: 'portal',
+      direction: 'inbound',
+      status: 'received',
+      subject,
+      body,
+      requiresApproval: false,
+      source: 'client_portal',
+      data: { source: 'client_portal', portalAccessId: snapshot.portal.accessId }
+    }, { actor: options.actor || 'client_portal' });
+    return { communication, portal: snapshot.portal };
   }
 
   classifyDispatchReadiness(recommendation = {}) {
@@ -9690,6 +9927,7 @@ class ContractorOperatingLedger {
       loadingPlans: this.db.prepare('SELECT * FROM loading_plans WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapLoadingPlan(row)),
       procurementOrders: this.db.prepare('SELECT * FROM procurement_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapProcurementOrder(row)),
       workerInstructions: this.db.prepare('SELECT * FROM worker_instructions WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapWorkerInstruction(row)),
+      portalAccess: this.db.prepare('SELECT * FROM client_portal_access WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapClientPortalAccess(row)),
       approvals: this.db.prepare('SELECT * FROM approvals WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapApproval(row)),
       weather: this.db.prepare('SELECT * FROM schedule_weather WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapWeather(row))
     };
@@ -13400,6 +13638,16 @@ class ContractorOperatingLedger {
       preview.channel = mapped?.channel || data.channel || null;
       preview.body = mapped?.body || null;
       preview.recipient = mapped?.data?.recipient || data.recipient || null;
+    } else if (targetType === 'client_portal_access') {
+      const access = this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = this.mapClientPortalAccess(access);
+      primaryEffect = `Activate restricted client portal access until ${mapped?.expiresAt || data.expiresAt || 'the configured expiry'}.`;
+      addEffect('Activate one scoped, read-only client job portal link.');
+      addSafeguard('The raw access token is stored only with the operator, never in the database. The portal excludes costs, invoices, internal notes, audit events, worker details, and supplier records.');
+      addSafeguard('Client messages are recorded as inbound requests and never count as approval of scope, price, dates, or safety decisions.');
+      riskLevel = 'high';
+      preview.expiresAt = mapped?.expiresAt || data.expiresAt || null;
+      preview.label = mapped?.data?.label || data.label || null;
     } else if (targetType === 'quote') {
       const quote = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = quote ? this.mapQuote(quote) : null;

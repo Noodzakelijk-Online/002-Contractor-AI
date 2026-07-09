@@ -93,3 +93,52 @@ test('dashboard auth guard accepts bearer, API-key, contractor token, and browse
     assert.equal(basic.response.status, 200);
   });
 });
+
+test('approved client portal tokens work without exposing the authenticated dashboard', async () => {
+  const token = 'contractor-ai-client-portal-token-32';
+  const app = loadServerWithEnv({
+    NODE_ENV: 'production',
+    CONTRACTOR_AI_AUTH_TOKEN: token
+  });
+
+  await withServer(app, async baseUrl => {
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const intake = await request(baseUrl, '/api/ledger/intake', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        title: 'Authenticated portal job',
+        client: { name: 'Portal access client' },
+        address: 'Amsterdam',
+        service: 'maintenance',
+        description: 'Client-safe project status.'
+      })
+    });
+    assert.equal(intake.response.status, 201);
+
+    const access = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/client-portal-access`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ expiresAt: '2027-01-01' })
+    });
+    assert.equal(access.response.status, 201);
+
+    const resolved = await request(baseUrl, `/api/approvals/${access.body.access.approval.id}/resolve`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ status: 'approved', resolvedBy: 'Auth portal test' })
+    });
+    assert.equal(resolved.response.status, 200);
+
+    const deniedDashboard = await request(baseUrl, '/api/dashboard');
+    assert.equal(deniedDashboard.response.status, 401);
+
+    const portal = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}`);
+    assert.equal(portal.response.status, 200);
+    assert.equal(portal.body.job.title, 'Authenticated portal job');
+
+    const portalPage = await fetch(`${baseUrl}/client-portal.html`);
+    assert.equal(portalPage.status, 200);
+    assert.match(await portalPage.text(), /Veilige projectinzage/);
+  });
+});
