@@ -20,7 +20,7 @@ async function request(baseUrl, route, options = {}) {
   return { response, body };
 }
 
-test('notification test endpoint is a dry-run draft and never reports live delivery', async t => {
+test('synthetic notification endpoint is retired in favor of job-linked ledger drafts', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -33,19 +33,10 @@ test('notification test endpoint is a dry-run draft and never reports live deliv
     body: JSON.stringify({ type: 'all' })
   });
 
-  assert.equal(result.response.status, 200);
-  assert.equal(result.body.success, true);
-  assert.equal(result.body.deliveryMode, 'dry_run');
-  assert.equal(result.body.notSent, true);
-  assert.match(result.body.message, /no external messages were sent/i);
-  assert.equal(result.body.channels.length, 2);
-
-  for (const channel of result.body.channels) {
-    assert.equal(channel.status, 'dry_run');
-    assert.equal(channel.notSent, true);
-    assert.equal(channel.requiresApproval, true);
-    assert.match(channel.content, /dry-run notification draft/i);
-  }
+  assert.equal(result.response.status, 410);
+  assert.equal(result.body.error.code, 'test_notification_route_retired');
+  assert.equal(result.body.migration.endpoint, '/api/ledger/jobs/:jobId/communication');
+  assert.equal(result.body.migration.approvalRequired, true);
 });
 
 test('sample client request endpoint is retired and cannot create non-ledger jobs', async t => {
@@ -56,7 +47,7 @@ test('sample client request endpoint is retired and cannot create non-ledger job
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const before = await request(baseUrl, '/api/dashboard');
+  const before = await request(baseUrl, '/api/ledger/jobs?limit=500');
   assert.equal(before.response.status, 200);
 
   const result = await request(baseUrl, '/api/simulate/client-request', {
@@ -67,7 +58,7 @@ test('sample client request endpoint is retired and cannot create non-ledger job
   assert.equal(result.response.status, 410);
   assert.equal(result.body.error.code, 'simulation_retired');
 
-  const after = await request(baseUrl, '/api/dashboard');
+  const after = await request(baseUrl, '/api/ledger/jobs?limit=500');
   assert.equal(after.response.status, 200);
   assert.deepEqual(after.body.jobs.map(job => job.id).sort(), before.body.jobs.map(job => job.id).sort());
 });
@@ -89,7 +80,7 @@ test('legacy simulated chat endpoint is retired', async t => {
   assert.equal(result.body.error.code, 'legacy_chat_retired');
 });
 
-test('conversational AI fails closed until a verified provider is configured', async t => {
+test('unpersisted conversational AI is retired in favor of the ledger command plan', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -101,69 +92,30 @@ test('conversational AI fails closed until a verified provider is configured', a
     body: JSON.stringify({ message: 'What should I do next?' })
   });
 
-  assert.equal(result.response.status, 501);
-  assert.equal(result.body.error.code, 'chat_unavailable');
+  assert.equal(result.response.status, 410);
+  assert.equal(result.body.error.code, 'conversational_ai_route_retired');
+  assert.deepEqual(result.body.migration, { endpoint: '/api/ledger/command-plan', method: 'GET' });
 });
 
-test('legacy autonomous cycle previews by default instead of mutating job state', async t => {
+test('legacy autonomous cycle is retired in favor of ledger-only automation', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
 
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
-
-  const job = await request(baseUrl, '/api/jobs', {
-    method: 'POST',
-    body: JSON.stringify({
-      title: 'Preview-only garden cleanup',
-      client: 'Safety Client',
-      address: 'Amsterdam',
-      description: 'Garden maintenance with hedge trimming and cleanup',
-      priority: 'medium'
-    })
-  });
-  assert.equal(job.response.status, 201);
 
   const cycle = await request(baseUrl, '/api/ai/autonomous-cycle', {
     method: 'POST',
     body: JSON.stringify({ maxActions: 20 })
   });
 
-  assert.equal(cycle.response.status, 200);
-  assert.equal(cycle.body.mode, 'dry_run');
-  assert.equal(cycle.body.defaultedToDryRun, true);
-  assert.equal(cycle.body.notApplied, true);
-  assert.match(cycle.body.approvalPolicy, /previews/i);
-
-  const detail = await request(baseUrl, `/api/jobs/${job.body.id}`);
-  assert.equal(detail.response.status, 200);
-  assert.equal(detail.body.status, 'pending');
-  assert.equal(detail.body.worker || null, null);
-  assert.equal(detail.body.assignedWorkerId || null, null);
+  assert.equal(cycle.response.status, 410);
+  assert.equal(cycle.body.error.code, 'legacy_autonomy_retired');
+  assert.match(cycle.body.error.message, /\/api\/ledger\/autonomous-cycle/);
 });
 
-test('legacy autonomous cycle can still be explicitly applied for internal state', async t => {
-  const server = app.listen(0);
-  await new Promise(resolve => server.once('listening', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-
-  const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  const cycle = await request(baseUrl, '/api/ai/autonomous-cycle', {
-    method: 'POST',
-    body: JSON.stringify({ dryRun: false, maxActions: 1 })
-  });
-
-  assert.equal(cycle.response.status, 200);
-  assert.equal(cycle.body.mode, 'applied');
-  assert.equal(cycle.body.defaultedToDryRun, false);
-  assert.equal(cycle.body.notApplied, false);
-  assert.match(cycle.body.approvalPolicy, /explicitly applied/i);
-});
-
-test('top-level communication API records outbound drafts without sending', async t => {
+test('ledger communication API records outbound drafts without sending', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -183,10 +135,9 @@ test('top-level communication API records outbound drafts without sending', asyn
   });
   assert.equal(job.response.status, 201);
 
-  const outbound = await request(baseUrl, '/api/communication', {
+  const outbound = await request(baseUrl, `/api/ledger/jobs/${job.body.job.id}/communication`, {
     method: 'POST',
     body: JSON.stringify({
-      ledgerJobId: job.body.job.id,
       channel: 'email',
       direction: 'outbound',
       status: 'sent',
@@ -206,10 +157,9 @@ test('top-level communication API records outbound drafts without sending', asyn
   assert.equal(outbound.body.communication.approval.approvalType, 'external_communication');
   assert.ok(outbound.body.job.communications.some(item => item.id === outbound.body.communication.id));
 
-  const inbound = await request(baseUrl, '/api/communication', {
+  const inbound = await request(baseUrl, `/api/ledger/jobs/${job.body.job.id}/communication`, {
     method: 'POST',
     body: JSON.stringify({
-      jobId: job.body.job.id,
       channel: 'portal',
       direction: 'inbound',
       subject: 'Client confirmation',
@@ -224,7 +174,7 @@ test('top-level communication API records outbound drafts without sending', asyn
   assert.equal(inbound.body.communication.status, 'received');
   assert.equal(inbound.body.communication.approvalId || null, null);
 
-  const list = await request(baseUrl, '/api/communication?status=all&limit=100');
+  const list = await request(baseUrl, '/api/ledger/communications?status=all&limit=100');
   assert.equal(list.response.status, 200);
   assert.ok(list.body.communications.some(item => item.id === outbound.body.communication.id));
   assert.ok(list.body.communications.some(item => item.id === inbound.body.communication.id));
@@ -232,7 +182,7 @@ test('top-level communication API records outbound drafts without sending', asyn
   assert.ok(list.body.summary.pendingApproval >= 1);
 });
 
-test('top-level communication API requires an existing job target', async t => {
+test('ledger communication API requires an existing job target', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -240,16 +190,13 @@ test('top-level communication API requires an existing job target', async t => {
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const result = await request(baseUrl, '/api/communication', {
+  const result = await request(baseUrl, '/api/ledger/jobs/job_missing/communication', {
     method: 'POST',
     body: JSON.stringify({
-      channel: 'email',
-      direction: 'outbound',
-      subject: 'Missing target',
-      body: 'This should not be recorded without a job.'
+      channel: 'email', direction: 'outbound', subject: 'Missing target', body: 'This should not be recorded without a job.'
     })
   });
 
-  assert.equal(result.response.status, 400);
-  assert.match(result.body.error.message, /valid jobId or ledgerJobId/i);
+  assert.equal(result.response.status, 404);
+  assert.match(result.body.error.message, /ledger job not found/i);
 });

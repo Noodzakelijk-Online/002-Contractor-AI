@@ -8,6 +8,7 @@ const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-clie
 process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
 process.env.LEDGER_DB_FILE = path.join(stateDirectory, 'ledger.sqlite');
 process.env.UPLOAD_DIR = path.join(stateDirectory, 'uploads');
+process.env.CONTRACTOR_AI_VERIFIED_INTEGRATIONS = 'client_success_test_provider';
 
 const app = require('../server');
 
@@ -92,11 +93,50 @@ test('client success API coordinates closeout, waiting-client, aftercare and app
   assert.equal(closeoutQueue.response.status, 200);
   const closeoutJob = closeoutQueue.body.jobs.find(job => job.jobId === closeoutJobId);
   assert.ok(closeoutJob);
+  assert.equal(closeoutJob.jobStatus, 'completed');
   assert.equal(closeoutJob.flags.closeoutReady, true);
   assert.equal(closeoutJob.flags.approvalRequired, false);
   assert.ok(closeoutJob.counts.pendingApprovals === 0);
   assert.ok(closeoutJob.nextActions.some(action => action.type === 'prepare_closeout'));
   assert.ok(closeoutQueue.body.summary.closeoutReady >= 1);
+
+  const firstCloseout = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(closeoutJobId)}/closeout`, {
+    method: 'POST',
+    body: JSON.stringify({ markCompleted: false, createRecurringPlan: true })
+  });
+  assert.equal(firstCloseout.response.status, 201);
+  assert.equal(firstCloseout.body.closeout.completion, null);
+  assert.ok(firstCloseout.body.closeout.communication.approvalId);
+  assert.ok(firstCloseout.body.closeout.invoice.approvalId);
+
+  const repeatedCloseout = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(closeoutJobId)}/closeout`, {
+    method: 'POST',
+    body: JSON.stringify({ markCompleted: false, createRecurringPlan: true })
+  });
+  assert.equal(repeatedCloseout.response.status, 201);
+  assert.equal(repeatedCloseout.body.closeout.quality.id, firstCloseout.body.closeout.quality.id);
+  assert.equal(repeatedCloseout.body.closeout.safety.id, firstCloseout.body.closeout.safety.id);
+  assert.equal(repeatedCloseout.body.closeout.aftercare.id, firstCloseout.body.closeout.aftercare.id);
+  assert.equal(repeatedCloseout.body.closeout.invoice.id, firstCloseout.body.closeout.invoice.id);
+  assert.equal(repeatedCloseout.body.closeout.payment.id, firstCloseout.body.closeout.payment.id);
+  assert.equal(repeatedCloseout.body.closeout.communication.id, firstCloseout.body.closeout.communication.id);
+  assert.equal(repeatedCloseout.body.closeout.recurringPlan.id, firstCloseout.body.closeout.recurringPlan.id);
+  assert.deepEqual(repeatedCloseout.body.closeout.reused, {
+    quality: true,
+    safety: true,
+    aftercare: true,
+    invoice: true,
+    payment: true,
+    communication: true,
+    recurringPlan: true
+  });
+  assert.equal(repeatedCloseout.body.job.qualityChecks.length, 1);
+  assert.equal(repeatedCloseout.body.job.safetyChecks.length, 1);
+  assert.equal(repeatedCloseout.body.job.aftercare.length, 1);
+  assert.equal(repeatedCloseout.body.job.invoices.length, 1);
+  assert.equal(repeatedCloseout.body.job.payments.length, 1);
+  assert.equal(repeatedCloseout.body.job.communications.length, 1);
+  assert.equal(repeatedCloseout.body.job.recurringPlans.length, 1);
 
   const aftercare = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(closeoutJobId)}/aftercare`, {
     method: 'POST',
@@ -147,7 +187,6 @@ test('client success API coordinates closeout, waiting-client, aftercare and app
     body: JSON.stringify({
       channel: 'email',
       direction: 'outbound',
-      status: 'sent',
       subject: 'Please confirm access and tile selection',
       body: 'Can you confirm access and the selected tile colour?',
       expectsReply: true,
@@ -156,7 +195,26 @@ test('client success API coordinates closeout, waiting-client, aftercare and app
     })
   });
   assert.equal(communication.response.status, 201);
-  assert.equal(communication.body.communication.status, 'sent');
+  assert.equal(communication.body.communication.status, 'draft');
+  assert.ok(communication.body.communication.approvalId);
+
+  const approvedDelivery = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(communication.body.communication.approvalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Client Success QA', reason: 'Outbound communication approved for delivery.' })
+  });
+  assert.equal(approvedDelivery.response.status, 200);
+
+  const deliveryReceipt = await request(baseUrl, `/api/ledger/communications/${encodeURIComponent(communication.body.communication.id)}/delivery-receipt`, {
+    method: 'POST',
+    body: JSON.stringify({
+      integration: 'client_success_test_provider',
+      providerMessageId: 'client-success-message-1',
+      sentAt: yesterday,
+      receipt: { status: 'accepted' }
+    })
+  });
+  assert.equal(deliveryReceipt.response.status, 200);
+  assert.equal(deliveryReceipt.body.communication.status, 'sent');
 
   const waitingQueue = await request(baseUrl, '/api/ledger/client-success?mode=waiting&limit=100');
   assert.equal(waitingQueue.response.status, 200);
@@ -167,8 +225,85 @@ test('client success API coordinates closeout, waiting-client, aftercare and app
   assert.equal(waitingJob.counts.waitingReplies, 1);
   assert.equal(waitingJob.counts.overdueReplies, 1);
   assert.ok(waitingJob.nextActions.some(action => action.type === 'selection_follow_up'));
+  assert.ok(waitingJob.nextActions.some(action => (
+    action.type === 'review_client_selection' && action.selectionId === selection.body.clientSelection.id
+  )));
   assert.ok(waitingJob.nextActions.some(action => action.type === 'client_reply_follow_up'));
   assert.ok(waitingQueue.body.summary.waitingClient >= 1);
+
+  const selectionJobId = await createJob(baseUrl, {
+    title: 'Client success retained selection decision',
+    service: 'kitchen installation',
+    status: 'scheduled',
+    progressPercent: 25,
+    assignAutomatically: false
+  });
+  await resolvePendingClientApprovals(baseUrl, selectionJobId);
+  const retainedSelection = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(selectionJobId)}/client-selections`, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Choose worktop finish',
+      category: 'finish',
+      status: 'pending_client',
+      dueAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+      options: ['light terrazzo', 'charcoal composite'],
+      value: 850
+    })
+  });
+  assert.equal(retainedSelection.response.status, 201);
+
+  const selectionQueue = await request(baseUrl, '/api/ledger/client-success?mode=waiting&limit=100');
+  const selectionJob = selectionQueue.body.jobs.find(job => job.jobId === selectionJobId);
+  assert.ok(selectionJob);
+  const selectionAction = selectionJob.nextActions.find(action => action.type === 'review_client_selection');
+  assert.ok(selectionAction);
+  assert.equal(selectionAction.selectionId, retainedSelection.body.clientSelection.id);
+  assert.equal(selectionJob.nextActions.some(action => action.type === 'selection_follow_up'), false);
+
+  const invalidSelection = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(selectionJobId)}/lifecycle/selection/${encodeURIComponent(selectionAction.selectionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: 'selected',
+      selectedOption: 'unretained custom finish',
+      verificationReference: 'CLIENT-DECISION-QA-INVALID',
+      notes: 'Attempted decision outside the retained option set.'
+    })
+  });
+  assert.equal(invalidSelection.response.status, 400);
+  assert.match(invalidSelection.body.error.message, /retained client-selection option/i);
+
+  const selectionDecision = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(selectionJobId)}/lifecycle/selection/${encodeURIComponent(selectionAction.selectionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: 'selected',
+      selectedOption: 'light terrazzo',
+      verificationReference: 'CLIENT-DECISION-QA-004',
+      clientConfirmed: true,
+      notes: 'Client confirmed light terrazzo in the retained portal reply.'
+    })
+  });
+  assert.equal(selectionDecision.response.status, 200);
+  assert.equal(selectionDecision.body.record.status, 'pending_approval');
+  assert.equal(selectionDecision.body.record.data.selectedOption, 'light terrazzo');
+  assert.equal(selectionDecision.body.record.data.verificationReference, 'CLIENT-DECISION-QA-004');
+  assert.equal(selectionDecision.body.approval.targetType, 'client_selection');
+
+  const selectionApprovalQueue = await request(baseUrl, '/api/ledger/client-success?mode=approval&limit=100');
+  const selectionApprovalJob = selectionApprovalQueue.body.jobs.find(job => job.jobId === selectionJobId);
+  assert.ok(selectionApprovalJob);
+  const clientApprovalAction = selectionApprovalJob.nextActions.find(action => action.type === 'review_client_approval');
+  assert.equal(clientApprovalAction.approvalId, selectionDecision.body.approval.id);
+
+  const approvedSelection = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(selectionDecision.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Client Selection QA' })
+  });
+  assert.equal(approvedSelection.response.status, 200);
+
+  const selectedDetail = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(selectionJobId)}`);
+  const selectedRecord = selectedDetail.body.job.clientSelections.find(item => item.id === selectionAction.selectionId);
+  assert.equal(selectedRecord.status, 'selected');
+  assert.ok(selectedRecord.decidedAt);
 
   const warrantyJobId = await createJob(baseUrl, {
     title: 'Client success warranty gate',

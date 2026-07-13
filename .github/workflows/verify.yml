@@ -1,0 +1,62 @@
+name: Verify Contractor.AI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: contractor_ai
+          POSTGRES_USER: contractor_ai
+          POSTGRES_PASSWORD: contractor-ai-ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=512m
+          --health-cmd "pg_isready -U contractor_ai -d contractor_ai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CONTRACTOR_AI_POSTGRES_TEST_URL: postgresql://contractor_ai:contractor-ai-ci-password@127.0.0.1:5432/contractor_ai?sslmode=require
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Enable TLS on PostgreSQL test service
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker ps --filter publish=5432 --format '{{.ID}}' | head -n 1)"
+          test -n "$container_id"
+          tls_dir="$(mktemp -d)"
+          trap 'rm -rf "$tls_dir"' EXIT
+          openssl req -new -x509 -nodes -days 1 -subj '/CN=localhost' \
+            -keyout "$tls_dir/server.key" -out "$tls_dir/server.crt"
+          docker cp "$tls_dir/server.key" "$container_id:/tmp/contractor-ai-server.key"
+          docker cp "$tls_dir/server.crt" "$container_id:/tmp/contractor-ai-server.crt"
+          docker exec --user root "$container_id" \
+            chown postgres:postgres /tmp/contractor-ai-server.key /tmp/contractor-ai-server.crt
+          docker exec --user root "$container_id" chmod 600 /tmp/contractor-ai-server.key
+          docker exec --user root "$container_id" chmod 644 /tmp/contractor-ai-server.crt
+          docker exec --user postgres "$container_id" psql -U contractor_ai -d contractor_ai -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET ssl = 'on'" \
+            -c "ALTER SYSTEM SET ssl_key_file = '/tmp/contractor-ai-server.key'" \
+            -c "ALTER SYSTEM SET ssl_cert_file = '/tmp/contractor-ai-server.crt'" \
+            -c "SELECT pg_reload_conf()"
+          docker exec "$container_id" pg_isready -U contractor_ai -d contractor_ai
+          test "$(docker exec --user postgres "$container_id" psql -U contractor_ai -d contractor_ai -Atc 'SHOW ssl')" = "on"
+      - run: npm run verify:release
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser

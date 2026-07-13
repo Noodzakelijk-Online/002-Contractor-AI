@@ -80,6 +80,61 @@ test('field assurance coordinates safety, design, quality, evidence and approval
   assert.equal(safetyJob.flags.safetyGap, true);
   assert.ok(safetyJob.nextActions.some(action => action.type === 'prepare_safety_pack'));
 
+  const firstPack = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(fieldJobId)}/field-assurance-pack`, {
+    method: 'POST',
+    body: JSON.stringify({ actor: 'Field Assurance QA' })
+  });
+  assert.equal(firstPack.response.status, 201);
+  assert.equal(firstPack.body.pack.externalCommitments, 0);
+  assert.deepEqual(firstPack.body.pack.reused, {
+    safetyMeeting: false,
+    jha: false,
+    sdsSheet: false,
+    orientation: false
+  });
+
+  const repeatedPack = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(fieldJobId)}/field-assurance-pack`, {
+    method: 'POST',
+    body: JSON.stringify({ actor: 'Field Assurance QA' })
+  });
+  assert.equal(repeatedPack.response.status, 201);
+  assert.equal(repeatedPack.body.pack.safetyMeeting.id, firstPack.body.pack.safetyMeeting.id);
+  assert.equal(repeatedPack.body.pack.jha.id, firstPack.body.pack.jha.id);
+  assert.equal(repeatedPack.body.pack.sdsSheet.id, firstPack.body.pack.sdsSheet.id);
+  assert.equal(repeatedPack.body.pack.orientation.id, firstPack.body.pack.orientation.id);
+  assert.deepEqual(repeatedPack.body.pack.reused, {
+    safetyMeeting: true,
+    jha: true,
+    sdsSheet: true,
+    orientation: true
+  });
+  assert.equal(repeatedPack.body.pack.job.safetyMeetings.length, 1);
+  assert.equal(repeatedPack.body.pack.job.jhas.length, 1);
+  assert.equal(repeatedPack.body.pack.job.sdsSheets.length, 1);
+  assert.equal(repeatedPack.body.pack.job.orientations.length, 1);
+
+  const clearedSafetyQueue = await request(baseUrl, '/api/ledger/field-assurance?mode=safety&limit=100');
+  assert.equal(clearedSafetyQueue.response.status, 200);
+  const plannedSafetyJob = clearedSafetyQueue.body.jobs.find(job => job.jobId === fieldJobId);
+  assert.ok(plannedSafetyJob);
+  assert.equal(plannedSafetyJob.flags.safetyGap, false);
+  assert.ok(plannedSafetyJob.nextActions.some(action => (
+    action.type === 'review_jha' && action.jhaId === firstPack.body.pack.jha.id
+  )));
+  assert.ok(plannedSafetyJob.nextActions.some(action => (
+    action.type === 'request_sds' && action.sdsSheetId === firstPack.body.pack.sdsSheet.id
+  )));
+  assert.ok(plannedSafetyJob.nextActions.some(action => (
+    action.type === 'complete_safety_meeting' && action.safetyMeetingId === firstPack.body.pack.safetyMeeting.id
+  )));
+  assert.ok(plannedSafetyJob.nextActions.some(action => (
+    action.type === 'complete_orientation' && action.orientationId === firstPack.body.pack.orientation.id
+  )));
+  assert.equal(plannedSafetyJob.latest.jha.id, firstPack.body.pack.jha.id);
+  assert.equal(plannedSafetyJob.latest.sdsSheet.id, firstPack.body.pack.sdsSheet.id);
+  assert.equal(plannedSafetyJob.latest.safetyMeeting.id, firstPack.body.pack.safetyMeeting.id);
+  assert.equal(plannedSafetyJob.latest.orientation.id, firstPack.body.pack.orientation.id);
+
   const jha = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(fieldJobId)}/jhas`, {
     method: 'POST',
     body: JSON.stringify({
@@ -180,7 +235,7 @@ test('field assurance coordinates safety, design, quality, evidence and approval
   const designJob = designQueue.body.jobs.find(job => job.jobId === fieldJobId);
   assert.ok(designJob);
   assert.equal(designJob.flags.designReview, true);
-  assert.ok(designJob.nextActions.some(action => action.type === 'review_rfi'));
+  assert.ok(designJob.nextActions.some(action => action.type === 'review_rfi' && action.rfiId === rfi.body.rfi.id));
   assert.ok(designQueue.body.summary.designReviews >= 1);
 
   const qualityQueue = await request(baseUrl, '/api/ledger/field-assurance?mode=quality&limit=100');
@@ -188,7 +243,7 @@ test('field assurance coordinates safety, design, quality, evidence and approval
   const qualityJob = qualityQueue.body.jobs.find(job => job.jobId === fieldJobId);
   assert.ok(qualityJob);
   assert.equal(qualityJob.flags.qualityReview, true);
-  assert.ok(qualityJob.nextActions.some(action => action.type === 'review_inspection'));
+  assert.ok(qualityJob.nextActions.some(action => action.type === 'review_inspection' && action.inspectionId === inspection.body.inspection.id));
 
   const evidenceJobId = await createJob(baseUrl, {
     title: 'Field assurance evidence missing job',
@@ -241,4 +296,85 @@ test('field assurance coordinates safety, design, quality, evidence and approval
   const clearedEvidenceQueue = await request(baseUrl, '/api/ledger/field-assurance?mode=evidence&limit=100');
   assert.equal(clearedEvidenceQueue.response.status, 200);
   assert.equal(clearedEvidenceQueue.body.jobs.some(job => job.jobId === evidenceJobId), false);
+
+  const documentJobId = await createJob(baseUrl, {
+    title: 'Field assurance controlled document review',
+    status: 'intake',
+    priority: 'medium'
+  });
+  const reviewDocument = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(documentJobId)}/documents`, {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'drawing',
+      title: 'Approved fixing detail',
+      filename: 'fixing-detail-r3.pdf',
+      storageRef: 'controlled-documents/fixing-detail-r3.pdf',
+      status: 'needs_review'
+    })
+  });
+  assert.equal(reviewDocument.response.status, 201);
+
+  const documentQueue = await request(baseUrl, '/api/ledger/field-assurance?mode=design&limit=100');
+  const documentJob = documentQueue.body.jobs.find(job => job.jobId === documentJobId);
+  assert.ok(documentJob);
+  const documentAction = documentJob.nextActions.find(action => action.type === 'review_document');
+  assert.ok(documentAction);
+  assert.equal(documentAction.documentId, reviewDocument.body.document.id);
+  assert.equal(documentJob.latest.document.id, reviewDocument.body.document.id);
+
+  const missingDocumentReference = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(documentJobId)}/lifecycle/document/${encodeURIComponent(documentAction.documentId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'approved', notes: 'Review note without controlled reference.' })
+  });
+  assert.equal(missingDocumentReference.response.status, 400);
+  assert.match(missingDocumentReference.body.error.message, /reference and evidence/i);
+
+  const documentReview = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(documentJobId)}/lifecycle/document/${encodeURIComponent(documentAction.documentId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: 'approved',
+      verificationReference: 'DOC-REVIEW-QA-003',
+      notes: 'Revision 3 dimensions, fixing specification, and issue status were checked against the retained scope.'
+    })
+  });
+  assert.equal(documentReview.response.status, 200);
+  assert.equal(documentReview.body.record.status, 'pending_approval');
+  assert.equal(documentReview.body.record.data.verificationReference, 'DOC-REVIEW-QA-003');
+  assert.equal(documentReview.body.approval.targetType, 'document');
+
+  const punchJobId = await createJob(baseUrl, {
+    title: 'Field assurance punch review',
+    status: 'intake',
+    priority: 'medium'
+  });
+  const punch = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(punchJobId)}/punch-items`, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Re-seat cabinet hinge',
+      status: 'open',
+      severity: 'medium',
+      dueAt: yesterday
+    })
+  });
+  assert.equal(punch.response.status, 201);
+
+  const punchQueue = await request(baseUrl, '/api/ledger/field-assurance?mode=quality&limit=100');
+  const punchJob = punchQueue.body.jobs.find(job => job.jobId === punchJobId);
+  assert.ok(punchJob);
+  const punchAction = punchJob.nextActions.find(action => action.type === 'resolve_punch_item');
+  assert.ok(punchAction);
+  assert.equal(punchAction.punchItemId, punch.body.punchItem.id);
+  assert.equal(punchJob.latest.punchItem.id, punch.body.punchItem.id);
+
+  const punchReview = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(punchJobId)}/lifecycle/punch_item/${encodeURIComponent(punchAction.punchItemId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: 'resolved',
+      notes: 'Hinge was re-seated, aligned, cycle-tested, and photographed.',
+      resolution: 'Verified corrective work complete.'
+    })
+  });
+  assert.equal(punchReview.response.status, 200);
+  assert.equal(punchReview.body.record.status, 'pending_approval');
+  assert.equal(punchReview.body.approval.targetType, 'punch_item');
 });

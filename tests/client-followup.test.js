@@ -8,6 +8,7 @@ const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-clie
 process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
 process.env.LEDGER_DB_FILE = path.join(stateDirectory, 'ledger.sqlite');
 process.env.UPLOAD_DIR = path.join(stateDirectory, 'uploads');
+process.env.CONTRACTOR_AI_VERIFIED_INTEGRATIONS = 'test_provider';
 
 const app = require('../server');
 
@@ -58,18 +59,45 @@ test('autonomous cycle drafts approval-gated client reply follow-up without send
     body: JSON.stringify({
       channel: 'email',
       direction: 'outbound',
-      status: 'sent',
       sentAt,
       subject: 'Confirm Friday access and green-waste bags',
       body: 'Can you confirm Friday access and whether green-waste bags are available?',
       expectsReply: true,
       replyBy,
-      requiresApproval: false
+      requiresApproval: true
     })
   });
   assert.equal(original.response.status, 201);
-  assert.equal(original.body.communication.status, 'sent');
+  assert.equal(original.body.communication.status, 'draft');
   assert.equal(original.body.communication.data.expectsReply, true);
+
+  const prematureReceipt = await request(baseUrl, `/api/ledger/communications/${original.body.communication.id}/delivery-receipt`, {
+    method: 'POST',
+    body: JSON.stringify({ integration: 'test_provider', providerMessageId: 'provider-message-123', sentAt })
+  });
+  assert.equal(prematureReceipt.response.status, 409);
+  assert.equal(prematureReceipt.body.error.code, 'communication_approval_required');
+
+  const approval = await request(baseUrl, `/api/ledger/approvals/${original.body.communication.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Integration approval test', reason: 'Client communication approved for delivery.' })
+  });
+  assert.equal(approval.response.status, 200);
+
+  const unverifiedReceipt = await request(baseUrl, `/api/ledger/communications/${original.body.communication.id}/delivery-receipt`, {
+    method: 'POST',
+    body: JSON.stringify({ integration: 'unconfigured_provider', providerMessageId: 'provider-message-123', sentAt })
+  });
+  assert.equal(unverifiedReceipt.response.status, 409);
+  assert.equal(unverifiedReceipt.body.error.code, 'verified_integration_required');
+
+  const delivered = await request(baseUrl, `/api/ledger/communications/${original.body.communication.id}/delivery-receipt`, {
+    method: 'POST',
+    body: JSON.stringify({ integration: 'test_provider', providerMessageId: 'provider-message-123', sentAt, receipt: { status: 'accepted' } })
+  });
+  assert.equal(delivered.response.status, 200);
+  assert.equal(delivered.body.communication.status, 'sent');
+  assert.equal(delivered.body.communication.data.deliveryReceipt.integration, 'test_provider');
 
   const dryRun = await request(baseUrl, '/api/ledger/autonomous-cycle', {
     method: 'POST',
@@ -85,7 +113,13 @@ test('autonomous cycle drafts approval-gated client reply follow-up without send
 
   const cycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
     method: 'POST',
-    body: JSON.stringify({ dryRun: false, actor: 'test' })
+    body: JSON.stringify({
+      dryRun: false,
+      actor: 'test',
+      actionTypes: ['client_reply_follow_up'],
+      jobIds: [jobId],
+      maxActions: 1
+    })
   });
   assert.equal(cycle.response.status, 200);
   const applied = cycle.body.applied.find(action =>
@@ -108,7 +142,7 @@ test('autonomous cycle drafts approval-gated client reply follow-up without send
   assert.match(followUp.body, /Robert can review this follow-up before anything is sent/);
   assert.ok(detail.body.job.audit.some(event => event.action === 'autonomous_draft_client_reply_followup'));
 
-  const approvals = await request(baseUrl, '/api/approvals?status=pending&limit=100');
+  const approvals = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');
   assert.equal(approvals.response.status, 200);
   assert.ok(approvals.body.approvals.some(approval =>
     approval.id === applied.approvalId

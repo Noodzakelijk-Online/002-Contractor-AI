@@ -44,6 +44,23 @@ async function createJob(baseUrl, payload) {
   return result.body.job.id;
 }
 
+async function createVerifiedTradePartner(baseUrl, name) {
+  const result = await request(baseUrl, '/api/ledger/trade-partners', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      partnerType: 'supplier',
+      registrationNumber: '87654321',
+      vatNumber: 'NL123456789B01',
+      verificationReference: 'Inventory QA registry check',
+      verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
+    })
+  });
+  assert.equal(result.response.status, 201);
+  assert.equal(result.body.partner.compliance.status, 'verified');
+  return result.body.partner;
+}
+
 test('inventory readiness coordinates materials, procurement, loading and tool conflicts', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
@@ -57,6 +74,7 @@ test('inventory readiness coordinates materials, procurement, loading and tool c
   const startIso = start.toISOString();
   const endIso = end.toISOString();
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const tradePartner = await createVerifiedTradePartner(baseUrl, 'Bouwmaat');
 
   const materialJobId = await createJob(baseUrl, {
     title: 'Inventory QA material job',
@@ -103,6 +121,7 @@ test('inventory readiness coordinates materials, procurement, loading and tool c
     method: 'POST',
     body: JSON.stringify({
       supplier: 'Bouwmaat',
+      tradePartnerId: tradePartner.id,
       status: 'ready_to_order',
       amount: 300,
       items: [{ name: 'Inventory QA adhesive', quantity: 8, unitCost: 12.5 }],
@@ -118,7 +137,58 @@ test('inventory readiness coordinates materials, procurement, loading and tool c
   const approvalJob = approvalQueue.body.jobs.find(job => job.jobId === materialJobId);
   assert.ok(approvalJob);
   assert.equal(approvalJob.flags.approvalRequired, true);
-  assert.ok(approvalJob.nextActions.some(action => action.type === 'review_inventory_approval'));
+  const reviewApprovalAction = approvalJob.nextActions.find(action => action.type === 'review_inventory_approval');
+  assert.ok(reviewApprovalAction);
+  assert.equal(reviewApprovalAction.approvalId, procurement.body.procurementOrder.approvalId);
+
+  const approvedProcurement = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(procurement.body.procurementOrder.approvalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Inventory QA approver' })
+  });
+  assert.equal(approvedProcurement.response.status, 200);
+
+  const materialQueue = await request(baseUrl, '/api/ledger/inventory?mode=material&limit=100');
+  assert.equal(materialQueue.response.status, 200);
+  const materialReviewJob = materialQueue.body.jobs.find(job => job.jobId === materialJobId);
+  assert.ok(materialReviewJob);
+  const materialStatusAction = materialReviewJob.nextActions.find(action => action.type === 'review_material_status');
+  assert.ok(materialStatusAction);
+  assert.equal(materialStatusAction.materialRequirementId, material.body.materialRequirement.id);
+
+  const blockedOrderStatus = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(materialJobId)}/materials/${encodeURIComponent(materialStatusAction.materialRequirementId)}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'ordered', notes: 'Attempted supplier commitment through an internal status route.' })
+  });
+  assert.equal(blockedOrderStatus.response.status, 400);
+  assert.match(blockedOrderStatus.body.error.message, /unsupported internal material status/i);
+
+  const missingMaterialEvidence = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(materialJobId)}/materials/${encodeURIComponent(materialStatusAction.materialRequirementId)}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'available', availableQuantity: 8, notes: 'No retained verification reference.' })
+  });
+  assert.equal(missingMaterialEvidence.response.status, 400);
+  assert.match(missingMaterialEvidence.body.error.message, /verification reference/i);
+
+  const materialStatus = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(materialJobId)}/materials/${encodeURIComponent(materialStatusAction.materialRequirementId)}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: 'available',
+      availableQuantity: 8,
+      location: 'Warehouse A-12',
+      verificationReference: 'COUNT-QA-001',
+      notes: 'Eight sealed tubes were counted and reserved for the job.'
+    })
+  });
+  assert.equal(materialStatus.response.status, 200);
+  assert.equal(materialStatus.body.materialRequirement.status, 'available');
+  assert.equal(materialStatus.body.materialRequirement.data.availableQuantity, 8);
+  assert.equal(materialStatus.body.materialRequirement.data.location, 'Warehouse A-12');
+  assert.equal(materialStatus.body.materialRequirement.data.lastStatusTransition.externalCommitments, 0);
+  assert.equal(materialStatus.body.externalCommitments, 0);
+
+  const clearedMaterialQueue = await request(baseUrl, '/api/ledger/inventory?mode=material&limit=100');
+  assert.equal(clearedMaterialQueue.response.status, 200);
+  assert.equal(clearedMaterialQueue.body.jobs.some(job => job.jobId === materialJobId), false);
 
   const materialJobTool = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(materialJobId)}/tools`, {
     method: 'POST',

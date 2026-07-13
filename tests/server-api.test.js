@@ -20,714 +20,90 @@ async function request(baseUrl, route, options = {}) {
   return { response, body };
 }
 
-test('API lifecycle keeps worker and tool state consistent', async t => {
+test('JSON request boundaries reject malformed and oversized bodies without internal errors', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const malformed = await request(baseUrl, '/api/ledger/trade-partners', {
+    method: 'POST',
+    body: '{'
+  });
+  assert.equal(malformed.response.status, 400);
+  assert.equal(malformed.body.error.code, 'invalid_json');
+  assert.ok(malformed.body.error.requestId);
+
+  const oversized = await request(baseUrl, '/api/ledger/trade-partners', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Oversized request', padding: 'x'.repeat(2 * 1024 * 1024) })
+  });
+  assert.equal(oversized.response.status, 413);
+  assert.equal(oversized.body.error.code, 'request_body_too_large');
+
+  const readiness = await request(baseUrl, '/api/health/ready');
+  assert.equal(readiness.response.status, 200);
+  assert.equal(readiness.body.status, 'ready');
+});
+
+test('legacy job autonomy routes are retired in favor of ledger workflows', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
 
   const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  const dashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboard.response.status, 200);
-  assert.equal(dashboard.body.source, 'node');
-
-  const toolResponse = await request(baseUrl, '/api/tools', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Cordless Drill',
-      category: 'power_tools',
-      location: 'Warehouse'
-    })
-  });
-  assert.equal(toolResponse.response.status, 201);
-
-  const createResponse = await request(baseUrl, '/api/jobs', {
-    method: 'POST',
-    body: JSON.stringify({
-      title: 'API lifecycle repair',
-      client: 'Regression Client',
-      address: 'Amsterdam',
-      description: 'General repair requiring a cordless drill',
-      priority: 'high',
-      tools: ['Cordless Drill'],
-      estimatedCost: 250
-    })
-  });
-  assert.equal(createResponse.response.status, 201);
-  const jobId = createResponse.body.id;
-  const ledgerJobId = createResponse.body.ledgerJobId;
-  assert.ok(ledgerJobId);
-
-  const ledgerCreated = await request(baseUrl, `/api/ledger/jobs/${ledgerJobId}`);
-  assert.equal(ledgerCreated.response.status, 200);
-  assert.equal(ledgerCreated.body.job.title, 'API lifecycle repair');
-  assert.ok(ledgerCreated.body.job.quotes[0].approvalId);
-  assert.ok(ledgerCreated.body.job.audit.some(event => event.action === 'create_intake_job'));
-
-  const executeResponse = await request(baseUrl, `/api/jobs/${jobId}/execute-ai-plan`, {
+  const result = await request(`http://127.0.0.1:${port}`, '/api/jobs/legacy_job_1/execute-ai-plan', {
     method: 'POST',
     body: '{}'
   });
-  assert.equal(executeResponse.response.status, 200);
-  assert.equal(executeResponse.body.success, true);
-  const assignedWorkerId = executeResponse.body.job.assignedWorkerId;
-  assert.ok(assignedWorkerId);
 
-  const workersBefore = await request(baseUrl, '/api/workers');
-  const completedBefore = workersBefore.body.find(worker => worker.id === assignedWorkerId).completedJobs;
-
-  const startResponse = await request(baseUrl, `/api/jobs/${jobId}/start`, {
-    method: 'POST',
-    body: '{}'
-  });
-  assert.equal(startResponse.response.status, 200);
-  assert.equal(startResponse.body.job.status, 'in_progress');
-
-  const completeResponse = await request(baseUrl, `/api/jobs/${jobId}/complete`, {
-    method: 'POST',
-    body: JSON.stringify({ actualCost: 240 })
-  });
-  assert.equal(completeResponse.response.status, 200);
-  assert.equal(completeResponse.body.job.status, 'completed');
-  assert.equal(completeResponse.body.job.actualCost, 240);
-  assert.ok(completeResponse.body.records.invoice.id);
-  assert.ok(completeResponse.body.records.peppolInvoice.id);
-  assert.ok(completeResponse.body.records.clientMessage.id);
-  assert.ok(completeResponse.body.records.dailyLog.id);
-  assert.ok(completeResponse.body.records.closeoutItem.id);
-  assert.ok(completeResponse.body.records.payment.id);
-  assert.ok(completeResponse.body.actions.some(action => action.type === 'release_resources'));
-  assert.ok(completeResponse.body.actions.some(action => action.type === 'draft_invoice'));
-  assert.ok(completeResponse.body.actions.some(action => action.type === 'queue_peppol_invoice'));
-  assert.ok(completeResponse.body.actions.some(action => action.type === 'draft_client_update'));
-  assert.ok(completeResponse.body.actions.some(action => action.type === 'draft_daily_log'));
-  assert.ok(completeResponse.body.actions.some(action => action.type === 'create_closeout_item'));
-  assert.equal(completeResponse.body.ledgerJob.status, 'completed');
-  assert.ok(completeResponse.body.ledgerJob.invoices[0].approvalId);
-
-  const ledgerAfterComplete = await request(baseUrl, `/api/ledger/jobs/${ledgerJobId}`);
-  assert.equal(ledgerAfterComplete.response.status, 200);
-  assert.equal(ledgerAfterComplete.body.job.status, 'completed');
-  assert.ok(ledgerAfterComplete.body.job.progress.some(update => update.status === 'completed'));
-  assert.ok(ledgerAfterComplete.body.job.invoices.length >= 1);
-
-  const repeatResponse = await request(baseUrl, `/api/jobs/${jobId}/complete`, {
-    method: 'POST',
-    body: JSON.stringify({ actualCost: 240 })
-  });
-  assert.equal(repeatResponse.response.status, 200);
-  assert.equal(repeatResponse.body.alreadyCompleted, true);
-  assert.equal(repeatResponse.body.actions.length, 0);
-  assert.equal(repeatResponse.body.records.invoice.id, completeResponse.body.records.invoice.id);
-
-  const workersAfter = await request(baseUrl, '/api/workers');
-  const assignedWorker = workersAfter.body.find(worker => worker.id === assignedWorkerId);
-  assert.equal(assignedWorker.completedJobs, completedBefore + 1);
-  assert.equal(assignedWorker.currentJobId, null);
-  assert.equal(assignedWorker.status, 'available');
-
-  const toolsAfter = await request(baseUrl, '/api/tools');
-  const drill = toolsAfter.body.find(tool => tool.id === toolResponse.body.id);
-  assert.equal(drill.status, 'available');
-  assert.equal(drill.assignedJobId, null);
-  assert.equal(drill.assignedWorkerId, null);
-
-  const dashboardAfterComplete = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboardAfterComplete.response.status, 200);
-  assert.ok(dashboardAfterComplete.body.ledger.metrics.jobs >= 4);
-  assert.ok(dashboardAfterComplete.body.construction.data.invoices.some(record => record.id === completeResponse.body.records.invoice.id));
-  assert.ok(dashboardAfterComplete.body.construction.data.peppolInvoices.some(record => record.id === completeResponse.body.records.peppolInvoice.id));
-  assert.ok(dashboardAfterComplete.body.construction.data.clientMessages.some(record => record.id === completeResponse.body.records.clientMessage.id));
-  assert.ok(dashboardAfterComplete.body.construction.data.dailyLogs.some(record => record.id === completeResponse.body.records.dailyLog.id));
-  assert.ok(dashboardAfterComplete.body.construction.data.closeoutItems.some(record => record.id === completeResponse.body.records.closeoutItem.id));
-  assert.ok(dashboardAfterComplete.body.construction.data.payments.some(record => record.id === completeResponse.body.records.payment.id));
-
-  const editJobResponse = await request(baseUrl, `/api/jobs/${jobId}`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      title: 'API lifecycle repair edited',
-      priority: 'medium',
-      status: 'completed'
-    })
-  });
-  assert.equal(editJobResponse.response.status, 200);
-  assert.equal(editJobResponse.body.title, 'API lifecycle repair edited');
-  assert.equal(editJobResponse.body.priority, 'medium');
-
-  const deleteJobResponse = await request(baseUrl, `/api/jobs/${jobId}`, {
-    method: 'DELETE'
-  });
-  assert.equal(deleteJobResponse.response.status, 200);
-  assert.equal(deleteJobResponse.body.success, true);
-  assert.equal(deleteJobResponse.body.deleted, false);
-  assert.equal(deleteJobResponse.body.retained, true);
-  assert.equal(deleteJobResponse.body.job.status, 'pending_archive_approval');
-  assert.equal(deleteJobResponse.body.approval.targetType, 'legacy_job_archive');
-
-  const repeatPendingDeleteJob = await request(baseUrl, `/api/jobs/${jobId}`, {
-    method: 'DELETE'
-  });
-  assert.equal(repeatPendingDeleteJob.response.status, 200);
-  assert.equal(repeatPendingDeleteJob.body.deleted, false);
-  assert.equal(repeatPendingDeleteJob.body.retained, true);
-  assert.equal(repeatPendingDeleteJob.body.alreadyPending, true);
-  assert.equal(repeatPendingDeleteJob.body.approval.id, deleteJobResponse.body.approval.id);
-
-  const pendingArchiveApprovals = await request(baseUrl, '/api/approvals?status=pending&limit=500');
-  assert.equal(pendingArchiveApprovals.response.status, 200);
-  assert.equal(pendingArchiveApprovals.body.approvals.filter(approval =>
-    approval.targetType === 'legacy_job_archive'
-    && String(approval.targetId) === String(jobId)
-  ).length, 1);
-
-  const retainedJobResponse = await request(baseUrl, `/api/jobs/${jobId}`);
-  assert.equal(retainedJobResponse.response.status, 200);
-  assert.equal(retainedJobResponse.body.status, 'pending_archive_approval');
-
-  const archiveApproval = await request(baseUrl, `/api/approvals/${deleteJobResponse.body.approval.id}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'approved', resolvedBy: 'Regression Test', reason: 'Archive approved.' })
-  });
-  assert.equal(archiveApproval.response.status, 200);
-  assert.equal(archiveApproval.body.approval.status, 'approved');
-  assert.equal(archiveApproval.body.sideEffect.type, 'legacy_job_archive');
-
-  const archivedJobResponse = await request(baseUrl, `/api/jobs/${jobId}`);
-  assert.equal(archivedJobResponse.response.status, 200);
-  assert.equal(archivedJobResponse.body.status, 'archived');
-
-  const repeatArchivedDeleteJob = await request(baseUrl, `/api/jobs/${jobId}`, {
-    method: 'DELETE'
-  });
-  assert.equal(repeatArchivedDeleteJob.response.status, 200);
-  assert.equal(repeatArchivedDeleteJob.body.deleted, false);
-  assert.equal(repeatArchivedDeleteJob.body.retained, true);
-  assert.equal(repeatArchivedDeleteJob.body.alreadyArchived, true);
-  assert.equal(repeatArchivedDeleteJob.body.approval, null);
-  assert.equal(repeatArchivedDeleteJob.body.job.status, 'archived');
-
-  const defaultJobsAfterArchive = await request(baseUrl, '/api/jobs');
-  assert.equal(defaultJobsAfterArchive.response.status, 200);
-  assert.ok(!defaultJobsAfterArchive.body.some(job => String(job.id) === String(jobId)));
-
-  const retainedJobsAfterArchive = await request(baseUrl, '/api/jobs?includeArchived=true');
-  assert.equal(retainedJobsAfterArchive.response.status, 200);
-  assert.ok(retainedJobsAfterArchive.body.some(job => String(job.id) === String(jobId) && job.status === 'archived'));
-
-  const archiveJobs = await request(baseUrl, '/api/jobs?status=archive');
-  assert.equal(archiveJobs.response.status, 200);
-  assert.ok(archiveJobs.body.some(job => String(job.id) === String(jobId) && job.status === 'archived'));
-
-  const ledgerJobsDefault = await request(baseUrl, '/api/ledger/jobs?limit=100');
-  assert.equal(ledgerJobsDefault.response.status, 200);
-  assert.ok(!ledgerJobsDefault.body.jobs.some(job => job.id === `legacy_job_${jobId}`));
-
-  const ledgerJobsArchive = await request(baseUrl, '/api/ledger/jobs?status=archive&limit=100');
-  assert.equal(ledgerJobsArchive.response.status, 200);
-  assert.ok(ledgerJobsArchive.body.jobs.some(job => job.id === `legacy_job_${jobId}` && job.status === 'archived'));
-
-  const dashboardAfterArchive = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboardAfterArchive.response.status, 200);
-  assert.ok(!dashboardAfterArchive.body.jobs.some(job => String(job.id) === String(jobId)));
-  assert.ok(dashboardAfterArchive.body.ledger.metrics.archivedJobs >= 1);
-
-  const editToolResponse = await request(baseUrl, `/api/tools/${toolResponse.body.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      status: 'maintenance',
-      currentLocation: 'Service Depot'
-    })
-  });
-  assert.equal(editToolResponse.response.status, 200);
-  assert.equal(editToolResponse.body.status, 'maintenance');
-  assert.equal(editToolResponse.body.currentLocation, 'Service Depot');
-
-  const deleteToolResponse = await request(baseUrl, `/api/tools/${toolResponse.body.id}`, {
-    method: 'DELETE'
-  });
-  assert.equal(deleteToolResponse.response.status, 200);
-  assert.equal(deleteToolResponse.body.success, true);
-
-  const createWorkerResponse = await request(baseUrl, '/api/workers', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Regression Worker',
-      specialty: 'QA',
-      location: 'Rotterdam',
-      hourlyRate: 35
-    })
-  });
-  assert.equal(createWorkerResponse.response.status, 201);
-
-  const editWorkerResponse = await request(baseUrl, `/api/workers/${createWorkerResponse.body.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      status: 'offline',
-      location: 'Eindhoven'
-    })
-  });
-  assert.equal(editWorkerResponse.response.status, 200);
-  assert.equal(editWorkerResponse.body.status, 'offline');
-  assert.equal(editWorkerResponse.body.location, 'Eindhoven');
-
-  const deleteWorkerResponse = await request(baseUrl, `/api/workers/${createWorkerResponse.body.id}`, {
-    method: 'DELETE'
-  });
-  assert.equal(deleteWorkerResponse.response.status, 200);
-  assert.equal(deleteWorkerResponse.body.success, true);
-
-  const diagnostics = await request(baseUrl, '/api/debug/diagnostics');
-  assert.equal(diagnostics.response.status, 200);
-  assert.equal(diagnostics.body.state.validation.valid, true);
+  assert.equal(result.response.status, 410);
+  assert.equal(result.body.error.code, 'legacy_resource_route_retired');
+  assert.equal(result.body.migration.records, '/api/ledger/jobs/:jobId/*');
 });
 
-test('construction API supports project-control records and autonomous review', async t => {
+test('legacy job lifecycle routes are retired with the ledger migration target', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
 
-  const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  const dashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboard.response.status, 200);
-  assert.ok(dashboard.body.construction.summary.activeProjects >= 1);
-  assert.ok(Array.isArray(dashboard.body.construction.data.projects));
-  assert.ok(Array.isArray(dashboard.body.construction.capabilities));
-  assert.ok(dashboard.body.construction.capabilities.some(capability => capability.key === 'eu-compliance'));
-
-  const modules = await request(baseUrl, '/api/construction');
-  assert.equal(modules.response.status, 200);
-  assert.ok(modules.body.collections.includes('rfis'));
-  assert.ok(modules.body.collections.includes('schedules'));
-  assert.ok(modules.body.collections.includes('formsChecklists'));
-  assert.ok(modules.body.collections.includes('transmittals'));
-  assert.ok(modules.body.collections.includes('costDatabase'));
-  assert.ok(modules.body.collections.includes('leadActivities'));
-  assert.ok(modules.body.collections.includes('directoryContacts'));
-  assert.ok(modules.body.collections.includes('integrationConnectors'));
-  assert.ok(modules.body.collections.includes('resourcePlans'));
-  assert.ok(modules.body.collections.includes('clientSelections'));
-  assert.ok(modules.body.collections.includes('productionReports'));
-  assert.ok(modules.body.collections.includes('payments'));
-  assert.ok(modules.body.collections.includes('lienWaivers'));
-  assert.ok(modules.body.collections.includes('complianceItems'));
-  assert.ok(modules.body.collections.includes('modelIssues'));
-  assert.ok(modules.body.collections.includes('takeoffs'));
-  assert.ok(modules.body.collections.includes('orientations'));
-  assert.ok(modules.body.collections.includes('peppolInvoices'));
-  assert.ok(modules.body.collections.includes('wkbDossiers'));
-  assert.ok(modules.body.collections.includes('vcaCertificates'));
-  assert.ok(modules.body.collections.includes('collaboratorReports'));
-  assert.ok(modules.body.collections.includes('segmentedDailyReports'));
-  assert.ok(modules.body.collections.includes('dayworkSheets'));
-  assert.ok(modules.body.collections.includes('workOrders'));
-  assert.ok(modules.body.collections.includes('bookings'));
-  assert.ok(modules.body.collections.includes('kioskSessions'));
-  assert.ok(modules.body.collections.includes('laborMap'));
-  assert.ok(modules.body.collections.includes('qualityReports'));
-  assert.ok(modules.body.collections.includes('preTaskPlans'));
-  assert.ok(modules.body.collections.includes('certifiedPayroll'));
-  assert.ok(modules.body.collections.includes('aiaBillings'));
-  assert.ok(modules.body.collections.includes('drawInspections'));
-  assert.ok(modules.body.collections.includes('riskMitigations'));
-  assert.ok(modules.body.collections.includes('dealPipelines'));
-  assert.ok(modules.body.collections.includes('omExtractions'));
-  assert.ok(modules.body.capabilities.some(capability => capability.key === 'financial-control'));
-  assert.ok(modules.body.workflows.some(workflow => workflow.key === 'payment-release'));
-  assert.ok(modules.body.workflows.some(workflow => workflow.key === 'site-coordination'));
-
-  const workflowCatalog = await request(baseUrl, '/api/construction/workflows');
-  assert.equal(workflowCatalog.response.status, 200);
-  assert.ok(workflowCatalog.body.workflows.some(workflow => workflow.key === 'safety-mobilization'));
-  assert.ok(workflowCatalog.body.workflows.some(workflow => workflow.key === 'site-coordination'));
-
-  const paymentWorkflow = await request(baseUrl, '/api/construction/workflows/payment-release/run', {
-    method: 'POST',
-    body: JSON.stringify({ projectId: 1 })
-  });
-  assert.equal(paymentWorkflow.response.status, 200);
-  assert.equal(paymentWorkflow.body.success, true);
-  assert.equal(paymentWorkflow.body.workflowKey, 'payment-release');
-  assert.ok(paymentWorkflow.body.records.invoice.id);
-  assert.ok(paymentWorkflow.body.records.peppolInvoice.id);
-  assert.ok(paymentWorkflow.body.records.payment.lienWaiverRequired);
-  assert.ok(paymentWorkflow.body.records.lienWaiver.id);
-  assert.ok(paymentWorkflow.body.records.drawRequest.id);
-  assert.ok(paymentWorkflow.body.records.drawInspection.id);
-  assert.ok(paymentWorkflow.body.records.riskMitigation.id);
-  assert.ok(paymentWorkflow.body.run.recordRefs.some(ref => ref.collection === 'payments'));
-  assert.ok(paymentWorkflow.body.recordRefs.some(ref => ref.collection === 'drawRequests'));
-  assert.ok(paymentWorkflow.body.actions.some(action => action.collection === 'drawRequests'));
-
-  const coordinationWorkflow = await request(baseUrl, '/api/construction/workflows/site-coordination/run', {
-    method: 'POST',
-    body: JSON.stringify({ projectId: 1 })
-  });
-  assert.equal(coordinationWorkflow.response.status, 200);
-  assert.equal(coordinationWorkflow.body.success, true);
-  assert.equal(coordinationWorkflow.body.workflowKey, 'site-coordination');
-  assert.ok(coordinationWorkflow.body.records.booking.id);
-  assert.ok(coordinationWorkflow.body.records.workOrder.id);
-  assert.ok(coordinationWorkflow.body.records.dayworkSheet.id);
-  assert.ok(coordinationWorkflow.body.recordRefs.some(ref => ref.collection === 'dayworkSheets'));
-  assert.ok(coordinationWorkflow.body.actions.some(action => action.collection === 'workOrders'));
-
-  const dashboardAfterWorkflow = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboardAfterWorkflow.response.status, 200);
-  assert.ok(dashboardAfterWorkflow.body.construction.data.workflowRuns.some(run => run.runId === paymentWorkflow.body.runId));
-  assert.ok(dashboardAfterWorkflow.body.construction.data.workflowRuns.some(run => run.runId === coordinationWorkflow.body.runId));
-  const storedPaymentRun = dashboardAfterWorkflow.body.construction.data.workflowRuns.find(run => run.runId === paymentWorkflow.body.runId);
-  assert.ok(storedPaymentRun.recordRefs.some(ref => ref.collection === 'lienWaivers'));
-
-  const overdueDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const createRfi = await request(baseUrl, '/api/construction/rfis', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      subject: 'Regression RFI',
-      status: 'open',
-      dueDate: overdueDate,
-      responsible: 'Design team'
-    })
-  });
-  assert.equal(createRfi.response.status, 201);
-  assert.equal(createRfi.body.record.subject, 'Regression RFI');
-
-  const createSelection = await request(baseUrl, '/api/construction/clientSelections', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      title: 'Regression client selection',
-      status: 'pending_client',
-      dueDate: overdueDate,
-      client: 'Regression Client'
-    })
-  });
-  assert.equal(createSelection.response.status, 201);
-
-  const createPayment = await request(baseUrl, '/api/construction/payments', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      vendor: 'Regression Subcontractor',
-      status: 'ready_to_release',
-      amount: 1200,
-      lienWaiverRequired: true
-    })
-  });
-  assert.equal(createPayment.response.status, 201);
-
-  const review = await request(baseUrl, '/api/construction/autonomous-review', {
-    method: 'POST',
-    body: '{}'
-  });
-  assert.equal(review.response.status, 200);
-  assert.equal(review.body.success, true);
-  assert.ok(review.body.actions.some(action => action.type === 'escalate_rfi' && action.id === createRfi.body.record.id));
-  assert.ok(review.body.actions.some(action => action.type === 'escalate_selection' && action.id === createSelection.body.record.id));
-  assert.ok(review.body.actions.some(action => action.type === 'request_lien_waiver'));
-  assert.ok(review.body.actions.some(action => action.type === 'queue_peppol_invoice'));
-  assert.ok(review.body.actions.some(action => action.type === 'renew_vca_certificate'));
-  assert.ok(review.body.actions.some(action => action.type === 'repair_integration'));
-  assert.ok(review.body.actions.some(action => action.type === 'review_collaborator_report'));
-  assert.ok(review.body.actions.some(action => action.type === 'verify_kiosk_session'));
-  assert.ok(review.body.actions.some(action => action.type === 'resolve_quality_report'));
-  assert.ok(review.body.actions.some(action => action.type === 'certify_payroll'));
-  assert.ok(review.body.actions.some(action => action.type === 'submit_progress_billing'));
-  assert.ok(review.body.actions.some(action => action.type === 'review_om_extraction'));
-  assert.ok(review.body.insights.some(insight => ['production_variance', 'compliance_risk'].includes(insight.type)));
-  assert.ok(review.body.insights.some(insight => ['takeoff_review', 'wkb_dossier_gap', 'site_access_block'].includes(insight.type)));
-  assert.ok(review.body.insights.some(insight => ['cost_database_stale', 'directory_compliance_gap'].includes(insight.type)));
-  assert.ok(review.body.insights.some(insight => insight.type === 'segment_blocker'));
-  assert.ok(review.body.insights.some(insight => insight.type === 'labor_certification_gap'));
-  assert.ok(review.body.insights.some(insight => insight.type === 'finance_risk_control'));
-  assert.ok(review.body.insights.some(insight => insight.type === 'deal_underwriting'));
-  assert.ok(review.body.capabilities.some(capability => capability.status === 'action_required'));
-  assert.ok(review.body.summary.overdueRfis >= 1);
-  assert.ok(review.body.summary.pendingPaymentValue >= 1200);
-  assert.ok(review.body.summary.openComplianceItems >= 1);
-  assert.ok(review.body.summary.openModelIssues >= 1);
-  assert.ok(review.body.summary.wkbCompletionPercent < 100);
-  assert.ok(review.body.summary.integrationIssues >= 1);
-  assert.ok(review.body.summary.pendingCollaboratorReports >= 1);
-  assert.ok(review.body.summary.segmentedReportBlockers >= 1);
-  assert.ok(review.body.summary.openKioskSessions >= 1);
-  assert.ok(review.body.summary.laborCertificationGaps >= 1);
-  assert.ok(review.body.summary.openQualityReports >= 1);
-  assert.ok(review.body.summary.pendingPreTaskPlans >= 1);
-  assert.ok(review.body.summary.pendingCertifiedPayroll >= 1);
-  assert.ok(review.body.summary.draftAiaBillings >= 1);
-  assert.ok(review.body.summary.pendingDrawInspections >= 1);
-  assert.ok(review.body.summary.openRiskMitigations >= 1);
-  assert.ok(review.body.summary.activeDealPipelineValue > 0);
-  assert.ok(review.body.summary.pendingOmExtractions >= 1);
-
-  const collaboratorReports = await request(baseUrl, '/api/construction/collaboratorReports');
-  assert.equal(collaboratorReports.response.status, 200);
-  const collaboratorReport = collaboratorReports.body.records.find(record => record.status === 'pending_review');
-  assert.ok(collaboratorReport);
-  const acceptCollaboratorReport = await request(baseUrl, `/api/construction/collaboratorReports/${collaboratorReport.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'accepted' })
-  });
-  assert.equal(acceptCollaboratorReport.response.status, 200);
-  assert.equal(acceptCollaboratorReport.body.record.status, 'accepted');
-  assert.ok(acceptCollaboratorReport.body.records.dailyLog.id);
-  assert.ok(acceptCollaboratorReport.body.actions.some(action => action.type === 'draft_daily_log'));
-
-  const aiaBillings = await request(baseUrl, '/api/construction/aiaBillings');
-  assert.equal(aiaBillings.response.status, 200);
-  const aiaBilling = aiaBillings.body.records.find(record => record.status === 'draft');
-  assert.ok(aiaBilling);
-  const submitAiaBilling = await request(baseUrl, `/api/construction/aiaBillings/${aiaBilling.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'submitted' })
-  });
-  assert.equal(submitAiaBilling.response.status, 200);
-  assert.equal(submitAiaBilling.body.record.status, 'submitted');
-  assert.ok(submitAiaBilling.body.records.invoice.id);
-  assert.ok(submitAiaBilling.body.records.drawRequest.id);
-  assert.ok(submitAiaBilling.body.actions.some(action => action.type === 'draft_invoice'));
-  assert.ok(submitAiaBilling.body.actions.some(action => action.type === 'create_draw_request'));
-
-  const closeRfiAction = await request(baseUrl, `/api/construction/rfis/${createRfi.body.record.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'closed' })
-  });
-  assert.equal(closeRfiAction.response.status, 200);
-  assert.equal(closeRfiAction.body.record.status, 'closed');
-  assert.ok(closeRfiAction.body.records.transmittal.id);
-  assert.ok(closeRfiAction.body.actions.some(action => action.type === 'draft_rfi_transmittal'));
-
-  const createTimecard = await request(baseUrl, '/api/construction/timecards', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      worker: 'Regression Worker',
-      date: new Date().toISOString().slice(0, 10),
-      hours: 8,
-      hourlyRate: 72,
-      costCode: '01-200',
-      status: 'submitted'
-    })
-  });
-  assert.equal(createTimecard.response.status, 201);
-  const approveTimecard = await request(baseUrl, `/api/construction/timecards/${createTimecard.body.record.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'approved' })
-  });
-  assert.equal(approveTimecard.response.status, 200);
-  assert.equal(approveTimecard.body.record.status, 'approved');
-  assert.equal(approveTimecard.body.records.jobCostEntry.actualCost, 576);
-  assert.ok(approveTimecard.body.records.payrollRun.id);
-  assert.ok(approveTimecard.body.actions.some(action => action.type === 'post_timecard_job_cost'));
-  assert.ok(approveTimecard.body.actions.some(action => action.type === 'queue_timecard_payroll'));
-
-  const createMaterial = await request(baseUrl, '/api/construction/materials', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      title: 'Regression material',
-      status: 'low_stock',
-      quantity: 3,
-      unit: 'boxes',
-      vendor: 'Regression Supplier',
-      expectedDelivery: new Date().toISOString().slice(0, 10)
-    })
-  });
-  assert.equal(createMaterial.response.status, 201);
-  const orderMaterial = await request(baseUrl, `/api/construction/materials/${createMaterial.body.record.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'ordered' })
-  });
-  assert.equal(orderMaterial.response.status, 200);
-  assert.ok(orderMaterial.body.records.purchaseOrder.id);
-  assert.ok(orderMaterial.body.actions.some(action => action.type === 'create_material_purchase_order'));
-
-  const createPeppolInvoice = await request(baseUrl, '/api/construction/peppolInvoices', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      recipient: 'Regression Client',
-      status: 'ready',
-      amount: 2400,
-      standard: 'UBL 2.1',
-      dueDate: new Date().toISOString().slice(0, 10)
-    })
-  });
-  assert.equal(createPeppolInvoice.response.status, 201);
-  const peppolInvoice = createPeppolInvoice.body.record;
-  const sendPeppolInvoice = await request(baseUrl, `/api/construction/peppolInvoices/${peppolInvoice.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'sent' })
-  });
-  assert.equal(sendPeppolInvoice.response.status, 200);
-  assert.equal(sendPeppolInvoice.body.record.status, 'sent');
-  assert.ok(sendPeppolInvoice.body.records.invoice.id);
-  assert.ok(sendPeppolInvoice.body.actions.some(action => action.type === 'sync_peppol_invoice'));
-
-  const batchTimecard = await request(baseUrl, '/api/construction/timecards', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      worker: 'Batch Worker',
-      date: new Date().toISOString().slice(0, 10),
-      hours: 5,
-      hourlyRate: 60,
-      costCode: '01-300',
-      status: 'submitted'
-    })
-  });
-  assert.equal(batchTimecard.response.status, 201);
-  const batchMaterial = await request(baseUrl, '/api/construction/materials', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      title: 'Batch material',
-      status: 'low_stock',
-      quantity: 4,
-      unit: 'packs',
-      vendor: 'Batch Supplier'
-    })
-  });
-  assert.equal(batchMaterial.response.status, 201);
-  const batchAction = await request(baseUrl, '/api/construction/actions/batch', {
-    method: 'POST',
-    body: JSON.stringify({
-      actions: [
-        { collection: 'timecards', id: batchTimecard.body.record.id, status: 'approved' },
-        { collection: 'materials', id: batchMaterial.body.record.id, status: 'ordered' }
-      ]
-    })
-  });
-  assert.equal(batchAction.response.status, 200);
-  assert.equal(batchAction.body.executed, 2);
-  assert.equal(batchAction.body.failed, 0);
-  assert.ok(batchAction.body.results.some(result => result.collection === 'timecards' && result.records.jobCostEntry.actualCost === 300));
-  assert.ok(batchAction.body.results.some(result => result.collection === 'materials' && result.records.purchaseOrder.id));
-
-  const updateRfi = await request(baseUrl, `/api/construction/rfis/${createRfi.body.record.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({ status: 'closed' })
-  });
-  assert.equal(updateRfi.response.status, 200);
-  assert.equal(updateRfi.body.record.status, 'closed');
-
-  const rfis = await request(baseUrl, '/api/construction/rfis');
-  assert.equal(rfis.response.status, 200);
-  assert.equal(rfis.body.records.find(record => record.id === createRfi.body.record.id).status, 'closed');
-
-  const deleteSelection = await request(baseUrl, `/api/construction/clientSelections/${createSelection.body.record.id}`, {
-    method: 'DELETE'
-  });
-  assert.equal(deleteSelection.response.status, 200);
-  assert.equal(deleteSelection.body.success, true);
-  assert.equal(deleteSelection.body.deleted, false);
-  assert.equal(deleteSelection.body.retained, true);
-  assert.equal(deleteSelection.body.record.status, 'pending_archive_approval');
-  assert.equal(deleteSelection.body.approval.targetType, 'construction_record_archive');
-
-  const repeatPendingDeleteSelection = await request(baseUrl, `/api/construction/clientSelections/${createSelection.body.record.id}`, {
-    method: 'DELETE'
-  });
-  assert.equal(repeatPendingDeleteSelection.response.status, 200);
-  assert.equal(repeatPendingDeleteSelection.body.retained, true);
-  assert.equal(repeatPendingDeleteSelection.body.alreadyPending, true);
-  assert.equal(repeatPendingDeleteSelection.body.approval.id, deleteSelection.body.approval.id);
-
-  const pendingSelectionApprovals = await request(baseUrl, '/api/approvals?status=pending&limit=500');
-  assert.equal(pendingSelectionApprovals.response.status, 200);
-  assert.equal(pendingSelectionApprovals.body.approvals.filter(approval =>
-    approval.targetType === 'construction_record_archive'
-    && approval.targetId === `clientSelections:${createSelection.body.record.id}`
-  ).length, 1);
-
-  const selections = await request(baseUrl, '/api/construction/clientSelections');
-  assert.equal(selections.response.status, 200);
-  assert.ok(selections.body.records.some(record =>
-    record.id === createSelection.body.record.id
-    && record.status === 'pending_archive_approval'
-  ));
-
-  const archiveSelection = await request(baseUrl, `/api/approvals/${deleteSelection.body.approval.id}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'approved', resolvedBy: 'Regression Test', reason: 'Archive selection record.' })
-  });
-  assert.equal(archiveSelection.response.status, 200);
-  assert.equal(archiveSelection.body.approval.status, 'approved');
-  assert.equal(archiveSelection.body.sideEffect.type, 'construction_record_archive');
-
-  const archivedSelections = await request(baseUrl, '/api/construction/clientSelections');
-  assert.equal(archivedSelections.response.status, 200);
-  assert.ok(archivedSelections.body.records.some(record =>
-    record.id === createSelection.body.record.id
-    && record.status === 'archived'
-  ));
-
-  const repeatArchivedDeleteSelection = await request(baseUrl, `/api/construction/clientSelections/${createSelection.body.record.id}`, {
-    method: 'DELETE'
-  });
-  assert.equal(repeatArchivedDeleteSelection.response.status, 200);
-  assert.equal(repeatArchivedDeleteSelection.body.retained, true);
-  assert.equal(repeatArchivedDeleteSelection.body.alreadyArchived, true);
-  assert.equal(repeatArchivedDeleteSelection.body.approval, null);
-  assert.equal(repeatArchivedDeleteSelection.body.record.status, 'archived');
-
-  const createInvoice = await request(baseUrl, '/api/construction/invoices', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      vendor: 'Regression Vendor',
-      number: 'INV-ACTION-1',
-      status: 'pending_review',
-      amount: 777
-    })
-  });
-  assert.equal(createInvoice.response.status, 201);
-
-  const payInvoice = await request(baseUrl, `/api/construction/invoices/${createInvoice.body.record.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'paid' })
-  });
-  assert.equal(payInvoice.response.status, 200);
-  assert.equal(payInvoice.body.success, true);
-  assert.equal(payInvoice.body.record.status, 'paid');
-  assert.ok(payInvoice.body.record.paidAt);
-  assert.equal(payInvoice.body.record.actionHistory.at(-1).to, 'paid');
-  assert.ok(payInvoice.body.records.payment.id);
-  assert.ok(payInvoice.body.actions.some(action => action.type === 'sync_payment'));
-
-  const createDailyLog = await request(baseUrl, '/api/construction/dailyLogs', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: 1,
-      date: new Date().toISOString().slice(0, 10),
-      status: 'draft',
-      manpower: 3,
-      notes: 'Regression field log'
-    })
-  });
-  assert.equal(createDailyLog.response.status, 201);
-
-  const submitDailyLog = await request(baseUrl, `/api/construction/dailyLogs/${createDailyLog.body.record.id}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'submitted' })
-  });
-  assert.equal(submitDailyLog.response.status, 200);
-  assert.equal(submitDailyLog.body.record.status, 'submitted');
-  assert.ok(submitDailyLog.body.record.submittedAt);
-  assert.ok(submitDailyLog.body.records.clientMessage.id);
-  assert.ok(submitDailyLog.body.actions.some(action => action.type === 'draft_client_update'));
-
-  const dashboardAfterActions = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboardAfterActions.response.status, 200);
-  assert.ok(dashboardAfterActions.body.construction.data.payments.some(record => record.id === payInvoice.body.records.payment.id));
-  assert.ok(dashboardAfterActions.body.construction.data.clientMessages.some(record => record.id === submitDailyLog.body.records.clientMessage.id));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  for (const route of ['schedule', 'start', 'complete']) {
+    const result = await request(baseUrl, `/api/jobs/legacy_job_1/${route}`, {
+      method: 'POST',
+      body: '{}'
+    });
+    assert.equal(result.response.status, 410);
+    assert.equal(result.body.error.code, 'legacy_resource_route_retired');
+    assert.equal(result.body.migration.intake, '/api/ledger/intake');
+  }
 });
 
-test('emergency activation dispatches resources and creates command records', async t => {
+test('construction compatibility routes are retired in favor of operating-ledger records', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  for (const route of ['/api/construction', '/api/construction/rfis', '/api/construction/workflows/site-coordination/run']) {
+    const result = route === '/api/construction'
+      ? await request(baseUrl, route)
+      : await request(baseUrl, route, { method: 'POST', body: '{}' });
+    assert.equal(result.response.status, 410);
+    assert.equal(result.body.error.code, 'legacy_construction_retired');
+    assert.equal(result.body.migration.dashboard, '/api/ledger/dashboard');
+  }
+
+  const dashboard = await request(baseUrl, '/api/ledger/dashboard');
+  assert.equal(dashboard.response.status, 200);
+  assert.ok(dashboard.body.dashboard.metrics);
+
+  const retiredDashboard = await request(baseUrl, '/api/dashboard');
+  assert.equal(retiredDashboard.response.status, 410);
+  assert.equal(retiredDashboard.body.error.code, 'dashboard_facade_retired');
+  assert.equal(retiredDashboard.body.migration.dashboard, '/api/ledger/dashboard');
+});
+test('emergency auto-dispatch is retired in favor of ledger incident and approval workflows', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -739,391 +115,47 @@ test('emergency activation dispatches resources and creates command records', as
     method: 'POST',
     body: JSON.stringify({ reason: 'Regression emergency activation' })
   });
-  assert.equal(emergency.response.status, 200);
-  assert.equal(emergency.body.success, true);
-  assert.equal(emergency.body.job.priority, 'critical');
-  assert.equal(emergency.body.job.status, 'in_progress');
-  assert.ok(emergency.body.job.progress >= 15);
-  assert.ok(emergency.body.worker);
-  assert.ok(emergency.body.actions.some(action => action.type === 'dispatch_worker'));
-  assert.ok(emergency.body.actions.some(action => action.type === 'open_incident'));
-  assert.ok(emergency.body.actions.some(action => action.type === 'draft_client_update'));
-  assert.ok(emergency.body.records.incident.id);
-  assert.ok(emergency.body.records.task.id);
-  assert.ok(emergency.body.records.clientMessage.id);
-  assert.ok(emergency.body.records.safetyMeeting.id);
-  assert.ok(emergency.body.records.dailyLog.id);
-
-  const dashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboard.response.status, 200);
-  assert.ok(dashboard.body.construction.data.incidents.some(record => record.id === emergency.body.records.incident.id));
-  assert.ok(dashboard.body.construction.data.tasks.some(record => record.id === emergency.body.records.task.id));
-  assert.ok(dashboard.body.construction.data.clientMessages.some(record => record.id === emergency.body.records.clientMessage.id));
-
-  const diagnostics = await request(baseUrl, '/api/debug/diagnostics');
-  assert.equal(diagnostics.response.status, 200);
-  assert.equal(diagnostics.body.state.validation.valid, true);
+  assert.equal(emergency.response.status, 410);
+  assert.equal(emergency.body.error.code, 'emergency_autonomy_retired');
+  assert.match(emergency.body.error.message, /approval gates/);
 });
 
-test('operations cycle combines job AI and Build autonomous review', async t => {
+test('mixed legacy operations cycle is retired in favor of durable ledger automation', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
 
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
-
-  const worker = await request(baseUrl, '/api/workers', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Operations Cycle Worker',
-      specialty: 'General repair',
-      status: 'available',
-      location: 'Amsterdam'
-    })
-  });
-  assert.equal(worker.response.status, 201);
-
-  const tool = await request(baseUrl, '/api/tools', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Operations Cycle Kit',
-      category: 'general',
-      status: 'available',
-      location: 'Warehouse'
-    })
-  });
-  assert.equal(tool.response.status, 201);
-
-  const job = await request(baseUrl, '/api/jobs', {
-    method: 'POST',
-    body: JSON.stringify({
-      title: 'Operations cycle validation job',
-      client: 'Operations Client',
-      address: 'Amsterdam',
-      description: 'General repair with operations cycle kit',
-      status: 'pending',
-      priority: 'high',
-      tools: ['Operations Cycle Kit'],
-      estimatedCost: 500
-    })
-  });
-  assert.equal(job.response.status, 201);
 
   const cycle = await request(baseUrl, '/api/operations/cycle', {
     method: 'POST',
     body: JSON.stringify({ maxActions: 25 })
   });
-  assert.equal(cycle.response.status, 200);
-  assert.equal(cycle.body.success, true);
-  assert.equal(cycle.body.source, 'server');
-  assert.ok(cycle.body.jobCycle.preview.some(action => action.jobId === job.body.ledgerJobId));
-  assert.ok(cycle.body.summary.jobActions >= 1);
-  assert.equal(cycle.body.summary.jobActions, cycle.body.jobCycle.applied.length);
-  assert.equal(cycle.body.summary.constructionActions, cycle.body.constructionReview.actions.length);
-  assert.ok(Array.isArray(cycle.body.constructionReview.insights));
-  assert.ok(Array.isArray(cycle.body.capabilities));
-
-  const dashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboard.response.status, 200);
-  const updatedJob = dashboard.body.jobs.find(item => item.id === job.body.ledgerJobId);
-  assert.ok(updatedJob);
-  assert.equal(updatedJob.source, 'ledger');
-  const ledgerDetail = await request(baseUrl, `/api/ledger/jobs/${job.body.ledgerJobId}`);
-  assert.equal(ledgerDetail.response.status, 200);
-  assert.ok(ledgerDetail.body.job.audit.some(event => event.action.startsWith('autonomous_')));
-  assert.ok(dashboard.body.construction.data.lastReview || dashboard.body.construction.lastReview);
+  assert.equal(cycle.response.status, 410);
+  assert.equal(cycle.body.error.code, 'legacy_operations_cycle_retired');
+  assert.match(cycle.body.error.message, /ledger\/autonomous-cycle/);
 });
 
-test('capability gap plan installs official vendor modules', async t => {
+test('ledger evidence uploads retain documents and create approval-safe follow-ups', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
 
-  const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  const gaps = await request(baseUrl, '/api/construction/capability-gaps');
-  assert.equal(gaps.response.status, 200);
-  assert.equal(gaps.body.success, true);
-  assert.ok(gaps.body.blueprint.some(vendor => vendor.vendor === 'Procore'));
-  assert.ok(gaps.body.plan.vendors.some(vendor => vendor.vendor === 'HammerTech'));
-  assert.ok(Number.isFinite(gaps.body.plan.summary.averageCoverage));
-  const procoreBlueprint = gaps.body.blueprint.find(vendor => vendor.vendor === 'Procore');
-  assert.ok(procoreBlueprint.serviceGroups.some(group => group.name === 'Project execution'));
-  assert.ok(procoreBlueprint.netherlandsEuEnhancements.some(note => note.includes('Wkb')));
-
-  const marketMap = await request(baseUrl, '/api/construction/market-map');
-  assert.equal(marketMap.response.status, 200);
-  assert.equal(marketMap.body.success, true);
-  assert.ok(marketMap.body.marketMap.summary.services >= 70);
-  assert.ok(marketMap.body.marketMap.vendors.some(vendor => vendor.vendor === 'Built' && vendor.serviceGroups.length >= 3));
-
-  const operatingCatalog = await request(baseUrl, '/api/construction/operating-catalog');
-  assert.equal(operatingCatalog.response.status, 200);
-  assert.equal(operatingCatalog.body.success, true);
-  assert.ok(operatingCatalog.body.catalog.summary.services >= 70);
-  assert.ok(operatingCatalog.body.catalog.summary.approvalGates >= 8);
-  assert.ok(operatingCatalog.body.catalog.summary.regionalControls >= 5);
-  assert.ok(operatingCatalog.body.catalog.lanes.some(lane =>
-    lane.key === 'financial-control'
-    && lane.vendors.includes('Built')
-    && lane.safeAutonomy.canSendExternally === false
-    && lane.safeAutonomy.requiresApprovalFor.includes('payment_or_draw_release')
-  ));
-  assert.ok(operatingCatalog.body.catalog.regionalControls.some(control => control.key === 'wkb'));
-
-  const install = await request(baseUrl, '/api/construction/capability-gaps/run', {
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const intake = await request(baseUrl, '/api/ledger/intake', {
     method: 'POST',
-    body: JSON.stringify({
-      vendor: 'Procore',
-      modules: ['portfolioReports'],
-      force: true,
-      limit: 1
-    })
+    body: JSON.stringify({ title: 'Evidence review job', client: { name: 'Evidence Client' } })
   });
-  assert.equal(install.response.status, 200);
-  assert.equal(install.body.success, true);
-  assert.equal(install.body.vendor, 'Procore');
-  assert.equal(install.body.created, 1);
-  assert.equal(install.body.records[0].collection, 'portfolioReports');
-  assert.equal(install.body.records[0].sourceVendor, 'Procore');
-  assert.ok(install.body.gapPlan.vendors.some(vendor => vendor.vendor === 'Procore'));
+  assert.equal(intake.response.status, 201);
 
-  const dashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboard.response.status, 200);
-  assert.ok(dashboard.body.construction.data.portfolioReports.some(record => record.sourceVendor === 'Procore'));
-  assert.ok(dashboard.body.construction.operatingCatalog.summary.services >= 70);
-});
-
-test('expanded construction actions create competitor-suite linked records', async t => {
-  const server = app.listen(0);
-  await new Promise(resolve => server.once('listening', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-
-  const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-  const today = new Date().toISOString().slice(0, 10);
-
-  const createRecord = async (collection, record) => {
-    const result = await request(baseUrl, `/api/construction/${collection}`, {
-      method: 'POST',
-      body: JSON.stringify({ projectId: 1, ...record })
-    });
-    assert.equal(result.response.status, 201);
-    return result.body.record;
-  };
-
-  const runAction = async (collection, record, status) => {
-    const result = await request(baseUrl, `/api/construction/${collection}/${record.id}/action`, {
-      method: 'POST',
-      body: JSON.stringify({ status })
-    });
-    assert.equal(result.response.status, 200);
-    assert.equal(result.body.record.status, status);
-    return result.body;
-  };
-
-  const draw = await createRecord('drawRequests', {
-    title: 'Regression funded draw',
-    status: 'pending_lender',
-    requestedAmount: 12345,
-    approvedAmount: 12345
-  });
-  const fundedDraw = await runAction('drawRequests', draw, 'funded');
-  assert.ok(fundedDraw.records.payment.id);
-  assert.equal(fundedDraw.records.payment.status, 'ready_to_release');
-  assert.ok(fundedDraw.records.portfolioReport.id);
-  assert.ok(fundedDraw.actions.some(action => action.type === 'create_draw_payment_release'));
-
-  const payment = await createRecord('payments', {
-    vendor: 'Waiver Vendor',
-    status: 'scheduled',
-    amount: 4321,
-    lienWaiverRequired: true
-  });
-  const waiver = await createRecord('lienWaivers', {
-    vendor: 'Waiver Vendor',
-    status: 'requested',
-    amount: 4321,
-    paymentId: payment.id
-  });
-  const receivedWaiver = await runAction('lienWaivers', waiver, 'received');
-  assert.equal(receivedWaiver.records.payment.id, payment.id);
-  assert.equal(receivedWaiver.records.payment.lienWaiverRequired, false);
-  assert.ok(receivedWaiver.records.document.id);
-  assert.ok(receivedWaiver.actions.some(action => action.type === 'unblock_payment_release'));
-
-  const capital = await createRecord('capitalRequests', {
-    title: 'Regression capital request',
-    status: 'pending_owner',
-    amount: 7654
-  });
-  const approvedCapital = await runAction('capitalRequests', capital, 'approved');
-  assert.ok(approvedCapital.records.drawRequest.id);
-  assert.equal(approvedCapital.records.drawRequest.requestedAmount, 7654);
-
-  const underwriting = await createRecord('underwritingReviews', {
-    title: 'Regression underwriting review',
-    status: 'pending_review',
-    riskLevel: 'medium',
-    reviewer: 'Finance'
-  });
-  const approvedUnderwriting = await runAction('underwritingReviews', underwriting, 'approved');
-  assert.ok(approvedUnderwriting.records.riskMitigation.id);
-  assert.equal(approvedUnderwriting.records.riskMitigation.status, 'mitigated');
-
-  const orientation = await createRecord('orientations', {
-    worker: 'Regression Crew',
-    company: 'Regression Sub',
-    status: 'pending',
-    dueDate: today
-  });
-  const completedOrientation = await runAction('orientations', orientation, 'completed');
-  assert.ok(completedOrientation.records.siteAccessLog.id);
-  assert.equal(completedOrientation.records.siteAccessLog.orientationValid, true);
-
-  const jha = await createRecord('jhas', {
-    title: 'Regression JHA',
-    status: 'pending_review',
-    assignee: 'Safety Lead'
-  });
-  const approvedJha = await runAction('jhas', jha, 'approved');
-  assert.ok(approvedJha.records.formsChecklist.id);
-  assert.equal(approvedJha.records.formsChecklist.category, 'safety');
-
-  const sds = await createRecord('sdsSheets', {
-    title: 'Regression SDS',
-    status: 'missing',
-    supplier: 'Chemical Supplier'
-  });
-  const currentSds = await runAction('sdsSheets', sds, 'current');
-  assert.ok(currentSds.records.complianceItem.id);
-  assert.equal(currentSds.records.complianceItem.status, 'current');
-
-  const safetyPlan = await createRecord('safetyPlans', {
-    title: 'Regression safety plan',
-    status: 'pending_review',
-    reviewer: 'Safety Lead'
-  });
-  const approvedSafetyPlan = await runAction('safetyPlans', safetyPlan, 'approved');
-  assert.ok(approvedSafetyPlan.records.document.id);
-  assert.equal(approvedSafetyPlan.records.document.category, 'safety_plan');
-
-  const permit = await createRecord('permits', {
-    title: 'Regression permit',
-    status: 'pending',
-    holder: 'Site Team',
-    location: 'Test Zone'
-  });
-  const activePermit = await runAction('permits', permit, 'active');
-  assert.ok(activePermit.records.bulletin.id);
-  assert.ok(activePermit.actions.some(action => action.type === 'draft_permit_bulletin'));
-
-  const opportunity = await createRecord('opportunities', {
-    title: 'Regression pursuit',
-    client: 'Regression Client',
-    status: 'lead',
-    value: 50000,
-    probability: 30
-  });
-  const qualifiedOpportunity = await runAction('opportunities', opportunity, 'qualified');
-  assert.ok(qualifiedOpportunity.records.dealPipeline.id);
-  assert.ok(qualifiedOpportunity.records.leadActivity.id);
-  assert.equal(qualifiedOpportunity.records.dealPipeline.status, 'underwriting');
-
-  const takeoff = await createRecord('takeoffs', {
-    title: 'Regression takeoff',
-    status: 'review_required',
-    quantity: 25,
-    unitCost: 80,
-    unit: 'sqm'
-  });
-  const approvedTakeoff = await runAction('takeoffs', takeoff, 'approved');
-  assert.ok(approvedTakeoff.records.estimate.id);
-  assert.equal(approvedTakeoff.records.estimate.estimateValue, 2000);
-
-  const specification = await createRecord('specifications', {
-    title: 'Regression specification',
-    status: 'needs_review',
-    section: '09 30 00'
-  });
-  const mappedSpecification = await runAction('specifications', specification, 'mapped');
-  assert.ok(mappedSpecification.records.submittal.id);
-  assert.equal(mappedSpecification.records.submittal.package, '09 30 00');
-
-  const serviceTicket = await createRecord('serviceTickets', {
-    title: 'Regression service ticket',
-    status: 'open',
-    assignee: 'Service Team'
-  });
-  const closedServiceTicket = await runAction('serviceTickets', serviceTicket, 'closed');
-  assert.ok(closedServiceTicket.records.document.id);
-  assert.equal(closedServiceTicket.records.document.category, 'service_ticket');
-
-  const dayworkSheet = await createRecord('dayworkSheets', {
-    title: 'Regression daywork sheet',
-    status: 'submitted',
-    crew: 'Regression Crew',
-    amount: 1800,
-    description: 'Out-of-scope regression work'
-  });
-  const approvedDaywork = await runAction('dayworkSheets', dayworkSheet, 'approved');
-  assert.ok(approvedDaywork.records.changeOrder.id);
-  assert.equal(approvedDaywork.records.changeOrder.value, 1800);
-  assert.ok(approvedDaywork.records.clientMessage.id);
-  assert.ok(approvedDaywork.actions.some(action => action.type === 'create_daywork_change_order'));
-
-  const booking = await createRecord('bookings', {
-    title: 'Regression loading booking',
-    status: 'pending',
-    resource: 'Loading zone',
-    startAt: today
-  });
-  const confirmedBooking = await runAction('bookings', booking, 'confirmed');
-  assert.ok(confirmedBooking.records.task.id);
-  assert.ok(confirmedBooking.records.bulletin.id);
-  assert.ok(confirmedBooking.actions.some(action => action.type === 'draft_booking_bulletin'));
-
-  const workOrder = await createRecord('workOrders', {
-    title: 'Regression work order',
-    status: 'open',
-    assignedTo: 'Field Team',
-    description: 'Complete and store evidence'
-  });
-  const completedWorkOrder = await runAction('workOrders', workOrder, 'completed');
-  assert.ok(completedWorkOrder.records.dailyLog.id);
-  assert.ok(completedWorkOrder.records.document.id);
-  assert.equal(completedWorkOrder.records.document.category, 'work_order');
-  assert.ok(completedWorkOrder.actions.some(action => action.type === 'store_work_order_evidence'));
-
-  const connector = await createRecord('integrationConnectors', {
-    title: 'Regression ERP connector',
-    provider: 'Exact Online',
-    status: 'needs_auth'
-  });
-  const connectedConnector = await runAction('integrationConnectors', connector, 'connected');
-  assert.ok(connectedConnector.records.document.id);
-  assert.equal(connectedConnector.records.document.category, 'integration_sync');
-  assert.ok(connectedConnector.record.lastSyncAt);
-});
-
-test('upload analysis routes job evidence into construction records', async t => {
-  const server = app.listen(0);
-  await new Promise(resolve => server.once('listening', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-
-  const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  const upload = await request(baseUrl, '/api/upload', {
+  const upload = await request(baseUrl, '/api/ledger/upload', {
     method: 'POST',
     body: JSON.stringify({
       filename: 'unsafe-access-photo.jpg',
       fileType: 'image/jpeg',
       category: 'safety',
-      jobId: 1,
-      projectId: 1,
+      jobId: intake.body.job.id,
       riskLevel: 'high',
       notes: 'Blocked stair landing creates unsafe access for the crew.'
     })
@@ -1133,26 +165,24 @@ test('upload analysis routes job evidence into construction records', async t =>
   assert.equal(upload.body.success, true);
   assert.equal(upload.body.analysis.category, 'safety');
   assert.equal(upload.body.analysis.riskDetected, true);
-  assert.ok(upload.body.records.formsChecklist.id);
-  assert.ok(upload.body.records.incident.id);
   assert.ok(upload.body.ledgerDocument.id);
   assert.equal(upload.body.ledgerDocument.type, 'photo');
   assert.equal(upload.body.ledgerDocument.status, 'needs_review');
-  assert.ok(upload.body.actions.some(action => action.type === 'create_safety_checklist'));
-  assert.ok(upload.body.actions.some(action => action.type === 'open_incident'));
-  assert.ok(upload.body.actions.some(action => action.type === 'update_job_evidence'));
+  assert.ok(upload.body.ledgerFollowUp.records.safetyCheck.id);
+  assert.ok(upload.body.actions.some(action => action.type === 'create_ledger_safety_review'));
 
-  const dashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(dashboard.response.status, 200);
-  assert.ok(dashboard.body.construction.data.formsChecklists.some(record => record.id === upload.body.records.formsChecklist.id));
-  assert.ok(dashboard.body.construction.data.incidents.some(record => record.id === upload.body.records.incident.id));
-  assert.ok(!dashboard.body.jobs.some(job => job.id === 1));
-  const ledgerDetail = await request(baseUrl, `/api/ledger/jobs/${upload.body.ledgerDocument.jobId}`);
+  const ledgerDetail = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}`);
   assert.equal(ledgerDetail.response.status, 200);
   assert.ok(ledgerDetail.body.job.documents.some(document => document.id === upload.body.ledgerDocument.id));
-  assert.ok(ledgerDetail.body.job.audit.some(event => event.action === 'store_document'));
-});
+  assert.ok(ledgerDetail.body.job.safetyChecks.some(check => check.id === upload.body.ledgerFollowUp.records.safetyCheck.id));
 
+  const missingJob = await request(baseUrl, '/api/ledger/upload', {
+    method: 'POST',
+    body: JSON.stringify({ filename: 'orphan.jpg', fileType: 'image/jpeg' })
+  });
+  assert.equal(missingJob.response.status, 400);
+  assert.equal(missingJob.body.error.code, 'ledger_job_required');
+});
 test('multipart field upload stores local evidence and links ledger document', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
@@ -1160,19 +190,29 @@ test('multipart field upload stores local evidence and links ledger document', a
 
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
-
-  const form = new FormData();
-  form.append('evidenceFile', new Blob([Buffer.from('fake image bytes for regression')], { type: 'image/jpeg' }), 'real-site-photo.jpg');
-  form.append('category', 'field_photo');
-  form.append('jobId', '1');
-  form.append('projectId', '1');
-  form.append('riskLevel', 'low');
-  form.append('notes', 'Before photo uploaded from the job site.');
-  form.append('attachToBuild', 'true');
-
-  const response = await fetch(`${baseUrl}/api/upload`, {
+  const intake = await request(baseUrl, '/api/ledger/intake', {
     method: 'POST',
-    body: form
+    body: JSON.stringify({ title: 'Multipart evidence job', client: { name: 'Evidence Client' } })
+  });
+  assert.equal(intake.response.status, 201);
+  const jobId = intake.body.job.id;
+
+  const evidenceForm = (notes = 'Before photo uploaded from the job site.') => {
+    const form = new FormData();
+    form.append('evidenceFile', new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('fake image bytes for regression')], { type: 'image/jpeg' }), 'real-site-photo.jpg');
+    form.append('category', 'field_photo');
+    form.append('jobId', jobId);
+    form.append('riskLevel', 'low');
+    form.append('notes', notes);
+    form.append('attachToBuild', 'true');
+    return form;
+  };
+  const idempotencyKey = 'field-draft-retry-0001';
+
+  const response = await fetch(`${baseUrl}/api/ledger/upload`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: evidenceForm()
   });
   const body = await response.json();
 
@@ -1182,17 +222,63 @@ test('multipart field upload stores local evidence and links ledger document', a
   assert.equal(body.analysis.category, 'field_photo');
   assert.ok(body.uploadedFile.storageRef);
   assert.ok(fs.existsSync(path.resolve(__dirname, '..', body.uploadedFile.storageRef)));
-  assert.ok(body.records.photoRecord.id);
-  assert.ok(body.records.dailyLog.id);
   assert.ok(body.ledgerDocument.id);
   assert.equal(body.ledgerDocument.type, 'photo');
   assert.equal(body.ledgerDocument.filename, 'real-site-photo.jpg');
   assert.equal(body.ledgerDocument.storageRef, body.uploadedFile.storageRef);
+  assert.equal(body.migration.legacyBuildAttachmentRetired, true);
+
+  const storedFileCount = fs.readdirSync(process.env.UPLOAD_DIR).length;
+  const replayResponse = await fetch(`${baseUrl}/api/ledger/upload`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: evidenceForm()
+  });
+  const replayBody = await replayResponse.json();
+  assert.equal(replayResponse.status, 200);
+  assert.equal(replayResponse.headers.get('idempotent-replayed'), 'true');
+  assert.equal(replayBody.ledgerDocument.id, body.ledgerDocument.id);
+  assert.equal(replayBody.uploadedFile.storageRef, body.uploadedFile.storageRef);
+  assert.equal(fs.readdirSync(process.env.UPLOAD_DIR).length, storedFileCount);
+
+  const conflictResponse = await fetch(`${baseUrl}/api/ledger/upload`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: evidenceForm('Changed evidence must not reuse the completed request identity.')
+  });
+  const conflictBody = await conflictResponse.json();
+  assert.equal(conflictResponse.status, 409);
+  assert.equal(conflictBody.error.code, 'idempotency_key_reused');
+  assert.equal(fs.readdirSync(process.env.UPLOAD_DIR).length, storedFileCount);
 
   const ledgerDetail = await request(baseUrl, `/api/ledger/jobs/${body.ledgerDocument.jobId}`);
   assert.equal(ledgerDetail.response.status, 200);
   assert.ok(ledgerDetail.body.job.documents.some(document => document.id === body.ledgerDocument.id));
+  assert.equal(ledgerDetail.body.job.documents.filter(document => document.storageRef === body.uploadedFile.storageRef).length, 1);
   assert.ok(ledgerDetail.body.job.audit.some(event => event.action === 'store_document'));
+
+  const download = await fetch(`${baseUrl}/api/ledger/documents/${body.ledgerDocument.id}/content`);
+  assert.equal(download.status, 200);
+  assert.equal(download.headers.get('content-type'), 'image/jpeg');
+  assert.equal(Buffer.from(await download.arrayBuffer()).subarray(0, 3).toString('hex'), 'ffd8ff');
+
+  const unsafeForm = new FormData();
+  unsafeForm.append('evidenceFile', new Blob([Buffer.from('not a JPEG')], { type: 'image/jpeg' }), 'mismatched-photo.jpg');
+  unsafeForm.append('jobId', jobId);
+  const unsafeResponse = await fetch(`${baseUrl}/api/ledger/upload`, { method: 'POST', body: unsafeForm });
+  const unsafeBody = await unsafeResponse.json();
+  assert.equal(unsafeResponse.status, 415);
+  assert.equal(unsafeBody.error.code, 'upload_signature_mismatch');
+
+  const filesBeforeUnknownJob = fs.readdirSync(process.env.UPLOAD_DIR).length;
+  const unknownJobForm = new FormData();
+  unknownJobForm.append('evidenceFile', new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('orphan evidence')], { type: 'image/jpeg' }), 'orphan-photo.jpg');
+  unknownJobForm.append('jobId', 'job_not_present');
+  const unknownJobResponse = await fetch(`${baseUrl}/api/ledger/upload`, { method: 'POST', body: unknownJobForm });
+  const unknownJobBody = await unknownJobResponse.json();
+  assert.equal(unknownJobResponse.status, 404);
+  assert.equal(unknownJobBody.error.code, 'ledger_job_not_found');
+  assert.equal(fs.readdirSync(process.env.UPLOAD_DIR).length, filesBeforeUnknownJob);
 });
 
 test('operating ledger persists intake, approvals, audit, and autonomous controls', async t => {
@@ -1203,10 +289,35 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const dashboardBefore = await request(baseUrl, '/api/dashboard');
+  const dashboardBefore = await request(baseUrl, '/api/ledger/dashboard');
   assert.equal(dashboardBefore.response.status, 200);
-  assert.ok(dashboardBefore.body.ledger.metrics.jobs >= 3);
-  assert.ok(dashboardBefore.body.ledger.capabilities.some(capability => capability.key === 'financial-control'));
+  const startingJobCount = dashboardBefore.body.dashboard.metrics.jobs;
+  assert.ok(Number.isInteger(startingJobCount));
+  assert.ok(dashboardBefore.body.dashboard.capabilities.some(capability => capability.key === 'financial-control'));
+
+  const scheduleWorker = await request(baseUrl, '/api/ledger/workers', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Ledger scheduling crew',
+      role: 'Renovation specialist',
+      status: 'available',
+      homeRegion: 'Amsterdam',
+      skills: ['kitchen renovation', 'tile work']
+    })
+  });
+  assert.equal(scheduleWorker.response.status, 201);
+
+  const scheduleTool = await request(baseUrl, '/api/ledger/tools', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Tile Saw',
+      category: 'power_tools',
+      status: 'available',
+      homeLocation: 'Amsterdam depot',
+      currentLocation: 'Amsterdam depot'
+    })
+  });
+  assert.equal(scheduleTool.response.status, 201);
 
   const intake = await request(baseUrl, '/api/ledger/intake', {
     method: 'POST',
@@ -1242,6 +353,24 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(intake.body.job.quotes[0].approvalId);
   assert.ok(intake.body.job.communications[0].approvalId);
   assert.ok(intake.body.job.audit.some(event => event.action === 'create_intake_job'));
+
+  const tradePartner = await request(baseUrl, '/api/ledger/trade-partners', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Bouwmaat',
+      partnerType: 'supplier',
+      registrationNumber: '99887766',
+      vatNumber: 'NL123456789B01',
+      verificationReference: 'Server API registry check',
+      verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
+    })
+  });
+  assert.equal(tradePartner.response.status, 201);
+  assert.equal(tradePartner.body.partner.compliance.status, 'verified');
+
+  const dashboardAfterIntake = await request(baseUrl, '/api/ledger/dashboard');
+  assert.equal(dashboardAfterIntake.response.status, 200);
+  assert.equal(dashboardAfterIntake.body.dashboard.metrics.jobs, startingJobCount + 1);
 
   const capabilityPreview = await request(baseUrl, `/api/ledger/jobs/${jobId}/capability-plan`, {
     method: 'POST',
@@ -1383,12 +512,12 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(commandDetail.body.job.audit.some(event => event.action === 'apply_today_command_plan'));
   assert.ok(commandDetail.body.job.audit.some(event => event.action === 'apply_capability_gap_plan'));
 
-  const clients = await request(baseUrl, '/api/clients?search=Ledger%20Client');
+  const clients = await request(baseUrl, '/api/ledger/clients?search=Ledger%20Client');
   assert.equal(clients.response.status, 200);
   const ledgerClient = clients.body.clients.find(client => client.name === 'Ledger Client BV');
   assert.ok(ledgerClient);
 
-  const updatedClient = await request(baseUrl, `/api/clients/${ledgerClient.id}`, {
+  const updatedClient = await request(baseUrl, `/api/ledger/clients/${ledgerClient.id}`, {
     method: 'PUT',
     body: JSON.stringify({ preferredLanguage: 'nl', city: 'Amsterdam' })
   });
@@ -1442,7 +571,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   const quoteApproval = approvals.body.approvals.find(approval => approval.jobId === jobId && approval.targetType === 'quote');
   assert.ok(quoteApproval);
 
-  const topLevelApprovals = await request(baseUrl, '/api/approvals');
+  const topLevelApprovals = await request(baseUrl, '/api/ledger/approvals');
   assert.equal(topLevelApprovals.response.status, 200);
   assert.ok(topLevelApprovals.body.approvals.some(approval => approval.id === quoteApproval.id));
 
@@ -1459,7 +588,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(jobDetail.body.job.invoices.some(item => item.approvalId === invoice.body.invoice.approvalId));
   assert.ok(jobDetail.body.job.audit.some(event => event.action === 'resolve_approved'));
 
-  const weather = await request(baseUrl, '/api/weather/assess', {
+  const weather = await request(baseUrl, '/api/ledger/weather/assess', {
     method: 'POST',
     body: JSON.stringify({ jobId, condition: 'rain_risk', precipitationPercent: 72 })
   });
@@ -1474,7 +603,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(weather.body.job.weather.some(item => item.id === weather.body.weather.id));
   assert.ok(weather.body.dispatch.weatherRisks >= 1);
 
-  const schedule = await request(baseUrl, '/api/schedule/recommend', {
+  const schedule = await request(baseUrl, '/api/ledger/schedule/recommend', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart: '2026-07-01T08:00:00.000Z' })
   });
@@ -1501,7 +630,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(schedule.body.recommendation.nextActions.some(action => action.type === 'prepare_safety_pack'));
   assert.ok(schedule.body.recommendation.nextActions.some(action => action.type === 'request_schedule_approval'));
 
-  const prep = await request(baseUrl, '/api/schedule/prepare-dispatch', {
+  const prep = await request(baseUrl, '/api/ledger/schedule/prepare-dispatch', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart: '2026-07-01T08:00:00.000Z' })
   });
@@ -1521,7 +650,9 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(prep.body.recommendationBefore.readiness.route.status, 'missing');
   assert.equal(prep.body.recommendationAfter.readiness.route.status, 'ready');
   assert.equal(prep.body.recommendationAfter.readiness.loading.status, 'ready');
-  assert.equal(prep.body.recommendationAfter.readiness.instructions.status, 'ready');
+  assert.equal(prep.body.recommendationAfter.readiness.instructions.status, 'review');
+  assert.equal(prep.body.recommendationAfter.readiness.instructions.drafts, 1);
+  assert.ok(prep.body.recommendationAfter.nextActions.some(action => action.type === 'review_worker_instruction'));
   assert.equal(prep.body.recommendationAfter.readiness.procurement.status, 'approval');
   assert.equal(prep.body.recommendationAfter.readiness.siteAccess.status, 'blocked');
   assert.equal(prep.body.recommendationAfter.readiness.safety.status, 'review');
@@ -1540,14 +671,14 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(preparedAccess.orientationValid, false);
   assert.ok(prep.body.job.audit.some(event => event.action === 'prepare_schedule_dispatch'));
 
-  const prepAgain = await request(baseUrl, '/api/schedule/prepare-dispatch', {
+  const prepAgain = await request(baseUrl, '/api/ledger/schedule/prepare-dispatch', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart: '2026-07-01T08:00:00.000Z' })
   });
   assert.equal(prepAgain.response.status, 201);
   assert.equal(prepAgain.body.created.length, 0);
   assert.ok(prepAgain.body.skipped.length >= 1);
-  assert.ok(prepAgain.body.skipped.some(item => item.type === 'site_access_log' && item.reason === 'active_record_exists'));
+  assert.ok(prepAgain.body.skipped.some(item => item.type === 'site_access_log' && item.reason === 'current_assignment_record_exists'));
 
   const siteVisit = await request(baseUrl, `/api/ledger/jobs/${jobId}/site-visits`, {
     method: 'POST',
@@ -2126,6 +1257,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
     body: JSON.stringify({
       budgetLineId: budgetLine.body.budgetLine.id,
       supplier: 'Bouwmaat',
+      tradePartnerId: tradePartner.body.partner.id,
       status: 'ordered',
       amount: 950,
       requiredBy: '2026-07-01',
@@ -2280,7 +1412,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(debug.body.dashboard.metrics.jhas >= 1);
   assert.ok(debug.body.dashboard.metrics.sdsSheets >= 1);
   assert.ok(debug.body.dashboard.metrics.siteAccessLogs >= 1);
-  assert.ok(debug.body.dashboard.metrics.dispatchReadyJobs >= 1);
+  assert.equal(debug.body.dashboard.metrics.dispatchReadyJobs, 0);
   assert.ok(debug.body.dashboard.metrics.budgetLines >= 1);
   assert.ok(debug.body.dashboard.metrics.purchaseOrders >= 1);
   assert.ok(debug.body.dashboard.metrics.drawRequests >= 1);
@@ -2300,7 +1432,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(audit.body.events.some(event => event.action === 'create_intake_job'));
   assert.ok(audit.body.events.some(event => event.action === 'record_time'));
 
-  const topLevelAudit = await request(baseUrl, `/api/audit?jobId=${encodeURIComponent(jobId)}`);
+  const topLevelAudit = await request(baseUrl, `/api/ledger/audit?jobId=${encodeURIComponent(jobId)}`);
   assert.equal(topLevelAudit.response.status, 200);
   assert.ok(topLevelAudit.body.events.some(event => event.action === 'assess_weather'));
 
@@ -2401,10 +1533,10 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(conflictingAssignment.body.assignment.approval.targetType, 'assignment');
   assert.ok(conflictingAssignment.body.assignment.conflicts.some(conflict => conflict.assignmentId === firstWorkerAssignment.body.assignment.id));
 
-  const assignmentConflictDashboard = await request(baseUrl, '/api/dashboard');
+  const assignmentConflictDashboard = await request(baseUrl, '/api/ledger/dashboard');
   assert.equal(assignmentConflictDashboard.response.status, 200);
-  assert.ok(assignmentConflictDashboard.body.ledger.metrics.assignmentConflicts >= 1);
-  assert.ok(assignmentConflictDashboard.body.ledger.nextActions.some(action => action.type === 'resolve_worker_conflict'));
+  assert.ok(assignmentConflictDashboard.body.dashboard.metrics.assignmentConflicts >= 1);
+  assert.ok(assignmentConflictDashboard.body.dashboard.nextActions.some(action => action.type === 'resolve_worker_conflict'));
 
   const approvedWorkerConflict = await request(baseUrl, `/api/ledger/approvals/${conflictingAssignment.body.assignment.approval.id}/resolve`, {
     method: 'POST',
@@ -2463,10 +1595,10 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(conflictingReservation.body.toolReservation.approval.targetType, 'tool_reservation');
   assert.ok(conflictingReservation.body.toolReservation.conflicts.some(conflict => conflict.reservationId === firstToolReservation.body.toolReservation.id));
 
-  const conflictDashboard = await request(baseUrl, '/api/dashboard');
+  const conflictDashboard = await request(baseUrl, '/api/ledger/dashboard');
   assert.equal(conflictDashboard.response.status, 200);
-  assert.ok(conflictDashboard.body.ledger.metrics.toolReservationConflicts >= 1);
-  assert.ok(conflictDashboard.body.ledger.nextActions.some(action => action.type === 'resolve_tool_conflict'));
+  assert.ok(conflictDashboard.body.dashboard.metrics.toolReservationConflicts >= 1);
+  assert.ok(conflictDashboard.body.dashboard.nextActions.some(action => action.type === 'resolve_tool_conflict'));
 
   const approvedToolConflict = await request(baseUrl, `/api/ledger/approvals/${conflictingReservation.body.toolReservation.approval.id}/resolve`, {
     method: 'POST',
@@ -2552,19 +1684,17 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(completedDetail.body.job.audit.some(event => event.action === 'propose_job_update'));
   assert.ok(completedDetail.body.job.audit.some(event => event.action === 'apply_job_update_approval'));
 
-  const mergedDashboard = await request(baseUrl, '/api/dashboard');
-  assert.equal(mergedDashboard.response.status, 200);
-  assert.ok(mergedDashboard.body.jobs.some(job => job.id === ledgerOnlyIntake.body.job.id));
-  assert.ok(mergedDashboard.body.workers.some(worker => worker.id === ledgerOnlyWorker.body.worker.id));
-  assert.ok(mergedDashboard.body.tools.some(tool => tool.id === ledgerOnlyTool.body.tool.id));
+  const ledgerJobs = await request(baseUrl, '/api/ledger/jobs?search=Ledger-only');
+  assert.equal(ledgerJobs.response.status, 200);
+  assert.ok(ledgerJobs.body.jobs.some(job => job.id === ledgerOnlyIntake.body.job.id));
 
-  const mergedWorkers = await request(baseUrl, '/api/workers?search=Ledger-only');
-  assert.equal(mergedWorkers.response.status, 200);
-  assert.ok(mergedWorkers.body.some(worker => worker.id === ledgerOnlyWorker.body.worker.id));
+  const ledgerWorkers = await request(baseUrl, '/api/ledger/workers?search=Ledger-only');
+  assert.equal(ledgerWorkers.response.status, 200);
+  assert.ok(ledgerWorkers.body.workers.some(worker => worker.id === ledgerOnlyWorker.body.worker.id));
 
-  const mergedTools = await request(baseUrl, '/api/tools?search=Ledger-only');
-  assert.equal(mergedTools.response.status, 200);
-  assert.ok(mergedTools.body.some(tool => tool.id === ledgerOnlyTool.body.tool.id));
+  const ledgerTools = await request(baseUrl, '/api/ledger/tools?search=Ledger-only');
+  assert.equal(ledgerTools.response.status, 200);
+  assert.ok(ledgerTools.body.tools.some(tool => tool.id === ledgerOnlyTool.body.tool.id));
 
   const ledgerWorkerRetirement = await request(baseUrl, `/api/ledger/workers/${encodeURIComponent(ledgerOnlyWorker.body.worker.id)}`, {
     method: 'DELETE',
@@ -2580,9 +1710,27 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(ledgerWorkerRetirement.body.approval.targetType, 'worker_retirement');
   assert.equal(ledgerWorkerRetirement.body.worker.status, 'available');
 
-  const approvedLedgerWorkerRetirement = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(ledgerWorkerRetirement.body.approval.id)}/resolve`, {
+  const blockedLedgerWorkerRetirement = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(ledgerWorkerRetirement.body.approval.id)}/resolve`, {
     method: 'POST',
     body: JSON.stringify({ status: 'approved', resolvedBy: 'Resource Approval Test', reason: 'Worker retirement approved.' })
+  });
+  assert.equal(blockedLedgerWorkerRetirement.response.status, 409);
+  assert.equal(blockedLedgerWorkerRetirement.body.error.code, 'worker_retirement_active_assignments');
+
+  const pendingWorkerRetirement = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');
+  assert.equal(pendingWorkerRetirement.response.status, 200);
+  assert.ok(pendingWorkerRetirement.body.approvals.some(approval => approval.id === ledgerWorkerRetirement.body.approval.id));
+
+  const finalWorkerAssignmentRelease = await request(baseUrl, `/api/ledger/jobs/${conflictJob.body.job.id}/assignments/${postReleaseAssignment.body.assignment.id}/release`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Release the final retained assignment before worker retirement.' })
+  });
+  assert.equal(finalWorkerAssignmentRelease.response.status, 200);
+  assert.equal(finalWorkerAssignmentRelease.body.assignment.status, 'released');
+
+  const approvedLedgerWorkerRetirement = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(ledgerWorkerRetirement.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Resource Approval Test', reason: 'Worker retirement approved after assignment release.' })
   });
   assert.equal(approvedLedgerWorkerRetirement.response.status, 200);
   assert.equal(approvedLedgerWorkerRetirement.body.approval.status, 'approved');
@@ -2605,9 +1753,27 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(ledgerToolRetirement.body.approval.targetType, 'tool_retirement');
   assert.equal(ledgerToolRetirement.body.tool.status, 'available');
 
+  const blockedLedgerToolRetirement = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(ledgerToolRetirement.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Resource Approval Test', reason: 'Attempt retirement before reservation release.' })
+  });
+  assert.equal(blockedLedgerToolRetirement.response.status, 409);
+  assert.equal(blockedLedgerToolRetirement.body.error.code, 'tool_retirement_active_reservations');
+
+  const pendingToolRetirement = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');
+  assert.equal(pendingToolRetirement.response.status, 200);
+  assert.ok(pendingToolRetirement.body.approvals.some(approval => approval.id === ledgerToolRetirement.body.approval.id));
+
+  const finalToolReservationRelease = await request(baseUrl, `/api/ledger/jobs/${conflictJob.body.job.id}/tools/${postReleaseReservation.body.toolReservation.id}/release`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Release the final retained reservation before equipment retirement.' })
+  });
+  assert.equal(finalToolReservationRelease.response.status, 200);
+  assert.equal(finalToolReservationRelease.body.toolReservation.status, 'released');
+
   const approvedLedgerToolRetirement = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(ledgerToolRetirement.body.approval.id)}/resolve`, {
     method: 'POST',
-    body: JSON.stringify({ status: 'approved', resolvedBy: 'Resource Approval Test', reason: 'Tool retirement approved.' })
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Resource Approval Test', reason: 'Tool retirement approved after reservation release.' })
   });
   assert.equal(approvedLedgerToolRetirement.response.status, 200);
   assert.equal(approvedLedgerToolRetirement.body.approval.status, 'approved');

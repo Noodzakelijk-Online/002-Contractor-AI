@@ -73,7 +73,13 @@ test('autonomous cycle drafts invoice for completed uninvoiced work behind appro
 
   const cycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
     method: 'POST',
-    body: JSON.stringify({ dryRun: false, actor: 'autonomous-finance-test' })
+    body: JSON.stringify({
+      dryRun: false,
+      actor: 'autonomous-finance-test',
+      actionTypes: ['draft_invoice'],
+      jobIds: [jobId],
+      maxActions: 1
+    })
   });
   assert.equal(cycle.response.status, 200);
   const applied = cycle.body.applied.find(action =>
@@ -98,7 +104,7 @@ test('autonomous cycle drafts invoice for completed uninvoiced work behind appro
   assert.equal(invoice.approvalId, applied.approvalId);
   assert.ok(detail.body.job.audit.some(event => event.action === 'autonomous_draft_invoice'));
 
-  const approvals = await request(baseUrl, '/api/approvals?status=pending&limit=100');
+  const approvals = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');
   assert.equal(approvals.response.status, 200);
   assert.ok(approvals.body.approvals.some(approval =>
     approval.id === applied.approvalId

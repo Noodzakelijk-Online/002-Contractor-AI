@@ -51,7 +51,7 @@ test('approval queue exposes exact decision effects and safeguards', async t => 
   });
   assert.equal(intake.response.status, 201);
 
-  const approvals = await request(baseUrl, '/api/approvals?status=pending&limit=100');
+  const approvals = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');
   assert.equal(approvals.response.status, 200);
   const quoteApproval = approvals.body.approvals.find(item => item.targetType === 'quote');
   const communicationApproval = approvals.body.approvals.find(item => item.targetType === 'communication');

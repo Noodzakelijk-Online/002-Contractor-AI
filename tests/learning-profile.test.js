@@ -220,7 +220,12 @@ test('autonomous cycle refreshes stale learning profiles as internal low-risk wo
 
   const cycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
     method: 'POST',
-    body: JSON.stringify({ dryRun: false, actor: 'test' })
+    body: JSON.stringify({
+      dryRun: false,
+      actor: 'test',
+      actionTypes: ['refresh_learning_profile'],
+      maxActions: 1
+    })
   });
   assert.equal(cycle.response.status, 200);
   const applied = cycle.body.applied.find(action =>

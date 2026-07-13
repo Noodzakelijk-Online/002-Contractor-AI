@@ -3,19 +3,77 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { AutonomousContractorEngine } = require('./autonomous-engine');
+const zlib = require('node:zlib');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const { ContractorOperatingLedger, LEDGER_CAPABILITY_BLUEPRINT, JOB_OPERATING_PLAYBOOKS } = require('./operating-ledger');
 const { OpenMeteoWeatherService } = require('./weather-service');
+const { EvidenceStorageError, createEvidenceStorage } = require('./evidence-storage');
+const { verifySqliteBackupDatabase } = require('./scripts/restore-local-backup');
 
 const app = express();
 const port = process.env.PORT || 3000;
-const autonomousEngine = new AutonomousContractorEngine();
 const weatherService = new OpenMeteoWeatherService({
   enabled: process.env.WEATHER_PROVIDER_ENABLED !== 'false'
 });
-const dataDir = path.join(__dirname, 'data');
-const stateFile = process.env.STATE_FILE
-  ? path.resolve(process.env.STATE_FILE)
+const configuredStateFile = process.env.STATE_FILE ? path.resolve(process.env.STATE_FILE) : null;
+const dataDir = process.env.CONTRACTOR_AI_DATA_DIR
+  ? path.resolve(process.env.CONTRACTOR_AI_DATA_DIR)
+  : configuredStateFile
+    ? path.dirname(configuredStateFile)
+    : path.join(__dirname, 'data');
+const distDir = path.join(__dirname, 'dist');
+const runtimeMode = String(process.env.CONTRACTOR_AI_RUNTIME_MODE || 'local').trim().toLowerCase();
+const storageMode = String(process.env.CONTRACTOR_AI_STORAGE_MODE || 'local').trim().toLowerCase();
+const trustedProxyRaw = String(process.env.CONTRACTOR_AI_TRUST_PROXY || '').trim();
+const trustedProxyEntries = trustedProxyRaw.split(',').map(value => value.trim()).filter(Boolean);
+let trustedProxyError = null;
+if (trustedProxyRaw) {
+  const unsafeShortcut = trustedProxyEntries.some(value => /^(?:true|false|\d+|\*|0\.0\.0\.0\/0|::\/0)$/i.test(value));
+  try {
+    if (unsafeShortcut || trustedProxyEntries.length === 0) {
+      throw new Error('Use explicit proxy IP addresses, CIDR ranges, or Express subnet names instead of a universal or hop-count trust rule.');
+    }
+    app.set('trust proxy', trustedProxyEntries.join(', '));
+  } catch (error) {
+    trustedProxyError = error;
+    app.set('trust proxy', false);
+  }
+} else {
+  app.set('trust proxy', false);
+}
+const hostedDatabaseUrl = runtimeMode === 'hosted' ? String(process.env.CONTRACTOR_AI_DATABASE_URL || '').trim() : '';
+const hostedPublicUrl = String(process.env.CONTRACTOR_AI_PUBLIC_URL || '').trim();
+const hostedPublicUrlDetails = (() => {
+  if (!hostedPublicUrl) return { protocol: '', origin: '', valid: false };
+  try {
+    const url = new URL(hostedPublicUrl);
+    return {
+      protocol: url.protocol,
+      origin: url.origin,
+      valid: !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash
+    };
+  } catch {
+    return { protocol: 'invalid', origin: '', valid: false };
+  }
+})();
+const hostingProvider = String(process.env.CONTRACTOR_AI_HOSTING_PROVIDER || '').trim();
+const hostingRegion = String(process.env.CONTRACTOR_AI_HOSTING_REGION || '').trim();
+const dataResidency = String(process.env.CONTRACTOR_AI_DATA_RESIDENCY || '').trim().toUpperCase();
+const dpaReference = String(process.env.CONTRACTOR_AI_DPA_REFERENCE || '').trim();
+const postgresBackupMode = String(process.env.CONTRACTOR_AI_POSTGRES_BACKUP_MODE || '').trim().toLowerCase();
+const objectVersioningEnabled = process.env.CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED === 'true';
+const backupPolicyReference = String(process.env.CONTRACTOR_AI_BACKUP_POLICY_REFERENCE || '').trim();
+const hostedDatabaseSslMode = (() => {
+  if (!hostedDatabaseUrl) return '';
+  try {
+    return String(new URL(hostedDatabaseUrl).searchParams.get('sslmode') || 'verify-full').trim().toLowerCase();
+  } catch {
+    return 'invalid';
+  }
+})();
+const stateFile = configuredStateFile
+  ? configuredStateFile
   : path.join(dataDir, 'server-state.json');
 const ledgerFile = process.env.LEDGER_DB_FILE
   ? path.resolve(process.env.LEDGER_DB_FILE)
@@ -23,159 +81,435 @@ const ledgerFile = process.env.LEDGER_DB_FILE
 const uploadDir = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
   : path.join(dataDir, 'uploads');
+const evidenceStorageOptions = {
+  endpoint: process.env.CONTRACTOR_AI_S3_ENDPOINT,
+  bucket: process.env.CONTRACTOR_AI_S3_BUCKET,
+  region: process.env.CONTRACTOR_AI_S3_REGION || 'eu-central-1',
+  accessKeyId: process.env.CONTRACTOR_AI_S3_ACCESS_KEY_ID,
+  secretAccessKey: process.env.CONTRACTOR_AI_S3_SECRET_ACCESS_KEY,
+  prefix: process.env.CONTRACTOR_AI_S3_PREFIX || 'contractor-ai/evidence',
+  timeoutMs: process.env.CONTRACTOR_AI_STORAGE_TIMEOUT_MS
+};
+let evidenceStorage;
+let evidenceStorageInitError = null;
+try {
+  evidenceStorage = createEvidenceStorage({ mode: storageMode, rootDir: uploadDir, projectRoot: __dirname, s3: evidenceStorageOptions });
+} catch (error) {
+  evidenceStorageInitError = error;
+}
+const evidenceStorageEndpointProtocol = (() => {
+  if (!evidenceStorageOptions.endpoint) return '';
+  try {
+    return new URL(evidenceStorageOptions.endpoint).protocol;
+  } catch {
+    return 'invalid';
+  }
+})();
+const evidenceStorageVerificationTtlMs = Math.max(5_000, Number(process.env.CONTRACTOR_AI_STORAGE_VERIFY_TTL_MS || 60_000));
+let evidenceStorageVerificationCache = evidenceStorageInitError
+  ? {
+      ready: false,
+      status: 'unavailable',
+      mode: storageMode,
+      checkedAt: new Date().toISOString(),
+      code: evidenceStorageInitError.code || 'storage_initialization_failed'
+    }
+  : null;
+let evidenceStorageVerificationPromise = null;
 const maxUploadBytes = Math.max(1024, Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 * 1024));
 const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
 const isProduction = process.env.NODE_ENV === 'production';
-const dashboardAuthRequired = process.env.CONTRACTOR_AI_REQUIRE_AUTH === 'true'
-  || (isProduction && process.env.CONTRACTOR_AI_REQUIRE_AUTH !== 'false');
+const dashboardAuthRequired = isProduction || process.env.CONTRACTOR_AI_REQUIRE_AUTH === 'true';
 const dashboardAuthToken = process.env.CONTRACTOR_AI_AUTH_TOKEN || process.env.DASHBOARD_AUTH_TOKEN || '';
-const CONSTRUCTION_COLLECTIONS = [
-  'projects',
-  'tenders',
-  'estimates',
-  'budgets',
-  'contracts',
-  'changeOrders',
-  'invoices',
-  'rfis',
-  'submittals',
-  'drawings',
-  'documents',
-  'transmittals',
-  'dailyLogs',
-  'dayworkSheets',
-  'collaboratorReports',
-  'segmentedDailyReports',
-  'schedules',
-  'inspections',
-  'observations',
-  'incidents',
-  'punchItems',
-  'equipment',
-  'timecards',
-  'kioskSessions',
-  'laborMap',
-  'formsChecklists',
-  'qualityReports',
-  'resourcePlans',
-  'trainingItems',
-  'clientSelections',
-  'clientMessages',
-  'closeoutItems',
-  'warrantyClaims',
-  'productionReports',
-  'permits',
-  'safetyMeetings',
-  'preTaskPlans',
-  'jobCostEntries',
-  'payrollRuns',
-  'certifiedPayroll',
-  'aiaBillings',
-  'payments',
-  'drawRequests',
-  'drawInspections',
-  'riskMitigations',
-  'lienWaivers',
-  'complianceItems',
-  'purchaseOrders',
-  'costDatabase',
-  'serviceTickets',
-  'workOrders',
-  'opportunities',
-  'dealPipelines',
-  'omExtractions',
-  'leadActivities',
-  'takeoffs',
-  'modelIssues',
-  'specifications',
-  'tasks',
-  'photoRecords',
-  'materials',
-  'orientations',
-  'jhas',
-  'sdsSheets',
-  'safetyPlans',
-  'bulletins',
-  'bookings',
-  'siteAccessLogs',
-  'directoryContacts',
-  'integrationConnectors',
-  'capitalRequests',
-  'underwritingReviews',
-  'portfolioReports',
-  'euVatReturns',
-  'peppolInvoices',
-  'gdprRequests',
-  'wkbDossiers',
-  'vcaCertificates',
-  'co2Reports'
-];
+const minimumOperatorTokenLength = 32;
+const roleTokenConfig = parseRoleTokens(process.env.CONTRACTOR_AI_ROLE_TOKENS);
+const operatorSessionCookieName = 'contractor_ai_session';
+const operatorSessionTtlSeconds = boundedInteger(process.env.CONTRACTOR_AI_SESSION_TTL_SECONDS, 28_800, 900, 86_400);
+const authLoginRateWindowMs = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_WINDOW_MS, 900_000, 60_000, 86_400_000);
+const authLoginRateLimit = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_LIMIT, 10, 3, 100);
+const operatorSessionSigningKey = createOperatorSessionSigningKey();
+const httpKeepAliveTimeoutMs = boundedInteger(process.env.CONTRACTOR_AI_HTTP_KEEP_ALIVE_TIMEOUT_MS, 65_000, 5_000, 300_000);
+const httpHeadersTimeoutMs = boundedInteger(
+  process.env.CONTRACTOR_AI_HTTP_HEADERS_TIMEOUT_MS,
+  70_000,
+  httpKeepAliveTimeoutMs + 1_000,
+  310_000
+);
+const verifiedIntegrationIds = new Set(
+  String(process.env.CONTRACTOR_AI_VERIFIED_INTEGRATIONS || '').split(',').map(value => value.trim()).filter(Boolean)
+);
+const autonomousSchedulerEnabled = process.env.CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED === 'true';
+const autonomousSchedulerIntervalSeconds = Math.max(30, Number(process.env.CONTRACTOR_AI_AUTONOMOUS_INTERVAL_SECONDS || 300));
+const autonomousSchedulerLeaseSeconds = Math.max(30, Number(process.env.CONTRACTOR_AI_AUTONOMOUS_LEASE_SECONDS || 120));
+const AUTONOMOUS_SCHEDULER_KEY = 'ledger_autonomous_cycle';
+const apiRateWindowMs = Math.max(1_000, Number(process.env.CONTRACTOR_AI_RATE_WINDOW_MS || 60_000));
+const apiRateLimit = Math.max(50, Number(process.env.CONTRACTOR_AI_RATE_LIMIT || 1000));
+const apiRateBucketLimit = Math.max(100, Number(process.env.CONTRACTOR_AI_RATE_BUCKET_LIMIT || 5_000));
+const apiRateBuckets = new Map();
+function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.floor(parsed)));
+}
 
-const CONSTRUCTION_WORKFLOWS = [
-  {
-    key: 'preconstruction-pursuit',
-    title: 'Preconstruction pursuit',
-    source: 'Buildr + Autodesk + Sage',
-    group: 'precon',
-    detail: 'Qualifies a new opportunity, starts bid control, estimate review, takeoff validation, cost benchmark, resource plan and lead follow-up.',
-    collections: ['opportunities', 'tenders', 'estimates', 'takeoffs', 'costDatabase', 'resourcePlans', 'leadActivities'],
-    steps: ['Opportunity', 'Tender', 'Estimate', 'Takeoff', 'Resources', 'Follow-up']
-  },
-  {
-    key: 'field-daily-close',
-    title: 'Field daily close',
-    source: 'Raken + Buildertrend',
-    group: 'field',
-    detail: 'Closes the field loop with a daily log, subcontractor report, production report, timecard, photo evidence, task and client portal update.',
-    collections: ['dailyLogs', 'collaboratorReports', 'productionReports', 'timecards', 'photoRecords', 'tasks', 'clientMessages'],
-    steps: ['Daily log', 'Crew report', 'Production', 'Timecard', 'Photo', 'Portal']
-  },
-  {
-    key: 'site-coordination',
-    title: 'Site coordination command',
-    source: 'Procore + Contractor Foreman + HammerTech + Buildertrend',
-    group: 'field',
-    detail: 'Coordinates a field commitment with a schedule item, booking, work order, daywork sheet, task, bulletin and client portal update.',
-    collections: ['schedules', 'bookings', 'workOrders', 'dayworkSheets', 'tasks', 'bulletins', 'clientMessages'],
-    steps: ['Schedule', 'Booking', 'Work order', 'Daywork', 'Task', 'Bulletin', 'Portal']
-  },
-  {
-    key: 'safety-mobilization',
-    title: 'Safety mobilization',
-    source: 'HammerTech + Raken',
-    group: 'safety',
-    detail: 'Creates the onboarding, orientation, pre-task plan, JHA, SDS, checklist, toolbox talk and site-access controls needed before work starts.',
-    collections: ['orientations', 'preTaskPlans', 'jhas', 'sdsSheets', 'formsChecklists', 'safetyMeetings', 'siteAccessLogs'],
-    steps: ['Orientation', 'Pre-task', 'JHA', 'SDS', 'Checklist', 'Access']
-  },
-  {
-    key: 'payment-release',
-    title: 'Payment release',
-    source: 'Built + Sage + Contractor Foreman',
-    group: 'finance',
-    detail: 'Builds a payment pack with invoice, Peppol/UBL, payment hold, lien waiver, draw request, draw inspection and risk control.',
-    collections: ['invoices', 'peppolInvoices', 'payments', 'lienWaivers', 'drawRequests', 'drawInspections', 'riskMitigations'],
-    steps: ['Invoice', 'Peppol', 'Payment', 'Waiver', 'Draw', 'Risk']
-  },
-  {
-    key: 'eu-handover',
-    title: 'EU handover pack',
-    source: 'Wkb + VCA + GDPR + CO2',
-    group: 'handover',
-    detail: 'Prepares client handover with Wkb dossier, closeout item, as-built document, CO2 report, GDPR check and client portal message.',
-    collections: ['wkbDossiers', 'closeoutItems', 'documents', 'co2Reports', 'gdprRequests', 'clientMessages'],
-    steps: ['Wkb', 'Closeout', 'As-built', 'CO2', 'GDPR', 'Client']
-  }
-];
+function configureHttpServer(server) {
+  if (!server) return server;
+  server.keepAliveTimeout = httpKeepAliveTimeoutMs;
+  server.headersTimeout = httpHeadersTimeoutMs;
+  return server;
+}
 
 function createRequestId() {
   if (typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isTemplatePlaceholder(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized.includes('replace-with')
+    || normalized.includes('example-provider')
+    || normalized.includes('contractor.example.eu');
+}
+
+function isConfiguredReference(value, minimumLength = 8) {
+  const normalized = String(value || '').trim();
+  return normalized.length >= minimumLength && !isTemplatePlaceholder(normalized);
+}
+
+function isStrongOperatorToken(value) {
+  return typeof value === 'string'
+    && value.length >= minimumOperatorTokenLength
+    && value === value.trim()
+    && !isTemplatePlaceholder(value);
+}
+
+function runtimeConfiguration(options = {}) {
+  const issues = [];
+  const hosted = runtimeMode === 'hosted';
+  const storageVerification = options.storageVerification ?? evidenceStorageVerificationCache;
+  const hasConfiguredAuthToken = isStrongOperatorToken(dashboardAuthToken) || roleTokenConfig.principals.length > 0;
+  const templateValues = [
+    ['authentication', dashboardAuthToken],
+    ['database', hostedDatabaseUrl],
+    ['public_url', hostedPublicUrl],
+    ['hosting_provider', hostingProvider],
+    ['hosting_region', hostingRegion],
+    ['dpa_reference', dpaReference],
+    ['backup_policy_reference', backupPolicyReference],
+    ['trusted_proxy', trustedProxyRaw],
+    ['cors', process.env.CORS_ORIGINS],
+    ['object_storage_endpoint', evidenceStorageOptions.endpoint],
+    ['object_storage_bucket', evidenceStorageOptions.bucket],
+    ['object_storage_access_key', evidenceStorageOptions.accessKeyId],
+    ['object_storage_secret', evidenceStorageOptions.secretAccessKey]
+  ].filter(([, value]) => isTemplatePlaceholder(value)).map(([key]) => key);
+  if (!['local', 'hosted'].includes(runtimeMode)) {
+    issues.push({ code: 'invalid_runtime_mode', message: 'CONTRACTOR_AI_RUNTIME_MODE must be local or hosted.' });
+  }
+  if (!['local', 's3'].includes(storageMode)) {
+    issues.push({ code: 'invalid_storage_mode', message: 'CONTRACTOR_AI_STORAGE_MODE must be local or s3.' });
+  }
+  if (hosted && !dashboardAuthRequired) {
+    issues.push({ code: 'hosted_auth_required', message: 'Hosted mode requires dashboard/API authentication.' });
+  }
+  if (roleTokenConfig.issues.length) {
+    issues.push(...roleTokenConfig.issues);
+  }
+  if (dashboardAuthToken && !isStrongOperatorToken(dashboardAuthToken)) {
+    issues.push({
+      code: 'weak_auth_token',
+      message: `CONTRACTOR_AI_AUTH_TOKEN must be an unpadded, non-template secret containing at least ${minimumOperatorTokenLength} characters.`
+    });
+  }
+  const legacyOwnerTokenConflict = isStrongOperatorToken(dashboardAuthToken)
+    ? roleTokenConfig.principals.find(principal => principal.token === dashboardAuthToken && principal.role !== 'owner')
+    : null;
+  if (legacyOwnerTokenConflict) {
+    issues.push({
+      code: 'ambiguous_owner_token',
+      message: `CONTRACTOR_AI_AUTH_TOKEN cannot also identify the ${legacyOwnerTokenConflict.id} ${legacyOwnerTokenConflict.role} principal.`
+    });
+  }
+  if (isProduction && !hasConfiguredAuthToken) {
+    issues.push({ code: 'production_auth_token_required', message: 'Production requires a strong CONTRACTOR_AI_AUTH_TOKEN or role token configuration.' });
+  }
+  if (isProduction && templateValues.length) {
+    issues.push({ code: 'template_placeholder_configured', message: `Production configuration contains template placeholder values for: ${templateValues.join(', ')}.` });
+  }
+  if (hosted && !hasConfiguredAuthToken) {
+    issues.push({ code: 'hosted_auth_token_required', message: 'Hosted mode requires a strong authentication token or role token configuration.' });
+  }
+  if (hosted && (!hostedPublicUrlDetails.valid || hostedPublicUrlDetails.protocol !== 'https:')) {
+    issues.push({ code: 'hosted_public_https_required', message: 'Hosted mode requires CONTRACTOR_AI_PUBLIC_URL to be an HTTPS origin without credentials, query parameters, or a path.' });
+  }
+  if (hosted && hostedPublicUrlDetails.origin && !allowedOrigins.includes(hostedPublicUrlDetails.origin)) {
+    issues.push({ code: 'hosted_public_origin_not_allowed', message: 'CORS_ORIGINS must include the exact CONTRACTOR_AI_PUBLIC_URL origin.' });
+  }
+  if (trustedProxyError) {
+    issues.push({ code: 'invalid_trusted_proxy', message: trustedProxyError.message || 'CONTRACTOR_AI_TRUST_PROXY is invalid.' });
+  } else if (hosted && trustedProxyEntries.length === 0) {
+    issues.push({ code: 'hosted_trusted_proxy_required', message: 'Hosted mode requires an explicit CONTRACTOR_AI_TRUST_PROXY ingress IP, CIDR range, or named subnet.' });
+  }
+  if (hosted && !isConfiguredReference(hostingProvider, 2)) {
+    issues.push({ code: 'hosted_provider_required', message: 'Hosted mode requires the contracted EU hosting provider name in CONTRACTOR_AI_HOSTING_PROVIDER.' });
+  }
+  if (hosted && !isConfiguredReference(hostingRegion, 2)) {
+    issues.push({ code: 'hosted_region_required', message: 'Hosted mode requires the provider region in CONTRACTOR_AI_HOSTING_REGION.' });
+  }
+  if (hosted && dataResidency !== 'EU') {
+    issues.push({ code: 'hosted_eu_residency_required', message: 'Hosted mode requires an explicit CONTRACTOR_AI_DATA_RESIDENCY=EU declaration.' });
+  }
+  if (hosted && !isConfiguredReference(dpaReference)) {
+    issues.push({ code: 'hosted_dpa_required', message: 'Hosted mode requires a retained DPA reference in CONTRACTOR_AI_DPA_REFERENCE.' });
+  }
+  if (hosted && !['snapshot', 'pitr'].includes(postgresBackupMode)) {
+    issues.push({ code: 'hosted_postgres_backup_required', message: 'Hosted mode requires CONTRACTOR_AI_POSTGRES_BACKUP_MODE to be snapshot or pitr.' });
+  }
+  if (hosted && !objectVersioningEnabled) {
+    issues.push({ code: 'hosted_object_versioning_required', message: 'Hosted mode requires versioning on the private evidence bucket and CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED=true.' });
+  }
+  if (hosted && !isConfiguredReference(backupPolicyReference)) {
+    issues.push({ code: 'hosted_backup_policy_required', message: 'Hosted mode requires a retained recovery-policy reference in CONTRACTOR_AI_BACKUP_POLICY_REFERENCE.' });
+  }
+  if (hosted && storageMode !== 's3') {
+    issues.push({ code: 'durable_object_storage_required', message: 'Hosted mode requires S3-compatible EU object storage for evidence files.' });
+  }
+  if (hosted && storageMode === 's3' && evidenceStorageEndpointProtocol !== 'https:') {
+    issues.push({ code: 'hosted_object_storage_tls_required', message: 'Hosted mode requires an HTTPS S3-compatible object storage endpoint.' });
+  }
+  if (evidenceStorageInitError) {
+    issues.push({ code: evidenceStorageInitError.code || 'storage_initialization_failed', message: evidenceStorageInitError.message });
+  }
+  if (hosted && storageMode === 's3' && !storageVerification) {
+    issues.push({ code: 'object_storage_verification_pending', message: 'Hosted object storage has not completed a read/write verification.' });
+  } else if (storageVerification && !storageVerification.ready) {
+    issues.push({
+      code: storageVerification.code || 'object_storage_unavailable',
+      message: 'Evidence storage is not currently readable and writable.'
+    });
+  }
+  if (hosted && !hostedDatabaseUrl) {
+    issues.push({ code: 'durable_database_required', message: 'Hosted mode requires CONTRACTOR_AI_DATABASE_URL for the managed PostgreSQL migration target.' });
+  }
+  if (hosted && ['disable', 'allow', 'prefer', 'invalid'].includes(hostedDatabaseSslMode)) {
+    issues.push({ code: 'hosted_postgres_tls_required', message: 'Hosted mode requires a valid PostgreSQL connection with TLS required; use sslmode=require or verify-full.' });
+  }
+  if (hosted && operatingLedger?.databaseMode !== 'postgres') {
+    issues.push({ code: 'hosted_postgres_adapter_required', message: 'Hosted mode requires the PostgreSQL ledger adapter.' });
+  }
+  return {
+    mode: runtimeMode,
+    storageMode,
+    databaseMode: operatingLedger?.databaseMode || (hostedDatabaseUrl ? 'postgres' : 'sqlite'),
+    auth: {
+      required: dashboardAuthRequired,
+      legacyOwnerTokenConfigured: isStrongOperatorToken(dashboardAuthToken),
+      minimumTokenLength: minimumOperatorTokenLength,
+      configuredRoles: [...new Set(roleTokenConfig.principals.map(principal => principal.role))],
+      configuredPrincipalCount: configuredOperatorTokens().length,
+      loginRateLimit: {
+        durability: 'ledger',
+        keyMaterial: 'hmac-sha256',
+        limit: authLoginRateLimit,
+        windowMs: authLoginRateWindowMs,
+        successfulLoginResetsFailures: true,
+        multiReplicaSafe: true
+      }
+    },
+    hosting: {
+      publicHttps: hostedPublicUrlDetails.protocol === 'https:' && hostedPublicUrlDetails.valid,
+      publicOriginAllowed: Boolean(hostedPublicUrlDetails.origin && allowedOrigins.includes(hostedPublicUrlDetails.origin)),
+      trustedProxyConfigured: trustedProxyEntries.length > 0 && !trustedProxyError,
+      trustedProxyEntryCount: trustedProxyError ? 0 : trustedProxyEntries.length,
+      provider: hostingProvider || null,
+      region: hostingRegion || null,
+      dataResidency: dataResidency || null,
+      dpaConfigured: isConfiguredReference(dpaReference),
+      recovery: {
+        postgresBackupMode: ['snapshot', 'pitr'].includes(postgresBackupMode) ? postgresBackupMode : null,
+        objectVersioningEnabled,
+        policyConfigured: isConfiguredReference(backupPolicyReference)
+      }
+    },
+    evidenceStorage: {
+      status: storageVerification?.status || 'unverified',
+      verified: Boolean(storageVerification?.ready),
+      checkedAt: storageVerification?.checkedAt || null,
+      code: storageVerification?.code || null
+    },
+    autonomousScheduler: {
+      enabled: autonomousSchedulerEnabled,
+      intervalSeconds: autonomousSchedulerIntervalSeconds
+    },
+    ready: issues.length === 0,
+    issues
+  };
+}
+
+function setSecurityHeaders(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data:",
+    "style-src 'self'",
+    "script-src 'self'",
+    "connect-src 'self'"
+  ].join('; '));
+  if (req.path === '/client-portal.html') res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  if (isProduction) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+}
+
+function attachRequestContext(req, res, next) {
+  const incomingRequestId = req.headers['x-request-id'];
+  req.requestId = typeof incomingRequestId === 'string' && incomingRequestId.trim()
+    ? incomingRequestId.trim().slice(0, 100)
+    : createRequestId();
+  res.setHeader('X-Request-Id', req.requestId);
+
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    if (!req.path.startsWith('/api')) return;
+    const statusCode = res.statusCode;
+    const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info';
+    log(level, 'api_request', {
+      requestId: req.requestId,
+      method: req.method,
+      path: logSafeRequestPath(req),
+      statusCode,
+      durationMs: Date.now() - startedAt
+    });
+  });
+
+  next();
+}
+
+function rateLimitApi(req, res, next) {
+  if (!req.path.startsWith('/api/') || req.path === '/api/health/ready') return next();
+  const now = Date.now();
+  const remoteKey = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  if (!apiRateBuckets.has(remoteKey) && apiRateBuckets.size >= apiRateBucketLimit - 1) {
+    for (const [bucketKey, entry] of apiRateBuckets) {
+      if (now - entry.startedAt >= apiRateWindowMs) apiRateBuckets.delete(bucketKey);
+    }
+  }
+  const key = apiRateBuckets.has(remoteKey) || apiRateBuckets.size < apiRateBucketLimit - 1
+    ? remoteKey
+    : '__overflow__';
+  const bucket = apiRateBuckets.get(key);
+  const active = !bucket || now - bucket.startedAt >= apiRateWindowMs
+    ? { startedAt: now, count: 0 }
+    : bucket;
+  active.count += 1;
+  apiRateBuckets.set(key, active);
+  const resetSeconds = Math.max(1, Math.ceil((active.startedAt + apiRateWindowMs - now) / 1000));
+  res.setHeader('RateLimit-Limit', String(apiRateLimit));
+  res.setHeader('RateLimit-Remaining', String(Math.max(0, apiRateLimit - active.count)));
+  res.setHeader('RateLimit-Reset', String(resetSeconds));
+  res.setHeader('RateLimit-Policy', `${apiRateLimit};w=${Math.ceil(apiRateWindowMs / 1000)}`);
+  if (active.count > apiRateLimit) {
+    res.setHeader('Retry-After', String(resetSeconds));
+    return sendError(req, res, 429, 'rate_limited', 'Too many requests. Try again shortly.');
+  }
+  next();
+}
+
+function authenticationRateLimitKey(req) {
+  const remoteAddress = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  return crypto.createHmac('sha256', operatorSessionSigningKey).update('contractor-ai-auth-login\0').update(remoteAddress).digest('hex');
+}
+
+function setAuthenticationRateLimitHeaders(res, state) {
+  const resetSeconds = Math.max(1, Math.ceil((Date.parse(state.expiresAt) - Date.now()) / 1000));
+  res.setHeader('RateLimit-Limit', String(authLoginRateLimit));
+  res.setHeader('RateLimit-Remaining', String(state.remaining));
+  res.setHeader('RateLimit-Reset', String(resetSeconds));
+  res.setHeader('RateLimit-Policy', `${authLoginRateLimit};w=${Math.ceil(authLoginRateWindowMs / 1000)}`);
+  return resetSeconds;
+}
+
+function authenticationRateLimitUnavailable(req, res, error) {
+  log('error', 'authentication_rate_limit_unavailable', { requestId: req.requestId, error: serializeError(error) });
+  return sendError(req, res, 503, 'authentication_rate_limit_unavailable', 'Sign-in protection is temporarily unavailable.');
+}
+
+function rateLimitAuthLogin(req, res, next) {
+  try {
+    const keyHash = authenticationRateLimitKey(req);
+    const state = operatingLedger.getAuthenticationRateLimit(keyHash, {
+      limit: authLoginRateLimit,
+      windowMs: authLoginRateWindowMs
+    });
+    req.authenticationRateLimit = { keyHash };
+    const resetSeconds = setAuthenticationRateLimitHeaders(res, state);
+    if (state.limited) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return sendError(req, res, 429, 'authentication_rate_limited', 'Too many sign-in attempts. Try again later.');
+    }
+    return next();
+  } catch (error) {
+    return authenticationRateLimitUnavailable(req, res, error);
+  }
+}
+
+function recordAuthenticationFailure(req, res) {
+  try {
+    const state = operatingLedger.recordAuthenticationFailure(req.authenticationRateLimit.keyHash, {
+      limit: authLoginRateLimit,
+      windowMs: authLoginRateWindowMs
+    });
+    const resetSeconds = setAuthenticationRateLimitHeaders(res, state);
+    if (state.attemptCount > authLoginRateLimit) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return sendError(req, res, 429, 'authentication_rate_limited', 'Too many sign-in attempts. Try again later.');
+    }
+    return sendError(req, res, 401, 'authentication_failed', 'The supplied access key is not valid.');
+  } catch (error) {
+    return authenticationRateLimitUnavailable(req, res, error);
+  }
+}
+
+function validateEvidenceUpload(file) {
+  const mimeType = String(file?.mimeType || '').toLowerCase();
+  const extension = path.extname(String(file?.originalName || '')).toLowerCase();
+  const allowed = new Map([
+    ['image/jpeg', new Set(['.jpg', '.jpeg'])],
+    ['image/png', new Set(['.png'])],
+    ['image/webp', new Set(['.webp'])],
+    ['application/pdf', new Set(['.pdf'])],
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', new Set(['.docx'])]
+  ]);
+  if (allowed.get(mimeType)?.has(extension) !== true) {
+    return { valid: false, code: 'unsupported_upload_type', message: 'Evidence uploads must be JPEG, PNG, WebP, PDF, or DOCX with a matching filename extension.' };
+  }
+
+  const bytes = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from(file?.buffer || '');
+  const startsWith = signature => bytes.length >= signature.length && bytes.subarray(0, signature.length).equals(Buffer.from(signature));
+  const signatureMatches = (
+    (mimeType === 'image/jpeg' && startsWith([0xff, 0xd8, 0xff])) ||
+    (mimeType === 'image/png' && startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ||
+    (mimeType === 'image/webp' && startsWith([0x52, 0x49, 0x46, 0x46]) && bytes.subarray(8, 12).equals(Buffer.from('WEBP'))) ||
+    (mimeType === 'application/pdf' && startsWith('%PDF-')) ||
+    (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' && startsWith([0x50, 0x4b, 0x03, 0x04]))
+  );
+  if (!signatureMatches) {
+    return { valid: false, code: 'upload_signature_mismatch', message: 'The file contents do not match the declared evidence type.' };
+  }
+  return { valid: true };
 }
 
 function sanitizeUploadFilename(value) {
@@ -286,56 +620,104 @@ function parseMultipartBody(buffer, contentType = '') {
   return { fields, files };
 }
 
-function storeUploadedFile(file) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-  const extension = path.extname(file.originalName).slice(0, 20);
-  const stem = path.basename(file.originalName, extension).slice(0, 80) || 'evidence';
-  const storageName = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}-${stem}${extension}`;
-  const target = path.resolve(uploadDir, storageName);
-  const root = path.resolve(uploadDir);
-  if (!(target === root || target.startsWith(`${root}${path.sep}`))) {
-    throw new UploadRequestError(400, 'invalid_upload_path', 'Upload path could not be resolved safely');
+async function storeUploadedFile(file) {
+  const validation = validateEvidenceUpload(file);
+  if (!validation.valid) {
+    throw new UploadRequestError(415, validation.code, validation.message);
   }
-  fs.writeFileSync(target, file.buffer);
-  return {
-    originalName: file.originalName,
-    filename: storageName,
-    mimeType: file.mimeType,
-    size: file.size,
-    storageRef: path.relative(__dirname, target).replace(/\\/g, '/')
-  };
+  if (!evidenceStorage) {
+    throw new UploadRequestError(503, evidenceStorageInitError?.code || 'storage_unavailable', evidenceStorageInitError?.message || 'Evidence storage is unavailable.');
+  }
+  try {
+    const stored = await evidenceStorage.store(file);
+    return { originalName: file.originalName, ...stored };
+  } catch (error) {
+    if (error instanceof EvidenceStorageError) {
+      throw new UploadRequestError(error.statusCode, error.code, error.message);
+    }
+    throw error;
+  }
 }
 
-async function readUploadPayload(req) {
+async function readUploadPayload(req, options = {}) {
   const contentType = req.headers['content-type'] || '';
   if (!contentType.includes('multipart/form-data')) {
-    return { payload: req.body || {}, storedFile: null };
+    const payload = req.body || {};
+    options.authorizePayload?.(payload);
+    return { payload, file: null };
   }
 
   const buffer = await readRequestBuffer(req, maxUploadBytes);
   const parsed = parseMultipartBody(buffer, contentType);
+  options.authorizePayload?.(parsed.fields);
   const file = parsed.files.find(item => item.fieldName === 'evidenceFile') || parsed.files[0] || null;
-  const storedFile = file ? storeUploadedFile(file) : null;
   const payload = {
     ...parsed.fields,
-    ...(storedFile ? {
-      filename: parsed.fields.filename || storedFile.originalName,
-      name: parsed.fields.name || storedFile.originalName,
-      fileType: parsed.fields.fileType || storedFile.mimeType,
-      mimeType: storedFile.mimeType,
-      size: storedFile.size,
-      storageRef: storedFile.storageRef,
-      uploadedFile: {
-        originalName: storedFile.originalName,
-        storedName: storedFile.filename,
-        storageRef: storedFile.storageRef,
-        mimeType: storedFile.mimeType,
-        size: storedFile.size
-      }
+    ...(file ? {
+      filename: parsed.fields.filename || file.originalName,
+      name: parsed.fields.name || file.originalName,
+      fileType: parsed.fields.fileType || file.mimeType,
+      mimeType: file.mimeType,
+      size: file.size
     } : {})
   };
 
-  return { payload, storedFile };
+  return { payload, file };
+}
+
+function withStoredUpload(payload, storedFile) {
+  if (!storedFile) return payload;
+  return {
+    ...payload,
+    filename: payload.filename || storedFile.originalName,
+    name: payload.name || storedFile.originalName,
+    fileType: payload.fileType || storedFile.mimeType,
+    mimeType: storedFile.mimeType,
+    size: storedFile.size,
+    storageRef: storedFile.storageRef,
+    uploadedFile: {
+      originalName: storedFile.originalName,
+      storedName: storedFile.filename,
+      storageRef: storedFile.storageRef,
+      mimeType: storedFile.mimeType,
+      size: storedFile.size
+    }
+  };
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function uploadIdempotencyClaim(req, payload, file) {
+  const supplied = req.headers['idempotency-key'];
+  const key = String(Array.isArray(supplied) ? supplied[0] : supplied || '').trim();
+  if (!key) return null;
+  if (!/^[A-Za-z0-9._:-]{8,200}$/.test(key)) {
+    throw new UploadRequestError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8 to 200 safe characters.');
+  }
+
+  const principal = req.operator?.authenticated
+    ? `${req.operator.role}:${req.operator.id || 'authenticated'}`
+    : `${req.operator?.role || 'owner'}:local`;
+  const principalHash = crypto.createHash('sha256').update(principal).digest('hex');
+  const scope = `POST /api/ledger/upload:${principalHash}`;
+  const keyHash = crypto.createHash('sha256').update(`${scope}\0${key}`).digest('hex');
+  const requestHash = crypto.createHash('sha256').update(stableJson({
+    payload,
+    file: file ? {
+      originalName: file.originalName,
+      mimeType: file.mimeType,
+      size: file.size,
+      sha256: crypto.createHash('sha256').update(file.buffer).digest('hex')
+    } : null
+  })).digest('hex');
+  const claim = operatingLedger.claimIdempotentRequest({ keyHash, scope, requestHash });
+  return { ...claim, keyHash, requestHash };
 }
 
 function serializeError(error) {
@@ -366,9 +748,70 @@ function log(level, message, meta = {}) {
   }
 }
 
+async function verifyEvidenceStorage({ force = false } = {}) {
+  const cachedAt = Date.parse(evidenceStorageVerificationCache?.checkedAt || '');
+  const cacheFresh = Number.isFinite(cachedAt) && Date.now() - cachedAt < evidenceStorageVerificationTtlMs;
+  if (!force && evidenceStorageVerificationCache && cacheFresh) {
+    return evidenceStorageVerificationCache;
+  }
+  if (evidenceStorageVerificationPromise) {
+    return evidenceStorageVerificationPromise;
+  }
+  if (!evidenceStorage || typeof evidenceStorage.verify !== 'function') {
+    evidenceStorageVerificationCache = {
+      ready: false,
+      status: 'unavailable',
+      mode: storageMode,
+      checkedAt: new Date().toISOString(),
+      code: evidenceStorageInitError?.code || 'storage_verification_unavailable'
+    };
+    return evidenceStorageVerificationCache;
+  }
+
+  evidenceStorageVerificationPromise = (async () => {
+    const startedAt = Date.now();
+    try {
+      const result = await evidenceStorage.verify();
+      evidenceStorageVerificationCache = {
+        ready: true,
+        status: 'verified',
+        mode: result?.mode || storageMode,
+        checkedAt: result?.checkedAt || new Date().toISOString(),
+        latencyMs: Date.now() - startedAt,
+        code: null
+      };
+    } catch (error) {
+      evidenceStorageVerificationCache = {
+        ready: false,
+        status: 'unavailable',
+        mode: storageMode,
+        checkedAt: new Date().toISOString(),
+        latencyMs: Date.now() - startedAt,
+        code: error?.code || 'storage_verification_failed'
+      };
+      log('warn', 'evidence_storage_verification_failed', {
+        mode: storageMode,
+        code: evidenceStorageVerificationCache.code,
+        latencyMs: evidenceStorageVerificationCache.latencyMs
+      });
+    }
+    return evidenceStorageVerificationCache;
+  })();
+
+  try {
+    return await evidenceStorageVerificationPromise;
+  } finally {
+    evidenceStorageVerificationPromise = null;
+  }
+}
+
 function logSafeRequestPath(req) {
   return String(req.originalUrl || req.path || '')
     .replace(/(\/api\/client-portal\/)[^/?#]+/g, '$1[redacted]');
+}
+
+function isClientPortalApiPath(pathname) {
+  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/selections\/[^/]+\/responses)?$/.test(String(pathname || ''));
 }
 
 function sendError(req, res, statusCode, code, message, details) {
@@ -387,10 +830,246 @@ function sendError(req, res, statusCode, code, message, details) {
   return res.status(statusCode).json(payload);
 }
 
+function asyncHandler(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
 function safeEqualToken(candidate, expected) {
   const candidateBuffer = Buffer.from(String(candidate || ''), 'utf8');
   const expectedBuffer = Buffer.from(String(expected || ''), 'utf8');
   return candidateBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function parseRoleTokens(rawValue) {
+  if (!rawValue) return { principals: [], issues: [] };
+  const allowedRoles = new Set(['owner', 'approver', 'office_operator', 'field_worker']);
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== 'object') {
+      return { principals: [], issues: [{ code: 'invalid_role_tokens', message: 'CONTRACTOR_AI_ROLE_TOKENS must be a role map or an operator principal list.' }] };
+    }
+    const candidates = [];
+    const issues = [];
+
+    if (Array.isArray(parsed)) {
+      parsed.forEach((configuredValue, index) => candidates.push({ configuredValue, source: 'principal_list', index }));
+    } else if (Object.prototype.hasOwnProperty.call(parsed, 'operators')) {
+      if (!Array.isArray(parsed.operators)) {
+        issues.push({ code: 'invalid_operator_principals', message: 'CONTRACTOR_AI_ROLE_TOKENS.operators must be an array.' });
+      } else {
+        parsed.operators.forEach((configuredValue, index) => candidates.push({ configuredValue, source: 'principal_list', index }));
+      }
+      for (const key of Object.keys(parsed).filter(key => key !== 'operators')) {
+        issues.push({ code: 'ambiguous_operator_config', message: `Do not mix the operators list with the legacy ${key} role key.` });
+      }
+    } else {
+      for (const [role, configuredRole] of Object.entries(parsed)) {
+        if (!allowedRoles.has(role)) {
+          issues.push({ code: 'invalid_role_tokens', message: `Unsupported operator role: ${role}.` });
+          continue;
+        }
+        const values = Array.isArray(configuredRole) ? configuredRole : [configuredRole];
+        values.forEach((configuredValue, index) => candidates.push({ configuredValue, role, source: values.length === 1 ? 'legacy_role' : 'role_list', index }));
+      }
+    }
+
+    const principals = [];
+    const principalIds = new Set();
+    const tokens = new Set();
+    for (const candidate of candidates) {
+      const isStructuredToken = candidate.configuredValue && typeof candidate.configuredValue === 'object' && !Array.isArray(candidate.configuredValue);
+      if (!isStructuredToken && typeof candidate.configuredValue !== 'string') {
+        issues.push({ code: 'invalid_operator_principal', message: 'Each configured operator must be a token string or an object containing role and token.' });
+        continue;
+      }
+      const role = String(candidate.role || candidate.configuredValue.role || '').trim();
+      if (!allowedRoles.has(role)) {
+        issues.push({ code: 'invalid_role_tokens', message: `Unsupported operator role: ${role || '(missing)'}.` });
+        continue;
+      }
+      const token = isStructuredToken ? candidate.configuredValue.token : candidate.configuredValue;
+      if (!isStrongOperatorToken(token)) {
+        issues.push({ code: 'weak_role_token', message: `The ${role} token must be an unpadded, non-template secret containing at least ${minimumOperatorTokenLength} characters.` });
+        continue;
+      }
+      const configuredId = isStructuredToken ? candidate.configuredValue.id || candidate.configuredValue.operatorId : null;
+      const id = String(configuredId || (candidate.source === 'legacy_role' ? role : '')).trim();
+      if (!id) {
+        issues.push({ code: 'operator_id_required', message: `Operator ${candidate.index + 1} in the ${role} list requires a stable id.` });
+        continue;
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,79}$/.test(id)) {
+        issues.push({ code: 'invalid_operator_id', message: `Operator id ${id || '(missing)'} must contain 2 to 80 safe characters.` });
+        continue;
+      }
+      if (principalIds.has(id)) {
+        issues.push({ code: 'duplicate_operator_id', message: `Operator id ${id} is configured more than once.` });
+        continue;
+      }
+      if (tokens.has(token)) {
+        issues.push({ code: 'duplicate_operator_token', message: `Operator ${id} reuses another operator token.` });
+        continue;
+      }
+
+      let scope = null;
+      if (role === 'field_worker') {
+        const jobIds = isStructuredToken && Array.isArray(candidate.configuredValue.jobIds)
+          ? [...new Set(candidate.configuredValue.jobIds.map(value => String(value || '').trim()).filter(Boolean))]
+          : [];
+        const workerId = isStructuredToken ? String(candidate.configuredValue.workerId || '').trim() : '';
+        if (!workerId && jobIds.length === 0) {
+          issues.push({ code: 'field_worker_scope_required', message: 'A field_worker token must declare a workerId or one or more jobIds.' });
+          continue;
+        }
+        scope = { workerId: workerId || null, jobIds };
+      }
+      const name = isStructuredToken ? String(candidate.configuredValue.name || candidate.configuredValue.displayName || '').trim() : '';
+      principals.push({ id, name: name.slice(0, 120) || null, role, token, scope });
+      principalIds.add(id);
+      tokens.add(token);
+    }
+    return { principals, issues };
+  } catch {
+    return { principals: [], issues: [{ code: 'invalid_role_tokens', message: 'CONTRACTOR_AI_ROLE_TOKENS is not valid JSON.' }] };
+  }
+}
+
+function configuredOperatorTokens() {
+  const entries = roleTokenConfig.principals.map(principal => ({ ...principal }));
+  if (isStrongOperatorToken(dashboardAuthToken) && !entries.some(entry => entry.token === dashboardAuthToken)) {
+    entries.push({
+      id: entries.some(entry => entry.id === 'owner') ? 'legacy_owner' : 'owner',
+      name: 'Owner',
+      role: 'owner',
+      token: dashboardAuthToken,
+      scope: null
+    });
+  }
+  return entries;
+}
+
+function createOperatorSessionSigningKey() {
+  const material = configuredOperatorTokens()
+    .map(entry => `${entry.id}:${entry.role}:${entry.token}`)
+    .sort()
+    .join('\u0000');
+  return material
+    ? crypto.createHash('sha256').update('contractor-ai-operator-session\u0000').update(material).digest()
+    : crypto.randomBytes(32);
+}
+
+function operatorTokenFingerprint(token) {
+  return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('base64url').slice(0, 24);
+}
+
+function operatorSessionIdHash(sessionId) {
+  return crypto.createHash('sha256').update(String(sessionId || ''), 'utf8').digest('base64url');
+}
+
+function resolveOperatorToken(suppliedToken) {
+  for (const entry of configuredOperatorTokens()) {
+    if (safeEqualToken(suppliedToken, entry.token)) {
+      return { id: entry.id, name: entry.name, role: entry.role, scope: entry.scope, token: entry.token };
+    }
+  }
+  return null;
+}
+
+function requestCookie(req, name) {
+  const cookieHeader = String(req.headers.cookie || '');
+  for (const part of cookieHeader.split(';')) {
+    const [rawName, ...rawValue] = part.trim().split('=');
+    if (rawName !== name) continue;
+    try {
+      return decodeURIComponent(rawValue.join('='));
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function signOperatorSession(operator) {
+  const now = Math.floor(Date.now() / 1000);
+  const sessionId = crypto.randomBytes(24).toString('base64url');
+  const payload = {
+    version: 2,
+    audience: 'contractor-ai-dashboard',
+    sessionId,
+    operatorId: operator.id,
+    role: operator.role,
+    tokenFingerprint: operatorTokenFingerprint(operator.token),
+    issuedAt: now,
+    expiresAt: now + operatorSessionTtlSeconds
+  };
+  operatingLedger.createOperatorSession({
+    sessionIdHash: operatorSessionIdHash(sessionId),
+    operatorId: operator.id,
+    role: operator.role,
+    tokenFingerprint: payload.tokenFingerprint,
+    issuedAt: new Date(payload.issuedAt * 1000).toISOString(),
+    expiresAt: new Date(payload.expiresAt * 1000).toISOString()
+  });
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', operatorSessionSigningKey).update(encodedPayload).digest('base64url');
+  return { value: `${encodedPayload}.${signature}`, expiresAt: new Date(payload.expiresAt * 1000).toISOString() };
+}
+
+function verifyOperatorSession(value) {
+  if (!value || value.length > 4096) return null;
+  const parts = value.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const expectedSignature = crypto.createHmac('sha256', operatorSessionSigningKey).update(parts[0]).digest('base64url');
+  if (!safeEqualToken(parts[1], expectedSignature)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.version !== 2 || payload.audience !== 'contractor-ai-dashboard') return null;
+    if (typeof payload.sessionId !== 'string' || payload.sessionId.length !== 32) return null;
+    if (!Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt)) return null;
+    if (payload.issuedAt > now + 60 || payload.expiresAt <= now || payload.expiresAt - payload.issuedAt > operatorSessionTtlSeconds) return null;
+    const configured = configuredOperatorTokens().find(entry => (
+      entry.id === payload.operatorId
+      && entry.role === payload.role
+      && safeEqualToken(operatorTokenFingerprint(entry.token), payload.tokenFingerprint)
+    ));
+    if (!configured) return null;
+    const sessionIdHash = operatorSessionIdHash(payload.sessionId);
+    const retainedSession = operatingLedger.getOperatorSession(sessionIdHash, { at: new Date(now * 1000).toISOString() });
+    if (
+      !retainedSession
+      || retainedSession.operatorId !== configured.id
+      || retainedSession.role !== configured.role
+      || !safeEqualToken(retainedSession.tokenFingerprint, payload.tokenFingerprint)
+      || Date.parse(retainedSession.issuedAt) !== payload.issuedAt * 1000
+      || Date.parse(retainedSession.expiresAt) !== payload.expiresAt * 1000
+    ) return null;
+    return {
+      id: configured.id,
+      name: configured.name,
+      role: configured.role,
+      scope: configured.scope,
+      authMethod: 'session',
+      sessionIdHash
+    };
+  } catch {
+    return null;
+  }
+}
+
+function operatorSessionCookie(value, maxAgeSeconds) {
+  const secure = isProduction || runtimeMode === 'hosted';
+  const attributes = [
+    `${operatorSessionCookieName}=${encodeURIComponent(value)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+    `Expires=${new Date(Date.now() + Math.max(0, maxAgeSeconds) * 1000).toUTCString()}`,
+    'Priority=High'
+  ];
+  if (secure) attributes.push('Secure');
+  return attributes.join('; ');
 }
 
 function extractAuthToken(req) {
@@ -416,32 +1095,312 @@ function extractAuthToken(req) {
   return '';
 }
 
+function resolveOperatorRole(req) {
+  const suppliedToken = extractAuthToken(req);
+  if (suppliedToken) {
+    const operator = resolveOperatorToken(suppliedToken);
+    return operator ? { id: operator.id, name: operator.name, role: operator.role, scope: operator.scope, authMethod: 'token' } : null;
+  }
+  return verifyOperatorSession(requestCookie(req, operatorSessionCookieName));
+}
+
+function actorFromRequest(req, fallback = 'Contractor.AI') {
+  if (!req.operator?.authenticated) return fallback;
+  const role = req.operator.role;
+  const id = req.operator.id;
+  return id && id !== role ? `role:${role}:${id}` : `role:${role}`;
+}
+
 function requireDashboardAuth(req, res, next) {
-  const clientPortalRoute = /^\/api\/client-portal\/[^/]+(?:\/messages)?$/.test(req.path);
-  if (!dashboardAuthRequired || req.method === 'OPTIONS' || req.path === '/api/health' || req.path === '/client-portal.html' || clientPortalRoute) {
+  const clientPortalRoute = isClientPortalApiPath(req.path);
+  const publicAuthRoute = req.path === '/api/session' || req.path === '/api/auth/login' || req.path === '/api/auth/logout';
+  const operatorAppShell = ['GET', 'HEAD'].includes(req.method) && !req.path.startsWith('/api/');
+  const operator = dashboardAuthRequired ? resolveOperatorRole(req) : null;
+  req.operator = operator
+    ? { ...operator, authenticated: true }
+    : { role: 'owner', scope: null, authenticated: false, authMethod: dashboardAuthRequired ? null : 'local' };
+
+  if (!dashboardAuthRequired || req.method === 'OPTIONS' || req.path === '/api/health/ready' || clientPortalRoute || publicAuthRoute || operatorAppShell) {
     return next();
   }
 
-  if (!dashboardAuthToken || dashboardAuthToken.length < 16) {
+  if (configuredOperatorTokens().length === 0) {
     return sendError(
       req,
       res,
       503,
       'auth_not_configured',
-      'Contractor.AI is locked because dashboard/API auth is required but CONTRACTOR_AI_AUTH_TOKEN is missing or too short'
+      'Contractor.AI is locked because dashboard/API auth is required but no strong authentication token is configured'
     );
   }
 
-  const suppliedToken = extractAuthToken(req);
-  if (suppliedToken && safeEqualToken(suppliedToken, dashboardAuthToken)) {
+  if (operator) {
     return next();
   }
 
-  res.setHeader('WWW-Authenticate', 'Basic realm="Contractor.AI", charset="UTF-8"');
+  res.setHeader('WWW-Authenticate', 'Bearer realm="Contractor.AI"');
   return sendError(req, res, 401, 'authentication_required', 'Authentication is required for Contractor.AI dashboard and API access');
 }
 
+function allowsOperatorRequest(role, req) {
+  if (!req.path.startsWith('/api/') || req.method === 'OPTIONS') return true;
+  if (role === 'owner') return true;
+  const isRead = ['GET', 'HEAD'].includes(req.method);
+  const pathName = req.path;
+  if (isRead && pathName === '/api/session') return true;
+  const ledgerRead = pathName.startsWith('/api/ledger/');
+
+  if (role === 'approver') {
+    return (isRead && ledgerRead) || (req.method === 'POST' && /^\/api\/ledger\/approvals\/[^/]+\/resolve$/.test(pathName));
+  }
+
+  if (role === 'office_operator') {
+    if (isRead && (ledgerRead || pathName === '/api/health' || pathName === '/api/readiness')) return true;
+    if (!['POST', 'PUT', 'PATCH'].includes(req.method) || !ledgerRead) return false;
+    return !/^\/api\/ledger\/approvals\/[^/]+\/resolve$/.test(pathName);
+  }
+
+  if (role === 'field_worker') {
+    if (isRead) {
+      return pathName === '/api/health'
+        || pathName === '/api/readiness'
+        || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
+        || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
+    }
+    if (req.method === 'POST' && pathName === '/api/ledger/upload') return true;
+    if (req.method === 'PATCH' && /^\/api\/ledger\/jobs\/[^/]+\/lifecycle\/task\/[^/]+$/.test(pathName)) return true;
+    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|field-reports|observations|incidents|safety-checks|time-logs|daily-logs)$/.test(pathName);
+  }
+
+  return false;
+}
+
+function fieldWorkerCanAccessJob(req, jobId) {
+  if (req.operator?.role !== 'field_worker') return true;
+  const scope = req.operator.scope;
+  if (!scope || !jobId) return false;
+  const normalizedJobId = String(jobId);
+  if (scope.jobIds?.includes(normalizedJobId)) return true;
+  if (!scope.workerId) return false;
+  try {
+    const detail = operatingLedger.getJobDetail(normalizedJobId);
+    return detail.assignments.some(assignment => (
+      String(assignment.workerId || '') === scope.workerId
+      && !['released', 'cancelled', 'completed', 'closed', 'rejected'].includes(String(assignment.status || '').toLowerCase())
+    ));
+  } catch {
+    return false;
+  }
+}
+
+function scopedLedgerJobs(req, filters = {}) {
+  const jobs = operatingLedger.listJobs(filters);
+  return req.operator?.role === 'field_worker'
+    ? jobs.filter(job => fieldWorkerCanAccessJob(req, job.id)).map(projectFieldJobSummary)
+    : jobs;
+}
+
+const FIELD_RECORD_PRIVATE_KEYS = new Set([
+  'amount', 'approval', 'approvalId', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
+  'data', 'email', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'portalToken',
+  'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
+  'taxAmount', 'taxRate', 'token', 'total'
+]);
+
+function projectFieldRecord(record) {
+  if (!record || typeof record !== 'object') return record;
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !FIELD_RECORD_PRIVATE_KEYS.has(key)));
+}
+
+function projectFieldRecords(records) {
+  return Array.isArray(records) ? records.map(projectFieldRecord) : [];
+}
+
+function projectFieldJobSummary(job = {}) {
+  return {
+    id: job.id,
+    title: job.title,
+    clientName: job.clientName,
+    jobType: job.jobType,
+    description: job.description,
+    address: job.address,
+    city: job.city,
+    region: job.region,
+    country: job.country,
+    priority: job.priority,
+    status: job.status,
+    phase: job.phase,
+    riskLevel: job.riskLevel,
+    estimatedHours: job.estimatedHours,
+    progressPercent: job.progressPercent,
+    scheduledStart: job.scheduledStart,
+    scheduledEnd: job.scheduledEnd,
+    targetCompletion: job.targetCompletion,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    fieldScoped: true
+  };
+}
+
+function fieldWorkerIdentity(req) {
+  const workerId = req.operator?.role === 'field_worker' ? req.operator.scope?.workerId : null;
+  if (!workerId) return { workerId: null, workerName: req.operator?.name || 'Field worker', hourlyRate: 0 };
+  try {
+    const worker = operatingLedger.getWorker(workerId);
+    return { workerId: worker.id, workerName: worker.name, hourlyRate: Number(worker.hourlyRate || 0) };
+  } catch {
+    return { workerId, workerName: req.operator?.name || 'Field worker', hourlyRate: 0 };
+  }
+}
+
+function projectFieldJobDetail(req, detail) {
+  const scopeWorkerId = req.operator?.scope?.workerId || null;
+  const timeLogs = scopeWorkerId
+    ? (detail.timeLogs || []).filter(log => String(log.workerId || '') === String(scopeWorkerId))
+    : [];
+  return {
+    ...projectFieldJobSummary(detail),
+    tasks: projectFieldRecords(detail.tasks),
+    fieldReports: projectFieldRecords(detail.fieldReports),
+    rfis: projectFieldRecords(detail.rfis),
+    submittals: projectFieldRecords(detail.submittals),
+    permits: projectFieldRecords(detail.permits),
+    inspections: projectFieldRecords(detail.inspections),
+    observations: projectFieldRecords(detail.observations),
+    incidents: projectFieldRecords(detail.incidents),
+    safetyMeetings: projectFieldRecords(detail.safetyMeetings),
+    orientations: projectFieldRecords(detail.orientations),
+    jhas: projectFieldRecords(detail.jhas),
+    sdsSheets: projectFieldRecords(detail.sdsSheets),
+    siteAccessLogs: projectFieldRecords(detail.siteAccessLogs),
+    assignments: projectFieldRecords(detail.assignments),
+    tools: projectFieldRecords(detail.tools),
+    materials: projectFieldRecords(detail.materials),
+    documents: projectFieldRecords(detail.documents),
+    progress: projectFieldRecords(detail.progress),
+    timeLogs: projectFieldRecords(timeLogs),
+    qualityChecks: projectFieldRecords(detail.qualityChecks),
+    safetyChecks: projectFieldRecords(detail.safetyChecks),
+    punchItems: projectFieldRecords(detail.punchItems),
+    workerInstructions: projectFieldRecords(detail.workerInstructions),
+    weather: projectFieldRecords(detail.weather),
+    approvals: [],
+    communications: []
+  };
+}
+
+function jobForOperator(req, jobId, options = {}) {
+  const detail = operatingLedger.getJobDetail(jobId, {
+    includeAudit: req.operator?.role === 'field_worker' ? false : options.includeAudit === true
+  });
+  return req.operator?.role === 'field_worker' ? projectFieldJobDetail(req, detail) : detail;
+}
+
+function dashboardForOperator(req) {
+  if (req.operator?.role !== 'field_worker') return operatingLedger.dashboardSummary();
+  const jobs = scopedLedgerJobs(req, { limit: 500 });
+  return { fieldScoped: true, jobCount: jobs.length };
+}
+
+function timeLogPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    rate: identity.hourlyRate,
+    hourlyRate: identity.hourlyRate,
+    hourly_rate: identity.hourlyRate
+  };
+}
+
+function taskLifecyclePayloadForOperator(req) {
+  const payload = req.body || {};
+  if (req.operator?.role !== 'field_worker') return payload;
+
+  const requestedStatus = String(payload.status || '').trim().toLowerCase();
+  if (!['in_progress', 'blocked', 'completed'].includes(requestedStatus)) {
+    const error = new Error('Field workers can start, block, or complete assigned job tasks.');
+    error.statusCode = 403;
+    error.code = 'field_task_transition_forbidden';
+    throw error;
+  }
+
+  const detail = operatingLedger.getJobDetail(req.params.id, { includeAudit: false });
+  const task = (detail.tasks || []).find(item => String(item.id) === String(req.params.recordId));
+  if (!task) {
+    const error = new Error('Task not found for this job');
+    error.statusCode = 404;
+    error.code = 'task_not_found';
+    throw error;
+  }
+  const workerId = req.operator.scope?.workerId || null;
+  if (task.assigneeId && (!workerId || String(task.assigneeId) !== String(workerId))) {
+    const error = new Error('This task is assigned to another crew member.');
+    error.statusCode = 403;
+    error.code = 'field_task_scope_forbidden';
+    throw error;
+  }
+
+  return {
+    status: requestedStatus,
+    notes: payload.notes || payload.note || null,
+    evidence: Array.isArray(payload.evidence) ? payload.evidence : []
+  };
+}
+
+function recordForOperator(req, record) {
+  return req.operator?.role === 'field_worker' ? projectFieldRecord(record) : record;
+}
+
+function requestedLedgerJobId(req) {
+  const match = String(req.path || '').match(/^\/api\/ledger\/jobs\/([^/]+)/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function requireOperatorAuthorization(req, res, next) {
+  const clientPortalRoute = isClientPortalApiPath(req.path);
+  if (clientPortalRoute || req.path === '/api/session' || req.path === '/api/auth/login' || req.path === '/api/auth/logout') return next();
+  if (!allowsOperatorRequest(req.operator?.role || 'owner', req)) {
+    return sendError(req, res, 403, 'insufficient_role', 'Your operator role cannot perform this action.');
+  }
+  const jobId = requestedLedgerJobId(req);
+  if (jobId && !fieldWorkerCanAccessJob(req, jobId)) {
+    return sendError(req, res, 403, 'field_job_scope_forbidden', 'This field worker is not assigned to the requested job.');
+  }
+  return next();
+}
+
+function requireSessionMutationOrigin(req, res, next) {
+  if (req.operator?.authMethod !== 'session' || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) {
+    return sendError(req, res, 403, 'session_origin_required', 'Cookie-authenticated changes require a same-origin browser request.');
+  }
+  let requestOrigin = '';
+  try {
+    requestOrigin = new URL(`${req.protocol}://${req.get('host')}`).origin;
+  } catch {
+    requestOrigin = '';
+  }
+  if (origin !== requestOrigin && !allowedOrigins.includes(origin)) {
+    return sendError(req, res, 403, 'session_origin_forbidden', 'The browser origin is not allowed to change Contractor.AI records.');
+  }
+  return next();
+}
+
 // Middleware
+app.disable('x-powered-by');
+app.use(setSecurityHeaders);
+app.use(attachRequestContext);
 app.use(cors({
   origin(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -450,852 +1409,115 @@ app.use(cors({
     return callback(null, false);
   }
 }));
+app.use(rateLimitApi);
+app.use(requireDashboardAuth);
+app.use(requireSessionMutationOrigin);
+app.use(requireOperatorAuthorization);
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use((req, res, next) => {
-  const incomingRequestId = req.headers['x-request-id'];
-  req.requestId = typeof incomingRequestId === 'string' && incomingRequestId.trim()
-    ? incomingRequestId.trim().slice(0, 100)
-    : createRequestId();
-  res.setHeader('X-Request-Id', req.requestId);
-
-  const startedAt = Date.now();
-  res.on('finish', () => {
-    if (!req.path.startsWith('/api')) {
-      return;
-    }
-
-    const statusCode = res.statusCode;
-    const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info';
-    log(level, 'api_request', {
-      requestId: req.requestId,
-      method: req.method,
-      path: logSafeRequestPath(req),
-      statusCode,
-      durationMs: Date.now() - startedAt
-    });
-  });
-
+  if (req.operator?.authenticated && req.body && typeof req.body === 'object') {
+    req.body.actor = actorFromRequest(req);
+  }
   next();
 });
-app.use(requireDashboardAuth);
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
 
-function loadState() {
+app.post('/api/auth/login', rateLimitAuthLogin, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!dashboardAuthRequired) {
+    return sendError(req, res, 409, 'authentication_not_required', 'This local runtime does not require operator authentication.');
+  }
+  if (configuredOperatorTokens().length === 0) {
+    return sendError(req, res, 503, 'auth_not_configured', 'Contractor.AI authentication is not configured.');
+  }
+  const suppliedToken = typeof req.body?.token === 'string' ? req.body.token : '';
+  const operator = resolveOperatorToken(suppliedToken);
+  if (!operator) {
+    return recordAuthenticationFailure(req, res);
+  }
   try {
-    const raw = fs.readFileSync(stateFile, 'utf8');
-    const parsed = JSON.parse(raw);
+    operatingLedger.clearAuthenticationRateLimit(req.authenticationRateLimit.keyHash);
+    setAuthenticationRateLimitHeaders(res, operatingLedger.getAuthenticationRateLimit(req.authenticationRateLimit.keyHash, {
+      limit: authLoginRateLimit,
+      windowMs: authLoginRateWindowMs
+    }));
+  } catch (error) {
+    return authenticationRateLimitUnavailable(req, res, error);
+  }
+  const session = signOperatorSession(operator);
+  res.setHeader('Set-Cookie', operatorSessionCookie(session.value, operatorSessionTtlSeconds));
+  log('info', 'operator_session_started', { requestId: req.requestId, operatorId: operator.id, role: operator.role, expiresAt: session.expiresAt });
+  return res.json({
+    authenticated: true,
+    operatorId: operator.id,
+    name: operator.name,
+    role: operator.role,
+    expiresAt: session.expiresAt
+  });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Set-Cookie', operatorSessionCookie('', 0));
+  if (req.operator?.authMethod === 'session' && req.operator.sessionIdHash) {
+    const revoked = operatingLedger.revokeOperatorSession(req.operator.sessionIdHash, {
+      reason: 'operator_logout'
+    });
+    log('info', 'operator_session_ended', {
+      requestId: req.requestId,
+      operatorId: req.operator.id,
+      role: req.operator.role,
+      revoked
+    });
+  }
+  return res.status(204).end();
+});
+
+app.get('/api/session', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const role = req.operator?.role || 'owner';
+  const fieldWorker = role === 'field_worker';
+  const fieldIdentity = fieldWorker ? fieldWorkerIdentity(req) : null;
+  return res.json({
+    authentication: {
+      required: dashboardAuthRequired,
+      authenticated: Boolean(req.operator?.authenticated),
+      method: req.operator?.authMethod || null,
+      sessionTtlSeconds: dashboardAuthRequired ? operatorSessionTtlSeconds : null
+    },
+    operator: {
+      id: req.operator?.id || (req.operator?.authenticated ? role : 'local_owner'),
+      name: req.operator?.name || (fieldIdentity?.workerName ?? null),
+      role,
+      authenticated: Boolean(req.operator?.authenticated),
+      fieldScoped: fieldWorker,
+      worker: fieldIdentity ? { id: fieldIdentity.workerId, name: fieldIdentity.workerName } : null,
+      capabilities: {
+        dashboard: !fieldWorker,
+        intake: role === 'owner' || role === 'office_operator',
+        approvals: role === 'owner' || role === 'approver',
+        dispatch: !fieldWorker,
+        resources: !fieldWorker,
+        finance: !fieldWorker,
+        clientSuccess: !fieldWorker,
+        fieldEvidence: role === 'owner' || role === 'office_operator' || fieldWorker,
+        maintenance: role === 'owner'
+      }
+    }
+  });
+});
+
+function loadLegacyStateForMigration() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     return {
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : null,
-      workers: Array.isArray(parsed.workers) ? parsed.workers : null,
-      tools: Array.isArray(parsed.tools) ? parsed.tools : null,
-      construction: parsed.construction && typeof parsed.construction === 'object'
-        ? parsed.construction
-        : null
+      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+      workers: Array.isArray(parsed.workers) ? parsed.workers : [],
+      tools: Array.isArray(parsed.tools) ? parsed.tools : []
     };
   } catch {
-    return { jobs: null, workers: null, tools: null, construction: null };
+    return { jobs: [], workers: [], tools: [] };
   }
-}
-
-function saveState() {
-  try {
-    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    fs.writeFileSync(stateFile, JSON.stringify({ jobs, workers, tools, construction }, null, 2));
-  } catch (error) {
-    log('warn', 'state_persistence_unavailable', { error: serializeError(error) });
-  }
-}
-
-function currentState() {
-  return { jobs, workers, tools, construction };
-}
-
-function findJob(jobId) {
-  return jobs.find(job => String(job.id) === String(jobId));
-}
-
-function findWorker(workerId) {
-  return workers.find(worker => String(worker.id) === String(workerId));
-}
-
-function releaseJobResources(job) {
-  return autonomousEngine.releaseJobResources(job, currentState());
-}
-
-function normalizeDateStart(value) {
-  if (!value) return null;
-  const raw = String(value);
-  const parsed = new Date(raw.length === 10 ? `${raw}T09:00:00` : raw);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function reservePlannedTools(job) {
-  const normalizedJob = autonomousEngine.normalizeJob(job);
-  const toolPlan = autonomousEngine.planTools(normalizedJob, tools);
-  for (const plannedTool of toolPlan.reserved) {
-    const tool = tools.find(item => String(item.id) === String(plannedTool.id));
-    if (!tool) continue;
-    tool.status = job.status === 'in_progress' ? 'in_use' : 'reserved';
-    tool.assignedJobId = job.id;
-    tool.assignedWorkerId = job.assignedWorkerId || null;
-    tool.currentLocation = job.address || job.location || 'Reserved for job';
-  }
-  return toolPlan;
-}
-
-function validateState() {
-  const issues = [];
-  const checkDuplicateIds = (collectionName, collection) => {
-    const seen = new Set();
-    collection.forEach((item, index) => {
-      if (item.id === undefined || item.id === null || item.id === '') {
-        issues.push({
-          severity: 'error',
-          collection: collectionName,
-          index,
-          message: 'Record is missing an id'
-        });
-        return;
-      }
-
-      const id = String(item.id);
-      if (seen.has(id)) {
-        issues.push({
-          severity: 'error',
-          collection: collectionName,
-          id: item.id,
-          message: 'Duplicate id detected'
-        });
-      }
-      seen.add(id);
-    });
-  };
-
-  checkDuplicateIds('jobs', jobs);
-  checkDuplicateIds('workers', workers);
-  checkDuplicateIds('tools', tools);
-
-  const workerNames = new Set(workers.map(worker => worker.name).filter(Boolean));
-  const workerIds = new Set(workers.map(worker => String(worker.id)));
-  const jobTitles = new Set(jobs.map(job => job.title).filter(Boolean));
-  const jobIds = new Set(jobs.map(job => String(job.id)));
-
-  jobs.forEach(job => {
-    const status = job.status || 'unknown';
-    const progress = Number(job.progress ?? job.progress_percentage ?? 0);
-
-    if (Number.isFinite(progress) && (progress < 0 || progress > 100)) {
-      issues.push({
-        severity: 'warning',
-        collection: 'jobs',
-        id: job.id,
-        message: 'Job progress is outside the expected 0-100 range'
-      });
-    }
-
-    if (job.worker && !workerNames.has(job.worker)) {
-      issues.push({
-        severity: 'error',
-        collection: 'jobs',
-        id: job.id,
-        message: `Assigned worker "${job.worker}" does not exist`
-      });
-    }
-
-    if (job.assignedWorkerId && !workerIds.has(String(job.assignedWorkerId))) {
-      issues.push({
-        severity: 'error',
-        collection: 'jobs',
-        id: job.id,
-        message: `Assigned worker id "${job.assignedWorkerId}" does not exist`
-      });
-    }
-
-    if (['scheduled', 'in_progress'].includes(status) && !job.worker && !job.assigned_worker_id) {
-      issues.push({
-        severity: 'warning',
-        collection: 'jobs',
-        id: job.id,
-        message: 'Active job has no assigned worker'
-      });
-    }
-
-    if (status === 'completed' && Number.isFinite(progress) && progress < 100) {
-      issues.push({
-        severity: 'warning',
-        collection: 'jobs',
-        id: job.id,
-        message: 'Completed job has progress below 100'
-      });
-    }
-  });
-
-  workers.forEach(worker => {
-    if (worker.currentJob && !jobTitles.has(worker.currentJob)) {
-      issues.push({
-        severity: 'warning',
-        collection: 'workers',
-        id: worker.id,
-        message: `Worker currentJob "${worker.currentJob}" does not match an existing job`
-      });
-    }
-
-    if (worker.currentJobId && !jobIds.has(String(worker.currentJobId))) {
-      issues.push({
-        severity: 'warning',
-        collection: 'workers',
-        id: worker.id,
-        message: `Worker currentJobId "${worker.currentJobId}" does not match an existing job`
-      });
-    }
-
-    if (['active', 'busy', 'traveling'].includes(worker.status) && !worker.currentJob && worker.status !== 'traveling') {
-      issues.push({
-        severity: 'warning',
-        collection: 'workers',
-        id: worker.id,
-        message: 'Busy worker has no current job reference'
-      });
-    }
-  });
-
-  tools.forEach(tool => {
-    if (['in_use', 'reserved'].includes(tool.status) && !tool.currentLocation && !tool.current_location) {
-      issues.push({
-        severity: 'warning',
-        collection: 'tools',
-        id: tool.id,
-        message: 'Reserved or in-use tool has no current location'
-      });
-    }
-
-    if (tool.assignedJobId && !jobIds.has(String(tool.assignedJobId))) {
-      issues.push({
-        severity: 'error',
-        collection: 'tools',
-        id: tool.id,
-        message: `Tool assignedJobId "${tool.assignedJobId}" does not match an existing job`
-      });
-    }
-
-    if (tool.assignedWorkerId && !workerIds.has(String(tool.assignedWorkerId))) {
-      issues.push({
-        severity: 'warning',
-        collection: 'tools',
-        id: tool.id,
-        message: `Tool assignedWorkerId "${tool.assignedWorkerId}" does not match an existing worker`
-      });
-    }
-  });
-
-  return {
-    valid: !issues.some(issue => issue.severity === 'error'),
-    issueCount: issues.length,
-    issues
-  };
-}
-
-// Contractor configuration
-const CONTRACTOR_CONFIG = {
-  email: 'noodzakelijkonline@gmail.com',
-  phone: '+31068351517',
-  company: 'Contractor AI Solutions',
-  services: ['Garden Maintenance', 'General House Services', 'Renovations']
-};
-
-function relativeDate(days, hour = 9) {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  date.setHours(hour, 0, 0, 0);
-  return date.toISOString();
-}
-
-// Coherent starter data for a fresh local install.
-let jobs = [
-  {
-    id: 1,
-    title: 'Bathroom Renovation',
-    client: 'Maria van der Berg',
-    address: 'Hoofdstraat 123, Amsterdam',
-    status: 'in_progress',
-    priority: 'critical',
-    worker: 'Anna Kowalski',
-    assignedWorkerId: 1,
-    estimatedCost: 1512,
-    actualCost: 1200,
-    progress: 65,
-    startDate: relativeDate(-1, 8),
-    scheduledStart: relativeDate(-1, 8),
-    actualStart: relativeDate(-1, 8),
-    estimatedCompletion: relativeDate(1, 16),
-    tools: ['Tile saw', 'Plumbing tools', 'Safety equipment'],
-    description: 'Complete bathroom renovation including tiles, plumbing, and fixtures'
-  },
-  {
-    id: 2,
-    title: 'Gutter Cleaning & Inspection',
-    client: 'Jan de Vries',
-    address: 'Kerkstraat 45, Utrecht',
-    status: 'scheduled',
-    priority: 'high',
-    worker: 'Marco Silva',
-    assignedWorkerId: 2,
-    estimatedCost: 90,
-    actualCost: 0,
-    progress: 0,
-    startDate: relativeDate(1, 10),
-    scheduledStart: relativeDate(1, 10),
-    estimatedCompletion: relativeDate(1, 13),
-    tools: ['Ladder', 'Pressure washer', 'Safety harness'],
-    description: 'Clean gutters and inspect for damage or blockages'
-  },
-  {
-    id: 3,
-    title: 'Weekly Lawn Maintenance',
-    client: 'Sophie Janssen',
-    address: 'Parkweg 78, Rotterdam',
-    status: 'completed',
-    priority: 'medium',
-    worker: 'Lisa Chen',
-    assignedWorkerId: 3,
-    estimatedCost: 45,
-    actualCost: 45,
-    progress: 100,
-    startDate: relativeDate(-1, 9),
-    actualStart: relativeDate(-1, 9),
-    actualEnd: relativeDate(-1, 11),
-    estimatedCompletion: relativeDate(-1, 11),
-    tools: ['Lawn mower', 'Trimmer', 'Rake'],
-    description: 'Regular lawn mowing and garden maintenance'
-  }
-];
-
-let workers = [
-  {
-    id: 1,
-    name: 'Anna Kowalski',
-    specialty: 'Bathroom Specialist',
-    status: 'active',
-    location: 'Amsterdam',
-    rating: 4.9,
-    completedJobs: 127,
-    currentJob: 'Bathroom Renovation',
-    currentJobId: 1
-  },
-  {
-    id: 2,
-    name: 'Marco Silva',
-    specialty: 'Gutter Specialist',
-    status: 'busy',
-    location: 'Utrecht',
-    rating: 4.7,
-    completedJobs: 89,
-    currentJob: 'Gutter Cleaning & Inspection',
-    currentJobId: 2
-  },
-  {
-    id: 3,
-    name: 'Lisa Chen',
-    specialty: 'Garden Maintenance',
-    status: 'available',
-    location: 'Rotterdam',
-    rating: 4.8,
-    completedJobs: 156,
-    currentJob: null
-  }
-];
-
-let tools = [
-  { id: 1, name: 'Tile Saw', category: 'power_tools', status: 'in_use', currentLocation: 'Amsterdam job site', assignedJobId: 1, assignedWorkerId: 1 },
-  { id: 2, name: 'Pressure Washer', category: 'cleaning', status: 'reserved', currentLocation: 'Utrecht depot', assignedJobId: 2, assignedWorkerId: 2, returnDate: relativeDate(1, 14) },
-  { id: 3, name: 'Extension Ladder', category: 'access', status: 'reserved', currentLocation: 'Van #2', assignedJobId: 2, assignedWorkerId: 2 },
-  { id: 4, name: 'Plumbing Kit', category: 'hand_tools', status: 'in_use', currentLocation: 'Amsterdam job site', assignedJobId: 1, assignedWorkerId: 1 }
-];
-
-function createDefaultConstructionState() {
-  return {
-    projects: [
-      {
-        id: 1,
-        name: 'Canal House Retrofit',
-        number: 'PRJ-1001',
-        client: 'Van Dijk Properties',
-        status: 'active',
-        phase: 'Execution',
-        location: 'Amsterdam',
-        budget: 185000,
-        committedCost: 118500,
-        forecastAtCompletion: 179250,
-        progress: 58,
-        startDate: relativeDate(-18, 8).slice(0, 10),
-        dueDate: relativeDate(24, 17).slice(0, 10),
-        manager: 'Anna Kowalski',
-        riskLevel: 'medium'
-      },
-      {
-        id: 2,
-        name: 'Retail Fit-Out Utrecht',
-        number: 'PRJ-1002',
-        client: 'Northline Retail',
-        status: 'preconstruction',
-        phase: 'Tendering',
-        location: 'Utrecht',
-        budget: 94000,
-        committedCost: 24000,
-        forecastAtCompletion: 91000,
-        progress: 18,
-        startDate: relativeDate(12, 8).slice(0, 10),
-        dueDate: relativeDate(55, 17).slice(0, 10),
-        manager: 'Marco Silva',
-        riskLevel: 'low'
-      }
-    ],
-    tenders: [
-      { id: 1, projectId: 2, package: 'Interior Carpentry', status: 'open', dueDate: relativeDate(5, 17), coverage: 4, bidders: ['OakWorks', 'Noord Build', 'Studio Hout'], estimateValue: 18500 },
-      { id: 2, projectId: 2, package: 'Electrical Rough-In', status: 'draft', dueDate: relativeDate(8, 17), coverage: 2, bidders: ['Volt Partners'], estimateValue: 21200 }
-    ],
-    estimates: [
-      { id: 1, projectId: 2, name: 'Retail Fit-Out baseline estimate', status: 'approved', value: 94000, marginPercent: 18, alternates: ['LED upgrade', 'After-hours install'] }
-    ],
-    budgets: [
-      { id: 1, projectId: 1, costCode: '01-100', description: 'General Conditions', budget: 22000, committed: 14200, actual: 11950, forecast: 21900 },
-      { id: 2, projectId: 1, costCode: '06-200', description: 'Carpentry', budget: 42000, committed: 31800, actual: 26750, forecast: 43800 },
-      { id: 3, projectId: 1, costCode: '22-100', description: 'Plumbing', budget: 36000, committed: 22100, actual: 20100, forecast: 35400 }
-    ],
-    contracts: [
-      { id: 1, projectId: 1, vendor: 'Noord Build', type: 'subcontract', status: 'executed', value: 31800, paidToDate: 14200 },
-      { id: 2, projectId: 1, vendor: 'Flow Plumbing', type: 'subcontract', status: 'executed', value: 22100, paidToDate: 8700 }
-    ],
-    changeOrders: [
-      { id: 1, projectId: 1, title: 'Hidden joist repair', status: 'pending_client', value: 4200, costImpact: 2850, scheduleImpactDays: 2 }
-    ],
-    invoices: [
-      { id: 1, projectId: 1, vendor: 'Noord Build', status: 'pending_review', amount: 6400, period: 'June 2026', dueDate: relativeDate(3, 17) },
-      { id: 2, projectId: 1, vendor: 'Flow Plumbing', status: 'approved', amount: 3100, period: 'June 2026', dueDate: relativeDate(7, 17) }
-    ],
-    rfis: [
-      { id: 1, projectId: 1, subject: 'Confirm fire-stopping detail at riser', status: 'open', assignee: 'Design Team', dueDate: relativeDate(2, 17), priority: 'high' },
-      { id: 2, projectId: 1, subject: 'Clarify cabinet hardware finish', status: 'answered', assignee: 'Client', dueDate: relativeDate(-1, 17), priority: 'medium' }
-    ],
-    submittals: [
-      { id: 1, projectId: 1, title: 'Bathroom tile data sheet', status: 'approved', dueDate: relativeDate(-5, 17), responsible: 'Anna Kowalski' },
-      { id: 2, projectId: 1, title: 'MEP valve package', status: 'revise_resubmit', dueDate: relativeDate(1, 17), responsible: 'Flow Plumbing' }
-    ],
-    drawings: [
-      { id: 1, projectId: 1, number: 'A-201', title: 'Level 2 Finish Plan', revision: 'C', status: 'current', uploadedAt: relativeDate(-2, 10) },
-      { id: 2, projectId: 1, number: 'M-101', title: 'Mechanical Layout', revision: 'B', status: 'superseded', uploadedAt: relativeDate(-12, 10) }
-    ],
-    documents: [
-      { id: 1, projectId: 1, title: 'Site logistics plan', type: 'plan', status: 'current', owner: 'Project Team' },
-      { id: 2, projectId: 1, title: 'Client finish approvals', type: 'approval_log', status: 'needs_update', owner: 'Client' }
-    ],
-    transmittals: [
-      { id: 1, projectId: 1, title: 'Issued for construction drawing set', status: 'sent', recipient: 'Noord Build', sentAt: relativeDate(-2, 11), documentCount: 8 },
-      { id: 2, projectId: 2, title: 'Tender addendum package', status: 'draft', recipient: 'Bidder list', dueDate: relativeDate(1, 12), documentCount: 4 }
-    ],
-    dailyLogs: [
-      { id: 1, projectId: 1, date: relativeDate(0, 8).slice(0, 10), weather: 'Light rain', manpower: 6, notes: 'Interior work continued. Delivery held for morning inspection.' }
-    ],
-    dayworkSheets: [
-      { id: 1, projectId: 1, title: 'Out-of-scope riser fire-stopping', status: 'submitted', crew: 'Flow Plumbing', hours: 5.5, amount: 920, dueDate: relativeDate(1, 17), description: 'Documented daywork for owner approval and change control.' }
-    ],
-    collaboratorReports: [
-      { id: 1, projectId: 1, title: 'Subcontractor daily report - plumbing', company: 'Flow Plumbing', status: 'pending_review', manpower: 2, submittedAt: relativeDate(0, 15) }
-    ],
-    segmentedDailyReports: [
-      { id: 1, projectId: 1, title: 'Occupied building access segment', segment: 'Level 2 residents', status: 'draft', blockers: 1, dueDate: relativeDate(1, 10) }
-    ],
-    schedules: [
-      { id: 1, projectId: 1, title: 'Bathroom finishes lookahead', status: 'active', startAt: relativeDate(0, 8), endAt: relativeDate(5, 17), owner: 'Anna Kowalski', percentComplete: 58 },
-      { id: 2, projectId: 2, title: 'Tender milestone plan', status: 'draft', startAt: relativeDate(1, 8), endAt: relativeDate(18, 17), owner: 'Marco Silva', percentComplete: 15 }
-    ],
-    inspections: [
-      { id: 1, projectId: 1, title: 'Tile substrate inspection', status: 'passed', inspector: 'Anna Kowalski', dueDate: relativeDate(-2, 15) },
-      { id: 2, projectId: 1, title: 'Temporary works safety check', status: 'scheduled', inspector: 'Marco Silva', dueDate: relativeDate(1, 9) }
-    ],
-    observations: [
-      { id: 1, projectId: 1, title: 'Materials stored in access path', status: 'open', assignee: 'Site Team', priority: 'medium', dueDate: relativeDate(1, 12) }
-    ],
-    incidents: [
-      { id: 1, projectId: 1, title: 'Near miss - blocked stair landing', severity: 'low', status: 'closed', date: relativeDate(-4, 14).slice(0, 10) }
-    ],
-    punchItems: [
-      { id: 1, projectId: 1, title: 'Touch up door casing paint', status: 'open', assignee: 'Noord Build', dueDate: relativeDate(6, 17) }
-    ],
-    equipment: [
-      { id: 1, name: 'Mini Excavator', status: 'available', location: 'Depot', assignedProjectId: null, nextInspection: relativeDate(12, 9) },
-      { id: 2, name: 'Material Hoist', status: 'assigned', location: 'Canal House Retrofit', assignedProjectId: 1, nextInspection: relativeDate(4, 9) }
-    ],
-    timecards: [
-      { id: 1, projectId: 1, worker: 'Anna Kowalski', date: relativeDate(0, 8).slice(0, 10), hours: 7.5, costCode: '09-300', status: 'submitted' },
-      { id: 2, projectId: 1, worker: 'Marco Silva', date: relativeDate(0, 8).slice(0, 10), hours: 6.0, costCode: '01-100', status: 'approved' }
-    ],
-    kioskSessions: [
-      { id: 1, projectId: 1, title: 'Lobby kiosk check-in', location: 'Canal House Retrofit', status: 'open', workersCheckedIn: 6, verificationRequired: true }
-    ],
-    laborMap: [
-      { id: 1, projectId: 1, title: 'VCA-certified labor coverage', region: 'Amsterdam', status: 'needs_review', certifiedWorkers: 5, gapCount: 1 }
-    ],
-    formsChecklists: [
-      { id: 1, projectId: 1, title: 'Daily quality checklist', status: 'in_progress', category: 'quality', owner: 'Site Team', dueDate: relativeDate(0, 16), completionPercent: 72 },
-      { id: 2, projectId: 1, title: 'Hot works pre-task checklist', status: 'open', category: 'safety', owner: 'Flow Plumbing', dueDate: relativeDate(1, 8), completionPercent: 25 }
-    ],
-    qualityReports: [
-      { id: 1, projectId: 1, title: 'Tile substrate QA report', status: 'open', inspector: 'Anna Kowalski', defectsOpen: 2, dueDate: relativeDate(1, 16) }
-    ],
-    resourcePlans: [
-      { id: 1, projectId: 1, role: 'Finish Carpenter', neededFrom: relativeDate(3, 8).slice(0, 10), neededTo: relativeDate(12, 17).slice(0, 10), quantity: 2, status: 'partially_filled' },
-      { id: 2, projectId: 2, role: 'Electrician', neededFrom: relativeDate(14, 8).slice(0, 10), neededTo: relativeDate(25, 17).slice(0, 10), quantity: 1, status: 'unfilled' }
-    ],
-    trainingItems: [
-      { id: 1, title: 'SOP: Daily site diary closeout', category: 'field_operations', status: 'published', assignedTo: 'All site leads' },
-      { id: 2, title: 'Toolbox talk: Working around public access', category: 'safety', status: 'draft', assignedTo: 'Site Team' }
-    ],
-    clientSelections: [
-      { id: 1, projectId: 1, title: 'Bathroom wall tile selection', status: 'approved', category: 'finishes', dueDate: relativeDate(-4, 17), client: 'Van Dijk Properties', value: 4200 },
-      { id: 2, projectId: 2, title: 'Retail lighting fixture package', status: 'pending_client', category: 'lighting', dueDate: relativeDate(2, 17), client: 'Northline Retail', value: 6800 }
-    ],
-    clientMessages: [
-      { id: 1, projectId: 1, subject: 'Weekly owner update', status: 'sent', channel: 'portal', recipient: 'Van Dijk Properties', sentAt: relativeDate(-1, 16), sentiment: 'positive' },
-      { id: 2, projectId: 2, subject: 'Selection reminder', status: 'draft', channel: 'portal', recipient: 'Northline Retail', dueDate: relativeDate(1, 12), sentiment: 'neutral' }
-    ],
-    closeoutItems: [
-      { id: 1, projectId: 1, title: 'O&M manual - plumbing fixtures', status: 'open', assignee: 'Flow Plumbing', dueDate: relativeDate(12, 17), category: 'owner_handover' },
-      { id: 2, projectId: 1, title: 'As-built drawing package', status: 'pending_review', assignee: 'Project Team', dueDate: relativeDate(18, 17), category: 'as_builts' }
-    ],
-    warrantyClaims: [
-      { id: 1, projectId: 1, title: 'Cabinet hinge adjustment', status: 'triage', assignee: 'Noord Build', dueDate: relativeDate(9, 17), client: 'Van Dijk Properties' }
-    ],
-    productionReports: [
-      { id: 1, projectId: 1, costCode: '09-300', activity: 'Tile install', status: 'submitted', date: relativeDate(0, 8).slice(0, 10), plannedUnits: 42, actualUnits: 34, unit: 'sqm', crewSize: 3 },
-      { id: 2, projectId: 1, costCode: '06-200', activity: 'Trim carpentry', status: 'draft', date: relativeDate(0, 8).slice(0, 10), plannedUnits: 28, actualUnits: 30, unit: 'lm', crewSize: 2 }
-    ],
-    permits: [
-      { id: 1, projectId: 1, title: 'Hot work permit', status: 'active', holder: 'Flow Plumbing', expiresAt: relativeDate(1, 17), location: 'Level 2 riser' },
-      { id: 2, projectId: 1, title: 'Public access permit', status: 'needs_renewal', holder: 'Project Team', expiresAt: relativeDate(-1, 17), location: 'Front pavement' }
-    ],
-    safetyMeetings: [
-      { id: 1, projectId: 1, title: 'Toolbox talk - occupied building work', status: 'completed', date: relativeDate(-1, 7).slice(0, 10), attendees: 8 },
-      { id: 2, projectId: 1, title: 'Pre-task plan - riser works', status: 'scheduled', date: relativeDate(1, 7).slice(0, 10), attendees: 0 }
-    ],
-    preTaskPlans: [
-      { id: 1, projectId: 1, title: 'Riser works pre-task plan', owner: 'Marco Silva', status: 'draft', crew: 'Flow Plumbing', dueDate: relativeDate(1, 8) }
-    ],
-    jobCostEntries: [
-      { id: 1, projectId: 1, costCode: '09-300', description: 'Tile crew labor', status: 'posted', actualCost: 1850, committedCost: 0, source: 'timecard' },
-      { id: 2, projectId: 1, costCode: '06-200', description: 'Custom casing materials', status: 'pending_review', actualCost: 0, committedCost: 5200, source: 'purchase_order' }
-    ],
-    payrollRuns: [
-      { id: 1, period: '2026-W26', status: 'pending_approval', regularHours: 62, overtimeHours: 7, grossCost: 4280, dueDate: relativeDate(2, 12) }
-    ],
-    certifiedPayroll: [
-      { id: 1, period: '2026-W26', status: 'pending_certification', workers: 8, grossCost: 4280, dueDate: relativeDate(2, 12) }
-    ],
-    aiaBillings: [
-      { id: 1, projectId: 1, title: 'Progress billing application', status: 'draft', applicationNumber: 3, amount: 28500, retention: 1425 }
-    ],
-    payments: [
-      { id: 1, projectId: 1, vendor: 'Noord Build', status: 'scheduled', amount: 6400, method: 'bank_transfer', dueDate: relativeDate(3, 12), lienWaiverRequired: true },
-      { id: 2, projectId: 1, vendor: 'Flow Plumbing', status: 'ready_to_release', amount: 3100, method: 'bank_transfer', dueDate: relativeDate(1, 12), lienWaiverRequired: true }
-    ],
-    drawRequests: [
-      { id: 1, projectId: 1, title: 'June progress draw', status: 'pending_lender', requestedAmount: 28500, approvedAmount: 0, dueDate: relativeDate(4, 17) }
-    ],
-    drawInspections: [
-      { id: 1, projectId: 1, title: 'June draw inspection', status: 'scheduled', inspector: 'Owner representative', drawRequest: 'June progress draw', dueDate: relativeDate(2, 14) }
-    ],
-    riskMitigations: [
-      { id: 1, projectId: 1, title: 'Payment chain risk mitigation', status: 'open', riskLevel: 'medium', owner: 'Finance', dueDate: relativeDate(3, 17) }
-    ],
-    lienWaivers: [
-      { id: 1, projectId: 1, vendor: 'Noord Build', status: 'requested', amount: 6400, paymentId: 1, dueDate: relativeDate(2, 17) },
-      { id: 2, projectId: 1, vendor: 'Flow Plumbing', status: 'received', amount: 3100, paymentId: 2, dueDate: relativeDate(-1, 17) }
-    ],
-    complianceItems: [
-      { id: 1, vendor: 'Noord Build', projectId: 1, title: 'Insurance certificate', status: 'current', expiresAt: relativeDate(45, 17), riskLevel: 'low' },
-      { id: 2, vendor: 'Flow Plumbing', projectId: 1, title: 'VCA safety certificate', status: 'expiring', expiresAt: relativeDate(5, 17), riskLevel: 'medium' }
-    ],
-    purchaseOrders: [
-      { id: 1, projectId: 1, vendor: 'Tile Supply NL', status: 'issued', amount: 7800, expectedDelivery: relativeDate(3, 9), costCode: '09-300' },
-      { id: 2, projectId: 1, vendor: 'Joinery Depot', status: 'pending_approval', amount: 5200, expectedDelivery: relativeDate(8, 9), costCode: '06-200' }
-    ],
-    costDatabase: [
-      { id: 1, title: 'Amsterdam tile install benchmark', status: 'current', trade: 'finishes', unit: 'sqm', unitCost: 72, updatedAt: relativeDate(-12, 9) },
-      { id: 2, title: 'Retail lighting rough-in benchmark', status: 'stale', trade: 'electrical', unit: 'lm', unitCost: 48, updatedAt: relativeDate(-95, 9) }
-    ],
-    serviceTickets: [
-      { id: 1, projectId: 1, title: 'Post-handover cabinet adjustment', status: 'triage', client: 'Van Dijk Properties', priority: 'medium', dueDate: relativeDate(10, 17) }
-    ],
-    workOrders: [
-      { id: 1, projectId: 1, title: 'Resident access protection work order', status: 'open', client: 'Van Dijk Properties', priority: 'high', dueDate: relativeDate(2, 17), assignedTo: 'Site Team', description: 'Protect access route before the next occupied-unit work sequence.' }
-    ],
-    opportunities: [
-      { id: 1, title: 'Hotel Lobby Renovation Rotterdam', status: 'qualified', client: 'Harbor Hospitality', stage: 'proposal', value: 240000, probability: 45, dueDate: relativeDate(18, 17) },
-      { id: 2, title: 'School Maintenance Framework', status: 'lead', client: 'Gemeente Utrecht', stage: 'discovery', value: 120000, probability: 25, dueDate: relativeDate(10, 17) }
-    ],
-    dealPipelines: [
-      { id: 1, title: 'Owner-financed hotel renovation deal', client: 'Harbor Hospitality', status: 'underwriting', value: 240000, probability: 45 }
-    ],
-    omExtractions: [
-      { id: 1, title: 'Offering memo extraction - hotel renovation', status: 'needs_review', extractedFields: 21, reviewer: 'Finance' }
-    ],
-    leadActivities: [
-      { id: 1, opportunityId: 1, title: 'Send proposal follow-up', status: 'open', owner: 'Business Development', dueDate: relativeDate(1, 10), channel: 'email' },
-      { id: 2, opportunityId: 2, title: 'Qualify procurement route', status: 'scheduled', owner: 'Business Development', dueDate: relativeDate(3, 10), channel: 'call' }
-    ],
-    takeoffs: [
-      { id: 1, projectId: 2, title: 'Retail flooring takeoff', status: 'review_required', discipline: 'finishes', quantity: 420, unit: 'sqm', confidence: 91 },
-      { id: 2, projectId: 1, title: 'Riser firestopping takeoff', status: 'approved', discipline: 'firestopping', quantity: 18, unit: 'locations', confidence: 88 }
-    ],
-    modelIssues: [
-      { id: 1, projectId: 1, title: 'MEP clash at level 2 riser', status: 'open', discipline: 'BIM', assignee: 'Design Team', dueDate: relativeDate(2, 17), priority: 'high' }
-    ],
-    specifications: [
-      { id: 1, projectId: 1, title: 'Section 09 30 00 Tile', status: 'mapped', submittalsGenerated: 2, reviewer: 'Anna Kowalski' },
-      { id: 2, projectId: 2, title: 'Section 26 50 00 Lighting', status: 'needs_review', submittalsGenerated: 0, reviewer: 'Marco Silva' }
-    ],
-    tasks: [
-      { id: 1, projectId: 1, title: 'Confirm lift booking for material delivery', status: 'open', assignee: 'Site Team', dueDate: relativeDate(1, 12), priority: 'medium' }
-    ],
-    photoRecords: [
-      { id: 1, projectId: 1, title: 'Bathroom waterproofing progress', status: 'tagged', location: 'Level 2 Bath', capturedAt: relativeDate(0, 10), tags: ['waterproofing', 'progress'] }
-    ],
-    materials: [
-      { id: 1, projectId: 1, title: 'Tile adhesive stock', status: 'low_stock', quantity: 6, unit: 'bags', reorderPoint: 10, expectedDelivery: relativeDate(3, 9) },
-      { id: 2, projectId: 2, title: 'Track lighting rails', status: 'ordered', quantity: 42, unit: 'lm', expectedDelivery: relativeDate(7, 9) }
-    ],
-    orientations: [
-      { id: 1, projectId: 1, worker: 'New subcontractor crew', company: 'Noord Build', status: 'pending', dueDate: relativeDate(1, 8), language: 'nl' }
-    ],
-    jhas: [
-      { id: 1, projectId: 1, title: 'Riser hot works JHA', status: 'pending_review', assignee: 'Flow Plumbing', dueDate: relativeDate(1, 8) }
-    ],
-    sdsSheets: [
-      { id: 1, projectId: 1, title: 'Tile adhesive SDS', status: 'current', expiresAt: relativeDate(180, 17), supplier: 'Tile Supply NL' },
-      { id: 2, projectId: 1, title: 'Solvent primer SDS', status: 'missing', expiresAt: null, supplier: 'Flow Plumbing' }
-    ],
-    safetyPlans: [
-      { id: 1, projectId: 1, title: 'Occupied building safety plan', status: 'approved', reviewer: 'Anna Kowalski' }
-    ],
-    bulletins: [
-      { id: 1, projectId: 1, title: 'Public access route change', status: 'draft', audience: 'All site users', dueDate: relativeDate(0, 15) }
-    ],
-    bookings: [
-      { id: 1, projectId: 1, title: 'Material hoist booking', status: 'confirmed', resource: 'Material Hoist', startAt: relativeDate(1, 8), endAt: relativeDate(1, 12) }
-    ],
-    siteAccessLogs: [
-      { id: 1, projectId: 1, worker: 'Anna Kowalski', company: 'Internal', status: 'checked_in', checkedInAt: relativeDate(0, 7), orientationValid: true },
-      { id: 2, projectId: 1, worker: 'Noord Build Crew', company: 'Noord Build', status: 'blocked', checkedInAt: null, orientationValid: false }
-    ],
-    directoryContacts: [
-      { id: 1, name: 'Noord Build', type: 'subcontractor', status: 'active', email: 'ops@noordbuild.example', phone: '+31 20 555 0191', complianceStatus: 'current' },
-      { id: 2, name: 'Flow Plumbing', type: 'subcontractor', status: 'active', email: 'planning@flow.example', phone: '+31 30 555 0142', complianceStatus: 'expiring' }
-    ],
-    integrationConnectors: [
-      { id: 1, title: 'Peppol e-invoicing', provider: 'Peppol', status: 'connected', category: 'finance', lastSyncAt: relativeDate(0, 9) },
-      { id: 2, title: 'Accounting export', provider: 'Exact Online', status: 'needs_auth', category: 'accounting', lastSyncAt: relativeDate(-9, 9) },
-      { id: 3, title: 'Calendar sync', provider: 'Google / Outlook', status: 'connected', category: 'schedule', lastSyncAt: relativeDate(-1, 9) }
-    ],
-    capitalRequests: [
-      { id: 1, projectId: 1, title: 'Owner contingency release', status: 'pending_owner', amount: 12500, dueDate: relativeDate(6, 17) }
-    ],
-    underwritingReviews: [
-      { id: 1, projectId: 2, title: 'Retail client credit review', status: 'approved', riskLevel: 'low', reviewer: 'Finance' }
-    ],
-    portfolioReports: [
-      { id: 1, title: 'Q2 active projects portfolio', status: 'current', totalValue: 279000, riskProjects: 1, generatedAt: relativeDate(0, 8) }
-    ],
-    euVatReturns: [
-      { id: 1, period: '2026-Q2', status: 'draft', country: 'NL', vatDue: 18420, dueDate: relativeDate(22, 17), reverseChargeAmount: 6400 }
-    ],
-    peppolInvoices: [
-      { id: 1, projectId: 1, recipient: 'Van Dijk Properties', status: 'ready', amount: 28500, standard: 'UBL 2.1', dueDate: relativeDate(3, 17) }
-    ],
-    gdprRequests: [
-      { id: 1, requester: 'Site visitor', status: 'open', type: 'access_request', dueDate: relativeDate(18, 17) }
-    ],
-    wkbDossiers: [
-      { id: 1, projectId: 1, title: 'Wkb quality assurance file', status: 'in_progress', evidenceItems: 34, requiredItems: 48, dueDate: relativeDate(21, 17) }
-    ],
-    vcaCertificates: [
-      { id: 1, vendor: 'Flow Plumbing', status: 'expiring', expiresAt: relativeDate(5, 17), certificateNumber: 'VCA-2026-4421' }
-    ],
-    co2Reports: [
-      { id: 1, projectId: 1, period: 'June 2026', status: 'draft', kgCo2e: 1840, transportKm: 420, materialKgCo2e: 1320 }
-    ],
-    workflowRuns: [],
-    insights: [],
-    lastReview: null
-  };
-}
-
-function normalizeConstructionState(input = {}) {
-  const baseline = createDefaultConstructionState();
-  const normalized = {};
-  for (const collection of CONSTRUCTION_COLLECTIONS) {
-    normalized[collection] = Array.isArray(input[collection])
-      ? input[collection]
-      : baseline[collection];
-  }
-  normalized.workflowRuns = Array.isArray(input.workflowRuns) ? input.workflowRuns : baseline.workflowRuns;
-  normalized.insights = Array.isArray(input.insights) ? input.insights : baseline.insights;
-  normalized.lastReview = input.lastReview || baseline.lastReview;
-  return normalized;
-}
-
-function collectionNextId(collection) {
-  const records = construction[collection] || [];
-  return Math.max(0, ...records.map(record => Number(record.id) || 0)) + 1;
-}
-
-function addConstructionRecord(collection, record) {
-  const now = new Date().toISOString();
-  const created = {
-    ...record,
-    id: collectionNextId(collection),
-    createdAt: now,
-    updatedAt: now
-  };
-  construction[collection].unshift(created);
-  return created;
-}
-
-function getConstructionWorkflow(workflowKey) {
-  return CONSTRUCTION_WORKFLOWS.find(workflow => workflow.key === workflowKey) || null;
-}
-
-function constructionWorkflowProjectContext(projectId) {
-  const selected = projectId
-    ? (construction.projects || []).find(project => String(project.id) === String(projectId))
-    : null;
-  const fallback = selected
-    || (construction.projects || []).find(project => ['active', 'preconstruction'].includes(String(project.status || '').toLowerCase()))
-    || (construction.projects || [])[0]
-    || null;
-  return {
-    project: fallback,
-    projectId: fallback?.id || null,
-    projectName: fallback?.name || fallback?.title || 'Portfolio',
-    client: fallback?.client || fallback?.owner || 'Client'
-  };
-}
-
-function createConstructionWorkflowRecords(workflowKey, payload = {}) {
-  const workflow = getConstructionWorkflow(workflowKey);
-  if (!workflow) {
-    const error = new Error('Unknown construction workflow');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const context = constructionWorkflowProjectContext(payload.projectId);
-  const runId = createRequestId();
-  const now = new Date().toISOString();
-  const today = now.slice(0, 10);
-  const common = {
-    projectId: context.projectId,
-    sourceWorkflow: workflowKey,
-    workflowRunId: runId
-  };
-  const records = {};
-  const actions = [];
-  const recordRefs = [];
-  const add = (key, collection, record, message) => {
-    const created = addConstructionRecord(collection, { ...common, ...record });
-    records[key] = created;
-    recordRefs.push({
-      key,
-      collection,
-      id: created.id,
-      label: created.title || created.subject || created.number || created.package || created.worker || created.vendor || created.recipient || key
-    });
-    actions.push({ type: `create_${collection}`, id: created.id, collection, message });
-    return created;
-  };
-
-  if (workflowKey === 'preconstruction-pursuit') {
-    add('opportunity', 'opportunities', { title: `${context.projectName} pursuit`, client: context.client, status: 'qualified', stage: 'proposal', value: 125000, probability: 55, dueDate: relativeDate(10, 17) }, 'Qualified opportunity created.');
-    add('tender', 'tenders', { package: `${context.projectName} bid package`, client: context.client, status: 'open', coverage: 0, estimateValue: 125000, bidDue: relativeDate(7, 17) }, 'Tender package opened.');
-    add('estimate', 'estimates', { title: `${context.projectName} concept estimate`, status: 'draft', estimateValue: 125000, estimator: 'Contractor.AI' }, 'Estimate draft created.');
-    add('takeoff', 'takeoffs', { title: `${context.projectName} quantity takeoff`, status: 'review_required', confidence: 86, reviewer: 'Estimator' }, 'Takeoff review queued.');
-    add('costBenchmark', 'costDatabase', { item: `${context.projectName} benchmark`, status: 'needs_update', unitCost: 0, source: 'workflow benchmark' }, 'Cost benchmark queued.');
-    add('resourcePlan', 'resourcePlans', { role: 'Estimator / project lead', status: 'unfilled', neededFrom: today, neededTo: relativeDate(14, 17) }, 'Resource plan created.');
-    add('leadActivity', 'leadActivities', { title: `Follow up with ${context.client}`, status: 'open', dueDate: relativeDate(2, 17), owner: 'Business development' }, 'Lead follow-up created.');
-  } else if (workflowKey === 'field-daily-close') {
-    add('dailyLog', 'dailyLogs', { date: today, status: 'draft', manpower: 4, notes: `${context.projectName} daily field closeout.` }, 'Daily log drafted.');
-    add('collaboratorReport', 'collaboratorReports', { title: `${context.projectName} subcontractor report`, company: 'Site partner', status: 'pending_review', manpower: 3, submittedAt: now }, 'Collaborator report queued.');
-    add('productionReport', 'productionReports', { activity: 'Main production activity', status: 'submitted', plannedUnits: 100, actualUnits: 92, unit: 'units' }, 'Production report created.');
-    add('timecard', 'timecards', { worker: 'Crew lead', date: today, hours: 8, hourlyRate: 65, status: 'submitted', costCode: 'LABOR' }, 'Timecard submitted.');
-    add('photoRecord', 'photoRecords', { title: `${context.projectName} progress photos`, status: 'captured', capturedAt: now, tags: ['daily', 'progress'] }, 'Photo record created.');
-    add('task', 'tasks', { title: `${context.projectName} next-day readiness`, status: 'open', priority: 'medium', dueDate: relativeDate(1, 17), assignee: 'Site Team' }, 'Next-day task created.');
-    add('clientMessage', 'clientMessages', { subject: `${context.projectName} daily update`, channel: 'portal', recipient: context.client, status: 'draft', dueDate: today }, 'Client portal update drafted.');
-  } else if (workflowKey === 'site-coordination') {
-    add('schedule', 'schedules', { title: `${context.projectName} coordinated field window`, status: 'draft', owner: 'Site Manager', startAt: relativeDate(1, 8), endAt: relativeDate(1, 17), percentComplete: 0 }, 'Field schedule window drafted.');
-    add('booking', 'bookings', { title: `${context.projectName} site resource booking`, status: 'pending', resource: 'Loading zone / lift', startAt: relativeDate(1, 8), endAt: relativeDate(1, 12), location: context.projectName }, 'Resource booking requested.');
-    add('workOrder', 'workOrders', { title: `${context.projectName} field work order`, status: 'open', client: context.client, priority: 'high', dueDate: relativeDate(2, 17), assignedTo: 'Site Team', description: 'Execute coordinated site work and capture evidence.' }, 'Work order opened.');
-    add('dayworkSheet', 'dayworkSheets', { title: `${context.projectName} daywork authorization`, status: 'draft', crew: 'Site crew', hours: 0, amount: 0, dueDate: relativeDate(1, 17), description: 'Capture out-of-scope labor, equipment and material for approval.' }, 'Daywork sheet drafted.');
-    add('task', 'tasks', { title: `${context.projectName} coordination checklist`, status: 'open', priority: 'high', dueDate: relativeDate(1, 12), assignee: 'Site Team' }, 'Coordination task created.');
-    add('bulletin', 'bulletins', { title: `${context.projectName} site coordination bulletin`, status: 'draft', audience: 'All site users', dueDate: today }, 'Site bulletin drafted.');
-    add('clientMessage', 'clientMessages', { subject: `${context.projectName} coordinated field window`, channel: 'portal', recipient: context.client, status: 'draft', dueDate: today }, 'Client coordination update drafted.');
-  } else if (workflowKey === 'safety-mobilization') {
-    add('orientation', 'orientations', { worker: 'New crew', company: 'Site partner', status: 'scheduled', dueDate: relativeDate(1, 8), orientationValid: false }, 'Orientation scheduled.');
-    add('preTaskPlan', 'preTaskPlans', { title: `${context.projectName} pre-task plan`, status: 'review_required', crew: 'Site crew', dueDate: relativeDate(1, 8), owner: 'Site Manager' }, 'Pre-task plan queued.');
-    add('jha', 'jhas', { title: `${context.projectName} JHA`, status: 'draft', hazardCount: 3, dueDate: relativeDate(1, 8) }, 'JHA drafted.');
-    add('sdsSheet', 'sdsSheets', { title: `${context.projectName} SDS register`, status: 'missing', material: 'Site materials' }, 'SDS request created.');
-    add('formsChecklist', 'formsChecklists', { title: `${context.projectName} mobilization checklist`, category: 'safety', status: 'open', owner: 'Safety Lead', dueDate: relativeDate(1, 8), completionPercent: 0 }, 'Safety checklist opened.');
-    add('safetyMeeting', 'safetyMeetings', { title: `${context.projectName} toolbox talk`, category: 'safety', status: 'draft', assignedTo: 'Site Team' }, 'Toolbox talk drafted.');
-    add('siteAccessLog', 'siteAccessLogs', { worker: 'New crew', company: 'Site partner', status: 'blocked', orientationValid: false, checkedInAt: null }, 'Site access gate prepared.');
-  } else if (workflowKey === 'payment-release') {
-    add('invoice', 'invoices', { vendor: context.client, number: `WF-${Date.now()}`, status: 'pending_review', amount: 18500, dueDate: relativeDate(7, 12) }, 'Invoice review created.');
-    add('peppolInvoice', 'peppolInvoices', { recipient: context.client, amount: 18500, status: 'ready', standard: 'UBL 2.1', dueDate: relativeDate(7, 12) }, 'Peppol invoice queued.');
-    add('payment', 'payments', { vendor: 'Site partner', status: 'ready_to_release', amount: 8200, method: 'bank_transfer', lienWaiverRequired: true, dueDate: relativeDate(2, 12) }, 'Payment release staged.');
-    add('lienWaiver', 'lienWaivers', { vendor: 'Site partner', status: 'requested', amount: 8200, dueDate: relativeDate(2, 12) }, 'Lien waiver requested.');
-    add('drawRequest', 'drawRequests', { title: `${context.projectName} workflow draw`, status: 'pending_lender', requestedAmount: 18500, approvedAmount: 0, dueDate: relativeDate(4, 17) }, 'Draw request created.');
-    add('drawInspection', 'drawInspections', { title: `${context.projectName} draw inspection`, status: 'scheduled', inspector: 'Owner representative', drawRequest: `${context.projectName} workflow draw`, dueDate: relativeDate(2, 14) }, 'Draw inspection scheduled.');
-    add('riskMitigation', 'riskMitigations', { title: `${context.projectName} payment risk control`, status: 'open', riskLevel: 'medium', owner: 'Finance' }, 'Payment risk control opened.');
-  } else if (workflowKey === 'eu-handover') {
-    add('wkbDossier', 'wkbDossiers', { title: `${context.projectName} Wkb dossier`, status: 'in_progress', evidenceItems: 8, requiredItems: 12, reviewer: 'Quality Lead' }, 'Wkb dossier prepared.');
-    add('closeoutItem', 'closeoutItems', { title: `${context.projectName} client handover`, category: 'handover', status: 'open', assignee: 'Project Team', dueDate: relativeDate(5, 17) }, 'Closeout item opened.');
-    add('document', 'documents', { title: `${context.projectName} as-built package`, type: 'closeout', category: 'as_builts', status: 'pending_review', owner: 'Project Team' }, 'As-built document package created.');
-    add('co2Report', 'co2Reports', { period: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), status: 'draft', kgCo2e: 0, transportKm: 0, materialKgCo2e: 0 }, 'CO2 report drafted.');
-    add('gdprRequest', 'gdprRequests', { title: `${context.projectName} handover data check`, requester: context.client, status: 'open', dueDate: relativeDate(5, 17) }, 'GDPR handover check opened.');
-    add('clientMessage', 'clientMessages', { subject: `${context.projectName} handover pack`, channel: 'portal', recipient: context.client, status: 'draft', dueDate: relativeDate(1, 17) }, 'Client handover message drafted.');
-  }
-
-  const run = {
-    id: runId,
-    runId,
-    workflowKey,
-    title: workflow.title,
-    projectId: context.projectId,
-    projectName: context.projectName,
-    status: 'completed',
-    createdAt: now,
-    recordCount: recordRefs.length,
-    actionCount: actions.length,
-    recordRefs
-  };
-  construction.workflowRuns = [
-    run,
-    ...(Array.isArray(construction.workflowRuns) ? construction.workflowRuns : []).filter(item => String(item.runId || item.id) !== String(runId))
-  ].slice(0, 12);
-
-  return {
-    success: true,
-    workflow,
-    workflowKey,
-    runId,
-    projectId: context.projectId,
-    projectName: context.projectName,
-    records,
-    recordRefs,
-    actions,
-    createdAt: now,
-    run,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  };
 }
 
 function analyzeUploadPayload(payload = {}) {
@@ -1345,2544 +1567,118 @@ function analyzeUploadPayload(payload = {}) {
   };
 }
 
-function createUploadBuildRecords(payload = {}, analysis = {}) {
-  const now = new Date().toISOString();
-  const today = now.slice(0, 10);
-  const filename = String(payload.filename || payload.name || 'field-evidence').trim() || 'field-evidence';
-  const notes = String(payload.notes || payload.observation || payload.description || analysis.summary || '').trim();
-  const job = payload.jobId ? findJob(payload.jobId) : null;
-  const activeProject = (construction.projects || []).find(project =>
-    ['active', 'preconstruction'].includes(String(project.status || '').toLowerCase())
-  );
-  const projectId = payload.projectId || activeProject?.id || null;
-  const sourceJobId = job?.id || payload.jobId || null;
-  const records = {};
-  const actions = [];
-
-  if (analysis.category === 'field_photo') {
-    records.photoRecord = addConstructionRecord('photoRecords', {
-      projectId,
-      title: filename,
-      status: analysis.riskDetected ? 'needs_review' : 'tagged',
-      location: payload.location || job?.address || 'Site',
-      capturedAt: now,
-      tags: ['ai_upload', analysis.riskDetected ? 'risk' : 'progress'].filter(Boolean),
-      notes,
-      sourceJobId
-    });
-    records.dailyLog = addConstructionRecord('dailyLogs', {
-      projectId,
-      date: today,
-      status: 'draft',
-      manpower: Number(payload.manpower || 0),
-      notes: `AI file analysis: ${analysis.summary}. ${notes}`,
-      sourceJobId
-    });
-    actions.push({ type: 'create_photo_record', id: records.photoRecord.id, message: 'Photo evidence tagged.' });
-    actions.push({ type: 'draft_daily_log', id: records.dailyLog.id, message: 'Daily log evidence entry drafted.' });
-  } else if (analysis.category === 'invoice') {
-    records.invoice = addConstructionRecord('invoices', {
-      projectId,
-      vendor: payload.vendor || payload.owner || 'Vendor',
-      number: payload.invoiceNumber || filename,
-      status: 'pending_review',
-      amount: analysis.amount,
-      period: payload.period || today.slice(0, 7),
-      dueDate: payload.dueDate || today,
-      sourceJobId,
-      notes
-    });
-    records.jobCostEntry = addConstructionRecord('jobCostEntries', {
-      projectId,
-      costCode: payload.costCode || '00-000',
-      description: `Invoice analysis: ${filename}`,
-      status: 'pending_review',
-      actualCost: analysis.amount,
-      committedCost: 0,
-      source: 'ai_upload',
-      sourceJobId
-    });
-    actions.push({ type: 'queue_invoice_review', id: records.invoice.id, message: 'Invoice queued for finance review.' });
-    actions.push({ type: 'create_job_cost_entry', id: records.jobCostEntry.id, message: 'Job cost entry created.' });
-  } else if (analysis.category === 'safety') {
-    records.formsChecklist = addConstructionRecord('formsChecklists', {
-      projectId,
-      title: `Review uploaded safety evidence: ${filename}`,
-      status: 'open',
-      category: 'safety',
-      owner: payload.owner || job?.worker || 'Safety Lead',
-      dueDate: today,
-      completionPercent: 0,
-      notes,
-      sourceJobId
-    });
-    if (analysis.riskDetected) {
-      records.incident = addConstructionRecord('incidents', {
-        projectId,
-        title: `AI-detected risk: ${filename}`,
-        severity: analysis.riskLevel,
-        status: 'open',
-        date: today,
-        notes,
-        sourceJobId
-      });
-      actions.push({ type: 'open_incident', id: records.incident.id, message: 'Incident opened from uploaded evidence.' });
-    }
-    actions.push({ type: 'create_safety_checklist', id: records.formsChecklist.id, message: 'Safety checklist follow-up created.' });
-  } else if (analysis.category === 'closeout') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: filename,
-      type: 'closeout',
-      category: 'handover',
-      status: 'pending_review',
-      owner: payload.owner || 'Project Team',
-      notes,
-      sourceJobId
-    });
-    records.closeoutItem = addConstructionRecord('closeoutItems', {
-      projectId,
-      title: `Review closeout evidence: ${filename}`,
-      status: 'open',
-      assignee: payload.owner || 'Project Team',
-      dueDate: payload.dueDate || today,
-      category: 'owner_handover',
-      sourceJobId
-    });
-    actions.push({ type: 'store_closeout_document', id: records.document.id, message: 'Closeout document stored.' });
-    actions.push({ type: 'create_closeout_item', id: records.closeoutItem.id, message: 'Closeout review item created.' });
-  } else {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: filename,
-      type: payload.documentType || 'project',
-      category: payload.category || 'project_controls',
-      status: 'pending_review',
-      owner: payload.owner || 'Project Team',
-      notes,
-      sourceJobId
-    });
-    records.task = addConstructionRecord('tasks', {
-      projectId,
-      title: `Review uploaded document: ${filename}`,
-      assignee: payload.owner || 'Project Team',
-      priority: analysis.riskDetected ? 'high' : 'medium',
-      status: 'open',
-      dueDate: payload.dueDate || today,
-      sourceJobId
-    });
-    actions.push({ type: 'store_document', id: records.document.id, message: 'Document stored for review.' });
-    actions.push({ type: 'create_review_task', id: records.task.id, message: 'Review task created.' });
-  }
-
-  if (job) {
-    job.ai = {
-      ...(job.ai || {}),
-      confidence: analysis.confidence,
-      reasoning: `Latest uploaded evidence: ${analysis.summary}`,
-      lastDecisionAt: now
-    };
-    actions.push({ type: 'update_job_evidence', id: job.id, message: `Linked upload analysis to ${job.title}.` });
-  }
-
-  return { records, actions, job };
-}
-
-function findCompletionBuildRecords(jobId) {
-  const matchesJob = record => String(record.sourceJobId || '') === String(jobId || '')
-    && String(record.sourceWorkflow || '') === 'job_completion';
-  return {
-    invoice: (construction.invoices || []).find(matchesJob) || null,
-    peppolInvoice: (construction.peppolInvoices || []).find(matchesJob) || null,
-    clientMessage: (construction.clientMessages || []).find(matchesJob) || null,
-    dailyLog: (construction.dailyLogs || []).find(matchesJob) || null,
-    closeoutItem: (construction.closeoutItems || []).find(matchesJob) || null,
-    payment: (construction.payments || []).find(matchesJob) || null
-  };
-}
-
-function createCompletionBuildRecords(job, payload = {}, released = {}) {
-  const now = new Date().toISOString();
-  const today = now.slice(0, 10);
-  const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const activeProject = (construction.projects || []).find(project =>
-    ['active', 'preconstruction'].includes(String(project.status || '').toLowerCase())
-  );
-  const projectId = payload.projectId || activeProject?.id || null;
-  const client = job.client || job.client_name || payload.client || 'Client';
-  const amount = Number(payload.actualCost || payload.actual_cost || job.actualCost || job.actual_cost || job.estimatedCost || job.estimated_cost || 0);
-  const completionNote = String(payload.completionNote || payload.completion_note || '').trim()
-    || `Work completed for ${client}.`;
-  const workerName = released.worker?.name || job.worker || 'Project Team';
-  const releasedToolNames = (released.tools || []).map(tool => tool.name).filter(Boolean);
-
-  const records = {
-    invoice: addConstructionRecord('invoices', {
-      projectId,
-      vendor: CONTRACTOR_CONFIG.company,
-      number: `INV-JOB-${job.id}`,
-      status: 'pending_review',
-      amount,
-      period: today.slice(0, 7),
-      dueDate,
-      sourceJobId: job.id,
-      sourceWorkflow: 'job_completion',
-      notes: `Drafted from completed job: ${job.title}. ${completionNote}`
-    }),
-    peppolInvoice: addConstructionRecord('peppolInvoices', {
-      projectId,
-      recipient: client,
-      amount,
-      status: 'ready',
-      standard: 'UBL 2.1',
-      dueDate,
-      sourceJobId: job.id,
-      sourceWorkflow: 'job_completion',
-      notes: 'Ready for Peppol/UBL e-invoicing review.'
-    }),
-    clientMessage: addConstructionRecord('clientMessages', {
-      projectId,
-      subject: `Completion update: ${job.title}`,
-      channel: 'portal',
-      recipient: client,
-      status: 'draft',
-      dueDate: now,
-      sourceJobId: job.id,
-      sourceWorkflow: 'job_completion',
-      notes: completionNote
-    }),
-    dailyLog: addConstructionRecord('dailyLogs', {
-      projectId,
-      date: today,
-      status: 'draft',
-      manpower: released.worker ? 1 : 0,
-      notes: `Completed ${job.title}. ${workerName} released${releasedToolNames.length ? ` with tools: ${releasedToolNames.join(', ')}` : ''}. ${completionNote}`,
-      sourceJobId: job.id,
-      sourceWorkflow: 'job_completion'
-    }),
-    closeoutItem: addConstructionRecord('closeoutItems', {
-      projectId,
-      title: `Client acceptance and closeout for ${job.title}`,
-      category: 'client_acceptance',
-      status: 'open',
-      assignee: 'Project Team',
-      dueDate: today,
-      sourceJobId: job.id,
-      sourceWorkflow: 'job_completion',
-      notes: 'Confirm acceptance, attach final evidence and close warranty handoff.'
-    }),
-    payment: addConstructionRecord('payments', {
-      projectId,
-      vendor: client,
-      amount,
-      status: 'awaiting_invoice',
-      method: 'bank_transfer',
-      lienWaiverRequired: false,
-      sourceJobId: job.id,
-      sourceWorkflow: 'job_completion',
-      notes: 'Created from completed job invoice workflow.'
-    })
-  };
-
-  const actions = [
-    { type: 'release_resources', id: job.id, message: `${released.worker ? released.worker.name : 'Worker'} and ${released.tools?.length || 0} tool(s) released.` },
-    { type: 'draft_invoice', id: records.invoice.id, message: `Invoice draft created for EUR ${Math.round(amount).toLocaleString()}.` },
-    { type: 'queue_peppol_invoice', id: records.peppolInvoice.id, message: 'Peppol/UBL invoice queued for review.' },
-    { type: 'draft_client_update', id: records.clientMessage.id, message: 'Client portal completion update drafted.' },
-    { type: 'draft_daily_log', id: records.dailyLog.id, message: 'Daily log completion entry drafted.' },
-    { type: 'create_closeout_item', id: records.closeoutItem.id, message: 'Client acceptance closeout item opened.' },
-    { type: 'track_payment', id: records.payment.id, message: 'Payment follow-up created.' }
-  ];
-
-  return { records, actions };
-}
-
-function completeConstructionStatus(collection) {
-  return {
-    projects: 'completed',
-    tenders: 'submitted',
-    estimates: 'approved',
-    budgets: 'locked',
-    contracts: 'executed',
-    changeOrders: 'approved',
-    invoices: 'paid',
-    rfis: 'closed',
-    submittals: 'approved',
-    drawings: 'current',
-    documents: 'current',
-    transmittals: 'sent',
-    dailyLogs: 'submitted',
-    dayworkSheets: 'approved',
-    collaboratorReports: 'accepted',
-    segmentedDailyReports: 'submitted',
-    schedules: 'active',
-    inspections: 'passed',
-    observations: 'closed',
-    incidents: 'closed',
-    punchItems: 'closed',
-    equipment: 'available',
-    timecards: 'approved',
-    kioskSessions: 'verified',
-    laborMap: 'current',
-    formsChecklists: 'completed',
-    qualityReports: 'approved',
-    resourcePlans: 'filled',
-    trainingItems: 'published',
-    clientSelections: 'approved',
-    clientMessages: 'sent',
-    closeoutItems: 'submitted',
-    warrantyClaims: 'closed',
-    productionReports: 'submitted',
-    permits: 'active',
-    safetyMeetings: 'completed',
-    preTaskPlans: 'approved',
-    jobCostEntries: 'posted',
-    payrollRuns: 'approved',
-    certifiedPayroll: 'certified',
-    aiaBillings: 'submitted',
-    payments: 'paid',
-    drawRequests: 'funded',
-    drawInspections: 'passed',
-    riskMitigations: 'mitigated',
-    lienWaivers: 'received',
-    complianceItems: 'current',
-    purchaseOrders: 'issued',
-    costDatabase: 'current',
-    serviceTickets: 'closed',
-    workOrders: 'completed',
-    opportunities: 'qualified',
-    dealPipelines: 'approved',
-    omExtractions: 'reviewed',
-    leadActivities: 'completed',
-    takeoffs: 'approved',
-    modelIssues: 'resolved',
-    specifications: 'mapped',
-    tasks: 'completed',
-    photoRecords: 'tagged',
-    materials: 'ordered',
-    orientations: 'completed',
-    jhas: 'approved',
-    sdsSheets: 'current',
-    safetyPlans: 'approved',
-    bulletins: 'sent',
-    bookings: 'confirmed',
-    siteAccessLogs: 'checked_in',
-    directoryContacts: 'active',
-    integrationConnectors: 'connected',
-    capitalRequests: 'approved',
-    underwritingReviews: 'approved',
-    portfolioReports: 'current',
-    euVatReturns: 'filed',
-    peppolInvoices: 'sent',
-    gdprRequests: 'closed',
-    wkbDossiers: 'complete',
-    vcaCertificates: 'current',
-    co2Reports: 'submitted'
-  }[collection] || 'closed';
-}
-
-function actionTimestampField(status) {
-  return {
-    sent: 'sentAt',
-    paid: 'paidAt',
-    funded: 'fundedAt',
-    filed: 'filedAt',
-    approved: 'approvedAt',
-    submitted: 'submittedAt',
-    closed: 'closedAt',
-    completed: 'completedAt',
-    complete: 'completedAt',
-    current: 'currentAt',
-    active: 'activatedAt',
-    connected: 'connectedAt',
-    received: 'receivedAt',
-    issued: 'issuedAt',
-    locked: 'lockedAt',
-    executed: 'executedAt',
-    posted: 'postedAt',
-    ordered: 'orderedAt',
-    confirmed: 'confirmedAt',
-    checked_in: 'checkedInAt',
-    accepted: 'acceptedAt',
-    certified: 'certifiedAt',
-    verified: 'verifiedAt',
-    reviewed: 'reviewedAt',
-    mitigated: 'mitigatedAt'
-  }[status] || 'actedAt';
-}
-
-function createConstructionActionArtifacts(collection, record, previousStatus, targetStatus, payload = {}) {
-  const now = new Date().toISOString();
-  const today = now.slice(0, 10);
-  const title = record.title
-    || record.subject
-    || record.number
-    || record.package
-    || record.worker
-    || record.activity
-    || record.description
-    || record.role
-    || record.resource
-    || record.company
-    || record.vendor
-    || record.supplier
-    || record.provider
-    || record.recipient
-    || record.requester
-    || record.period
-    || record.costCode
-    || `${collection} #${record.id}`;
-  const projectId = record.projectId || payload.projectId || null;
-  const note = String(payload.note || '').trim();
-  const records = {};
-  const actions = [
-    {
-      type: 'update_construction_status',
-      id: record.id,
-      collection,
-      message: `${title} moved from ${previousStatus || 'open'} to ${targetStatus}.`
-    }
-  ];
-
-  record.status = targetStatus;
-  record.updatedAt = now;
-  record.lastActionAt = now;
-  record.lastActionStatus = targetStatus;
-  record.lastActionNote = note || undefined;
-  record.actionHistory = [
-    ...(Array.isArray(record.actionHistory) ? record.actionHistory : []),
-    { at: now, from: previousStatus || 'open', to: targetStatus, note, actor: 'Contractor.AI' }
-  ].slice(-12);
-  record[actionTimestampField(targetStatus)] = record[actionTimestampField(targetStatus)] || now;
-
-  if (['clientMessages', 'transmittals', 'bulletins', 'peppolInvoices'].includes(collection) && targetStatus === 'sent') {
-    record.deliveryStatus = 'sent';
-    actions.push({ type: 'confirm_delivery', id: record.id, collection, message: `${title} delivery marked sent.` });
-  }
-
-  if (collection === 'rfis' && targetStatus === 'closed') {
-    records.transmittal = addConstructionRecord('transmittals', {
-      projectId,
-      title: `RFI response issued: ${title}`,
-      status: 'draft',
-      recipient: record.assignee || record.responsible || 'Project Team',
-      documentCount: 1,
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Package the final RFI response and notify impacted field teams.'
-    });
-    actions.push({ type: 'draft_rfi_transmittal', id: records.transmittal.id, message: 'RFI response transmittal drafted.' });
-  }
-
-  if (collection === 'submittals' && targetStatus === 'approved') {
-    records.task = addConstructionRecord('tasks', {
-      projectId,
-      title: `Release approved submittal: ${title}`,
-      status: 'open',
-      priority: 'medium',
-      assignee: record.responsible || record.assignee || 'Project Team',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Confirm procurement, field install readiness, and approved-data distribution.'
-    });
-    actions.push({ type: 'create_submittal_release_task', id: records.task.id, message: 'Approved submittal release task created.' });
-  }
-
-  if (collection === 'drawings' && targetStatus === 'current') {
-    records.transmittal = addConstructionRecord('transmittals', {
-      projectId,
-      title: `Issue current drawing: ${record.number || title}`,
-      status: 'draft',
-      recipient: 'Field and subcontractors',
-      documentCount: 1,
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Current revision ${record.revision || ''} is ready for distribution.`.trim()
-    });
-    actions.push({ type: 'draft_drawing_transmittal', id: records.transmittal.id, message: 'Current drawing transmittal drafted.' });
-  }
-
-  if (collection === 'changeOrders' && targetStatus === 'approved') {
-    const value = Number(record.value || record.costImpact || 0);
-    records.budget = addConstructionRecord('budgets', {
-      projectId,
-      costCode: record.costCode || 'CO',
-      description: `Approved change order: ${title}`,
-      budget: value,
-      committed: Number(record.costImpact || value),
-      actual: 0,
-      forecast: value,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    records.clientMessage = addConstructionRecord('clientMessages', {
-      projectId,
-      subject: `Change order approved: ${title}`,
-      channel: 'portal',
-      recipient: record.client || 'Client',
-      status: 'draft',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Approved value ${value}. Schedule impact ${record.scheduleImpactDays || 0} day(s).`
-    });
-    actions.push({ type: 'update_budget_from_change_order', id: records.budget.id, message: 'Budget line created from approved change order.' });
-    actions.push({ type: 'draft_change_order_client_update', id: records.clientMessage.id, message: 'Client change order update drafted.' });
-  }
-
-  if (collection === 'invoices' && targetStatus === 'paid') {
-    const amount = Number(record.amount || payload.amount || 0);
-    let payment = (construction.payments || []).find(item =>
-      String(item.sourceInvoiceId || '') === String(record.id)
-      || (record.sourceJobId && String(item.sourceJobId || '') === String(record.sourceJobId) && String(item.sourceWorkflow || '') === String(record.sourceWorkflow || ''))
-    );
-    if (payment) {
-      payment.status = 'paid';
-      payment.amount = Number(payment.amount || amount);
-      payment.paidAt = now;
-      payment.updatedAt = now;
-    } else {
-      payment = addConstructionRecord('payments', {
-        projectId,
-        vendor: record.vendor || record.recipient || 'Vendor',
-        amount,
-        status: 'paid',
-        method: 'bank_transfer',
-        lienWaiverRequired: false,
-        sourceInvoiceId: record.id,
-        sourceCollection: collection,
-        sourceWorkflow: 'construction_action',
-        paidAt: now
-      });
-    }
-    records.payment = payment;
-    actions.push({ type: 'sync_payment', id: payment.id, message: `Payment record ${payment.id} synchronized.` });
-  }
-
-  if (collection === 'payments' && targetStatus === 'paid' && record.lienWaiverRequired) {
-    const existingWaiver = (construction.lienWaivers || []).find(item =>
-      String(item.sourcePaymentId || '') === String(record.id)
-    );
-    records.lienWaiver = existingWaiver || addConstructionRecord('lienWaivers', {
-      projectId,
-      vendor: record.vendor || 'Vendor',
-      amount: Number(record.amount || 0),
-      status: 'requested',
-      dueDate: today,
-      sourcePaymentId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Collect lien waiver after payment release.'
-    });
-    actions.push({ type: 'request_lien_waiver', id: records.lienWaiver.id, message: 'Lien waiver follow-up created.' });
-  }
-
-  if (['dailyLogs', 'productionReports', 'formsChecklists', 'inspections'].includes(collection) && ['submitted', 'completed', 'passed'].includes(targetStatus)) {
-    records.clientMessage = addConstructionRecord('clientMessages', {
-      projectId,
-      subject: `Field update: ${title}`,
-      channel: 'portal',
-      recipient: record.client || 'Client',
-      status: 'draft',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Share approved field progress from ${title}.`
-    });
-    actions.push({ type: 'draft_client_update', id: records.clientMessage.id, message: 'Client field update drafted.' });
-  }
-
-  if (collection === 'dayworkSheets' && targetStatus === 'approved') {
-    const amount = Number(record.amount || record.value || 0);
-    records.changeOrder = addConstructionRecord('changeOrders', {
-      projectId,
-      title: `Daywork approved: ${title}`,
-      status: 'pending_client',
-      value: amount,
-      costImpact: amount,
-      scheduleImpactDays: Number(record.scheduleImpactDays || 0),
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: record.description || record.notes || 'Approved daywork routed into change control.'
-    });
-    records.clientMessage = addConstructionRecord('clientMessages', {
-      projectId,
-      subject: `Daywork approval: ${title}`,
-      channel: 'portal',
-      recipient: record.client || 'Client',
-      status: 'draft',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Approved daywork amount ${amount}.`
-    });
-    actions.push({ type: 'create_daywork_change_order', id: records.changeOrder.id, message: 'Daywork sheet converted into change control.' });
-    actions.push({ type: 'draft_daywork_client_update', id: records.clientMessage.id, message: 'Client daywork update drafted.' });
-  }
-
-  if (collection === 'inspections' && targetStatus === 'passed') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Inspection evidence: ${title}`,
-      type: 'quality',
-      category: 'inspection',
-      status: 'current',
-      owner: record.inspector || 'Inspector',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Passed inspection evidence stored for QA/Wkb traceability.'
-    });
-    actions.push({ type: 'store_inspection_evidence', id: records.document.id, message: 'Inspection evidence stored.' });
-  }
-
-  if (collection === 'collaboratorReports' && targetStatus === 'accepted') {
-    records.dailyLog = addConstructionRecord('dailyLogs', {
-      projectId,
-      date: today,
-      status: 'draft',
-      manpower: Number(record.manpower || 0),
-      notes: `Accepted collaborator report from ${record.company || 'subcontractor'}: ${title}.`,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    actions.push({ type: 'draft_daily_log', id: records.dailyLog.id, message: 'Collaborator report converted into a daily log draft.' });
-  }
-
-  if (collection === 'segmentedDailyReports' && targetStatus === 'submitted' && Number(record.blockers || 0) > 0) {
-    records.task = addConstructionRecord('tasks', {
-      projectId,
-      title: `Resolve segment blockers: ${record.segment || title}`,
-      status: 'open',
-      priority: 'high',
-      assignee: record.owner || 'Site Team',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `${record.blockers} blocker(s) reported in ${title}.`
-    });
-    actions.push({ type: 'create_blocker_task', id: records.task.id, message: 'Segment blocker task created.' });
-  }
-
-  if (collection === 'kioskSessions' && targetStatus === 'verified') {
-    records.siteAccessLog = addConstructionRecord('siteAccessLogs', {
-      projectId,
-      worker: `${Number(record.workersCheckedIn || 0)} worker(s)`,
-      company: record.company || 'Verified crew',
-      status: 'checked_in',
-      checkedInAt: now,
-      orientationValid: true,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Verified kiosk session at ${record.location || 'site'}.`
-    });
-    actions.push({ type: 'sync_site_access', id: records.siteAccessLog.id, message: 'Verified kiosk check-ins synchronized to site access.' });
-  }
-
-  if (collection === 'qualityReports' && targetStatus === 'approved' && Number(record.defectsOpen || 0) > 0) {
-    records.punchItem = addConstructionRecord('punchItems', {
-      projectId,
-      title: `Resolve QA defects: ${title}`,
-      status: 'open',
-      assignee: record.inspector || record.owner || 'QA Lead',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `${record.defectsOpen} defect(s) remained when QA report was approved.`
-    });
-    actions.push({ type: 'create_punch_followup', id: records.punchItem.id, message: 'Quality defects converted into a punch follow-up.' });
-  }
-
-  if (collection === 'preTaskPlans' && targetStatus === 'approved') {
-    records.formsChecklist = addConstructionRecord('formsChecklists', {
-      projectId,
-      title: `Field verification checklist: ${title}`,
-      category: 'safety',
-      status: 'open',
-      owner: record.owner || 'Site Manager',
-      dueDate: today,
-      completionPercent: 0,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Confirm crew execution for ${record.crew || 'planned crew'}.`
-    });
-    actions.push({ type: 'create_pre_task_checklist', id: records.formsChecklist.id, message: 'Pre-task plan converted into a field verification checklist.' });
-  }
-
-  if (collection === 'timecards' && targetStatus === 'approved') {
-    const hours = Number(record.hours || 0);
-    const hourlyRate = Number(record.hourlyRate || payload.hourlyRate || 65);
-    const actualCost = Math.round(hours * hourlyRate * 100) / 100;
-    records.jobCostEntry = addConstructionRecord('jobCostEntries', {
-      projectId,
-      costCode: record.costCode || 'LABOR',
-      description: `Approved timecard: ${record.worker || title}`,
-      status: 'posted',
-      actualCost,
-      committedCost: 0,
-      source: 'timecard',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    records.payrollRun = addConstructionRecord('payrollRuns', {
-      projectId,
-      period: record.date || today,
-      status: 'pending_approval',
-      regularHours: hours,
-      overtimeHours: Number(record.overtimeHours || 0),
-      grossCost: actualCost,
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    actions.push({ type: 'post_timecard_job_cost', id: records.jobCostEntry.id, message: 'Approved timecard posted to job cost.' });
-    actions.push({ type: 'queue_timecard_payroll', id: records.payrollRun.id, message: 'Payroll run queued from approved timecard.' });
-  }
-
-  if (collection === 'certifiedPayroll' && targetStatus === 'certified') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Certified payroll ${record.period || today}`,
-      type: 'finance',
-      category: 'certified_payroll',
-      status: 'current',
-      owner: 'Finance',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `${record.workers || 0} worker(s), gross cost ${record.grossCost || 0}.`
-    });
-    actions.push({ type: 'store_certified_payroll', id: records.document.id, message: 'Certified payroll document stored.' });
-  }
-
-  if (collection === 'aiaBillings' && targetStatus === 'submitted') {
-    const amount = Number(record.amount || 0);
-    records.invoice = addConstructionRecord('invoices', {
-      projectId,
-      vendor: record.vendor || 'Contractor.AI',
-      number: `AIA-${record.applicationNumber || record.id}`,
-      status: 'pending_review',
-      amount,
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Created from submitted progress billing ${title}.`
-    });
-    records.drawRequest = addConstructionRecord('drawRequests', {
-      projectId,
-      title: `Draw request from ${title}`,
-      status: 'pending_lender',
-      requestedAmount: amount,
-      approvedAmount: 0,
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    actions.push({ type: 'draft_invoice', id: records.invoice.id, message: 'Invoice created from AIA billing.' });
-    actions.push({ type: 'create_draw_request', id: records.drawRequest.id, message: 'Draw request created from AIA billing.' });
-  }
-
-  if (collection === 'drawInspections' && targetStatus === 'passed') {
-    const draw = (construction.drawRequests || []).find(item =>
-      String(item.id) === String(record.drawRequestId || '')
-      || String(item.title || '') === String(record.drawRequest || '')
-    );
-    if (draw) {
-      draw.status = 'approved_for_funding';
-      draw.approvedAmount = Number(draw.approvedAmount || draw.requestedAmount || 0);
-      draw.updatedAt = now;
-      records.drawRequest = draw;
-      actions.push({ type: 'approve_draw_request', id: draw.id, message: `${draw.title} approved for funding after inspection.` });
-    }
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Draw inspection evidence: ${title}`,
-      type: 'finance',
-      category: 'draw_inspection',
-      status: 'current',
-      owner: record.inspector || 'Inspector',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    actions.push({ type: 'store_draw_inspection', id: records.document.id, message: 'Draw inspection evidence stored.' });
-  }
-
-  if (collection === 'drawRequests' && targetStatus === 'funded') {
-    const amount = Number(record.approvedAmount || record.requestedAmount || record.amount || record.value || 0);
-    records.payment = addConstructionRecord('payments', {
-      projectId,
-      vendor: record.vendor || record.requester || 'Funding source',
-      amount,
-      status: 'ready_to_release',
-      method: 'bank_transfer',
-      lienWaiverRequired: true,
-      sourceDrawRequestId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      dueDate: today,
-      notes: 'Payment release created from funded draw request.'
-    });
-    records.portfolioReport = addConstructionRecord('portfolioReports', {
-      projectId,
-      title: `Draw funded: ${title}`,
-      status: 'current',
-      totalValue: amount,
-      riskProjects: 0,
-      generatedAt: now,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Portfolio visibility updated after draw funding.'
-    });
-    actions.push({ type: 'create_draw_payment_release', id: records.payment.id, message: 'Payment release created from funded draw.' });
-    actions.push({ type: 'update_portfolio_draw_report', id: records.portfolioReport.id, message: 'Portfolio report updated for funded draw.' });
-  }
-
-  if (collection === 'riskMitigations' && targetStatus === 'mitigated') {
-    record.riskLevel = 'low';
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Risk mitigation record: ${title}`,
-      type: 'finance',
-      category: 'risk_control',
-      status: 'current',
-      owner: record.owner || 'Risk owner',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Risk control marked mitigated.'
-    });
-    actions.push({ type: 'store_risk_evidence', id: records.document.id, message: 'Risk mitigation evidence stored.' });
-  }
-
-  if (collection === 'lienWaivers' && targetStatus === 'received') {
-    const payment = (construction.payments || []).find(item =>
-      String(item.id) === String(record.paymentId || record.sourcePaymentId || '')
-      || (
-        String(item.vendor || '').toLowerCase() === String(record.vendor || '').toLowerCase()
-        && Number(item.amount || 0) === Number(record.amount || 0)
-        && !['paid', 'void'].includes(String(item.status || '').toLowerCase())
-      )
-    );
-    if (payment) {
-      payment.status = 'ready_to_release';
-      payment.lienWaiverRequired = false;
-      payment.updatedAt = now;
-      records.payment = payment;
-      actions.push({ type: 'unblock_payment_release', id: payment.id, message: `${payment.vendor || 'Payment'} is ready for release after waiver receipt.` });
-    }
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Lien waiver received: ${record.vendor || title}`,
-      type: 'finance',
-      category: 'lien_waiver',
-      status: 'current',
-      owner: record.vendor || 'Vendor',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Waiver amount ${Number(record.amount || 0)} received.`
-    });
-    actions.push({ type: 'store_lien_waiver', id: records.document.id, message: 'Lien waiver evidence stored.' });
-  }
-
-  if (collection === 'capitalRequests' && targetStatus === 'approved') {
-    const amount = Number(record.amount || record.value || 0);
-    records.drawRequest = addConstructionRecord('drawRequests', {
-      projectId,
-      title: `Capital release draw: ${title}`,
-      status: 'pending_lender',
-      requestedAmount: amount,
-      approvedAmount: 0,
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Created from approved capital request.'
-    });
-    actions.push({ type: 'create_capital_draw_request', id: records.drawRequest.id, message: 'Draw request created from approved capital request.' });
-  }
-
-  if (collection === 'underwritingReviews' && targetStatus === 'approved') {
-    record.riskLevel = 'low';
-    records.riskMitigation = addConstructionRecord('riskMitigations', {
-      projectId,
-      title: `Underwriting control: ${title}`,
-      status: 'mitigated',
-      riskLevel: 'low',
-      owner: record.reviewer || 'Finance',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Underwriting approved and risk control documented.'
-    });
-    actions.push({ type: 'create_underwriting_risk_control', id: records.riskMitigation.id, message: 'Underwriting risk control documented.' });
-  }
-
-  if (collection === 'materials' && targetStatus === 'ordered') {
-    const quantity = Number(record.quantity || record.reorderPoint || 1);
-    records.purchaseOrder = addConstructionRecord('purchaseOrders', {
-      projectId,
-      vendor: record.vendor || record.supplier || 'Preferred supplier',
-      status: 'issued',
-      amount: Number(record.amount || record.value || 0),
-      expectedDelivery: record.expectedDelivery || today,
-      costCode: record.costCode || 'MAT',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Order ${quantity} ${record.unit || 'unit(s)'} for ${title}.`
-    });
-    actions.push({ type: 'create_material_purchase_order', id: records.purchaseOrder.id, message: 'Purchase order created from material order.' });
-  }
-
-  if (collection === 'bookings' && targetStatus === 'confirmed') {
-    records.task = addConstructionRecord('tasks', {
-      projectId,
-      title: `Prepare booking: ${record.resource || title}`,
-      status: 'open',
-      priority: 'medium',
-      assignee: record.owner || 'Site Team',
-      dueDate: record.startAt || today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Confirmed booking window ${record.startAt || today} to ${record.endAt || record.startAt || today}.`
-    });
-    records.bulletin = addConstructionRecord('bulletins', {
-      projectId,
-      title: `Confirmed booking: ${record.resource || title}`,
-      status: 'draft',
-      audience: 'All site users',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Coordinate access for ${record.location || 'site'} booking.`
-    });
-    actions.push({ type: 'create_booking_task', id: records.task.id, message: 'Booking preparation task created.' });
-    actions.push({ type: 'draft_booking_bulletin', id: records.bulletin.id, message: 'Booking coordination bulletin drafted.' });
-  }
-
-  if (['observations', 'incidents'].includes(collection) && targetStatus === 'closed') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Safety closeout evidence: ${title}`,
-      type: 'safety',
-      category: collection,
-      status: 'current',
-      owner: record.assignee || record.owner || 'Safety Lead',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Corrective action closeout evidence stored.'
-    });
-    actions.push({ type: 'store_safety_closeout', id: records.document.id, message: 'Safety closeout evidence stored.' });
-  }
-
-  if (collection === 'orientations' && targetStatus === 'completed') {
-    records.siteAccessLog = addConstructionRecord('siteAccessLogs', {
-      projectId,
-      worker: record.worker || title,
-      company: record.company || record.vendor || 'Subcontractor',
-      status: 'checked_in',
-      checkedInAt: now,
-      orientationValid: true,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Orientation completed and access cleared.'
-    });
-    actions.push({ type: 'clear_orientation_access', id: records.siteAccessLog.id, message: 'Site access clearance created from completed orientation.' });
-  }
-
-  if (collection === 'jhas' && targetStatus === 'approved') {
-    records.formsChecklist = addConstructionRecord('formsChecklists', {
-      projectId,
-      title: `JHA execution checklist: ${title}`,
-      category: 'safety',
-      status: 'open',
-      owner: record.assignee || 'Safety Lead',
-      dueDate: today,
-      completionPercent: 0,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Verify the approved JHA controls in the field.'
-    });
-    actions.push({ type: 'create_jha_execution_checklist', id: records.formsChecklist.id, message: 'Execution checklist created from approved JHA.' });
-  }
-
-  if (collection === 'sdsSheets' && targetStatus === 'current') {
-    records.complianceItem = addConstructionRecord('complianceItems', {
-      projectId,
-      vendor: record.supplier || record.vendor || 'Supplier',
-      title: `Current SDS: ${title}`,
-      status: 'current',
-      expiresAt: record.expiresAt,
-      riskLevel: 'low',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'SDS marked current and synchronized to compliance.'
-    });
-    actions.push({ type: 'sync_sds_compliance', id: records.complianceItem.id, message: 'Current SDS compliance item created.' });
-  }
-
-  if (collection === 'safetyPlans' && targetStatus === 'approved') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Approved safety plan: ${title}`,
-      type: 'safety',
-      category: 'safety_plan',
-      status: 'current',
-      owner: record.reviewer || 'Safety Lead',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Approved safety plan stored in document control.'
-    });
-    actions.push({ type: 'store_safety_plan', id: records.document.id, message: 'Approved safety plan stored.' });
-  }
-
-  if (collection === 'permits' && targetStatus === 'active') {
-    records.bulletin = addConstructionRecord('bulletins', {
-      projectId,
-      title: `Permit active: ${title}`,
-      status: 'draft',
-      audience: record.holder || 'All site users',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Notify site users about active permit at ${record.location || 'site'}.`
-    });
-    actions.push({ type: 'draft_permit_bulletin', id: records.bulletin.id, message: 'Permit coordination bulletin drafted.' });
-  }
-
-  if (collection === 'dealPipelines' && targetStatus === 'approved') {
-    records.opportunity = addConstructionRecord('opportunities', {
-      title,
-      client: record.client || 'Prospect',
-      status: 'qualified',
-      stage: 'approved_deal',
-      value: Number(record.value || 0),
-      probability: Number(record.probability || 100),
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    actions.push({ type: 'qualify_opportunity', id: records.opportunity.id, message: 'Approved deal promoted into the opportunity pipeline.' });
-  }
-
-  if (collection === 'omExtractions' && targetStatus === 'reviewed') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Reviewed OM extraction: ${title}`,
-      type: 'preconstruction',
-      category: 'om_extraction',
-      status: 'current',
-      owner: record.reviewer || 'Finance',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `${record.extractedFields || 0} extracted field(s) reviewed.`
-    });
-    actions.push({ type: 'store_om_review', id: records.document.id, message: 'Reviewed OM extraction stored as a preconstruction document.' });
-  }
-
-  if (collection === 'opportunities' && targetStatus === 'qualified') {
-    const value = Number(record.value || 0);
-    records.dealPipeline = addConstructionRecord('dealPipelines', {
-      title,
-      client: record.client || 'Prospect',
-      status: 'underwriting',
-      value,
-      probability: Number(record.probability || 35),
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Qualified opportunity promoted into preconstruction deal pipeline.'
-    });
-    records.leadActivity = addConstructionRecord('leadActivities', {
-      title: `Next pursuit step: ${title}`,
-      owner: record.owner || 'Business Development',
-      channel: 'email',
-      status: 'scheduled',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Follow up on qualified opportunity.'
-    });
-    actions.push({ type: 'create_deal_pipeline', id: records.dealPipeline.id, message: 'Deal pipeline record created from qualified opportunity.' });
-    actions.push({ type: 'schedule_lead_followup', id: records.leadActivity.id, message: 'Lead follow-up scheduled.' });
-  }
-
-  if (collection === 'takeoffs' && targetStatus === 'approved') {
-    records.estimate = addConstructionRecord('estimates', {
-      projectId,
-      title: `Estimate from takeoff: ${title}`,
-      status: 'pending_review',
-      estimateValue: Number(record.value || record.quantity || 0) * Number(record.unitCost || 1),
-      estimator: record.reviewer || record.assignee || 'Estimator',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `${record.quantity || 0} ${record.unit || 'units'} approved for estimating.`
-    });
-    actions.push({ type: 'draft_estimate_from_takeoff', id: records.estimate.id, message: 'Estimate draft created from approved takeoff.' });
-  }
-
-  if (collection === 'specifications' && targetStatus === 'mapped') {
-    records.submittal = addConstructionRecord('submittals', {
-      projectId,
-      title: `Submittal from spec: ${title}`,
-      status: 'pending_review',
-      package: record.section || record.title || 'Specification',
-      responsible: record.reviewer || 'Project Team',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Submittal log item generated from mapped specification.'
-    });
-    actions.push({ type: 'create_spec_submittal', id: records.submittal.id, message: 'Submittal created from mapped specification.' });
-  }
-
-  if (['closeoutItems', 'punchItems', 'warrantyClaims'].includes(collection) && ['submitted', 'closed'].includes(targetStatus)) {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Evidence package: ${title}`,
-      type: 'closeout',
-      category: collection === 'warrantyClaims' ? 'warranty' : 'handover',
-      status: 'current',
-      owner: record.assignee || record.owner || 'Project Team',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Generated when ${title} was ${targetStatus}.`
-    });
-    actions.push({ type: 'store_closeout_evidence', id: records.document.id, message: 'Closeout evidence document created.' });
-  }
-
-  if (collection === 'serviceTickets' && targetStatus === 'closed') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Service closeout evidence: ${title}`,
-      type: 'service',
-      category: 'service_ticket',
-      status: 'current',
-      owner: record.assignee || record.owner || 'Service Team',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Service ticket resolved with warranty/service evidence.'
-    });
-    actions.push({ type: 'store_service_closeout', id: records.document.id, message: 'Service closeout evidence stored.' });
-  }
-
-  if (collection === 'workOrders' && targetStatus === 'completed') {
-    records.dailyLog = addConstructionRecord('dailyLogs', {
-      projectId,
-      date: today,
-      status: 'draft',
-      manpower: Number(record.manpower || 0),
-      notes: `Work order completed: ${title}. ${record.description || record.notes || ''}`.trim(),
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Work order evidence: ${title}`,
-      type: 'field',
-      category: 'work_order',
-      status: 'current',
-      owner: record.assignedTo || record.assignee || record.owner || 'Site Team',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Completed work order evidence stored for field and client history.'
-    });
-    actions.push({ type: 'draft_work_order_daily_log', id: records.dailyLog.id, message: 'Work order completion drafted into the daily log.' });
-    actions.push({ type: 'store_work_order_evidence', id: records.document.id, message: 'Work order evidence stored.' });
-  }
-
-  if (collection === 'euVatReturns' && targetStatus === 'filed') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `VAT filing receipt ${record.period || today}`,
-      type: 'finance',
-      category: 'eu_vat',
-      status: 'current',
-      owner: 'Finance',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `VAT return filed for ${record.country || 'EU'}.`
-    });
-    actions.push({ type: 'store_vat_receipt', id: records.document.id, message: 'VAT filing receipt stored.' });
-  }
-
-  if (collection === 'peppolInvoices' && targetStatus === 'sent') {
-    records.invoice = addConstructionRecord('invoices', {
-      projectId,
-      vendor: record.recipient || 'Client',
-      number: record.number || `PEPPOL-${record.id}`,
-      status: 'sent',
-      amount: Number(record.amount || 0),
-      dueDate: record.dueDate || today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Peppol/UBL invoice sent using ${record.standard || 'UBL'}.`
-    });
-    actions.push({ type: 'sync_peppol_invoice', id: records.invoice.id, message: 'Peppol invoice synchronized to accounts receivable.' });
-  }
-
-  if (collection === 'complianceItems' && targetStatus === 'current') {
-    const contact = (construction.directoryContacts || []).find(item =>
-      String(item.name || '').toLowerCase() === String(record.vendor || record.owner || '').toLowerCase()
-    );
-    if (contact) {
-      contact.complianceStatus = 'current';
-      contact.updatedAt = now;
-      records.directoryContact = contact;
-      actions.push({ type: 'sync_directory_compliance', id: contact.id, message: `${contact.name} directory compliance marked current.` });
-    }
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Compliance evidence: ${title}`,
-      type: 'compliance',
-      category: 'vendor_compliance',
-      status: 'current',
-      owner: record.vendor || record.owner || 'Compliance',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    actions.push({ type: 'store_compliance_evidence', id: records.document.id, message: 'Compliance evidence stored.' });
-  }
-
-  if (collection === 'vcaCertificates' && targetStatus === 'current') {
-    records.complianceItem = addConstructionRecord('complianceItems', {
-      projectId,
-      vendor: record.vendor || 'Vendor',
-      title: `VCA certificate ${record.certificateNumber || title}`,
-      status: 'current',
-      expiresAt: record.expiresAt,
-      riskLevel: 'low',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action'
-    });
-    (construction.siteAccessLogs || [])
-      .filter(item => String(item.company || '').toLowerCase() === String(record.vendor || '').toLowerCase() && item.orientationValid === false)
-      .forEach(item => {
-        item.orientationValid = true;
-        item.status = item.status === 'blocked' ? 'checked_in' : item.status;
-        item.updatedAt = now;
-      });
-    actions.push({ type: 'sync_vca_compliance', id: records.complianceItem.id, message: 'VCA renewal synchronized to compliance records.' });
-  }
-
-  if (collection === 'co2Reports' && targetStatus === 'submitted') {
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `CO2 report ${record.period || today}`,
-      type: 'sustainability',
-      category: 'co2_report',
-      status: 'current',
-      owner: 'Sustainability',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `${record.kgCo2e || 0} kgCO2e reported.`
-    });
-    actions.push({ type: 'store_co2_report', id: records.document.id, message: 'CO2 report evidence stored.' });
-  }
-
-  if (collection === 'wkbDossiers' && targetStatus === 'complete') {
-    records.closeoutItem = addConstructionRecord('closeoutItems', {
-      projectId,
-      title: `Submit Wkb dossier: ${title}`,
-      category: 'wkb_handover',
-      status: 'open',
-      assignee: 'Quality Lead',
-      dueDate: today,
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: 'Final dossier is complete and ready for handover.'
-    });
-    actions.push({ type: 'queue_wkb_handover', id: records.closeoutItem.id, message: 'Wkb handover item created.' });
-  }
-
-  if (collection === 'integrationConnectors' && targetStatus === 'connected') {
-    record.lastSyncAt = now;
-    records.document = addConstructionRecord('documents', {
-      projectId,
-      title: `Integration sync proof: ${record.provider || title}`,
-      type: 'platform',
-      category: 'integration_sync',
-      status: 'current',
-      owner: record.provider || 'Integration',
-      sourceRecordId: record.id,
-      sourceCollection: collection,
-      sourceWorkflow: 'construction_action',
-      notes: `Connector ${record.title || record.provider || title} marked connected.`
-    });
-    actions.push({ type: 'store_integration_sync_proof', id: records.document.id, message: 'Integration sync proof stored.' });
-  }
-
-  return { records, actions };
-}
-
-function getProject(projectId) {
-  return (construction.projects || []).find(project => String(project.id) === String(projectId));
-}
-
-function isPastDue(value) {
-  if (!value) return false;
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) && date < new Date();
-}
-
-function constructionSummary() {
-  const projects = construction.projects || [];
-  const budgets = construction.budgets || [];
-  const invoices = construction.invoices || [];
-  const rfis = construction.rfis || [];
-  const submittals = construction.submittals || [];
-  const transmittals = construction.transmittals || [];
-  const dayworkSheets = construction.dayworkSheets || [];
-  const collaboratorReports = construction.collaboratorReports || [];
-  const segmentedDailyReports = construction.segmentedDailyReports || [];
-  const schedules = construction.schedules || [];
-  const inspections = construction.inspections || [];
-  const observations = construction.observations || [];
-  const punchItems = construction.punchItems || [];
-  const equipment = construction.equipment || [];
-  const kioskSessions = construction.kioskSessions || [];
-  const laborMap = construction.laborMap || [];
-  const tenders = construction.tenders || [];
-  const resourcePlans = construction.resourcePlans || [];
-  const clientSelections = construction.clientSelections || [];
-  const closeoutItems = construction.closeoutItems || [];
-  const warrantyClaims = construction.warrantyClaims || [];
-  const productionReports = construction.productionReports || [];
-  const permits = construction.permits || [];
-  const safetyMeetings = construction.safetyMeetings || [];
-  const qualityReports = construction.qualityReports || [];
-  const preTaskPlans = construction.preTaskPlans || [];
-  const jobCostEntries = construction.jobCostEntries || [];
-  const payrollRuns = construction.payrollRuns || [];
-  const certifiedPayroll = construction.certifiedPayroll || [];
-  const aiaBillings = construction.aiaBillings || [];
-  const formsChecklists = construction.formsChecklists || [];
-  const payments = construction.payments || [];
-  const drawRequests = construction.drawRequests || [];
-  const drawInspections = construction.drawInspections || [];
-  const riskMitigations = construction.riskMitigations || [];
-  const lienWaivers = construction.lienWaivers || [];
-  const complianceItems = construction.complianceItems || [];
-  const purchaseOrders = construction.purchaseOrders || [];
-  const costDatabase = construction.costDatabase || [];
-  const serviceTickets = construction.serviceTickets || [];
-  const workOrders = construction.workOrders || [];
-  const opportunities = construction.opportunities || [];
-  const dealPipelines = construction.dealPipelines || [];
-  const omExtractions = construction.omExtractions || [];
-  const leadActivities = construction.leadActivities || [];
-  const takeoffs = construction.takeoffs || [];
-  const modelIssues = construction.modelIssues || [];
-  const specifications = construction.specifications || [];
-  const tasks = construction.tasks || [];
-  const materials = construction.materials || [];
-  const orientations = construction.orientations || [];
-  const jhas = construction.jhas || [];
-  const sdsSheets = construction.sdsSheets || [];
-  const bookings = construction.bookings || [];
-  const siteAccessLogs = construction.siteAccessLogs || [];
-  const directoryContacts = construction.directoryContacts || [];
-  const integrationConnectors = construction.integrationConnectors || [];
-  const capitalRequests = construction.capitalRequests || [];
-  const euVatReturns = construction.euVatReturns || [];
-  const peppolInvoices = construction.peppolInvoices || [];
-  const gdprRequests = construction.gdprRequests || [];
-  const wkbDossiers = construction.wkbDossiers || [];
-  const vcaCertificates = construction.vcaCertificates || [];
-  const co2Reports = construction.co2Reports || [];
-
-  const budgetTotal = budgets.reduce((sum, item) => sum + Number(item.budget || 0), 0);
-  const forecastTotal = budgets.reduce((sum, item) => sum + Number(item.forecast || item.committed || 0), 0);
-  const actualTotal = budgets.reduce((sum, item) => sum + Number(item.actual || 0), 0);
-  const jobCostActual = jobCostEntries.reduce((sum, item) => sum + Number(item.actualCost || 0), 0);
-  const jobCostCommitted = jobCostEntries.reduce((sum, item) => sum + Number(item.committedCost || 0), 0);
-  const pendingPoValue = purchaseOrders
-    .filter(item => ['pending_approval', 'issued'].includes(item.status))
-    .reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const invoiceExposure = invoices
-    .filter(invoice => !['paid', 'rejected'].includes(invoice.status))
-    .reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0);
-  const paymentExposure = payments
-    .filter(payment => !['paid', 'void'].includes(payment.status))
-    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-  const openLienWaiverValue = lienWaivers
-    .filter(item => !['received', 'waived'].includes(item.status))
-    .reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const productionPlanned = productionReports.reduce((sum, item) => sum + Number(item.plannedUnits || 0), 0);
-  const productionActual = productionReports.reduce((sum, item) => sum + Number(item.actualUnits || 0), 0);
-  const productionVariancePercent = productionPlanned
-    ? Math.round(((productionActual - productionPlanned) / productionPlanned) * 100)
-    : 0;
-
-  return {
-    activeProjects: projects.filter(project => ['active', 'preconstruction'].includes(project.status)).length,
-    totalProjects: projects.length,
-    pendingTenders: tenders.filter(tender => ['open', 'draft'].includes(tender.status)).length,
-    budgetTotal,
-    forecastTotal,
-    actualTotal,
-    budgetVariance: forecastTotal - budgetTotal,
-    invoiceExposure,
-    openRfis: rfis.filter(rfi => rfi.status === 'open').length,
-    overdueRfis: rfis.filter(rfi => rfi.status === 'open' && isPastDue(rfi.dueDate)).length,
-    openSubmittals: submittals.filter(item => !['approved', 'closed'].includes(item.status)).length,
-    overdueSubmittals: submittals.filter(item => !['approved', 'closed'].includes(item.status) && isPastDue(item.dueDate)).length,
-    openTransmittals: transmittals.filter(item => !['sent', 'closed', 'received'].includes(item.status)).length,
-    pendingDayworkSheets: dayworkSheets.filter(item => !['approved', 'closed', 'rejected'].includes(item.status)).length,
-    pendingCollaboratorReports: collaboratorReports.filter(item => !['accepted', 'closed'].includes(item.status)).length,
-    segmentedReportBlockers: segmentedDailyReports.reduce((sum, item) => sum + Number(item.blockers || 0), 0),
-    activeScheduleItems: schedules.filter(item => !['closed', 'completed', 'cancelled'].includes(item.status)).length,
-    openKioskSessions: kioskSessions.filter(item => !['verified', 'closed'].includes(item.status) || item.verificationRequired).length,
-    laborCertificationGaps: laborMap.reduce((sum, item) => sum + Number(item.gapCount || 0), 0),
-    openSafetyActions: [...inspections, ...observations].filter(item => ['open', 'scheduled', 'failed'].includes(item.status)).length,
-    openQualityReports: qualityReports.filter(item => !['approved', 'closed'].includes(item.status) || Number(item.defectsOpen || 0) > 0).length,
-    pendingPreTaskPlans: preTaskPlans.filter(item => !['approved', 'closed'].includes(item.status)).length,
-    openPunchItems: punchItems.filter(item => item.status !== 'closed').length,
-    availableEquipment: equipment.filter(item => item.status === 'available').length,
-    unfilledResourcePlans: resourcePlans.filter(plan => ['unfilled', 'partially_filled'].includes(plan.status)).length,
-    pendingSelections: clientSelections.filter(item => !['approved', 'closed'].includes(item.status)).length,
-    overdueSelections: clientSelections.filter(item => !['approved', 'closed'].includes(item.status) && isPastDue(item.dueDate)).length,
-    openCloseoutItems: closeoutItems.filter(item => !['approved', 'closed', 'submitted'].includes(item.status)).length,
-    openWarrantyClaims: warrantyClaims.filter(item => !['closed', 'rejected'].includes(item.status)).length,
-    productionVariancePercent,
-    openPermits: permits.filter(item => ['active', 'needs_renewal', 'pending'].includes(item.status)).length,
-    expiringPermits: permits.filter(item => !['closed', 'expired'].includes(item.status) && isPastDue(item.expiresAt)).length,
-    scheduledSafetyMeetings: safetyMeetings.filter(item => ['scheduled', 'draft'].includes(item.status)).length,
-    jobCostActual,
-    jobCostCommitted,
-    pendingPayrollRuns: payrollRuns.filter(item => ['pending_approval', 'draft'].includes(item.status)).length,
-    pendingCertifiedPayroll: certifiedPayroll.filter(item => !['certified', 'approved', 'closed'].includes(item.status)).length,
-    draftAiaBillings: aiaBillings.filter(item => ['draft', 'pending_review'].includes(item.status)).length,
-    openChecklistItems: formsChecklists.filter(item => !['closed', 'completed', 'approved'].includes(item.status)).length,
-    pendingPaymentValue: paymentExposure,
-    pendingDrawRequests: drawRequests.filter(item => !['funded', 'rejected'].includes(item.status)).length,
-    pendingDrawInspections: drawInspections.filter(item => !['passed', 'closed'].includes(item.status)).length,
-    openRiskMitigations: riskMitigations.filter(item => !['mitigated', 'closed'].includes(item.status)).length,
-    openLienWaiverValue,
-    openComplianceItems: complianceItems.filter(item => !['current', 'closed'].includes(item.status)).length,
-    expiringComplianceItems: complianceItems.filter(item => ['expiring', 'expired'].includes(item.status) || isPastDue(item.expiresAt)).length,
-    pendingPoValue,
-    staleCostItems: costDatabase.filter(item => ['stale', 'review_required'].includes(item.status) || isPastDue(item.reviewBy)).length,
-    openServiceTickets: serviceTickets.filter(item => !['closed', 'cancelled'].includes(item.status)).length,
-    openWorkOrders: workOrders.filter(item => !['completed', 'closed', 'cancelled'].includes(item.status)).length,
-    qualifiedPipelineValue: opportunities
-      .filter(item => !['lost', 'won', 'closed'].includes(item.status))
-      .reduce((sum, item) => sum + Number(item.value || 0) * (Number(item.probability || 0) / 100), 0),
-    activeDealPipelineValue: dealPipelines
-      .filter(item => !['lost', 'closed', 'rejected'].includes(item.status))
-      .reduce((sum, item) => sum + Number(item.value || 0) * (Number(item.probability || 0) / 100), 0),
-    pendingOmExtractions: omExtractions.filter(item => !['reviewed', 'closed'].includes(item.status)).length,
-    openLeadActivities: leadActivities.filter(item => !['closed', 'completed', 'cancelled'].includes(item.status)).length,
-    openModelIssues: modelIssues.filter(item => !['closed', 'resolved'].includes(item.status)).length,
-    takeoffsNeedingReview: takeoffs.filter(item => ['review_required', 'needs_review'].includes(item.status)).length,
-    specsNeedingReview: specifications.filter(item => ['needs_review', 'draft'].includes(item.status)).length,
-    openTasks: tasks.filter(item => !['closed', 'completed'].includes(item.status)).length,
-    lowStockMaterials: materials.filter(item => item.status === 'low_stock' || Number(item.quantity || 0) <= Number(item.reorderPoint || 0)).length,
-    pendingOrientations: orientations.filter(item => !['complete', 'completed', 'approved'].includes(item.status)).length,
-    pendingJhas: jhas.filter(item => !['approved', 'closed'].includes(item.status)).length,
-    missingSdsSheets: sdsSheets.filter(item => ['missing', 'expired'].includes(item.status)).length,
-    pendingBookings: bookings.filter(item => !['confirmed', 'closed', 'cancelled'].includes(item.status)).length,
-    blockedSiteAccess: siteAccessLogs.filter(item => item.status === 'blocked' || item.orientationValid === false).length,
-    directoryComplianceGaps: directoryContacts.filter(item => !['current', 'approved'].includes(item.complianceStatus || item.status)).length,
-    integrationIssues: integrationConnectors.filter(item => !['connected', 'active'].includes(item.status)).length,
-    pendingCapitalRequests: capitalRequests.filter(item => !['approved', 'funded', 'rejected'].includes(item.status)).length,
-    draftVatReturns: euVatReturns.filter(item => ['draft', 'open'].includes(item.status)).length,
-    readyPeppolInvoices: peppolInvoices.filter(item => ['ready', 'queued'].includes(item.status)).length,
-    openGdprRequests: gdprRequests.filter(item => !['closed', 'rejected'].includes(item.status)).length,
-    wkbCompletionPercent: wkbDossiers.length
-      ? Math.round((wkbDossiers.reduce((sum, item) => sum + Number(item.evidenceItems || 0), 0) / Math.max(1, wkbDossiers.reduce((sum, item) => sum + Number(item.requiredItems || 0), 0))) * 100)
-      : 100,
-    expiringVcaCertificates: vcaCertificates.filter(item => ['expiring', 'expired'].includes(item.status) || isPastDue(item.expiresAt)).length,
-    draftCo2Reports: co2Reports.filter(item => ['draft', 'open'].includes(item.status)).length,
-    lastReview: construction.lastReview
-  };
-}
-
-const CONTRACTOR_CAPABILITIES = [
-  {
-    key: 'project-controls',
-    label: 'Connected project controls',
-    source: 'Autodesk, Procore, Buildertrend',
-    collections: ['projects', 'documents', 'drawings', 'transmittals', 'rfis', 'submittals', 'dailyLogs', 'dayworkSheets', 'collaboratorReports', 'segmentedDailyReports', 'modelIssues'],
-    promise: 'Single source of truth for drawings, documents, RFIs, submittals, daily reports, daywork sheets, collaborator reports, segmented reports and BIM coordination.'
-  },
-  {
-    key: 'preconstruction',
-    label: 'Preconstruction pipeline',
-    source: 'Buildr, Autodesk, Contractor Foreman, Built',
-    collections: ['opportunities', 'dealPipelines', 'omExtractions', 'leadActivities', 'tenders', 'estimates', 'takeoffs', 'costDatabase', 'resourcePlans'],
-    promise: 'CRM, deal pipeline, OM extraction, bid tracking, takeoff, estimating, cost benchmarks, resource allocation and forecasted margin.'
-  },
-  {
-    key: 'field-production',
-    label: 'Field production',
-    source: 'Raken, Buildertrend, Contractor Foreman',
-    collections: ['schedules', 'bookings', 'tasks', 'workOrders', 'dailyLogs', 'dayworkSheets', 'collaboratorReports', 'segmentedDailyReports', 'timecards', 'kioskSessions', 'laborMap', 'productionReports', 'materials', 'equipment', 'photoRecords'],
-    promise: 'Lookaheads, bookings, work orders, daily logs, daywork sheets, collaborator reports, kiosk time, labor maps, production quantities, material/equipment tracking and field photos.'
-  },
-  {
-    key: 'safety-quality',
-    label: 'Safety and quality',
-    source: 'HammerTech, Raken, Contractor Foreman',
-    collections: ['formsChecklists', 'qualityReports', 'inspections', 'observations', 'incidents', 'permits', 'safetyMeetings', 'preTaskPlans', 'orientations', 'jhas', 'sdsSheets', 'safetyPlans', 'bulletins', 'bookings', 'siteAccessLogs'],
-    promise: 'Managed checklists, quality reports, incidents, permits, pre-task plans, toolbox talks, orientations, JHAs, SDS, safety plans, bookings and access control.'
-  },
-  {
-    key: 'financial-control',
-    label: 'Financial control',
-    source: 'Sage, Built, Contractor Foreman',
-    collections: ['budgets', 'jobCostEntries', 'purchaseOrders', 'invoices', 'aiaBillings', 'payments', 'drawRequests', 'drawInspections', 'riskMitigations', 'lienWaivers', 'capitalRequests', 'payrollRuns', 'certifiedPayroll'],
-    promise: 'Job cost, commitments, POs, invoices, AIA billing, payments, draw inspections, risk controls, lien waivers, payroll and capital controls.'
-  },
-  {
-    key: 'client-service',
-    label: 'Client portal and service',
-    source: 'Buildertrend, Contractor Foreman',
-    collections: ['clientSelections', 'clientMessages', 'workOrders', 'serviceTickets', 'warrantyClaims', 'closeoutItems', 'punchItems'],
-    promise: 'Selections, portal messages, work orders, service tickets, warranty, punch and closeout communication.'
-  },
-  {
-    key: 'eu-compliance',
-    label: 'Netherlands and EU compliance',
-    source: 'Regional requirements plus Built finance controls',
-    collections: ['wkbDossiers', 'vcaCertificates', 'euVatReturns', 'peppolInvoices', 'gdprRequests', 'co2Reports', 'complianceItems'],
-    promise: 'Wkb dossier evidence, VCA certificates, VAT, Peppol/UBL invoicing, GDPR requests, CO2 reporting and vendor compliance.'
-  },
-  {
-    key: 'integrations-directory',
-    label: 'Integrations and directory',
-    source: 'Autodesk, Raken, Contractor Foreman, Built',
-    collections: ['integrationConnectors', 'directoryContacts', 'contracts'],
-    promise: 'Connected accounting, calendar, finance, document, contact and subcontractor data.'
-  }
-];
-
-const CONTRACTOR_SUITE_BASE_BLUEPRINT = [
-  {
-    vendor: 'Procore',
-    url: 'https://www.procore.com/en-gb/products',
-    focus: 'analytics, tender management, budgets, BIM, contracts, site diary, forms, inspections, observations, project financials, invoice management, photos, punch, quality, safety, resource tracking, schedules, submittals, daywork, timecards, estimating, equipment, insights and resource planning',
-    modules: ['portfolioReports', 'tenders', 'budgets', 'modelIssues', 'contracts', 'drawings', 'dailyLogs', 'dayworkSheets', 'formsChecklists', 'inspections', 'observations', 'jobCostEntries', 'invoices', 'photoRecords', 'punchItems', 'qualityReports', 'timecards', 'estimates', 'equipment', 'resourcePlans', 'submittals']
-  },
-  {
-    vendor: 'Autodesk Construction Cloud',
-    url: 'https://construction.autodesk.com/',
-    focus: 'single source of truth, document control, bid management, BIM/model coordination, project management, AI, product integrations and construction data management',
-    modules: ['documents', 'drawings', 'transmittals', 'rfis', 'submittals', 'modelIssues', 'tenders', 'integrationConnectors']
-  },
-  {
-    vendor: 'Buildr',
-    url: 'https://buildr.com/platform/',
-    focus: 'preconstruction CRM, deal pipeline, estimate tracking, resource planning, forecasting, handover and cross-team collaboration',
-    modules: ['opportunities', 'dealPipelines', 'leadActivities', 'tenders', 'estimates', 'resourcePlans', 'portfolioReports', 'closeoutItems']
-  },
-  {
-    vendor: 'Buildertrend',
-    url: 'https://buildertrend.com/',
-    focus: 'residential client portal, scheduling, selections, change orders, service, warranty and templates',
-    modules: ['clientSelections', 'clientMessages', 'schedules', 'changeOrders', 'serviceTickets', 'warrantyClaims', 'tasks']
-  },
-  {
-    vendor: 'Sage 100 Contractor',
-    url: 'https://www.sage.com/en-us/products/sage-100-contractor/',
-    focus: 'job cost, project accounting, estimating, budgets, subcontracts, purchase orders, certified payroll, AIA billings, service management and reports',
-    modules: ['budgets', 'jobCostEntries', 'estimates', 'contracts', 'purchaseOrders', 'payrollRuns', 'certifiedPayroll', 'aiaBillings', 'invoices', 'serviceTickets']
-  },
-  {
-    vendor: 'Contractor Foreman',
-    url: 'https://contractorforeman.com/',
-    focus: 'all-in-one project management, permits, punch, work orders, bids, takeoffs, invoices, payments and directory',
-    modules: ['projects', 'permits', 'punchItems', 'workOrders', 'serviceTickets', 'takeoffs', 'invoices', 'payments', 'directoryContacts']
-  },
-  {
-    vendor: 'Raken',
-    url: 'https://www.rakenapp.com/',
-    focus: 'daily reports, collaborator reports, segmented reports, time clock, kiosk mode, labor map, production, materials, equipment, photos, tasks, RFIs and safety/quality reporting',
-    modules: ['dailyLogs', 'collaboratorReports', 'segmentedDailyReports', 'timecards', 'kioskSessions', 'laborMap', 'productionReports', 'materials', 'equipment', 'photoRecords', 'tasks', 'inspections', 'qualityReports']
-  },
-  {
-    vendor: 'HammerTech',
-    url: 'https://www.hammertech.com/en-us/',
-    focus: 'safety mobilization, subcontractor onboarding, orientations, pre-task plans, JHAs, SDS, permits, meetings, bulletins, bookings, equipment and access',
-    modules: ['orientations', 'preTaskPlans', 'jhas', 'sdsSheets', 'safetyPlans', 'permits', 'safetyMeetings', 'bulletins', 'bookings', 'siteAccessLogs', 'equipment']
-  },
-  {
-    vendor: 'Built',
-    url: 'https://getbuilt.com/',
-    focus: 'construction finance, draw inspections, risk mitigation, underwriting, budget management, invoices, lien waivers, capital requests, compliance, payments and portfolio risk',
-    modules: ['budgets', 'drawRequests', 'drawInspections', 'riskMitigations', 'invoices', 'lienWaivers', 'capitalRequests', 'underwritingReviews', 'dealPipelines', 'omExtractions', 'complianceItems', 'payments', 'portfolioReports']
-  }
-];
-
-const CONTRACTOR_MARKET_SERVICE_DETAILS = {
-  Procore: {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public UK products page lists capabilities for analytics, tender management, budgets, BIM, contracts, site diary, forms, inspections, observations, project financials, invoice management, photos, snag/punch, quality and safety, resource tracking, schedules, submittals, daywork, timecards, estimating, equipment, insights and resource planning.',
-      'Mapped into Contractor.AI as project execution, cost management, resource management and lifecycle management modules.'
-    ],
-    serviceGroups: [
-      { name: 'Project execution', services: ['Project management', 'RFIs', 'submittals', 'site diary', 'forms', 'photos and videos', 'snag/punch list', 'daywork sheets'] },
-      { name: 'Cost and resources', services: ['Budget', 'project financials', 'invoice management', 'subcontractor invoicing', 'resource tracking', 'timecards', 'equipment', 'resource planning'] },
-      { name: 'Quality, safety and data', services: ['Inspections', 'observations', 'quality and safety', 'analytics', 'insights', 'BIM', 'contract/drawing management'] }
-    ],
-    netherlandsEuEnhancements: ['Translate snag lists into Wkb evidence packs', 'Connect invoices to Peppol/UBL approval gates', 'Track VCA and subcontractor compliance before resource release']
-  },
-  'Autodesk Construction Cloud': {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public construction page presents Autodesk Forma/ACC products for construction operations, preconstruction, model management, data management, takeoff, estimate, bid management and integrations.',
-      'Mapped into Contractor.AI as document control, bid management, model coordination, takeoff/estimate and integration connectors.'
-    ],
-    serviceGroups: [
-      { name: 'Construction operations', services: ['Document management', 'project management', 'RFIs', 'submittals', 'daily reports', 'AI workflow support'] },
-      { name: 'Preconstruction', services: ['Takeoff', 'estimating', 'bid management', 'BuildingConnected style tender coverage', 'TradeTapp qualification'] },
-      { name: 'Model and data', services: ['Model coordination', 'design collaboration', 'data management', 'integration ecosystem'] }
-    ],
-    netherlandsEuEnhancements: ['Use drawing/document revisions as Wkb proof sources', 'Attach model issues to field correction tasks', 'Keep GDPR-safe document access audit events']
-  },
-  Buildr: {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public platform page describes a unified preconstruction system with business development, estimating/project management, operations, finance, leadership dashboards, collaboration, APIs and webhooks.',
-      'Mapped into Contractor.AI as CRM, pursuits, estimates, workforce planning, forecasting, handover and reporting.'
-    ],
-    serviceGroups: [
-      { name: 'Business development', services: ['Construction CRM', 'clients and prospects', 'phase/deadline tracking', 'marketing materials', 'lead follow-up'] },
-      { name: 'Estimating and operations', services: ['Estimate tracking', 'budget management', 'value engineering', 'workforce planning', 'project handover'] },
-      { name: 'Forecasting and integrations', services: ['Revenue forecasting', 'profit forecasting', 'pipeline dashboards', 'REST APIs', 'webhooks', 'custom schema'] }
-    ],
-    netherlandsEuEnhancements: ['Score opportunities against Dutch crew capacity and travel time', 'Convert won pursuits into operating-ledger jobs', 'Preserve tender audit records for client transparency']
-  },
-  Buildertrend: {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public site navigation highlights business owner, project manager and client roles plus templates, onboarding, academy/training and client transparency workflows.',
-      'Mapped into Contractor.AI as client portal, selections, scheduling, service/warranty, templates and customer-facing updates.'
-    ],
-    serviceGroups: [
-      { name: 'Client experience', services: ['Client portal', 'messages', 'selections', 'change approvals', 'client transparency'] },
-      { name: 'Project delivery', services: ['Schedule', 'tasks', 'templates', 'project manager controls', 'progress updates'] },
-      { name: 'Service and support', services: ['Service work', 'warranty', 'learning academy style help', 'setup/onboarding'] }
-    ],
-    netherlandsEuEnhancements: ['Use Dutch/English client update templates', 'Gate scope changes through approval records', 'Attach warranty claims to aftercare jobs']
-  },
-  'Sage 100 Contractor': {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public Sage 100 Contractor page describes managing construction and service management, job cost/project details, dashboards, reports, estimating, budgets, proposals, subcontracts and purchase orders.',
-      'It also calls out certified payroll, AIA billings, lien waivers, project accounting and construction management integration.'
-    ],
-    serviceGroups: [
-      { name: 'Accounting and job cost', services: ['Job costing', 'project accounting', 'dashboards', 'industry reports', 'margin protection'] },
-      { name: 'Commercial controls', services: ['Estimating', 'budgets', 'proposals', 'subcontracts', 'purchase orders'] },
-      { name: 'Billing and payroll', services: ['AIA/progress billing', 'lien waivers', 'certified payroll', 'service management'] }
-    ],
-    netherlandsEuEnhancements: ['Adapt financial handoff to VAT and Peppol/UBL', 'Keep invoice send actions behind human approval', 'Map job-cost records to Dutch chart-of-accounts export later']
-  },
-  'Contractor Foreman': {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public home/features page lists project management, financials, people, documents, integrations and CRM with to-dos, client portal, scheduling, service tickets, projects, opportunities, punchlists, work orders, permits, daily logs and inspections.',
-      'Financial/service links include takeoffs, cost database, change orders, subcontracts, estimates, invoices, online payments, purchase orders and bid management.'
-    ],
-    serviceGroups: [
-      { name: 'All-in-one operations', services: ['Projects', 'to-dos', 'scheduling', 'service tickets', 'work orders', 'permits', 'daily logs', 'inspections', 'punchlists'] },
-      { name: 'Financials', services: ['Takeoffs', 'real-time cost database', 'change orders', 'subcontracts', 'estimates', 'invoices', 'online payments', 'purchase orders', 'bid management'] },
-      { name: 'People, documents and CRM', services: ['Team chat', 'crew schedule', 'incidents', 'leads manager', 'safety meetings', 'time cards', 'calendar', 'directory', 'submittals', 'PDF markup', 'forms/checklists', 'document writer'] }
-    ],
-    netherlandsEuEnhancements: ['Prioritize small contractor workflows over enterprise complexity', 'Tie team chat and client portal updates to audit events', 'Add work orders for maintenance and service-call jobs']
-  },
-  Raken: {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public navigation lists progress reporting, time tracking, production tracking, project management, safety and quality, and integrations.',
-      'Feature links include daily reports, collaborator reports, segmented reports, photo documentation, tasks, messaging, time clock, kiosk mode, policies/verification, material tracking, equipment management, production insights, certifications/labor map, RFIs, document management, managed checklists, observations, incidents and toolbox talks.'
-    ],
-    serviceGroups: [
-      { name: 'Field reporting', services: ['Daily reports', 'collaborator reports', 'segmented daily reports', 'photo documentation', 'tasks', 'messaging'] },
-      { name: 'Labor and production', services: ['Time tracking', 'time clock', 'kiosk mode', 'policies and verification', 'production tracking', 'resource scheduling', 'materials', 'equipment', 'production insights', 'certifications and labor map'] },
-      { name: 'Quality and integrations', services: ['RFIs', 'document management', 'safety management', 'quality management', 'managed checklists', 'observations', 'incidents', 'toolbox talks', 'accounting/payroll integrations'] }
-    ],
-    netherlandsEuEnhancements: ['Turn daily reports into client-ready Dutch summaries', 'Use labor map for VCA coverage gaps', 'Tie material tracking to local supplier purchase-order reminders']
-  },
-  HammerTech: {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public site navigation groups platform services into mobilize, coordinate and report, including subcontractor management, orientations/worker info, JHAs, SDS, safety plans, pre-task plans, permits, safety meetings, bulletins, bookings, equipment management, incidents/injuries, daily report, inspections and site access.',
-      'Mapped into Contractor.AI as safety mobilization, access gating, compliance evidence and field safety reporting.'
-    ],
-    serviceGroups: [
-      { name: 'Mobilize', services: ['Subcontractor management', 'orientations and worker info', 'JHAs', 'SDS', 'safety plans'] },
-      { name: 'Coordinate', services: ['Pre-task plans', 'permits', 'safety meetings', 'bulletins', 'bookings', 'equipment management'] },
-      { name: 'Report', services: ['Incidents and injuries', 'daily report', 'inspections', 'site access', 'reporting and insights', 'safety intelligence'] }
-    ],
-    netherlandsEuEnhancements: ['Gate site access on VCA and orientation status', 'Store JHA/SDS/safety-plan evidence per job', 'Escalate unsafe work before schedule commitments move']
-  },
-  Built: {
-    sourceReviewedAt: '2026-07-01',
-    sourceEvidence: [
-      'Public site lists construction loan administration, AI draw agent, draw inspections, draw/budget management, risk mitigation, deal management, underwriting, portfolio reporting, construction financials, budget management, invoice management, lien waiver management, capital requests, compliance tracking and payments.',
-      'Mapped into Contractor.AI as finance controls, draw/payment approvals, risk controls, lien-waiver-style document gates and portfolio reporting.'
-    ],
-    serviceGroups: [
-      { name: 'Construction finance', services: ['Budget management', 'invoice management', 'compliance tracking', 'payments', 'portfolio reporting'] },
-      { name: 'Draw and risk', services: ['AI draw agent', 'draw inspections', 'draw and budget management', 'risk mitigation', 'capital requests'] },
-      { name: 'Deal and waiver controls', services: ['Origination pipeline', 'OM extraction', 'underwriting', 'lien waiver creation/sending/tracking', 'integrations'] }
-    ],
-    netherlandsEuEnhancements: ['Use draw/payment gates as invoice approval workflow analogues', 'Adapt lien waiver checks into EU subcontractor compliance holds', 'Surface funding/payment risk before materials are ordered']
-  }
-};
-
-const CONTRACTOR_SUITE_BLUEPRINT = CONTRACTOR_SUITE_BASE_BLUEPRINT.map(vendor => ({
-  ...vendor,
-  ...(CONTRACTOR_MARKET_SERVICE_DETAILS[vendor.vendor] || {})
-}));
-
-function recordIsOpen(record = {}) {
-  const status = String(record.status || record.riskLevel || record.priority || 'open').toLowerCase();
-  return !['accepted', 'approved', 'certified', 'checked_in', 'closed', 'completed', 'complete', 'confirmed', 'connected', 'current', 'executed', 'filed', 'funded', 'issued', 'locked', 'mapped', 'mitigated', 'ordered', 'paid', 'passed', 'posted', 'received', 'rejected', 'resolved', 'reviewed', 'sent', 'submitted', 'tagged', 'verified', 'waived', 'cancelled', 'active'].includes(status);
-}
-
-function constructionCapabilities() {
-  const summary = constructionSummary();
-  return CONTRACTOR_CAPABILITIES.map(capability => {
-    const records = capability.collections.flatMap(collection => construction[collection] || []);
-    const openRecords = records.filter(recordIsOpen);
-    const missingCollections = capability.collections.filter(collection => !(construction[collection] || []).length);
-    const coverage = Math.round(((capability.collections.length - missingCollections.length) / capability.collections.length) * 100);
-    const automationScore = openRecords.length
-      ? Math.max(35, Math.min(95, 100 - openRecords.length * 6))
-      : 100;
-    return {
-      ...capability,
-      recordCount: records.length,
-      openCount: openRecords.length,
-      missingCollections,
-      coverage,
-      automationScore,
-      status: missingCollections.length ? 'needs_data' : openRecords.length ? 'action_required' : 'ready',
-      signals: {
-        budgetVariance: summary.budgetVariance,
-        openRfis: summary.openRfis,
-        openSafetyActions: summary.openSafetyActions,
-        pendingPaymentValue: summary.pendingPaymentValue,
-        integrationIssues: summary.integrationIssues,
-        wkbCompletionPercent: summary.wkbCompletionPercent
-      }
-    };
-  });
-}
-
-function collectionLabel(collection) {
-  return String(collection || '')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, letter => letter.toUpperCase());
-}
-
-function getContractorSuiteVendor(identifier) {
-  const raw = String(identifier || '').trim().toLowerCase();
-  if (!raw) return null;
-  const index = Number(identifier);
-  if (Number.isInteger(index) && CONTRACTOR_SUITE_BLUEPRINT[index]) {
-    return CONTRACTOR_SUITE_BLUEPRINT[index];
-  }
-  return CONTRACTOR_SUITE_BLUEPRINT.find(vendor => vendor.vendor.toLowerCase() === raw) || null;
-}
-
-function buildContractorSuiteVendorCoverage(data = construction) {
-  return CONTRACTOR_SUITE_BLUEPRINT.map((vendor, index) => {
-    const modules = vendor.modules.filter(module => CONSTRUCTION_COLLECTIONS.includes(module));
-    const missingModules = modules.filter(module => !(data[module] || []).length);
-    const coveredModules = modules.filter(module => (data[module] || []).length);
-    const openRecords = modules.flatMap(module =>
-      (data[module] || [])
-        .filter(recordIsOpen)
-        .map(record => ({
-          module,
-          id: record.id,
-          title: record.title || record.name || record.subject || record.number || record.package || record.vendor || `${collectionLabel(module)} #${record.id}`,
-          status: record.status || record.riskLevel || record.priority || 'open',
-          targetStatus: completeConstructionStatus(module)
-        }))
-    );
-    const bestWorkflow = CONSTRUCTION_WORKFLOWS
-      .map(workflow => ({
-        ...workflow,
-        matchScore: workflow.collections.filter(collection => modules.includes(collection)).length
-      }))
-      .filter(workflow => workflow.matchScore > 0)
-      .sort((a, b) => b.matchScore - a.matchScore || a.title.localeCompare(b.title))[0] || null;
-
-    return {
-      ...vendor,
-      index,
-      modules,
-      coveredModules,
-      missingModules,
-      openRecords,
-      bestWorkflow,
-      coverage: Math.round((coveredModules.length / Math.max(1, modules.length)) * 100),
-      recommendedAction: missingModules.length
-        ? 'install_missing_modules'
-        : openRecords.length
-          ? 'run_open_actions'
-          : 'monitor'
-    };
-  });
-}
-
-function buildContractorCapabilityGapPlan() {
-  const vendors = buildContractorSuiteVendorCoverage(construction);
-  const averageCoverage = Math.round(vendors.reduce((sum, vendor) => sum + vendor.coverage, 0) / Math.max(1, vendors.length));
-  const missingModules = vendors.reduce((sum, vendor) => sum + vendor.missingModules.length, 0);
-  const openRecords = vendors.reduce((sum, vendor) => sum + vendor.openRecords.length, 0);
-  const recommendations = vendors
-    .flatMap(vendor => vendor.missingModules.map(module => ({
-      vendor: vendor.vendor,
-      url: vendor.url,
-      module,
-      label: collectionLabel(module),
-      action: 'install_missing_module',
-      reason: `${vendor.vendor} coverage expects ${collectionLabel(module)} for ${vendor.focus}.`
-    })))
-    .slice(0, 30);
-
-  return {
-    generatedAt: new Date().toISOString(),
-    summary: {
-      averageCoverage,
-      missingModules,
-      openRecords,
-      readyVendors: vendors.filter(vendor => vendor.recommendedAction === 'monitor').length,
-      actionVendors: vendors.filter(vendor => vendor.recommendedAction !== 'monitor').length,
-      topRecommendation: recommendations[0] || null
-    },
-    vendors,
-    recommendations
-  };
-}
-
-function buildContractorMarketMap() {
-  const plan = buildContractorCapabilityGapPlan();
-  const serviceCount = plan.vendors.reduce((sum, vendor) =>
-    sum + (vendor.serviceGroups || []).reduce((groupSum, group) => groupSum + (group.services || []).length, 0),
-  0);
-  const sourceCount = plan.vendors.reduce((sum, vendor) => sum + (vendor.sourceEvidence || []).length, 0);
-  const euEnhancementCount = plan.vendors.reduce((sum, vendor) => sum + (vendor.netherlandsEuEnhancements || []).length, 0);
-
-  return {
-    generatedAt: plan.generatedAt,
-    summary: {
-      vendors: plan.vendors.length,
-      serviceGroups: plan.vendors.reduce((sum, vendor) => sum + (vendor.serviceGroups || []).length, 0),
-      services: serviceCount,
-      sourceEvidenceItems: sourceCount,
-      netherlandsEuEnhancements: euEnhancementCount,
-      averageCoverage: plan.summary.averageCoverage,
-      missingModules: plan.summary.missingModules,
-      openRecords: plan.summary.openRecords
-    },
-    vendors: plan.vendors,
-    recommendations: plan.recommendations,
-    capabilities: constructionCapabilities(),
-    workflows: CONSTRUCTION_WORKFLOWS
-  };
-}
-
-function buildContractorOperatingCatalog(data = construction) {
-  const plan = buildContractorCapabilityGapPlan();
-  const marketMap = buildContractorMarketMap();
-  const capabilities = constructionCapabilities();
-  const ledgerCoverage = operatingLedger.ledgerCapabilityCoverage();
-  const serviceCount = plan.vendors.reduce((sum, vendor) =>
-    sum + (vendor.serviceGroups || []).reduce((groupSum, group) => groupSum + (group.services || []).length, 0),
-  0);
-  const approvalGates = [
-    { action: 'quote_issue', label: 'Issue quote or estimate', reason: 'Pricing and contract terms must stay reviewable before the client sees them.' },
-    { action: 'client_message_send', label: 'Send client/subcontractor message', reason: 'External communication remains a draft until Robert approves it.' },
-    { action: 'schedule_commit', label: 'Commit schedule or start date', reason: 'Crew availability, weather, approvals and access must be verified first.' },
-    { action: 'purchase_order_release', label: 'Release purchase order or material order', reason: 'Orders create cost and supplier commitments.' },
-    { action: 'invoice_or_peppol_send', label: 'Send invoice, UBL or Peppol record', reason: 'Finance handoff requires VAT, client, amount and evidence review.' },
-    { action: 'payment_or_draw_release', label: 'Release payment or draw request', reason: 'Payment actions require invoice, waiver/compliance and approval proof.' },
-    { action: 'archive_or_delete_record', label: 'Archive/delete operational record', reason: 'Records are retained and routed through approval before removal.' },
-    { action: 'complete_job_or_close_warranty', label: 'Complete job or close warranty', reason: 'Closeout, evidence, aftercare and client obligations must be checked.' }
-  ];
-  const regionalControls = [
-    { key: 'wkb', label: 'Wkb evidence dossier', modules: ['wkbDossiers', 'documents', 'photoRecords', 'qualityReports'], reason: 'Dutch quality evidence should be assembled from photos, documents, inspections and closeout records.' },
-    { key: 'vca', label: 'VCA and site safety proof', modules: ['vcaCertificates', 'orientations', 'jhas', 'sdsSheets', 'siteAccessLogs'], reason: 'Site access and field scheduling should be blocked when safety proof is missing or expired.' },
-    { key: 'vat-peppol', label: 'VAT, UBL and Peppol finance handoff', modules: ['euVatReturns', 'peppolInvoices', 'invoices', 'financeHandoffs'], reason: 'European finance workflows need structured invoice readiness before sending or payment.' },
-    { key: 'gdpr', label: 'GDPR access audit', modules: ['gdprRequests', 'documents', 'directoryContacts', 'audit_events'], reason: 'Client, worker and subcontractor data needs access and change traceability.' },
-    { key: 'co2', label: 'CO2 and sustainability reporting', modules: ['co2Reports', 'materials', 'route_plans'], reason: 'Transport, materials and project records should support later emissions reporting.' }
-  ];
-  const lanes = capabilities.map(capability => {
-    const vendorMatches = plan.vendors.filter(vendor =>
-      vendor.modules.some(module => capability.collections.includes(module))
-      || capability.source.toLowerCase().split(',').some(source => vendor.vendor.toLowerCase().includes(source.trim()))
-    );
-    const services = vendorMatches.flatMap(vendor =>
-      (vendor.serviceGroups || []).flatMap(group => group.services || [])
-    );
-    const uniqueServices = Array.from(new Set(services)).slice(0, 18);
-    const euEnhancements = Array.from(new Set(vendorMatches.flatMap(vendor => vendor.netherlandsEuEnhancements || []))).slice(0, 8);
-    const missingModules = capability.missingCollections || [];
-    const modules = capability.collections || [];
-    const coveredModules = modules.filter(module => !missingModules.includes(module));
-    const openRecords = modules.flatMap(module =>
-      (data[module] || [])
-        .filter(recordIsOpen)
-        .map(record => ({
-          module,
-          id: record.id,
-          title: record.title || record.name || record.subject || record.number || record.vendor || `${collectionLabel(module)} #${record.id}`,
-          status: record.status || record.riskLevel || record.priority || 'open'
-        }))
-    ).slice(0, 10);
-
-    return {
-      key: capability.key,
-      label: capability.label,
-      source: capability.source,
-      promise: capability.promise,
-      status: capability.status,
-      coverage: capability.coverage,
-      automationScore: capability.automationScore,
-      modules,
-      coveredModules,
-      missingModules,
-      openRecords,
-      vendors: vendorMatches.map(vendor => vendor.vendor),
-      serviceExamples: uniqueServices,
-      euEnhancements,
-      safeAutonomy: {
-        canDraft: true,
-        canCreateInternalRecords: true,
-        canSendExternally: false,
-        requiresApprovalFor: approvalGates.map(gate => gate.action)
-      },
-      recommendedNextAction: missingModules.length
-        ? {
-            type: 'install_missing_modules',
-            modules: missingModules.slice(0, 5),
-            label: `Create ${collectionLabel(missingModules[0])} operating record`,
-            reason: `${capability.label} needs ${missingModules.slice(0, 3).map(collectionLabel).join(', ')} to match the researched contractor-platform baseline.`
-          }
-        : openRecords.length
-          ? {
-              type: 'resolve_open_records',
-              modules: Array.from(new Set(openRecords.map(record => record.module))).slice(0, 5),
-              label: `Resolve ${openRecords.length} open ${capability.label} record(s)`,
-              reason: 'Existing records are present but still need review, approval, submission, or closeout.'
-            }
-          : {
-              type: 'monitor',
-              modules: [],
-              label: 'Monitor lane',
-              reason: 'Coverage exists and no open action is currently blocking this lane.'
-            }
-    };
-  });
-
-  return {
-    generatedAt: new Date().toISOString(),
-    summary: {
-      vendors: plan.vendors.length,
-      services: serviceCount,
-      serviceGroups: marketMap.summary.serviceGroups,
-      constructionCapabilities: capabilities.length,
-      ledgerCapabilities: ledgerCoverage.capabilities.length,
-      constructionCoverage: plan.summary.averageCoverage,
-      ledgerCoverage: ledgerCoverage.summary.averageCoverage,
-      missingModules: plan.summary.missingModules,
-      openRecords: plan.summary.openRecords,
-      approvalGates: approvalGates.length,
-      regionalControls: regionalControls.length
-    },
-    lanes,
-    vendors: plan.vendors,
-    workflows: CONSTRUCTION_WORKFLOWS,
-    ledgerCapabilities: ledgerCoverage.capabilities,
-    approvalGates,
-    regionalControls,
-    recommendations: plan.recommendations
-  };
-}
-
-function initialCapabilityGapStatus(collection) {
-  return {
-    dailyLogs: 'draft',
-    dayworkSheets: 'draft',
-    collaboratorReports: 'pending_review',
-    segmentedDailyReports: 'draft',
-    clientMessages: 'draft',
-    documents: 'draft',
-    drawings: 'open',
-    transmittals: 'draft',
-    estimates: 'draft',
-    tenders: 'open',
-    opportunities: 'lead',
-    dealPipelines: 'underwriting',
-    integrationConnectors: 'needs_auth',
-    safetyMeetings: 'scheduled',
-    bookings: 'pending',
-    permits: 'pending',
-    siteAccessLogs: 'blocked',
-    invoices: 'pending_review',
-    workOrders: 'open',
-    payments: 'scheduled',
-    peppolInvoices: 'ready',
-    euVatReturns: 'draft',
-    co2Reports: 'draft'
-  }[collection] || 'open';
-}
-
-function buildCapabilityGapRecord(vendor, collection, payload = {}) {
-  const context = constructionWorkflowProjectContext(payload.projectId);
-  const now = new Date().toISOString();
-  const today = now.slice(0, 10);
-  const label = collectionLabel(collection);
-  const value = Number(payload.value || 0);
-  const dueDate = payload.dueDate || relativeDate(['rfis', 'submittals', 'permits', 'inspections', 'observations', 'clientMessages', 'siteAccessLogs'].includes(collection) ? 1 : 7, 17);
-  const base = {
-    projectId: context.projectId,
-    title: `${vendor.vendor} ${label} accelerator`,
-    status: initialCapabilityGapStatus(collection),
-    sourceWorkflow: 'capability_gap_install',
-    sourceVendor: vendor.vendor,
-    sourceCapability: vendor.focus,
-    dueDate,
-    owner: payload.owner || 'Contractor.AI',
-    value,
-    notes: `Installed from ${vendor.vendor} service map: ${vendor.focus}.`
-  };
-
-  if (collection === 'projects') return { ...base, name: base.title, client: context.client, budget: value || 100000, phase: 'preconstruction', progress: 0 };
-  if (collection === 'tenders') return { ...base, package: base.title, client: context.client, estimateValue: value || 45000, bidDue: dueDate };
-  if (collection === 'budgets') return { ...base, description: base.title, costCode: 'CAP-GAP', budget: value || 25000, forecast: value || 25000, actual: 0 };
-  if (collection === 'contracts') return { ...base, vendor: context.client, value: value || 25000 };
-  if (collection === 'invoices') return { ...base, vendor: context.client, number: `CAP-${Date.now()}`, amount: value || 0 };
-  if (collection === 'rfis') return { ...base, subject: base.title, responsible: 'Design Team' };
-  if (collection === 'submittals') return { ...base, package: 'Capability package' };
-  if (collection === 'dayworkSheets') return { ...base, title: base.title, crew: payload.owner || 'Site crew', hours: value || 0, amount: value || 0, description: base.notes };
-  if (collection === 'dailyLogs') return { ...base, date: today, manpower: 0 };
-  if (collection === 'timecards') return { ...base, worker: 'Crew lead', date: today, hours: value || 0 };
-  if (collection === 'equipment') return { ...base, name: base.title, location: 'Depot', nextInspection: dueDate };
-  if (collection === 'clientMessages') return { ...base, subject: base.title, channel: 'portal', recipient: context.client };
-  if (collection === 'payments') return { ...base, vendor: context.client, amount: value || 0, method: 'bank_transfer', lienWaiverRequired: true };
-  if (collection === 'purchaseOrders') return { ...base, vendor: context.client, amount: value || 0, expectedDelivery: dueDate, costCode: 'CAP-GAP' };
-  if (collection === 'opportunities') return { ...base, client: context.client, stage: 'qualification', probability: 25 };
-  if (collection === 'dealPipelines') return { ...base, client: context.client, probability: 25 };
-  if (collection === 'orientations') return { ...base, worker: 'New crew', company: context.client, orientationValid: false };
-  if (collection === 'bookings') return { ...base, title: base.title, resource: payload.resource || 'Site resource', location: context.projectName, startAt: dueDate, endAt: dueDate };
-  if (collection === 'siteAccessLogs') return { ...base, worker: 'New crew', company: context.client, checkedInAt: null, orientationValid: false };
-  if (collection === 'workOrders') return { ...base, title: base.title, client: context.client, priority: 'medium', dueDate, assignedTo: payload.owner || 'Site Team', description: base.notes };
-  if (collection === 'directoryContacts') return { ...base, name: context.client, type: 'subcontractor', email: '', complianceStatus: 'pending_review' };
-  if (collection === 'portfolioReports') return { ...base, totalValue: value || 0, riskProjects: 0, generatedAt: now };
-  if (collection === 'peppolInvoices') return { ...base, recipient: context.client, amount: value || 0, standard: 'UBL 2.1' };
-  if (collection === 'wkbDossiers') return { ...base, evidenceItems: 0, requiredItems: 1 };
-  if (collection === 'co2Reports') return { ...base, period: `${new Date().getFullYear()}-Q${Math.ceil((new Date().getMonth() + 1) / 3)}`, kgCo2e: value || 0 };
-  return base;
-}
-
-function runConstructionAutopilot() {
-  const actions = [];
-  const insights = [];
-  const now = new Date().toISOString();
-
-  for (const project of construction.projects || []) {
-    const projectBudgets = (construction.budgets || []).filter(item => String(item.projectId) === String(project.id));
-    if (projectBudgets.length) {
-      const forecast = projectBudgets.reduce((sum, item) => sum + Number(item.forecast || item.committed || 0), 0);
-      project.forecastAtCompletion = forecast;
-      if (forecast > Number(project.budget || 0)) {
-        project.riskLevel = 'high';
-        insights.push({
-          type: 'cost_risk',
-          severity: 'high',
-          projectId: project.id,
-          message: `${project.name} forecast is above budget by EUR ${Math.round(forecast - Number(project.budget || 0)).toLocaleString()}.`
-        });
-      }
-    }
-  }
-
-  for (const rfi of construction.rfis || []) {
-    if (rfi.status === 'open' && isPastDue(rfi.dueDate)) {
-      rfi.priority = 'critical';
-      actions.push({ type: 'escalate_rfi', id: rfi.id, message: `RFI escalated: ${rfi.subject}` });
-    }
-  }
-
-  for (const submittal of construction.submittals || []) {
-    if (!['approved', 'closed'].includes(submittal.status) && isPastDue(submittal.dueDate)) {
-      submittal.status = 'overdue';
-      actions.push({ type: 'flag_submittal', id: submittal.id, message: `Submittal flagged overdue: ${submittal.title}` });
-    }
-  }
-
-  for (const report of construction.collaboratorReports || []) {
-    if (['pending_review', 'draft'].includes(report.status)) {
-      actions.push({ type: 'review_collaborator_report', id: report.id, message: `${report.title} is waiting for field review.` });
-    }
-  }
-
-  for (const report of construction.segmentedDailyReports || []) {
-    if (Number(report.blockers || 0) > 0) {
-      insights.push({ type: 'segment_blocker', severity: 'medium', projectId: report.projectId, message: `${report.title} has ${report.blockers} blocker(s).` });
-    }
-  }
-
-  for (const sheet of construction.dayworkSheets || []) {
-    if (!['approved', 'closed', 'rejected'].includes(String(sheet.status || '').toLowerCase())) {
-      actions.push({ type: 'approve_daywork_sheet', id: sheet.id, message: `${sheet.title || 'Daywork sheet'} needs approval before change control.` });
-    }
-  }
-
-  for (const order of construction.workOrders || []) {
-    if (!['completed', 'closed', 'cancelled'].includes(String(order.status || '').toLowerCase())) {
-      actions.push({ type: 'complete_work_order', id: order.id, message: `${order.title || 'Work order'} is open for field completion.` });
-    }
-  }
-
-  for (const booking of construction.bookings || []) {
-    if (!['confirmed', 'closed', 'cancelled'].includes(String(booking.status || '').toLowerCase())) {
-      actions.push({ type: 'confirm_booking', id: booking.id, message: `${booking.title || 'Booking'} needs resource confirmation.` });
-    }
-  }
-
-  for (const session of construction.kioskSessions || []) {
-    if (session.verificationRequired || session.status === 'open') {
-      actions.push({ type: 'verify_kiosk_session', id: session.id, message: `${session.title} needs check-in verification.` });
-    }
-  }
-
-  for (const map of construction.laborMap || []) {
-    if (Number(map.gapCount || 0) > 0) {
-      insights.push({ type: 'labor_certification_gap', severity: 'medium', projectId: map.projectId, message: `${map.title} shows ${map.gapCount} certification gap(s).` });
-    }
-  }
-
-  for (const report of construction.qualityReports || []) {
-    if (Number(report.defectsOpen || 0) > 0 && !['approved', 'closed'].includes(report.status)) {
-      actions.push({ type: 'resolve_quality_report', id: report.id, message: `${report.title} has ${report.defectsOpen} open defect(s).` });
-    }
-  }
-
-  const openObservation = (construction.observations || []).find(item => item.status === 'open');
-  if (openObservation && !construction.trainingItems.some(item => item.title.includes(openObservation.title))) {
-    const trainingItem = {
-      id: collectionNextId('trainingItems'),
-      title: `Toolbox talk: ${openObservation.title}`,
-      category: 'safety',
-      status: 'draft',
-      assignedTo: openObservation.assignee || 'Site Team',
-      sourceObservationId: openObservation.id
-    };
-    construction.trainingItems.push(trainingItem);
-    actions.push({ type: 'draft_training', id: trainingItem.id, message: `Drafted safety training for ${openObservation.title}` });
-  }
-
-  const unfilledPlan = (construction.resourcePlans || []).find(plan => plan.status === 'unfilled');
-  if (unfilledPlan) {
-    const project = getProject(unfilledPlan.projectId);
-    insights.push({
-      type: 'resource_gap',
-      severity: 'medium',
-      projectId: unfilledPlan.projectId,
-      message: `${unfilledPlan.role} is unfilled for ${project?.name || 'project'} from ${unfilledPlan.neededFrom}.`
-    });
-  }
-
-  for (const selection of construction.clientSelections || []) {
-    if (!['approved', 'closed'].includes(selection.status) && isPastDue(selection.dueDate)) {
-      selection.status = 'overdue';
-      actions.push({ type: 'escalate_selection', id: selection.id, message: `Client selection overdue: ${selection.title}` });
-    }
-  }
-
-  const pendingSelection = (construction.clientSelections || []).find(item => ['pending_client', 'overdue'].includes(item.status));
-  if (pendingSelection && !(construction.clientMessages || []).some(item => item.sourceSelectionId === pendingSelection.id)) {
-    const message = {
-      id: collectionNextId('clientMessages'),
-      projectId: pendingSelection.projectId,
-      subject: `Selection reminder: ${pendingSelection.title}`,
-      status: 'draft',
-      channel: 'portal',
-      recipient: pendingSelection.client || 'Client',
-      dueDate: relativeDate(0, 16),
-      sourceSelectionId: pendingSelection.id
-    };
-    construction.clientMessages.push(message);
-    actions.push({ type: 'draft_client_message', id: message.id, message: `Drafted portal reminder for ${pendingSelection.title}` });
-  }
-
-  for (const activity of construction.leadActivities || []) {
-    if (!['closed', 'completed', 'cancelled'].includes(activity.status) && isPastDue(activity.dueDate)) {
-      activity.status = 'overdue';
-      actions.push({ type: 'escalate_lead_activity', id: activity.id, message: `BD follow-up overdue: ${activity.title}` });
-    }
-  }
-
-  for (const transmittal of construction.transmittals || []) {
-    if (transmittal.status === 'draft' && isPastDue(transmittal.dueDate)) {
-      transmittal.status = 'ready_to_send';
-      actions.push({ type: 'prepare_transmittal', id: transmittal.id, message: `Transmittal ready to send: ${transmittal.title}` });
-    }
-  }
-
-  for (const schedule of construction.schedules || []) {
-    if (['draft', 'open'].includes(schedule.status) && isPastDue(schedule.startAt)) {
-      schedule.status = 'needs_commitment';
-      actions.push({ type: 'commit_schedule', id: schedule.id, message: `Schedule needs commitment: ${schedule.title}` });
-    }
-  }
-
-  for (const report of construction.productionReports || []) {
-    const planned = Number(report.plannedUnits || 0);
-    const actual = Number(report.actualUnits || 0);
-    if (planned > 0 && actual < planned * 0.85) {
-      report.status = report.status === 'submitted' ? 'review_required' : report.status;
-      insights.push({
-        type: 'production_variance',
-        severity: 'medium',
-        projectId: report.projectId,
-        message: `${report.activity} production is ${Math.round(((actual - planned) / planned) * 100)}% against plan.`
-      });
-    }
-  }
-
-  for (const checklist of construction.formsChecklists || []) {
-    if (!['closed', 'completed', 'approved'].includes(checklist.status) && isPastDue(checklist.dueDate)) {
-      checklist.status = 'overdue';
-      actions.push({ type: 'complete_checklist', id: checklist.id, message: `Checklist overdue: ${checklist.title}` });
-    }
-  }
-
-  for (const permit of construction.permits || []) {
-    if (!['closed', 'expired'].includes(permit.status) && isPastDue(permit.expiresAt)) {
-      permit.status = 'needs_renewal';
-      actions.push({ type: 'renew_permit', id: permit.id, message: `Permit needs renewal: ${permit.title}` });
-    }
-  }
-
-  for (const plan of construction.preTaskPlans || []) {
-    if (!['approved', 'closed'].includes(plan.status) && isPastDue(plan.dueDate)) {
-      plan.status = 'review_required';
-      actions.push({ type: 'review_pre_task_plan', id: plan.id, message: `Pre-task plan needs approval: ${plan.title}` });
-    }
-  }
-
-  for (const compliance of construction.complianceItems || []) {
-    if (['expired', 'expiring'].includes(compliance.status) || isPastDue(compliance.expiresAt)) {
-      compliance.riskLevel = 'high';
-      insights.push({
-        type: 'compliance_risk',
-        severity: 'high',
-        projectId: compliance.projectId,
-        message: `${compliance.vendor} compliance item needs attention: ${compliance.title}.`
-      });
-    }
-  }
-
-  for (const costItem of construction.costDatabase || []) {
-    if (['stale', 'review_required'].includes(costItem.status) || isPastDue(costItem.reviewBy)) {
-      insights.push({
-        type: 'cost_database_stale',
-        severity: 'medium',
-        message: `${costItem.title} needs a current market-rate review.`
-      });
-    }
-  }
-
-  for (const contact of construction.directoryContacts || []) {
-    if (!['current', 'approved'].includes(contact.complianceStatus || contact.status)) {
-      insights.push({
-        type: 'directory_compliance_gap',
-        severity: 'medium',
-        message: `${contact.name} has a directory compliance gap.`
-      });
-    }
-  }
-
-  for (const connector of construction.integrationConnectors || []) {
-    if (!['connected', 'active'].includes(connector.status)) {
-      actions.push({ type: 'repair_integration', id: connector.id, message: `${connector.title} integration needs attention (${connector.status}).` });
-    }
-  }
-
-  const readyPayment = (construction.payments || []).find(payment => payment.status === 'ready_to_release' && payment.lienWaiverRequired);
-  if (readyPayment && !(construction.lienWaivers || []).some(item => String(item.paymentId) === String(readyPayment.id))) {
-    const waiver = {
-      id: collectionNextId('lienWaivers'),
-      projectId: readyPayment.projectId,
-      vendor: readyPayment.vendor,
-      status: 'requested',
-      amount: readyPayment.amount,
-      paymentId: readyPayment.id,
-      dueDate: relativeDate(1, 17)
-    };
-    construction.lienWaivers.push(waiver);
-    readyPayment.status = 'hold_for_waiver';
-    actions.push({ type: 'request_lien_waiver', id: waiver.id, message: `Requested lien waiver from ${readyPayment.vendor}` });
-  }
-
-  for (const payroll of construction.certifiedPayroll || []) {
-    if (!['certified', 'approved', 'closed'].includes(payroll.status)) {
-      actions.push({ type: 'certify_payroll', id: payroll.id, message: `${payroll.period || payroll.title} certified payroll is pending.` });
-    }
-  }
-
-  for (const billing of construction.aiaBillings || []) {
-    if (['draft', 'pending_review'].includes(billing.status)) {
-      actions.push({ type: 'submit_progress_billing', id: billing.id, message: `${billing.title} is ready for billing review.` });
-    }
-  }
-
-  for (const inspection of construction.drawInspections || []) {
-    if (!['passed', 'closed'].includes(inspection.status) && isPastDue(inspection.dueDate)) {
-      inspection.status = 'due';
-      actions.push({ type: 'complete_draw_inspection', id: inspection.id, message: `Draw inspection due: ${inspection.title}` });
-    }
-  }
-
-  for (const risk of construction.riskMitigations || []) {
-    if (!['mitigated', 'closed'].includes(risk.status)) {
-      insights.push({ type: 'finance_risk_control', severity: risk.riskLevel || 'medium', projectId: risk.projectId, message: `${risk.title} is still open.` });
-    }
-  }
-
-  for (const deal of construction.dealPipelines || []) {
-    if (['underwriting', 'pending_review'].includes(deal.status)) {
-      insights.push({ type: 'deal_underwriting', severity: 'medium', projectId: deal.projectId, message: `${deal.title} is in underwriting at ${deal.probability || 0}% probability.` });
-    }
-  }
-
-  for (const extraction of construction.omExtractions || []) {
-    if (['needs_review', 'draft'].includes(extraction.status)) {
-      actions.push({ type: 'review_om_extraction', id: extraction.id, message: `${extraction.title} needs extracted field review.` });
-    }
-  }
-
-  const openCloseout = (construction.closeoutItems || []).filter(item => !['approved', 'closed', 'submitted'].includes(item.status));
-  const advancedProject = (construction.projects || []).find(project => Number(project.progress || 0) >= 50);
-  if (advancedProject && !openCloseout.length) {
-    const closeoutItem = {
-      id: collectionNextId('closeoutItems'),
-      projectId: advancedProject.id,
-      title: 'Owner handover checklist',
-      status: 'open',
-      assignee: advancedProject.manager || 'Project Team',
-      dueDate: relativeDate(14, 17),
-      category: 'owner_handover'
-    };
-    construction.closeoutItems.push(closeoutItem);
-    actions.push({ type: 'seed_closeout', id: closeoutItem.id, message: `Created closeout checklist for ${advancedProject.name}` });
-  }
-
-  const pendingDraw = (construction.drawRequests || []).find(draw => draw.status === 'pending_lender' && isPastDue(draw.dueDate));
-  if (pendingDraw) {
-    pendingDraw.status = 'escalated';
-    insights.push({
-      type: 'draw_delay',
-      severity: 'medium',
-      projectId: pendingDraw.projectId,
-      message: `${pendingDraw.title} is waiting on lender approval.`
-    });
-  }
-
-  for (const issue of construction.modelIssues || []) {
-    if (!['closed', 'resolved'].includes(issue.status) && isPastDue(issue.dueDate)) {
-      issue.status = 'coordination_required';
-      actions.push({ type: 'coordinate_model_issue', id: issue.id, message: `Model issue needs coordination: ${issue.title}` });
-    }
-  }
-
-  for (const takeoff of construction.takeoffs || []) {
-    if (['review_required', 'needs_review'].includes(takeoff.status) || Number(takeoff.confidence || 100) < 90) {
-      insights.push({
-        type: 'takeoff_review',
-        severity: 'medium',
-        projectId: takeoff.projectId,
-        message: `${takeoff.title} should be reviewed before estimate lock.`
-      });
-    }
-  }
-
-  for (const spec of construction.specifications || []) {
-    if (['needs_review', 'draft'].includes(spec.status)) {
-      spec.status = 'submittal_log_required';
-      actions.push({ type: 'generate_submittal_log', id: spec.id, message: `Generate submittal log from ${spec.title}` });
-    }
-  }
-
-  for (const material of construction.materials || []) {
-    if (material.status === 'low_stock' || Number(material.quantity || 0) <= Number(material.reorderPoint || 0)) {
-      insights.push({
-        type: 'material_shortage',
-        severity: 'medium',
-        projectId: material.projectId,
-        message: `${material.title} is below reorder point.`
-      });
-    }
-  }
-
-  for (const orientation of construction.orientations || []) {
-    if (!['complete', 'completed', 'approved'].includes(orientation.status) && isPastDue(orientation.dueDate)) {
-      orientation.status = 'blocked';
-      actions.push({ type: 'block_unoriented_worker', id: orientation.id, message: `Orientation required for ${orientation.worker}` });
-    }
-  }
-
-  for (const jha of construction.jhas || []) {
-    if (!['approved', 'closed'].includes(jha.status) && isPastDue(jha.dueDate)) {
-      jha.status = 'overdue';
-      actions.push({ type: 'escalate_jha', id: jha.id, message: `JHA overdue: ${jha.title}` });
-    }
-  }
-
-  for (const sds of construction.sdsSheets || []) {
-    if (['missing', 'expired'].includes(sds.status)) {
-      actions.push({ type: 'request_sds', id: sds.id, message: `Request SDS: ${sds.title}` });
-    }
-  }
-
-  const blockedAccess = (construction.siteAccessLogs || []).find(item => item.status === 'blocked' || item.orientationValid === false);
-  if (blockedAccess) {
-    insights.push({
-      type: 'site_access_block',
-      severity: 'high',
-      projectId: blockedAccess.projectId,
-      message: `${blockedAccess.worker} is blocked from site access until onboarding is complete.`
-    });
-  }
-
-  for (const vatReturn of construction.euVatReturns || []) {
-    if (['draft', 'open'].includes(vatReturn.status) && isPastDue(vatReturn.dueDate)) {
-      vatReturn.status = 'overdue';
-      actions.push({ type: 'file_vat_return', id: vatReturn.id, message: `VAT return overdue: ${vatReturn.period}` });
-    }
-  }
-
-  for (const invoice of construction.peppolInvoices || []) {
-    if (invoice.status === 'ready') {
-      invoice.status = 'queued';
-      actions.push({ type: 'queue_peppol_invoice', id: invoice.id, message: `Queued Peppol invoice for ${invoice.recipient}` });
-    }
-  }
-
-  for (const request of construction.gdprRequests || []) {
-    if (!['closed', 'rejected'].includes(request.status) && isPastDue(request.dueDate)) {
-      request.status = 'overdue';
-      insights.push({
-        type: 'gdpr_deadline',
-        severity: 'high',
-        message: `GDPR request is overdue for ${request.requester}.`
-      });
-    }
-  }
-
-  for (const dossier of construction.wkbDossiers || []) {
-    const completion = Number(dossier.requiredItems || 0)
-      ? Number(dossier.evidenceItems || 0) / Number(dossier.requiredItems)
-      : 1;
-    if (completion < 0.9) {
-      insights.push({
-        type: 'wkb_dossier_gap',
-        severity: 'medium',
-        projectId: dossier.projectId,
-        message: `${dossier.title} is ${Math.round(completion * 100)}% complete.`
-      });
-    }
-  }
-
-  for (const certificate of construction.vcaCertificates || []) {
-    if (['expiring', 'expired'].includes(certificate.status) || isPastDue(certificate.expiresAt)) {
-      certificate.riskLevel = 'high';
-      actions.push({ type: 'renew_vca_certificate', id: certificate.id, message: `VCA renewal required for ${certificate.vendor}` });
-    }
-  }
-
-  construction.insights = [...insights, ...(construction.insights || [])].slice(0, 25);
-  construction.lastReview = now;
-
-  return {
-    success: true,
-    ranAt: now,
-    actions,
-    insights,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  };
-}
-
-let construction = createDefaultConstructionState();
-
-const savedState = loadState();
-if (savedState.jobs) {
-  jobs = savedState.jobs;
-}
-if (savedState.workers) {
-  workers = savedState.workers;
-}
-if (savedState.tools) {
-  tools = savedState.tools;
-}
-if (savedState.construction) {
-  construction = normalizeConstructionState(savedState.construction);
-}
-
+let legacyStateForMigration = loadLegacyStateForMigration();
 const operatingLedger = new ContractorOperatingLedger({
   dbFile: ledgerFile,
-  stateProvider: currentState,
+  databaseUrl: hostedDatabaseUrl || null,
+  stateProvider: () => legacyStateForMigration,
   logger: log
 });
+// The legacy JSON file is only an import source during construction. All live
+// reads and writes are ledger-backed after the synchronous migration completes.
+legacyStateForMigration = { jobs: [], workers: [], tools: [] };
+function autonomousSchedulerStatus() {
+  return {
+    enabled: autonomousSchedulerEnabled,
+    intervalSeconds: autonomousSchedulerIntervalSeconds,
+    leaseSeconds: autonomousSchedulerLeaseSeconds,
+    job: operatingLedger.getScheduledJob(AUTONOMOUS_SCHEDULER_KEY)
+  };
+}
+
+function runDurableAutonomousCycle(options = {}) {
+  const claim = operatingLedger.claimScheduledJob(AUTONOMOUS_SCHEDULER_KEY, {
+    intervalSeconds: autonomousSchedulerIntervalSeconds,
+    leaseSeconds: autonomousSchedulerLeaseSeconds,
+    now: options.now
+  });
+  if (!claim.claimed) return { success: true, ran: false, claim, scheduler: autonomousSchedulerStatus() };
+
+  try {
+    const result = operatingLedger.runAutonomousCycle({
+      actor: 'durable_scheduler',
+      maxActions: Math.max(1, Math.min(25, Number(options.maxActions || 10))),
+      source: 'durable_scheduler',
+      actionType: options.actionType ?? options.action_type,
+      actionTypes: options.actionTypes ?? options.action_types,
+      jobId: options.jobId ?? options.job_id,
+      jobIds: options.jobIds ?? options.job_ids
+    });
+    const completion = operatingLedger.completeScheduledJob(AUTONOMOUS_SCHEDULER_KEY, claim.leaseId, {
+      success: true,
+      actionCount: result.applied?.length || 0,
+      blockedCount: result.blocked?.length || 0,
+      ranAt: result.ranAt || new Date().toISOString()
+    }, { actor: 'durable_scheduler', now: options.now });
+    return { success: true, ran: true, result, completion, scheduler: autonomousSchedulerStatus() };
+  } catch (error) {
+    const completion = operatingLedger.completeScheduledJob(AUTONOMOUS_SCHEDULER_KEY, claim.leaseId, {
+      success: false,
+      error: error.message || 'Autonomous scheduler failed.'
+    }, { actor: 'durable_scheduler', now: options.now });
+    log('error', 'durable_autonomous_cycle_failed', { error: serializeError(error) });
+    return { success: false, ran: true, error: serializeError(error), completion, scheduler: autonomousSchedulerStatus() };
+  }
+}
+
+function durableAutonomousCycleResponse(execution, options = {}) {
+  if (!execution.success) return execution;
+  if (execution.ran) {
+    return {
+      ...execution.result,
+      durable: {
+        ran: true,
+        completed: Boolean(execution.completion?.completed),
+        schedulerKey: AUTONOMOUS_SCHEDULER_KEY
+      },
+      scheduler: execution.scheduler
+    };
+  }
+  const preview = operatingLedger.runAutonomousCycle({
+    ...options,
+    actor: 'durable_scheduler_preview',
+    dryRun: true
+  });
+  return {
+    ...preview,
+    dryRun: false,
+    ranAt: null,
+    applied: [],
+    blocked: [],
+    durable: {
+      ran: false,
+      reason: execution.claim?.reason || 'not_due',
+      schedulerKey: AUTONOMOUS_SCHEDULER_KEY
+    },
+    scheduler: execution.scheduler
+  };
+}
+
+const autonomousSchedulerTimers = new Set();
+
+function registerAutonomousSchedulerTimer(timer) {
+  timer.unref();
+  autonomousSchedulerTimers.add(timer);
+  return timer;
+}
+
+function clearAutonomousSchedulerTimers() {
+  const count = autonomousSchedulerTimers.size;
+  for (const timer of autonomousSchedulerTimers) {
+    clearTimeout(timer);
+    clearInterval(timer);
+  }
+  autonomousSchedulerTimers.clear();
+  return count;
+}
+
+if (autonomousSchedulerEnabled) {
+  registerAutonomousSchedulerTimer(setInterval(
+    () => runDurableAutonomousCycle(),
+    autonomousSchedulerIntervalSeconds * 1000
+  ));
+  registerAutonomousSchedulerTimer(setTimeout(() => runDurableAutonomousCycle(), 500));
+}
 
 async function handleLedgerRequest(req, res, action, successStatus = 200) {
   try {
@@ -3896,535 +1692,37 @@ async function handleLedgerRequest(req, res, action, successStatus = 200) {
       statusCode,
       error.code || (statusCode === 404 ? 'not_found' : statusCode === 400 ? 'bad_request' : statusCode === 409 ? 'conflict' : 'ledger_error'),
       error.message || 'Ledger request failed',
-      serializeError(error)
+      error.details || serializeError(error)
     );
   }
 }
 
-function legacyLedgerJobId(jobOrId) {
-  const value = typeof jobOrId === 'object' && jobOrId !== null
-    ? jobOrId.ledgerJobId || jobOrId.id
-    : jobOrId;
-  const id = String(value || '').trim();
-  if (!id) return null;
-  if (id.startsWith('job_') || id.startsWith('legacy_job_')) return id;
-  return `legacy_job_${id}`;
-}
-
-function legacyLedgerWorkerId(workerOrId) {
-  const value = typeof workerOrId === 'object' && workerOrId !== null
-    ? workerOrId.ledgerWorkerId || workerOrId.id
-    : workerOrId;
-  const id = String(value || '').trim();
-  if (!id) return null;
-  if (id.startsWith('worker_') || id.startsWith('legacy_worker_')) return id;
-  return `legacy_worker_${id}`;
-}
-
-function legacyLedgerToolId(toolOrId) {
-  const value = typeof toolOrId === 'object' && toolOrId !== null
-    ? toolOrId.ledgerToolId || toolOrId.id
-    : toolOrId;
-  const id = String(value || '').trim();
-  if (!id) return null;
-  if (id.startsWith('tool_') || id.startsWith('legacy_tool_')) return id;
-  return `legacy_tool_${id}`;
-}
-
-function recordLabel(record = {}, fallback = 'record') {
-  return record.title
-    || record.subject
-    || record.number
-    || record.package
-    || record.name
-    || record.client
-    || record.vendor
-    || record.company
-    || record.worker
-    || record.description
-    || fallback;
-}
-
-function findPendingArchiveApproval(targetType, targetId) {
-  const approvals = operatingLedger.listApprovals({ status: 'pending', limit: 500 });
-  return approvals.find(approval =>
-    approval.targetType === targetType
-    && String(approval.targetId) === String(targetId)
-  ) || null;
-}
-
-function requestConstructionArchive(collection, id, payload = {}, options = {}) {
-  const records = construction[collection] || [];
-  const record = records.find(item => String(item.id) === String(id));
-  if (!record) {
-    const error = new Error('Construction record not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const actor = options.actor || payload.actor || 'dashboard';
-  const reason = payload.reason || payload.notes || 'Destructive archive requested; retained until human approval is resolved.';
-  const before = { ...record };
-  const targetId = `${collection}:${id}`;
-
-  if (record.status === 'archived') {
-    return { record, approval: null, before, alreadyArchived: true };
-  }
-
-  const pendingApproval = findPendingArchiveApproval('construction_record_archive', targetId);
-  if (record.status === 'pending_archive_approval' && pendingApproval) {
-    return { record, approval: pendingApproval, before, alreadyPending: true };
-  }
-
-  const timestamp = new Date().toISOString();
-  const approval = operatingLedger.createApproval({
-    targetType: 'construction_record_archive',
-    targetId,
-    approvalType: 'destructive_action',
-    requestedBy: actor,
-    summary: `Archive ${collection} record: ${recordLabel(record, id)}`,
-    reason,
-    data: {
-      collection,
-      recordId: id,
-      label: recordLabel(record, id),
-      requestedAction: 'archive',
-      before
-    }
-  }, { actor });
-
-  Object.assign(record, {
-    status: 'pending_archive_approval',
-    archiveApprovalId: approval.id,
-    archiveRequestedAt: timestamp,
-    archiveRequestedBy: actor,
-    archiveReason: reason,
-    updatedAt: timestamp
-  });
-
-  operatingLedger.audit({
-    entityType: 'construction_record',
-    entityId: targetId,
-    action: 'request_construction_archive',
-    actor,
-    before,
-    after: record,
-    metadata: { approvalId: approval.id, collection, id }
-  });
-
-  saveState();
-  return { record, approval, before };
-}
-
-function requestLegacyJobArchive(job, payload = {}, options = {}) {
-  const actor = options.actor || payload.actor || 'legacy_jobs_api';
-  const reason = payload.reason || payload.notes || 'Legacy job delete requested; retained until human approval is resolved.';
-  const before = { ...job };
-
-  if (job.status === 'archived') {
-    return { job, approval: null, before, alreadyArchived: true };
-  }
-
-  const pendingApproval = findPendingArchiveApproval('legacy_job_archive', job.id);
-  if (job.status === 'pending_archive_approval' && pendingApproval) {
-    return { job, approval: pendingApproval, before, alreadyPending: true };
-  }
-
-  const timestamp = new Date().toISOString();
-  const approval = operatingLedger.createApproval({
-    targetType: 'legacy_job_archive',
-    targetId: String(job.id),
-    jobId: legacyLedgerJobId(job),
-    approvalType: 'destructive_action',
-    requestedBy: actor,
-    summary: `Archive legacy job: ${job.title || job.id}`,
-    reason,
-    data: {
-      legacyJobId: job.id,
-      ledgerJobId: legacyLedgerJobId(job),
-      title: job.title || null,
-      requestedAction: 'archive',
-      before
-    }
-  }, { actor });
-
-  Object.assign(job, {
-    status: 'pending_archive_approval',
-    archiveApprovalId: approval.id,
-    archiveRequestedAt: timestamp,
-    archiveRequestedBy: actor,
-    archiveReason: reason,
-    updatedAt: timestamp
-  });
-
-  mirrorLegacyJobToLedger(job, {
-    actor,
-    status: 'pending_archive_approval',
-    progressNote: 'Job archive requested; record retained until approval is resolved.'
-  });
-
-  operatingLedger.audit({
-    entityType: 'legacy_job',
-    entityId: job.id,
-    jobId: legacyLedgerJobId(job),
-    action: 'request_legacy_job_archive',
-    actor,
-    before,
-    after: job,
-    metadata: { approvalId: approval.id }
-  });
-
-  saveState();
-  return { job, approval, before };
-}
-
-function applyServerApprovalSideEffects(approval, actor = 'approval') {
-  if (!approval || approval.status !== 'approved') {
-    return null;
-  }
-
-  const targetType = String(approval.targetType || '');
-  const data = approval.data || {};
-  const timestamp = new Date().toISOString();
-
-  if (targetType === 'construction_record_archive') {
-    const collection = data.collection;
-    const recordId = data.recordId;
-    if (!CONSTRUCTION_COLLECTIONS.includes(collection)) return null;
-    const records = construction[collection] || [];
-    const record = records.find(item => String(item.id) === String(recordId));
-    if (!record) return null;
-    const before = { ...record };
-    Object.assign(record, {
-      status: 'archived',
-      archivedAt: timestamp,
-      archivedBy: approval.resolvedBy || actor,
-      archiveApprovalId: approval.id,
-      updatedAt: timestamp
-    });
-    operatingLedger.audit({
-      entityType: 'construction_record',
-      entityId: `${collection}:${recordId}`,
-      action: 'archive_construction_record',
-      actor: approval.resolvedBy || actor,
-      before,
-      after: record,
-      metadata: { approvalId: approval.id, collection, recordId }
-    });
-    saveState();
-    return { type: 'construction_record_archive', collection, record };
-  }
-
-  if (targetType === 'legacy_job_archive') {
-    const legacyJobId = data.legacyJobId || approval.targetId;
-    const job = jobs.find(item => String(item.id) === String(legacyJobId));
-    if (!job) return null;
-    const before = { ...job };
-    releaseJobResources(job);
-    Object.assign(job, {
-      status: 'archived',
-      progress: Math.max(0, Math.min(100, Number(job.progress || 0))),
-      archivedAt: timestamp,
-      archivedBy: approval.resolvedBy || actor,
-      archiveApprovalId: approval.id,
-      updatedAt: timestamp
-    });
-    mirrorLegacyJobToLedger(job, {
-      actor: approval.resolvedBy || actor,
-      status: 'archived',
-      progressNote: 'Job archived after explicit approval; operational record retained.'
-    });
-    operatingLedger.audit({
-      entityType: 'legacy_job',
-      entityId: job.id,
-      jobId: legacyLedgerJobId(job),
-      action: 'archive_legacy_job',
-      actor: approval.resolvedBy || actor,
-      before,
-      after: job,
-      metadata: { approvalId: approval.id }
-    });
-    saveState();
-    return { type: 'legacy_job_archive', job };
-  }
-
-  if (targetType === 'worker_retirement' && data.legacyWorkerId != null) {
-    const worker = workers.find(item => String(item.id) === String(data.legacyWorkerId));
-    if (!worker) return null;
-    const before = { ...worker };
-    Object.assign(worker, {
-      status: 'retired',
-      retiredAt: timestamp,
-      retiredBy: approval.resolvedBy || actor,
-      retirementApprovalId: approval.id,
-      updatedAt: timestamp
-    });
-    for (const job of jobs.filter(item =>
-      String(item.assignedWorkerId) === String(worker.id)
-      || item.worker === worker.name
-    )) {
-      releaseJobResources(job);
-      job.worker = null;
-      job.assignedWorkerId = null;
-      if (['scheduled', 'in_progress'].includes(job.status)) {
-        job.status = 'pending';
-        job.startDate = null;
-        job.scheduledStart = null;
-        job.scheduledEnd = null;
-        job.estimatedCompletion = null;
-        job.ai = {
-          ...(job.ai || {}),
-          confidence: 'low',
-          reasoning: 'Assigned worker retirement was approved. Job returned to pending for replanning.',
-          lastDecisionAt: timestamp
-        };
-      }
-      mirrorLegacyJobToLedger(job, {
-        actor: approval.resolvedBy || actor,
-        status: job.status,
-        progressNote: 'Worker retirement approved; job resources released for replanning.'
-      });
-    }
-    syncLegacyWorkerToLedger(worker, approval.resolvedBy || actor);
-    operatingLedger.audit({
-      entityType: 'legacy_worker',
-      entityId: worker.id,
-      action: 'retire_legacy_worker',
-      actor: approval.resolvedBy || actor,
-      before,
-      after: worker,
-      metadata: { approvalId: approval.id, ledgerWorkerId: approval.targetId }
-    });
-    saveState();
-    return { type: 'worker_retirement', worker };
-  }
-
-  if (targetType === 'tool_retirement' && data.legacyToolId != null) {
-    const tool = tools.find(item => String(item.id) === String(data.legacyToolId));
-    if (!tool) return null;
-    const before = { ...tool };
-    Object.assign(tool, {
-      status: 'retired',
-      assignedJobId: null,
-      assignedWorkerId: null,
-      retiredAt: timestamp,
-      retiredBy: approval.resolvedBy || actor,
-      retirementApprovalId: approval.id,
-      updatedAt: timestamp
-    });
-    syncLegacyToolToLedger(tool, approval.resolvedBy || actor);
-    operatingLedger.audit({
-      entityType: 'legacy_tool',
-      entityId: tool.id,
-      action: 'retire_legacy_tool',
-      actor: approval.resolvedBy || actor,
-      before,
-      after: tool,
-      metadata: { approvalId: approval.id, ledgerToolId: approval.targetId }
-    });
-    saveState();
-    return { type: 'tool_retirement', tool };
-  }
-
-  return null;
-}
-
-function syncLegacyWorkerToLedger(worker, actor = 'legacy_api') {
-  if (!worker) return null;
-  const ledgerWorkerId = legacyLedgerWorkerId(worker);
-  const ledgerWorker = operatingLedger.upsertWorker({
-    ...worker,
-    id: ledgerWorkerId,
-    legacyId: worker.id,
-    role: worker.role || worker.specialty,
-    homeRegion: worker.homeRegion || worker.location,
-    hourlyRate: worker.hourlyRate
-  }, { actor });
-  worker.ledgerWorkerId = ledgerWorker.id;
-  return ledgerWorker;
-}
-
-function syncLegacyToolToLedger(tool, actor = 'legacy_api') {
-  if (!tool) return null;
-  const ledgerToolId = legacyLedgerToolId(tool);
-  const ledgerTool = operatingLedger.upsertTool({
-    ...tool,
-    id: ledgerToolId,
-    legacyId: tool.id,
-    homeLocation: tool.homeLocation || tool.currentLocation || tool.location,
-    currentLocation: tool.currentLocation || tool.location
-  }, { actor });
-  tool.ledgerToolId = ledgerTool.id;
-  return ledgerTool;
-}
-
-function legacyJobToLedgerPayload(job) {
-  return {
-    ledgerJobId: legacyLedgerJobId(job),
-    legacyId: job.id,
-    title: job.title || job.service || 'Contractor job',
-    service: job.service || job.jobType || job.job_type || job.title || 'contracting',
-    jobType: job.jobType || job.job_type || job.service || 'general',
-    description: job.description || job.notes || '',
-    address: job.address || job.location || '',
-    city: job.city || '',
-    region: job.region || '',
-    country: job.country || 'NL',
-    priority: job.priority || 'medium',
-    status: job.status || 'pending',
-    phase: job.phase || job.status || 'intake',
-    estimatedHours: job.estimatedHours || job.estimated_hours || 0,
-    estimatedCost: job.estimatedCost || job.estimated_cost || 0,
-    contractValue: job.contractValue || job.value || job.estimatedCost || job.estimated_cost || 0,
-    progressPercent: job.progress ?? job.progressPercent ?? 0,
-    scheduledStart: job.scheduledStart || job.startDate || null,
-    scheduledEnd: job.scheduledEnd || job.estimatedCompletion || null,
-    targetCompletion: job.estimatedCompletion || null,
-    assignAutomatically: false,
-    workerId: job.assignedWorkerId ? legacyLedgerWorkerId(job.assignedWorkerId) : null,
-    workerName: job.worker || null,
-    tools: Array.isArray(job.tools) ? job.tools : Array.isArray(job.requiredTools) ? job.requiredTools : [],
-    client: {
-      name: job.client || job.client_name || 'Unknown client',
-      phone: job.phone || job.client_phone || null,
-      email: job.email || job.client_email || null,
-      address: job.address || job.location || null,
-      country: job.country || 'NL'
-    },
-    data: {
-      legacyId: job.id,
-      legacyUpdatedAt: new Date().toISOString()
-    }
-  };
-}
-
-function mirrorLegacyJobToLedger(job, options = {}) {
-  if (!job) return null;
-  const actor = options.actor || 'legacy_api';
-  const ledgerJobId = legacyLedgerJobId(job);
-  const existing = ledgerJobId ? operatingLedger.getJobRow(ledgerJobId) : null;
-  let detail = existing
-    ? operatingLedger.updateJob(ledgerJobId, legacyJobToLedgerPayload(job), { actor })
-    : operatingLedger.createIntake(legacyJobToLedgerPayload(job), { actor, jobId: ledgerJobId });
-  const detailJobId = detail?.job?.id || detail?.id || ledgerJobId;
-  detail = operatingLedger.getJobDetail(detailJobId);
-
-  job.ledgerJobId = detail.id;
-
-  const worker = workers.find(item =>
-    String(item.id) === String(job.assignedWorkerId)
-    || item.name === job.worker
-  );
-  if (worker) {
-    const ledgerWorker = syncLegacyWorkerToLedger(worker, actor);
-    const hasAssignment = detail.assignments.some(assignment => assignment.workerId === ledgerWorker.id);
-    if (!hasAssignment) {
-      operatingLedger.addAssignment(detail.id, {
-        workerId: ledgerWorker.id,
-        role: worker.specialty || worker.role || 'Contractor',
-        scheduledStart: job.scheduledStart || null,
-        scheduledEnd: job.scheduledEnd || null,
-        allocationHours: job.estimatedHours || 0
-      }, { actor, optional: true });
-    }
-  }
-
-  const requestedTools = Array.isArray(job.tools) ? job.tools : Array.isArray(job.requiredTools) ? job.requiredTools : [];
-  for (const requestedTool of requestedTools) {
-    const toolName = typeof requestedTool === 'string' ? requestedTool : requestedTool.name;
-    if (!toolName) continue;
-    const legacyTool = tools.find(tool => String(tool.name || '').toLowerCase() === String(toolName).toLowerCase());
-    const ledgerTool = legacyTool ? syncLegacyToolToLedger(legacyTool, actor) : null;
-    detail = operatingLedger.getJobDetail(detail.id);
-    const hasReservation = detail.tools.some(reservation => String(reservation.toolName || '').toLowerCase() === String(toolName).toLowerCase());
-    if (!hasReservation) {
-      operatingLedger.reserveTool(detail.id, {
-        toolId: ledgerTool?.id,
-        toolName,
-        neededFrom: job.scheduledStart || null,
-        neededUntil: job.scheduledEnd || null
-      }, { actor });
-    }
-  }
-
-  if (options.progressNote || options.status) {
-    operatingLedger.addProgressUpdate(detail.id, {
-      status: options.status || job.status || 'note',
-      progressPercent: job.progress ?? job.progressPercent ?? 0,
-      note: options.progressNote || `Legacy job ${job.id} synchronized.`
-    }, { actor });
-  }
-
-  if (options.createInvoiceOnComplete) {
-    detail = operatingLedger.getJobDetail(detail.id);
-    if (!detail.invoices.length) {
-      operatingLedger.createInvoice(detail.id, {
-        amount: job.actualCost || job.estimatedCost || 0,
-        total: job.actualCost || job.estimatedCost || 0,
-        notes: 'Drafted from completed legacy job lifecycle.'
-      }, { actor });
-    }
-  }
-
-  return operatingLedger.getJobDetail(job.ledgerJobId);
-}
-
-function resolveJobDetailForApiRoute(jobId, actor = 'legacy_jobs_api') {
-  const legacyJob = findJob(jobId);
-  if (legacyJob) {
-    return mirrorLegacyJobToLedger(legacyJob, { actor });
-  }
-  return operatingLedger.getJobDetail(jobId, { includeAudit: true });
-}
-
-function resolveUploadLedgerJobDetail(payload = {}, actor = 'upload_api') {
-  const explicitLedgerJobId = payload.ledgerJobId || payload.ledger_job_id || null;
-  if (explicitLedgerJobId) {
-    return operatingLedger.getJobDetail(explicitLedgerJobId);
-  }
-
-  const submittedJobId = payload.jobId || payload.job_id || null;
-  if (!submittedJobId) return null;
-
-  const legacyJob = findJob(submittedJobId);
-  if (legacyJob) {
-    return mirrorLegacyJobToLedger(legacyJob, { actor });
-  }
-
+function resolveUploadLedgerJobDetail(payload = {}) {
+  const jobId = payload.ledgerJobId || payload.ledger_job_id || payload.jobId || payload.job_id || null;
+  if (!jobId) return null;
   try {
-    return operatingLedger.getJobDetail(submittedJobId);
+    return operatingLedger.getJobDetail(jobId);
   } catch {
-    const fallbackLedgerId = legacyLedgerJobId(submittedJobId);
-    if (fallbackLedgerId && fallbackLedgerId !== String(submittedJobId)) {
-      try {
-        return operatingLedger.getJobDetail(fallbackLedgerId);
-      } catch {
-        return null;
-      }
-    }
     return null;
   }
 }
 
 function createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload = {}, analysis = {}) {
-  if (!ledgerDetail?.id || !ledgerDocument?.id) {
-    return { records: {}, actions: [] };
-  }
+  if (!ledgerDetail?.id || !ledgerDocument?.id) return { records: {}, actions: [] };
 
   const filename = ledgerDocument.filename || payload.filename || payload.name || 'uploaded evidence';
   const notes = String(payload.notes || payload.observation || payload.description || analysis.summary || '').trim();
   const evidenceRef = ledgerDocument.storageRef || ledgerDocument.filename || ledgerDocument.id;
   const photos = ledgerDocument.type === 'photo' ? [evidenceRef].filter(Boolean) : [];
-  const records = {};
-  const actions = [];
-
-  records.progress = operatingLedger.addProgressUpdate(ledgerDetail.id, {
-    progressPercent: ledgerDetail.progressPercent || ledgerDetail.progress || 0,
-    note: `Uploaded evidence recorded: ${filename}. ${analysis.summary || notes}`.trim(),
-    photos,
-    source: 'upload_evidence'
-  }, { actor: 'upload_api' });
-  actions.push({ type: 'record_ledger_progress_evidence', id: records.progress.id, message: 'Ledger progress evidence recorded.' });
+  const records = {
+    progress: operatingLedger.addProgressUpdate(ledgerDetail.id, {
+      progressPercent: ledgerDetail.progressPercent || ledgerDetail.progress || 0,
+      note: `Uploaded evidence recorded: ${filename}. ${analysis.summary || notes}`.trim(),
+      photos,
+      source: 'upload_evidence'
+    }, { actor: 'upload_api' })
+  };
+  const actions = [{ type: 'record_ledger_progress_evidence', id: records.progress.id, message: 'Ledger progress evidence recorded.' }];
 
   if (analysis.riskDetected) {
     records.task = operatingLedger.addTask(ledgerDetail.id, {
@@ -4468,265 +1766,60 @@ function createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload = {},
   return { records, actions };
 }
 
-function createLegacyJobSubresourceAlias(route, responseKey, createRecord, successStatus = 201) {
-  app.post(`/api/jobs/:id/${route}`, (req, res) => {
-    return handleLedgerRequest(req, res, () => {
-      const actor = req.body?.actor || 'legacy_jobs_api';
-      const detail = resolveJobDetailForApiRoute(req.params.id, actor);
-      const record = createRecord(detail.id, req.body || {}, actor);
-      const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-      return {
-        success: true,
-        [responseKey]: record,
-        job: mapLedgerJobForLegacy(job),
-        ledgerJob: job,
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    }, successStatus);
-  });
-}
-
-function mapLedgerJobForLegacy(jobOrDetail) {
-  const detail = Array.isArray(jobOrDetail?.tasks) || Array.isArray(jobOrDetail?.invoices) ? jobOrDetail : null;
-  const job = detail || jobOrDetail;
-  const client = detail?.client || {};
-  return {
-    id: job.id,
-    ledgerJobId: job.id,
-    source: 'ledger',
-    title: job.title,
-    client: client.name || job.clientName || 'Client',
-    client_name: client.name || job.clientName || 'Client',
-    client_phone: client.phone || job.clientPhone || '',
-    client_email: client.email || job.clientEmail || '',
-    address: job.address,
-    location: job.address || job.city || '',
-    description: job.description,
-    service: job.jobType,
-    jobType: job.jobType,
-    status: job.status,
-    priority: job.priority,
-    progress: job.progressPercent,
-    estimatedCost: job.estimatedCost,
-    actualCost: detail?.expenses?.reduce((sum, expense) => sum + Number(expense.amount || 0), 0) || 0,
-    estimatedHours: job.estimatedHours,
-    startDate: job.scheduledStart ? String(job.scheduledStart).slice(0, 10) : null,
-    scheduledStart: job.scheduledStart,
-    scheduledEnd: job.scheduledEnd,
-    estimatedCompletion: job.targetCompletion || job.scheduledEnd,
-    worker: detail?.assignments?.[0]?.workerName || null,
-    tools: detail?.tools?.map(tool => tool.toolName) || [],
-    ledger: detail || { job }
-  };
-}
-
-function mapLedgerWorkerForLegacy(worker) {
-  const data = worker?.data || {};
-  return {
-    id: worker.id,
-    ledgerWorkerId: worker.id,
-    legacyId: data.legacyId || null,
-    source: 'ledger',
-    name: worker.name,
-    specialty: worker.role || (worker.skills || [])[0] || 'General Maintenance',
-    specialties: worker.skills || [],
-    skills: worker.skills || [],
-    status: worker.status,
-    location: worker.homeRegion || 'Unassigned',
-    rating: Number(data.rating || 5),
-    completedJobs: Number(data.completedJobs || 0),
-    hourlyRate: Number(worker.hourlyRate || 0),
-    currentJob: data.currentJob || null,
-    currentJobId: data.currentJobId || null,
-    ledger: worker
-  };
-}
-
-function mapLedgerToolForLegacy(tool) {
-  const data = tool?.data || {};
-  return {
-    id: tool.id,
-    ledgerToolId: tool.id,
-    legacyId: data.legacyId || null,
-    source: 'ledger',
-    name: tool.name,
-    category: tool.category || 'general',
-    status: tool.status,
-    currentLocation: tool.currentLocation || tool.homeLocation || 'Warehouse',
-    homeLocation: tool.homeLocation || tool.currentLocation || 'Warehouse',
-    returnDate: data.returnDate || null,
-    assignedJobId: data.assignedJobId || null,
-    assignedWorkerId: data.assignedWorkerId || null,
-    ledger: tool
-  };
-}
-
-const LEGACY_JOB_ARCHIVE_STATUSES = new Set(['archived', 'pending_archive_approval']);
-const LEGACY_JOB_INACTIVE_STATUSES = new Set([
-  'archived',
-  'pending_archive_approval',
-  'cancelled',
-  'canceled',
-  'rejected',
-  'deleted',
-  'void'
-]);
-
-function normalizeLegacyJobStatus(value, fallback = 'pending') {
-  return String(value || fallback).trim().toLowerCase().replace(/[\s-]+/g, '_');
-}
-
-function booleanQuery(value, fallback = false) {
-  if (value === undefined || value === null || value === '') return fallback;
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  const text = String(value).trim().toLowerCase();
-  if (['1', 'true', 'yes', 'y', 'on'].includes(text)) return true;
-  if (['0', 'false', 'no', 'n', 'off'].includes(text)) return false;
-  return fallback;
-}
-
-function isArchivedLegacyJob(job) {
-  return LEGACY_JOB_ARCHIVE_STATUSES.has(normalizeLegacyJobStatus(job?.status));
-}
-
-function isInactiveLegacyJob(job) {
-  return LEGACY_JOB_INACTIVE_STATUSES.has(normalizeLegacyJobStatus(job?.status));
-}
-
-function findLedgerWorkerForLegacyRoute(workerId) {
-  const directId = String(workerId || '').trim();
-  if (!directId) return null;
-  const candidateIds = new Set([directId, legacyLedgerWorkerId(directId)].filter(Boolean));
-  return operatingLedger.listWorkers({ limit: 500 })
-    .find(worker => candidateIds.has(String(worker.id))) || null;
-}
-
-function findLedgerToolForLegacyRoute(toolId) {
-  const directId = String(toolId || '').trim();
-  if (!directId) return null;
-  const candidateIds = new Set([directId, legacyLedgerToolId(directId)].filter(Boolean));
-  return operatingLedger.listTools({ limit: 500 })
-    .find(tool => candidateIds.has(String(tool.id))) || null;
-}
-
-function mergedLegacyAndLedgerJobs(filters = {}) {
-  const requestedStatus = normalizeLegacyJobStatus(filters.status || '', '');
-  const archiveOnly = ['archive', 'archives', 'archived'].includes(requestedStatus);
-  const includeArchived = archiveOnly || booleanQuery(filters.includeArchived ?? filters.include_archived, false);
-  const status = archiveOnly ? '' : requestedStatus;
-  const priority = String(filters.priority || '').trim().toLowerCase();
-  const search = String(filters.search || '').trim().toLowerCase();
-  const filteredJobs = jobs.filter(job => {
-    const jobStatus = normalizeLegacyJobStatus(job.status);
-    if (archiveOnly && !isArchivedLegacyJob(job)) return false;
-    if (!includeArchived && isInactiveLegacyJob(job)) return false;
-    if (status && jobStatus !== status) return false;
-    if (priority && String(job.priority || '').toLowerCase() !== priority) return false;
-    if (search && !JSON.stringify(job).toLowerCase().includes(search)) return false;
-    return true;
-  });
-  const representedLedgerIds = new Set(filteredJobs.map(job => legacyLedgerJobId(job)).filter(Boolean));
-  const ledgerJobs = operatingLedger.listJobs({
-    status,
-    search,
-    limit: 500,
-    includeArchived,
-    archiveOnly
-  })
-    .filter(job => !representedLedgerIds.has(job.id))
-    .filter(job => !priority || String(job.priority || '').toLowerCase() === priority)
-    .map(job => mapLedgerJobForLegacy(job));
-  return [...filteredJobs, ...ledgerJobs];
-}
-
-function mergedLegacyAndLedgerWorkers(filters = {}) {
-  const status = String(filters.status || '').trim().toLowerCase();
-  const search = String(filters.search || '').trim().toLowerCase();
-  const filteredWorkers = workers.filter(worker => {
-    if (status && String(worker.status || '').toLowerCase() !== status) return false;
-    if (search && !JSON.stringify(worker).toLowerCase().includes(search)) return false;
-    return true;
-  });
-  const representedLedgerIds = new Set(filteredWorkers.map(worker => legacyLedgerWorkerId(worker)).filter(Boolean));
-  const ledgerWorkers = operatingLedger.listWorkers({ status, search, limit: 500 })
-    .filter(worker => !representedLedgerIds.has(worker.id))
-    .map(worker => mapLedgerWorkerForLegacy(worker));
-  return [...filteredWorkers, ...ledgerWorkers];
-}
-
-function mergedLegacyAndLedgerTools(filters = {}) {
-  const status = String(filters.status || '').trim().toLowerCase();
-  const search = String(filters.search || '').trim().toLowerCase();
-  const filteredTools = tools.filter(tool => {
-    if (status && String(tool.status || '').toLowerCase() !== status) return false;
-    if (search && !JSON.stringify(tool).toLowerCase().includes(search)) return false;
-    return true;
-  });
-  const representedLedgerIds = new Set(filteredTools.map(tool => legacyLedgerToolId(tool)).filter(Boolean));
-  const ledgerTools = operatingLedger.listTools({ status, search, limit: 500 })
-    .filter(tool => !representedLedgerIds.has(tool.id))
-    .map(tool => mapLedgerToolForLegacy(tool));
-  return [...filteredTools, ...ledgerTools];
-}
-
-// Routes
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
 // API Routes
-app.get('/api/dashboard', (req, res) => {
-  const ledgerJobs = operatingLedger.listJobs({ limit: 500 }).map(mapLedgerJobForLegacy);
-  const ledgerWorkers = operatingLedger.listWorkers({ limit: 500 }).map(mapLedgerWorkerForLegacy);
-  const ledgerTools = operatingLedger.listTools({ limit: 500 }).map(mapLedgerToolForLegacy);
-  const ledgerSummary = operatingLedger.dashboardSummary();
-  const weather = operatingLedger.weatherOverview();
-  const criticalJobs = ledgerJobs.filter(job => job.priority === 'critical').length;
-  const aiHandling = ledgerJobs.filter(job => job.status === 'in_progress').length;
-  const ledgerInsights = (ledgerSummary.nextActions || []).slice(0, 8).map(action => ({
-    title: action.label || action.type || 'Ledger action',
-    description: action.message || 'A persisted contractor record needs review.',
-    confidence: 'ledger',
-    actionType: action.type || null,
-    requiresApproval: action.requiresApproval === true,
-    jobId: action.jobId || null
-  }));
-
-  res.json({
-    apiVersion: '1.1.0',
-    source: 'node',
-    dashboardSource: 'ledger',
-    metrics: {
-      criticalJobs,
-      aiHandling,
-      todayRevenue: 0,
-      onTimeRate: null,
-      ledgerOnly: true
-    },
-    jobs: ledgerJobs,
-    workers: ledgerWorkers,
-    tools: ledgerTools,
-    ledgerJobs,
-    ledgerWorkers,
-    ledgerTools,
-    construction: {
-      summary: constructionSummary(),
-      data: construction,
-      capabilities: constructionCapabilities(),
-      operatingCatalog: buildContractorOperatingCatalog()
-    },
-    ledger: ledgerSummary,
-    weather,
-    aiInsights: ledgerInsights
-  });
-});
+app.all('/api/dashboard', (req, res) => res.status(410).json({
+  error: {
+    code: 'dashboard_facade_retired',
+    message: 'The unversioned dashboard facade is retired. Use the operating-ledger dashboard and resource routes.',
+    requestId: req.requestId
+  },
+  migration: {
+    dashboard: '/api/ledger/dashboard',
+    jobs: '/api/ledger/jobs',
+    workers: '/api/ledger/workers',
+    tools: '/api/ledger/tools',
+    weather: '/api/ledger/weather'
+  }
+}));
 
 app.get('/api/ledger/dashboard', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     dashboard: operatingLedger.dashboardSummary()
   }));
+});
+
+app.get('/api/ledger/weather', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    weather: operatingLedger.weatherOverview()
+  }));
+});
+
+app.get('/api/ledger/documents/:id/content', async (req, res) => {
+  try {
+    const document = operatingLedger.getDocument(req.params.id);
+    if (!fieldWorkerCanAccessJob(req, document.jobId)) {
+      return sendError(req, res, 403, 'field_job_scope_forbidden', 'This field worker is not assigned to the evidence job.');
+    }
+    if (!evidenceStorage) throw evidenceStorageInitError || new EvidenceStorageError('storage_unavailable', 'Evidence storage is unavailable.');
+    const evidence = await evidenceStorage.read(document.storageRef);
+    operatingLedger.audit({
+      entityType: 'document',
+      entityId: document.id,
+      jobId: document.jobId,
+      action: 'download_document',
+      actor: req.operator?.role || 'authenticated_operator',
+      after: { storageRef: document.storageRef, filename: document.filename }
+    });
+    res.setHeader('Content-Type', document.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(evidence.length));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(document.filename || 'evidence')}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.end(evidence);
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || (error.statusCode ? 'not_found' : 'evidence_download_failed'), error.statusCode ? error.message : 'Unable to retrieve the retained evidence file.', serializeError(error));
+  }
 });
 
 app.get('/api/ledger/capabilities', (req, res) => {
@@ -4759,6 +1852,9 @@ app.get('/api/ledger/command-plan', (req, res) => {
 });
 
 app.post('/api/ledger/command-plan', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can apply command-plan automation.');
+  }
   return handleLedgerRequest(req, res, () => {
     const payload = req.body || {};
     const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
@@ -4783,8 +1879,10 @@ app.get('/api/ledger/playbooks', (req, res) => {
 app.get('/api/ledger/jobs', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    jobs: operatingLedger.listJobs(req.query || {}),
-    dashboard: operatingLedger.dashboardSummary()
+    jobs: scopedLedgerJobs(req, req.query || {}),
+    dashboard: req.operator?.role === 'field_worker'
+      ? { fieldScoped: true, jobCount: scopedLedgerJobs(req, req.query || {}).length }
+      : operatingLedger.dashboardSummary()
   }));
 });
 
@@ -4799,7 +1897,7 @@ app.post('/api/ledger/intake', (req, res) => {
 app.get('/api/ledger/jobs/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true })
+    job: jobForOperator(req, req.params.id, { includeAudit: true })
   }));
 });
 
@@ -4817,6 +1915,22 @@ app.patch('/api/ledger/jobs/:id', (req, res) => {
     ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
     dashboard: operatingLedger.dashboardSummary()
   }));
+});
+
+app.post('/api/ledger/jobs/:id/archive', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestJobArchive(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/restore', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestJobRestore(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
 });
 
 app.get('/api/ledger/jobs/:id/playbook', (req, res) => {
@@ -4902,9 +2016,9 @@ app.post('/api/ledger/jobs/:id/change-orders', (req, res) => {
 app.post('/api/ledger/jobs/:id/field-reports', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    fieldReport: operatingLedger.createFieldReport(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    fieldReport: recordForOperator(req, operatingLedger.createFieldReport(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
@@ -4956,18 +2070,18 @@ app.post('/api/ledger/jobs/:id/inspections', (req, res) => {
 app.post('/api/ledger/jobs/:id/observations', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    observation: operatingLedger.createObservationRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    observation: recordForOperator(req, operatingLedger.createObservationRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
 app.post('/api/ledger/jobs/:id/incidents', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    incident: operatingLedger.createIncidentRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    incident: recordForOperator(req, operatingLedger.createIncidentRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
@@ -5037,7 +2151,7 @@ app.post('/api/ledger/jobs/:id/assignments/:assignmentId/release', (req, res) =>
 app.post('/api/ledger/jobs/:id/tools', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    toolReservation: operatingLedger.reserveTool(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    toolReservation: operatingLedger.reserveTool(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5046,7 +2160,7 @@ app.post('/api/ledger/jobs/:id/tools', (req, res) => {
 app.post('/api/ledger/jobs/:id/tools/:reservationId/release', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    toolReservation: operatingLedger.releaseToolReservation(req.params.id, req.params.reservationId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    toolReservation: operatingLedger.releaseToolReservation(req.params.id, req.params.reservationId, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -5059,6 +2173,22 @@ app.post('/api/ledger/jobs/:id/materials', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.patch('/api/ledger/jobs/:id/materials/:materialId/status', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    materialRequirement: operatingLedger.updateMaterialRequirementStatus(
+      req.params.id,
+      req.params.materialId,
+      req.body || {},
+      { actor: req.body?.actor || 'dashboard' }
+    ),
+    deliveryMode: 'record_only',
+    externalCommitments: 0,
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
 });
 
 app.post('/api/ledger/jobs/:id/route-plans', (req, res) => {
@@ -5086,6 +2216,15 @@ app.post('/api/ledger/jobs/:id/procurement-orders', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/procurement-orders/:orderId/request-approval', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestProcurementApproval(req.params.id, req.params.orderId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
 });
 
 app.post('/api/ledger/jobs/:id/worker-instructions', (req, res) => {
@@ -5138,6 +2277,14 @@ app.get('/api/ledger/field-assurance', (req, res) => {
   }));
 });
 
+app.post('/api/ledger/jobs/:id/field-assurance-pack', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    pack: operatingLedger.prepareFieldAssurancePack(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
 app.get('/api/ledger/finance', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -5155,21 +2302,37 @@ app.get('/api/ledger/client-success', (req, res) => {
 });
 
 app.post('/api/ledger/jobs/:id/progress', (req, res) => {
+  const requestedStatus = String(req.body?.status || '').trim().toLowerCase();
+  if (req.operator?.role === 'field_worker' && ['completed', 'closed', 'cancelled', 'archived'].includes(requestedStatus)) {
+    return sendError(req, res, 403, 'field_completion_approval_required', 'Field workers can record progress and blockers, but job completion requires an office approval workflow.');
+  }
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    progress: operatingLedger.addProgressUpdate(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    progress: recordForOperator(req, operatingLedger.addProgressUpdate(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
 app.post('/api/ledger/jobs/:id/communication', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    communication: operatingLedger.addCommunication(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
-  }), 201);
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const direction = String(payload.direction || 'outbound').trim().toLowerCase();
+    const outbound = direction !== 'inbound';
+    const communication = operatingLedger.addCommunication(req.params.id, outbound
+      ? { ...payload, direction: 'outbound', status: 'draft', sentAt: null, sent_at: null, requiresApproval: true }
+      : { ...payload, direction: 'inbound', status: 'received', requiresApproval: false }, { actor: payload.actor || 'dashboard' });
+    return {
+      success: true,
+      communication,
+      job: operatingLedger.getJobDetail(req.params.id),
+      deliveryMode: outbound ? 'draft_only' : 'record_only',
+      notSent: outbound,
+      approvalRequired: outbound,
+      approval: communication.approval || null,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
 });
 
 app.get('/api/ledger/communications', (req, res) => {
@@ -5224,6 +2387,23 @@ app.post('/api/client-portal/:token/messages', (req, res) => {
   }, 201);
 });
 
+app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.submitClientPortalSelectionResponse(
+      req.params.token,
+      req.params.selectionId,
+      req.body || {},
+      { actor: 'client_portal' }
+    );
+    return {
+      success: true,
+      approvalRequired: true,
+      externalCommitments: 0,
+      ...result
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/documents', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -5234,18 +2414,51 @@ app.post('/api/ledger/jobs/:id/documents', (req, res) => {
 });
 
 app.post('/api/ledger/jobs/:id/time-logs', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    timeLog: operatingLedger.addTimeLog(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
-  }), 201);
+  return handleLedgerRequest(req, res, () => {
+    const payload = timeLogPayloadForOperator(req, req.body || {});
+    return {
+      success: true,
+      timeLog: recordForOperator(req, operatingLedger.addTimeLog(req.params.id, payload, { actor: req.body?.actor || 'dashboard' })),
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/daily-logs', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = timeLogPayloadForOperator(req, req.body || {});
+    const dailyLog = operatingLedger.recordFieldDailyLog(req.params.id, payload, { actor: req.body?.actor || 'dashboard' });
+    return {
+      success: true,
+      dailyLog: req.operator?.role === 'field_worker'
+        ? {
+            ...dailyLog,
+            fieldReport: projectFieldRecord(dailyLog.fieldReport),
+            timeLog: projectFieldRecord(dailyLog.timeLog),
+            safetyCheck: projectFieldRecord(dailyLog.safetyCheck),
+            approvals: dailyLog.approvals.length
+          }
+        : dailyLog,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     expense: operatingLedger.addExpense(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/finance-costs', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    costs: operatingLedger.recordJobCosts(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5272,9 +2485,9 @@ app.post('/api/ledger/jobs/:id/quality-checks', (req, res) => {
 app.post('/api/ledger/jobs/:id/safety-checks', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    safetyCheck: operatingLedger.addSafetyCheck(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    safetyCheck: recordForOperator(req, operatingLedger.addSafetyCheck(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
@@ -5282,6 +2495,24 @@ app.post('/api/ledger/jobs/:id/payments', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     payment: operatingLedger.recordPayment(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/payments/follow-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPaymentFollowUp(req.params.id, null, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/payments/:paymentId/follow-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPaymentFollowUp(req.params.id, req.params.paymentId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5332,6 +2563,15 @@ app.post('/api/ledger/jobs/:id/finance-handoffs', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/finance-handoffs/prepare', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    financeHandoff: operatingLedger.prepareFinanceHandoff(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/punch-items', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -5361,20 +2601,21 @@ app.post('/api/ledger/jobs/:id/aftercare', (req, res) => {
 
 app.patch('/api/ledger/jobs/:id/lifecycle/:recordType/:recordId', (req, res) => {
   return handleLedgerRequest(req, res, () => {
+    const payload = req.params.recordType === 'task' ? taskLifecyclePayloadForOperator(req) : (req.body || {});
     const result = operatingLedger.transitionLifecycleRecord(
       req.params.id,
       req.params.recordType,
       req.params.recordId,
-      req.body || {},
+      payload,
       { actor: req.body?.actor || 'dashboard' }
     );
     return {
       success: true,
-      record: result.record,
+      record: recordForOperator(req, result.record),
       approval: result.approval,
       approvalRequired: result.approvalRequired,
-      job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
-      dashboard: operatingLedger.dashboardSummary()
+      job: jobForOperator(req, req.params.id, { includeAudit: true }),
+      dashboard: dashboardForOperator(req)
     };
   });
 });
@@ -5407,11 +2648,9 @@ app.get('/api/ledger/approvals', (req, res) => {
 app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
-    const sideEffect = applyServerApprovalSideEffects(approval, req.body?.actor || 'dashboard');
     return {
       success: true,
       approval,
-      sideEffect,
       dashboard: operatingLedger.dashboardSummary()
     };
   });
@@ -5451,7 +2690,26 @@ app.post('/api/ledger/learning/recommend', (req, res) => {
 });
 
 app.post('/api/ledger/autonomous-cycle', (req, res) => {
-  return handleLedgerRequest(req, res, () => operatingLedger.runAutonomousCycle(req.body || {}));
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can preview or request autonomous ledger work.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const options = req.body || {};
+    if (options.dryRun === true) return operatingLedger.runAutonomousCycle(options);
+    return durableAutonomousCycleResponse(runDurableAutonomousCycle(options), options);
+  });
+});
+
+app.get('/api/ledger/scheduler', (req, res) => {
+  return res.json({ success: true, scheduler: autonomousSchedulerStatus() });
+});
+
+app.post('/api/ledger/scheduler/run', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can request a durable autonomous scheduler run.');
+  }
+  const result = runDurableAutonomousCycle(req.body || {});
+  return res.status(result.success ? 200 : 500).json(result);
 });
 
 app.get('/api/ledger/debug', (req, res) => {
@@ -5463,17 +2721,28 @@ app.get('/api/ledger/debug', (req, res) => {
 });
 
 app.get('/api/ledger/workers', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const workers = operatingLedger.listWorkers(req.query || {});
+    return {
+      success: true,
+      workers,
+      summary: operatingLedger.summarizeWorkers(operatingLedger.listWorkers({ limit: 500 })),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+});
+
+app.get('/api/ledger/workers/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    workers: operatingLedger.listWorkers(req.query || {}),
-    dashboard: operatingLedger.dashboardSummary()
+    worker: operatingLedger.getWorker(req.params.id)
   }));
 });
 
 app.post('/api/ledger/workers', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    worker: operatingLedger.upsertWorker(req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    worker: operatingLedger.upsertWorker(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -5481,17 +2750,23 @@ app.post('/api/ledger/workers', (req, res) => {
 app.put('/api/ledger/workers/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    worker: operatingLedger.upsertWorker({ ...(req.body || {}), id: req.params.id }, { actor: req.body?.actor || 'dashboard' }),
+    worker: operatingLedger.upsertWorker(
+      { ...(req.body || {}), id: req.params.id },
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
     dashboard: operatingLedger.dashboardSummary()
   }));
 });
 
-app.delete('/api/ledger/workers/:id', (req, res) => {
+function requestWorkerRetirement(req, res) {
   return handleLedgerRequest(req, res, () => {
-    const retirement = operatingLedger.requestWorkerRetirement(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
+    const retirement = operatingLedger.requestWorkerRetirement(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
     if (!retirement) {
       const error = new Error('Worker not found');
       error.statusCode = 404;
+      error.code = 'worker_not_found';
       throw error;
     }
     return {
@@ -5506,20 +2781,30 @@ app.delete('/api/ledger/workers/:id', (req, res) => {
       dashboard: operatingLedger.dashboardSummary()
     };
   });
+}
+
+app.post('/api/ledger/workers/:id/retirement', requestWorkerRetirement);
+
+app.delete('/api/ledger/workers/:id', (req, res) => {
+  return requestWorkerRetirement(req, res);
 });
 
 app.get('/api/ledger/tools', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    tools: operatingLedger.listTools(req.query || {}),
-    dashboard: operatingLedger.dashboardSummary()
-  }));
+  return handleLedgerRequest(req, res, () => {
+    const tools = operatingLedger.listTools(req.query || {});
+    return {
+      success: true,
+      tools,
+      summary: operatingLedger.summarizeTools(operatingLedger.listTools({ limit: 500 })),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
 });
 
 app.post('/api/ledger/tools', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    tool: operatingLedger.upsertTool(req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    tool: operatingLedger.upsertTool(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -5527,17 +2812,61 @@ app.post('/api/ledger/tools', (req, res) => {
 app.put('/api/ledger/tools/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    tool: operatingLedger.upsertTool({ ...(req.body || {}), id: req.params.id }, { actor: req.body?.actor || 'dashboard' }),
+    tool: operatingLedger.upsertTool(
+      { ...(req.body || {}), id: req.params.id },
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
     dashboard: operatingLedger.dashboardSummary()
   }));
 });
 
-app.delete('/api/ledger/tools/:id', (req, res) => {
+app.post('/api/ledger/tools/:id/inspections', (req, res) => {
   return handleLedgerRequest(req, res, () => {
-    const retirement = operatingLedger.requestToolRetirement(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
+    const result = operatingLedger.recordToolInspection(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    if (!result) {
+      const error = new Error('Tool not found');
+      error.statusCode = 404;
+      error.code = 'tool_not_found';
+      throw error;
+    }
+    return {
+      success: true,
+      ...result,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/tools/:id/maintenance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.recordToolMaintenance(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    if (!result) {
+      const error = new Error('Tool not found');
+      error.statusCode = 404;
+      error.code = 'tool_not_found';
+      throw error;
+    }
+    return {
+      success: true,
+      ...result,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+function requestToolRetirement(req, res) {
+  return handleLedgerRequest(req, res, () => {
+    const retirement = operatingLedger.requestToolRetirement(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
     if (!retirement) {
       const error = new Error('Tool not found');
       error.statusCode = 404;
+      error.code = 'tool_not_found';
       throw error;
     }
     return {
@@ -5552,108 +2881,108 @@ app.delete('/api/ledger/tools/:id', (req, res) => {
       dashboard: operatingLedger.dashboardSummary()
     };
   });
-});
+}
 
-app.get('/api/clients', (req, res) => {
+app.post('/api/ledger/tools/:id/retirement', requestToolRetirement);
+
+app.delete('/api/ledger/tools/:id', requestToolRetirement);
+
+app.get('/api/ledger/clients', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     clients: operatingLedger.listClients(req.query || {})
   }));
 });
 
-app.post('/api/clients', (req, res) => {
+app.post('/api/ledger/clients', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     client: operatingLedger.findOrCreateClient(req.body || {}, { actor: req.body?.actor || 'dashboard' })
   }), 201);
 });
 
-app.put('/api/clients/:id', (req, res) => {
+app.put('/api/ledger/clients/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     client: operatingLedger.updateClient(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
   }));
 });
 
-app.get('/api/approvals', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    approvals: operatingLedger.listApprovals(req.query || {})
-  }));
-});
-
-app.post('/api/approvals/:id/resolve', (req, res) => {
+app.get('/api/ledger/trade-partners', (req, res) => {
   return handleLedgerRequest(req, res, () => {
-    const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
-    const sideEffect = applyServerApprovalSideEffects(approval, req.body?.actor || 'dashboard');
+    const partners = operatingLedger.listTradePartners(req.query || {});
     return {
       success: true,
-      approval,
-      sideEffect,
-      dashboard: operatingLedger.dashboardSummary()
+      partners,
+      summary: operatingLedger.summarizeTradePartners(
+        operatingLedger.listTradePartners({ includeRetired: true, limit: 500 })
+      )
     };
   });
 });
 
-app.get('/api/audit', (req, res) => {
+app.get('/api/ledger/trade-partners/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    events: operatingLedger.listAudit(req.query || {})
+    partner: operatingLedger.getTradePartner(req.params.id)
   }));
 });
 
-app.get('/api/communication', (req, res) => {
+app.post('/api/ledger/trade-partners', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    communications: operatingLedger.listCommunications(req.query || {}),
-    summary: operatingLedger.communicationSummary(),
+    partner: operatingLedger.upsertTradePartner(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.put('/api/ledger/trade-partners/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    partner: operatingLedger.upsertTradePartner(
+      { ...(req.body || {}), id: req.params.id },
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
     dashboard: operatingLedger.dashboardSummary()
   }));
 });
 
-app.post('/api/communication', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const payload = req.body || {};
-    const detail = resolveUploadLedgerJobDetail(payload, 'communication_api');
-    if (!detail?.id) {
-      const error = new Error('A valid jobId or ledgerJobId is required to record communication');
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const direction = String(payload.direction || 'outbound').trim().toLowerCase();
-    const outbound = direction !== 'inbound';
-    const communicationPayload = outbound
-      ? {
-          ...payload,
-          direction: 'outbound',
-          status: 'draft',
-          sentAt: null,
-          sent_at: null,
-          requiresApproval: true
-        }
-      : {
-          ...payload,
-          direction: 'inbound',
-          status: 'received',
-          requiresApproval: false
-        };
-    const communication = operatingLedger.addCommunication(detail.id, communicationPayload, { actor: payload.actor || 'communication_api' });
-
-    return {
-      success: true,
-      communication,
-      job: operatingLedger.getJobDetail(detail.id),
-      deliveryMode: outbound ? 'draft_only' : 'record_only',
-      notSent: outbound,
-      approvalRequired: outbound,
-      approval: communication.approval || null,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
+app.post('/api/ledger/trade-partners/:id/retirement', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestTradePartnerRetirement(
+      req.params.id,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
 });
 
-app.post('/api/weather/assess', (req, res) => {
+function retiredLedgerFacadeRoute(req, res) {
+  const resource = req.baseUrl.split('/').filter(Boolean).at(-1) || 'resource';
+  const targets = {
+    clients: '/api/ledger/clients',
+    approvals: '/api/ledger/approvals',
+    audit: '/api/ledger/audit',
+    communication: '/api/ledger/communications',
+    weather: '/api/ledger/weather/assess',
+    schedule: '/api/ledger/schedule/recommend'
+  };
+  return res.status(410).json({
+    error: {
+      code: 'ledger_facade_route_retired',
+      message: `The /api/${resource} facade is retired. Use the ledger API.`
+    },
+    migration: { endpoint: targets[resource] || '/api/ledger/dashboard' }
+  });
+}
+
+app.use('/api/clients', retiredLedgerFacadeRoute);
+app.use('/api/approvals', retiredLedgerFacadeRoute);
+app.use('/api/audit', retiredLedgerFacadeRoute);
+app.use('/api/communication', retiredLedgerFacadeRoute);
+app.post('/api/ledger/weather/assess', (req, res) => {
   return handleLedgerRequest(req, res, async () => {
     const jobId = req.body?.jobId || req.body?.job_id;
     const actor = req.body?.actor || 'dashboard';
@@ -5716,14 +3045,14 @@ app.post('/api/weather/assess', (req, res) => {
   }, 201);
 });
 
-app.post('/api/schedule/recommend', (req, res) => {
+app.post('/api/ledger/schedule/recommend', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     recommendation: operatingLedger.recommendSchedule(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
   }));
 });
 
-app.post('/api/schedule/prepare-dispatch', (req, res) => {
+app.post('/api/ledger/schedule/prepare-dispatch', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.prepareScheduleDispatch(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
@@ -5731,7 +3060,7 @@ app.post('/api/schedule/prepare-dispatch', (req, res) => {
   }), 201);
 });
 
-app.post('/api/schedule/request-approval', (req, res) => {
+app.post('/api/ledger/schedule/request-approval', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestScheduleApproval(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
@@ -5739,1455 +3068,102 @@ app.post('/api/schedule/request-approval', (req, res) => {
   }), 201);
 });
 
-app.get('/api/construction', (req, res) => {
-  res.json({
-    collections: CONSTRUCTION_COLLECTIONS,
-    workflows: CONSTRUCTION_WORKFLOWS,
-    workflowRuns: construction.workflowRuns || [],
-    summary: constructionSummary(),
-    data: construction,
-    capabilities: constructionCapabilities(),
-    operatingCatalog: buildContractorOperatingCatalog()
-  });
-});
-
-app.post('/api/construction/autonomous-review', (req, res) => {
-  const result = runConstructionAutopilot();
-  saveState();
-  res.json(result);
-});
-
-app.post('/api/operations/cycle', (req, res) => {
-  const payload = req.body || {};
-  const maxActions = Math.max(1, Math.min(25, Number(payload.maxActions || 8)));
-  const jobCycle = operatingLedger.runAutonomousCycle({
-    actor: payload.actor || 'operations_cycle',
-    maxActions,
-    jobIds: payload.jobIds || payload.job_ids,
-    actionTypes: payload.actionTypes || payload.action_types
-  });
-  const constructionReview = runConstructionAutopilot();
-  const capabilityGapPlan = buildContractorCapabilityGapPlan();
-  const ledgerMetrics = jobCycle.dashboard?.metrics || {};
-  const summary = {
-    jobActions: jobCycle.applied?.length || 0,
-    jobAlerts: jobCycle.blocked?.length || 0,
-    jobInsights: jobCycle.preview?.length || 0,
-    constructionActions: constructionReview.actions?.length || 0,
-    constructionInsights: constructionReview.insights?.length || 0,
-    pendingJobs: ledgerMetrics.openJobs || 0,
-    scheduledJobs: Number(operatingLedger.listJobs({ status: 'scheduled' }).length || 0),
-    inProgressJobs: Number(operatingLedger.listJobs({ status: 'in_progress' }).length || 0),
-    activeProjects: constructionReview.summary?.activeProjects || 0,
-    openRfis: constructionReview.summary?.openRfis || 0,
-    openSafetyActions: constructionReview.summary?.openSafetyActions || 0,
-    openComplianceItems: constructionReview.summary?.openComplianceItems || 0,
-    capabilityCoverage: capabilityGapPlan.summary.averageCoverage,
-    capabilityGaps: capabilityGapPlan.summary.missingModules,
-    recommendedCapabilityVendor: capabilityGapPlan.summary.topRecommendation?.vendor || null
-  };
-
-  saveState();
-  res.json({
-    success: true,
-    ranAt: new Date().toISOString(),
-    source: 'server',
-    summary,
-    jobCycle,
-    constructionReview,
-    capabilityGapPlan,
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.post('/api/construction/actions/batch', (req, res) => {
-  const payload = req.body || {};
-  const requested = Array.isArray(payload.actions) ? payload.actions : [];
-  const limit = Math.max(1, Math.min(10, Number(payload.limit || requested.length || 1)));
-  const results = [];
-  const errors = [];
-
-  requested.slice(0, limit).forEach((item, index) => {
-    const collection = String(item.collection || '');
-    const id = item.id;
-    if (!CONSTRUCTION_COLLECTIONS.includes(collection)) {
-      errors.push({ index, collection, id, error: 'Unknown construction collection' });
-      return;
-    }
-
-    const record = (construction[collection] || []).find(candidate => String(candidate.id) === String(id));
-    if (!record) {
-      errors.push({ index, collection, id, error: 'Construction record not found' });
-      return;
-    }
-
-    const targetStatus = String(item.status || completeConstructionStatus(collection));
-    const previousStatus = record.status || record.riskLevel || record.priority || 'open';
-    const result = createConstructionActionArtifacts(collection, record, previousStatus, targetStatus, item.payload || {});
-    results.push({
-      success: true,
-      collection,
-      id: record.id,
-      record,
-      previousStatus,
-      status: targetStatus,
-      records: result.records,
-      actions: result.actions
-    });
-  });
-
-  saveState();
-  res.json({
-    success: errors.length === 0,
-    requested: requested.length,
-    executed: results.length,
-    failed: errors.length,
-    results,
-    errors,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.get('/api/construction/workflows', (req, res) => {
-  res.json({
-    workflows: CONSTRUCTION_WORKFLOWS,
-    workflowRuns: construction.workflowRuns || [],
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.get('/api/construction/capability-gaps', (req, res) => {
-  res.json({
-    success: true,
-    blueprint: CONTRACTOR_SUITE_BLUEPRINT,
-    plan: buildContractorCapabilityGapPlan(),
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.get('/api/construction/market-map', (req, res) => {
-  res.json({
-    success: true,
-    marketMap: buildContractorMarketMap()
-  });
-});
-
-app.get('/api/construction/operating-catalog', (req, res) => {
-  res.json({
-    success: true,
-    catalog: buildContractorOperatingCatalog()
-  });
-});
-
-app.post('/api/construction/capability-gaps/run', (req, res) => {
-  const payload = req.body || {};
-  const vendor = getContractorSuiteVendor(payload.vendor ?? payload.vendorIndex ?? payload.index);
-  if (!vendor) {
-    return res.status(404).json({ error: 'Unknown contractor suite vendor' });
-  }
-
-  const vendorCoverage = buildContractorSuiteVendorCoverage(construction)
-    .find(item => item.vendor === vendor.vendor);
-  const force = payload.force === true;
-  const requestedModules = Array.isArray(payload.modules) && payload.modules.length
-    ? payload.modules
-    : vendorCoverage?.missingModules || [];
-  const modules = requestedModules
-    .map(module => String(module || ''))
-    .filter(module => CONSTRUCTION_COLLECTIONS.includes(module) && vendor.modules.includes(module));
-  const limit = Math.max(1, Math.min(50, Number(payload.limit || modules.length || 1)));
-  const selected = modules
-    .filter(module => force || !(construction[module] || []).length)
-    .slice(0, limit);
-  const skipped = modules.filter(module => !selected.includes(module));
-  const records = selected.map(module => {
-    const record = addConstructionRecord(module, buildCapabilityGapRecord(vendor, module, payload));
-    return {
-      collection: module,
-      id: record.id,
-      title: record.title || record.name || record.subject || record.package || record.vendor || `${collectionLabel(module)} #${record.id}`,
-      status: record.status,
-      sourceVendor: record.sourceVendor
-    };
-  });
-
-  const review = payload.runReview === true ? runConstructionAutopilot() : null;
-  saveState();
-  res.json({
-    success: true,
-    vendor: vendor.vendor,
-    created: records.length,
-    records,
-    skipped,
-    review,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities(),
-    gapPlan: buildContractorCapabilityGapPlan()
-  });
-});
-
-app.post('/api/construction/workflows/:workflowKey/run', (req, res) => {
-  try {
-    const result = createConstructionWorkflowRecords(req.params.workflowKey, req.body || {});
-    saveState();
-    res.json(result);
-  } catch (error) {
-    if (error.statusCode === 404) {
-      return res.status(404).json({ error: error.message });
-    }
-    throw error;
-  }
-});
-
-app.get('/api/construction/:collection', (req, res) => {
-  const { collection } = req.params;
-  if (!CONSTRUCTION_COLLECTIONS.includes(collection)) {
-    return res.status(404).json({ error: 'Unknown construction collection' });
-  }
-
-  res.json({
-    collection,
-    records: construction[collection] || [],
-    summary: constructionSummary()
-  });
-});
-
-app.post('/api/construction/:collection', (req, res) => {
-  const { collection } = req.params;
-  if (!CONSTRUCTION_COLLECTIONS.includes(collection)) {
-    return res.status(404).json({ error: 'Unknown construction collection' });
-  }
-
-  const now = new Date().toISOString();
-  const record = {
-    ...(req.body || {}),
-    id: collectionNextId(collection),
-    createdAt: now,
-    updatedAt: now
-  };
-
-  construction[collection].unshift(record);
-  saveState();
-  res.status(201).json({
-    collection,
-    record,
-    summary: constructionSummary()
-  });
-});
-
-app.put('/api/construction/:collection/:id', (req, res) => {
-  const { collection, id } = req.params;
-  if (!CONSTRUCTION_COLLECTIONS.includes(collection)) {
-    return res.status(404).json({ error: 'Unknown construction collection' });
-  }
-
-  const records = construction[collection] || [];
-  const index = records.findIndex(record => String(record.id) === String(id));
-  if (index === -1) {
-    return res.status(404).json({ error: 'Construction record not found' });
-  }
-
-  records[index] = {
-    ...records[index],
-    ...(req.body || {}),
-    id: records[index].id,
-    updatedAt: new Date().toISOString()
-  };
-  saveState();
-  res.json({
-    collection,
-    record: records[index],
-    summary: constructionSummary()
-  });
-});
-
-app.post('/api/construction/:collection/:id/action', (req, res) => {
-  const { collection, id } = req.params;
-  if (!CONSTRUCTION_COLLECTIONS.includes(collection)) {
-    return res.status(404).json({ error: 'Unknown construction collection' });
-  }
-
-  const records = construction[collection] || [];
-  const record = records.find(item => String(item.id) === String(id));
-  if (!record) {
-    return res.status(404).json({ error: 'Construction record not found' });
-  }
-
-  const payload = req.body || {};
-  const targetStatus = String(payload.status || completeConstructionStatus(collection));
-  const previousStatus = record.status || record.riskLevel || record.priority || 'open';
-  const result = createConstructionActionArtifacts(collection, record, previousStatus, targetStatus, payload);
-  saveState();
-  res.json({
-    success: true,
-    collection,
-    record,
-    previousStatus,
-    status: targetStatus,
-    records: result.records,
-    actions: result.actions,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.delete('/api/construction/:collection/:id', (req, res) => {
-  const { collection, id } = req.params;
-  if (!CONSTRUCTION_COLLECTIONS.includes(collection)) {
-    return res.status(404).json({ error: 'Unknown construction collection' });
-  }
-
-  try {
-    const result = requestConstructionArchive(collection, id, {
-      ...(req.body || {}),
-      reason: req.body?.reason || req.query?.reason
-    }, { actor: req.body?.actor || 'construction_api' });
-    res.json({
-      success: true,
-      collection,
-      deleted: false,
-      retained: true,
-      status: result.alreadyArchived ? 'archived' : 'pending_approval',
-      alreadyPending: Boolean(result.alreadyPending),
-      alreadyArchived: Boolean(result.alreadyArchived),
-      message: result.alreadyArchived
-        ? 'Construction record is already archived and retained.'
-        : result.alreadyPending
-          ? 'Construction record archive approval is already pending.'
-          : 'Construction record retained. Archive requires explicit approval before it is applied.',
-      record: result.record,
-      approval: result.approval || null,
-      summary: constructionSummary(),
-      capabilities: constructionCapabilities()
-    });
-  } catch (error) {
-    const statusCode = error.statusCode || 500;
-    return sendError(
-      req,
-      res,
-      statusCode,
-      statusCode === 404 ? 'not_found' : 'construction_delete_error',
-      error.message || 'Construction delete request failed',
-      serializeError(error)
-    );
-  }
-});
-
-app.get('/api/jobs', (req, res) => {
-  res.json(mergedLegacyAndLedgerJobs(req.query || {}));
-});
-
-app.get('/api/jobs/:id', (req, res) => {
-  const job = findJob(req.params.id);
-  if (job) {
-    return res.json(job);
-  }
-
-  return handleLedgerRequest(req, res, () => {
-    const detail = operatingLedger.getJobDetail(req.params.id, { includeAudit: true });
-    return mapLedgerJobForLegacy(detail);
-  });
-});
-
-app.post('/api/jobs', (req, res) => {
-  const jobData = req.body || {};
-  if (!jobData.title || !jobData.client) {
-    return res.status(400).json({ error: 'Job title and client are required' });
-  }
-
-  const newJob = {
-    ...autonomousEngine.createJobFromRequest(jobData, currentState()),
-    ...jobData,
-    id: Math.max(0, ...jobs.map(job => Number(job.id) || 0)) + 1,
-    status: jobData.status || 'pending',
-    progress: Number(jobData.progress || 0),
-    actualCost: Number(jobData.actualCost || 0)
-  };
-
-  const ledgerDetail = mirrorLegacyJobToLedger(newJob, {
-    actor: 'legacy_jobs_api',
-    progressNote: 'Legacy job created and mirrored into the operating ledger.'
-  });
-  newJob.ledgerJobId = ledgerDetail.id;
-  jobs.push(newJob);
-  saveState();
-  res.status(201).json(newJob);
-});
-
-app.put('/api/jobs/:id', (req, res) => {
-  const jobId = req.params.id;
-  const jobIndex = jobs.findIndex(job => String(job.id) === String(jobId));
-  if (jobIndex === -1) {
-    return handleLedgerRequest(req, res, () => {
-      const result = operatingLedger.updateJobWithApproval(jobId, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-      return {
-        success: true,
-        ...mapLedgerJobForLegacy(result.job),
-        operationStatus: result.status,
-        requiresApproval: result.requiresApproval,
-        reasons: result.reasons,
-        proposedPatch: result.proposedPatch,
-        approval: result.approval || null,
-        ledger: result.job,
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    });
-  }
-  const updates = { ...(req.body || {}) };
-  delete updates.id;
-  const existingJob = jobs[jobIndex];
-  const previousWorkerName = existingJob.worker;
-  const updatedJob = {
-    ...existingJob,
-    ...updates,
-    id: existingJob.id,
-    progress: Math.max(0, Math.min(100, Number(updates.progress ?? existingJob.progress ?? 0)))
-  };
-  jobs[jobIndex] = updatedJob;
-
-  if (updates.worker !== undefined && updates.worker !== previousWorkerName) {
-    const previousWorker = workers.find(worker => worker.name === previousWorkerName);
-    autonomousEngine.releaseWorkerFromJob(previousWorker, existingJob);
-    const nextWorker = workers.find(worker => worker.name === updates.worker);
-    if (nextWorker) {
-      updatedJob.assignedWorkerId = nextWorker.id;
-      nextWorker.status = 'active';
-      nextWorker.currentJob = updatedJob.title;
-      nextWorker.currentJobId = updatedJob.id;
-    } else {
-      updatedJob.assignedWorkerId = null;
-    }
-  }
-
-  if (updatedJob.status === 'completed' && existingJob.status !== 'completed') {
-    updatedJob.progress = 100;
-    releaseJobResources(updatedJob);
-  }
-  mirrorLegacyJobToLedger(updatedJob, {
-    actor: 'legacy_jobs_api',
-    status: updatedJob.status,
-    progressNote: 'Legacy job update synchronized into the operating ledger.',
-    createInvoiceOnComplete: updatedJob.status === 'completed'
-  });
-  saveState();
-  res.json(jobs[jobIndex]);
-});
-
-app.delete('/api/jobs/:id', (req, res) => {
-  const jobId = req.params.id;
-  const jobIndex = jobs.findIndex(job => String(job.id) === String(jobId));
-  if (jobIndex === -1) {
-    return handleLedgerRequest(req, res, () => {
-      const result = operatingLedger.updateJobWithApproval(jobId, {
-        status: 'cancelled',
-        reason: req.body?.reason || req.query?.reason || 'Legacy-compatible delete requested. Ledger records are retained and cancellation requires approval.'
-      }, { actor: req.body?.actor || 'legacy_jobs_api' });
-      return {
-        success: true,
-        deleted: false,
-        retained: true,
-        message: 'Ledger jobs are retained; cancellation is routed through the approval gate.',
-        job: mapLedgerJobForLegacy(result.job),
-        operationStatus: result.status,
-        requiresApproval: result.requiresApproval,
-        reasons: result.reasons,
-        proposedPatch: result.proposedPatch,
-        approval: result.approval || null,
-        ledger: result.job,
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    });
-  }
-
-  try {
-    const result = requestLegacyJobArchive(jobs[jobIndex], {
-      ...(req.body || {}),
-      reason: req.body?.reason || req.query?.reason
-    }, { actor: req.body?.actor || 'legacy_jobs_api' });
-    res.json({
-      success: true,
-      deleted: false,
-      retained: true,
-      status: result.alreadyArchived ? 'archived' : 'pending_approval',
-      alreadyPending: Boolean(result.alreadyPending),
-      alreadyArchived: Boolean(result.alreadyArchived),
-      message: result.alreadyArchived
-        ? 'Job is already archived and retained.'
-        : result.alreadyPending
-          ? 'Job archive approval is already pending.'
-          : 'Job retained. Archive requires explicit approval before it is applied.',
-      job: result.job,
-      approval: result.approval || null,
-      dashboard: operatingLedger.dashboardSummary()
-    });
-  } catch (error) {
-    const statusCode = error.statusCode || 500;
-    return sendError(
-      req,
-      res,
-      statusCode,
-      statusCode === 404 ? 'not_found' : 'legacy_job_delete_error',
-      error.message || 'Job delete request failed',
-      serializeError(error)
-    );
-  }
-});
-
-app.post('/api/jobs/:id/tasks', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const task = operatingLedger.addTask(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      task,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/quote', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const quote = operatingLedger.createQuote(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      quote,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/assignments', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const assignment = operatingLedger.addAssignment(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api', optional: false });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      assignment,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/tools', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const toolReservation = operatingLedger.reserveTool(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      toolReservation,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/materials', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const materialRequirement = operatingLedger.addMaterialRequirement(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      materialRequirement,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/documents', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const documentRecord = operatingLedger.addDocument(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      document: documentRecord,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/photos', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const photo = operatingLedger.addDocument(detail.id, {
-      ...(req.body || {}),
-      type: req.body?.type || 'photo',
-      tags: Array.from(new Set(['photo', 'jobsite', ...(
-        Array.isArray(req.body?.tags)
-          ? req.body.tags
-          : req.body?.tags
-            ? String(req.body.tags).split(',').map(item => item.trim()).filter(Boolean)
-            : []
-      )]))
-    }, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      photo,
-      document: photo,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/progress', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const progress = operatingLedger.addProgressUpdate(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      progress,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/communication', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const communication = operatingLedger.addCommunication(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      communication,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/time-logs', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const timeLog = operatingLedger.addTimeLog(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      timeLog,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/expenses', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const expense = operatingLedger.addExpense(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      expense,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/invoice', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const invoice = operatingLedger.createInvoice(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      invoice,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/invoices', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.body?.actor || 'legacy_jobs_api');
-    const invoice = operatingLedger.createInvoice(detail.id, req.body || {}, { actor: req.body?.actor || 'legacy_jobs_api' });
-    const job = operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      invoice,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-createLegacyJobSubresourceAlias('site-visits', 'siteVisit', (jobId, payload, actor) =>
-  operatingLedger.createSiteVisit(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('change-orders', 'changeOrder', (jobId, payload, actor) =>
-  operatingLedger.createChangeOrder(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('field-reports', 'fieldReport', (jobId, payload, actor) =>
-  operatingLedger.createFieldReport(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('rfis', 'rfi', (jobId, payload, actor) =>
-  operatingLedger.createRfi(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('submittals', 'submittal', (jobId, payload, actor) =>
-  operatingLedger.createSubmittalRecord(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('client-selections', 'clientSelection', (jobId, payload, actor) =>
-  operatingLedger.createClientSelection(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('permits', 'permit', (jobId, payload, actor) =>
-  operatingLedger.createPermitRecord(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('inspections', 'inspection', (jobId, payload, actor) =>
-  operatingLedger.createInspectionRecord(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('observations', 'observation', (jobId, payload, actor) =>
-  operatingLedger.createObservationRecord(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('incidents', 'incident', (jobId, payload, actor) =>
-  operatingLedger.createIncidentRecord(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('safety-meetings', 'safetyMeeting', (jobId, payload, actor) =>
-  operatingLedger.createSafetyMeeting(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('orientations', 'orientation', (jobId, payload, actor) =>
-  operatingLedger.createWorkerOrientation(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('jhas', 'jha', (jobId, payload, actor) =>
-  operatingLedger.createJhaRecord(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('sds-sheets', 'sdsSheet', (jobId, payload, actor) =>
-  operatingLedger.createSdsSheet(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('site-access', 'siteAccessLog', (jobId, payload, actor) =>
-  operatingLedger.createSiteAccessLog(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('route-plans', 'routePlan', (jobId, payload, actor) =>
-  operatingLedger.createRoutePlan(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('loading-plans', 'loadingPlan', (jobId, payload, actor) =>
-  operatingLedger.createLoadingPlan(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('procurement-orders', 'procurementOrder', (jobId, payload, actor) =>
-  operatingLedger.createProcurementOrder(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('worker-instructions', 'workerInstruction', (jobId, payload, actor) =>
-  operatingLedger.createWorkerInstruction(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('dispatch', 'dispatch', (jobId, payload, actor) =>
-  operatingLedger.createDispatchPack(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('quality-checks', 'qualityCheck', (jobId, payload, actor) =>
-  operatingLedger.addQualityCheck(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('safety-checks', 'safetyCheck', (jobId, payload, actor) =>
-  operatingLedger.addSafetyCheck(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('payments', 'payment', (jobId, payload, actor) =>
-  operatingLedger.recordPayment(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('budget-lines', 'budgetLine', (jobId, payload, actor) =>
-  operatingLedger.createBudgetLine(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('purchase-orders', 'purchaseOrder', (jobId, payload, actor) =>
-  operatingLedger.createPurchaseOrder(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('draw-requests', 'drawRequest', (jobId, payload, actor) =>
-  operatingLedger.createDrawRequest(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('lien-waivers', 'lienWaiver', (jobId, payload, actor) =>
-  operatingLedger.createLienWaiver(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('finance-handoffs', 'financeHandoff', (jobId, payload, actor) =>
-  operatingLedger.createFinanceHandoff(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('punch-items', 'punchItem', (jobId, payload, actor) =>
-  operatingLedger.createPunchItem(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('warranty-claims', 'warrantyClaim', (jobId, payload, actor) =>
-  operatingLedger.createWarrantyClaim(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('aftercare', 'aftercare', (jobId, payload, actor) =>
-  operatingLedger.addAftercareItem(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('recurring-plans', 'recurringPlan', (jobId, payload, actor) =>
-  operatingLedger.createRecurringPlan(jobId, payload, { actor }));
-createLegacyJobSubresourceAlias('closeout', 'closeout', (jobId, payload, actor) =>
-  operatingLedger.createCloseoutPackage(jobId, payload, { actor }));
-
-app.get('/api/jobs/:id/playbook', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const detail = resolveJobDetailForApiRoute(req.params.id, req.query?.actor || 'legacy_jobs_api');
-    return {
-      success: true,
-      ...operatingLedger.buildJobPlaybookPlan(detail.id, req.query || {}),
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  });
-});
-
-app.post('/api/jobs/:id/playbook', (req, res) => {
-  return handleLedgerRequest(req, res, () => {
-    const payload = req.body || {};
-    const actor = payload.actor || 'legacy_jobs_api';
-    const detail = resolveJobDetailForApiRoute(req.params.id, actor);
-    const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
-    const result = mode === 'preview'
-      ? operatingLedger.buildJobPlaybookPlan(detail.id, payload)
-      : operatingLedger.applyJobPlaybook(detail.id, payload, { actor });
-    const job = result.job || operatingLedger.getJobDetail(detail.id, { includeAudit: true });
-    return {
-      success: true,
-      ...result,
-      job: mapLedgerJobForLegacy(job),
-      ledgerJob: job,
-      dashboard: operatingLedger.dashboardSummary()
-    };
-  }, 201);
-});
-
-app.post('/api/jobs/:id/schedule', (req, res) => {
-  const jobId = req.params.id;
-  const job = findJob(jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-  if (['completed', 'cancelled'].includes(job.status)) {
-    return res.status(409).json({ error: `Cannot schedule a ${job.status} job` });
-  }
-
-  const { scheduledDate, workerId } = req.body || {};
-  if (!scheduledDate && !workerId) {
-    const execution = autonomousEngine.executePlan(jobId, currentState());
-    if (!execution.success) {
-      return res.status(409).json(execution);
-    }
-    mirrorLegacyJobToLedger(execution.job || job, {
-      actor: 'legacy_schedule_api',
-      status: execution.job?.status || job.status,
-      progressNote: 'Autonomous schedule plan executed and mirrored into the operating ledger.'
-    });
-    saveState();
-    return res.json(execution);
-  }
-
-  const worker = workerId
-    ? findWorker(workerId)
-    : workers.find(item => autonomousEngine.isWorkerAvailable(item, job));
-  if (!worker) {
-    return res.status(409).json({ error: 'No suitable worker is available' });
-  }
-  if (!autonomousEngine.isWorkerAvailable(worker, job)) {
-    return res.status(409).json({ error: `${worker.name} is not available` });
-  }
-
-  const previousWorker = workers.find(item =>
-    String(item.id) === String(job.assignedWorkerId)
-    || item.name === job.worker
-  );
-  if (previousWorker && previousWorker.id !== worker.id) {
-    autonomousEngine.releaseWorkerFromJob(previousWorker, job);
-  }
-
-  const scheduledStart = normalizeDateStart(scheduledDate || new Date().toISOString().split('T')[0]);
-  if (!scheduledStart) {
-    return res.status(400).json({ error: 'A valid scheduledDate is required' });
-  }
-  const scheduledEnd = new Date(scheduledStart);
-  scheduledEnd.setHours(scheduledEnd.getHours() + Math.max(1, Number(job.estimatedHours || 4)));
-  job.status = 'scheduled';
-  job.progress = 0;
-  job.startDate = scheduledStart.toISOString().slice(0, 10);
-  job.scheduledStart = scheduledStart.toISOString();
-  job.scheduledEnd = scheduledEnd.toISOString();
-  job.estimatedCompletion = scheduledEnd.toISOString();
-  job.worker = worker.name;
-  job.assignedWorkerId = worker.id;
-  worker.status = 'active';
-  worker.currentJob = job.title;
-  worker.currentJobId = job.id;
-  const toolPlan = reservePlannedTools(job);
-  mirrorLegacyJobToLedger(job, {
-    actor: 'legacy_schedule_api',
-    status: 'scheduled',
-    progressNote: `${job.title} scheduled for ${job.scheduledStart}.`
-  });
-
-  saveState();
-  res.json({ job, worker, toolPlan });
-});
-
-app.post('/api/jobs/:id/start', (req, res) => {
-  const jobId = req.params.id;
-  const job = findJob(jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-  if (job.status === 'completed') {
-    return res.status(409).json({ error: 'Completed jobs cannot be restarted' });
-  }
-
-  if (!job.worker && !job.assignedWorkerId) {
-    const execution = autonomousEngine.executePlan(job.id, currentState());
-    if (!execution.success) {
-      return res.status(409).json(execution);
-    }
-  }
-
-  job.status = 'in_progress';
-  job.progress = Math.max(Number(job.progress || 0), 10);
-  job.actualStart = job.actualStart || new Date().toISOString();
-  const worker = workers.find(item =>
-    String(item.id) === String(job.assignedWorkerId)
-    || item.name === job.worker
-  );
-  if (worker) {
-    worker.status = 'active';
-    worker.currentJob = job.title;
-    worker.currentJobId = job.id;
-  }
-  const toolPlan = reservePlannedTools(job);
-  for (const tool of tools) {
-    if (String(tool.assignedJobId) === String(job.id)) {
-      tool.status = 'in_use';
-    }
-  }
-  mirrorLegacyJobToLedger(job, {
-    actor: 'legacy_start_api',
-    status: 'in_progress',
-    progressNote: `${job.title} started from the legacy dashboard.`
-  });
-  saveState();
-  res.json({ job, worker: worker || null, toolPlan });
-});
-
-app.post('/api/jobs/:id/complete', (req, res) => {
-  const jobId = req.params.id;
-  const job = findJob(jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-  if (job.status === 'completed') {
-    const existingRecords = findCompletionBuildRecords(job.id);
-    return res.json({
-      success: true,
-      alreadyCompleted: true,
-      job,
-      worker: null,
-      releasedTools: [],
-      records: existingRecords,
-      actions: []
-    });
-  }
-
-  const payload = req.body || {};
-  const { actualCost } = payload;
-  job.status = 'completed';
-  job.progress = 100;
-  job.actualCost = Number(actualCost || job.actualCost || job.estimatedCost || 0);
-  job.actualEnd = new Date().toISOString();
-  job.ai = {
-    ...(job.ai || {}),
-    confidence: 'high',
-    reasoning: payload.completionNote || payload.completion_note || `Completed and routed into finance, client communication, daily log and closeout workflows.`,
-    lastDecisionAt: job.actualEnd
-  };
-
-  const worker = workers.find(item =>
-    String(item.id) === String(job.assignedWorkerId)
-    || item.name === job.worker
-  );
-  if (worker) {
-    worker.completedJobs = Number(worker.completedJobs || 0) + 1;
-  }
-  const released = releaseJobResources(job);
-  const completionWorkflow = createCompletionBuildRecords(job, payload, released);
-  const ledgerDetail = mirrorLegacyJobToLedger(job, {
-    actor: 'legacy_complete_api',
-    status: 'completed',
-    progressNote: payload.completionNote || payload.completion_note || `${job.title} completed from the legacy dashboard.`,
-    createInvoiceOnComplete: true
-  });
-
-  saveState();
-  res.json({
-    success: true,
-    job,
-    ledgerJob: ledgerDetail,
-    worker: released.worker,
-    releasedTools: released.tools,
-    records: completionWorkflow.records,
-    actions: completionWorkflow.actions,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.get('/api/ai/status', (req, res) => {
-  res.json({
-    status: 'operational',
-    autonomous: true,
-    summary: autonomousEngine.summarizeState(currentState()),
-    insights: autonomousEngine.generateInsights(currentState()),
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.post('/api/ai/analyze', (req, res) => {
-  const analysis = autonomousEngine.analyzeJobRequest(req.body || {});
-  res.json({ analysis });
-});
-
-app.get('/api/jobs/:id/ai-plan', (req, res) => {
-  const jobId = parseInt(req.params.id);
-  const job = jobs.find(item => item.id === jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-
-  res.json(autonomousEngine.createPlan(job, currentState()));
-});
-
-app.post('/api/jobs/:id/execute-ai-plan', (req, res) => {
-  const jobId = parseInt(req.params.id);
-  const execution = autonomousEngine.executePlan(jobId, currentState());
-  if (!execution.success) {
-    return res.status(409).json(execution);
-  }
-
-  mirrorLegacyJobToLedger(execution.job, {
-    actor: 'legacy_ai_plan_api',
-    status: execution.job.status,
-    progressNote: 'AI plan execution synchronized into the operating ledger.'
-  });
-  saveState();
-  res.json(execution);
-});
-
-app.post('/api/ai/autonomous-cycle', (req, res) => {
-  const payload = req.body || {};
-  const explicitApply = payload.dryRun === false
-    || (payload.dryRun !== true && (payload.apply === true || payload.execute === true));
-  const result = autonomousEngine.runAutonomousCycle(currentState(), {
-    ...payload,
-    dryRun: !explicitApply
-  });
-  if (explicitApply) {
-    saveState();
-  }
-  res.json({
-    ...result,
-    defaultedToDryRun: !explicitApply,
-    notApplied: !explicitApply,
-    approvalPolicy: explicitApply
-      ? 'Legacy internal autonomous changes were explicitly applied by request.'
-      : 'Legacy autonomous cycle previews internal worker, tool, schedule and progress changes unless explicitly applied.'
-  });
-});
-
-app.post('/api/emergency/activate', (req, res) => {
-  const now = new Date().toISOString();
-  const today = now.slice(0, 10);
-  const payload = req.body || {};
-  const reason = String(payload.reason || 'Emergency mode activated from dashboard');
-  const actions = [];
-  const alerts = [];
-
-  let primaryJob = jobs.find(job =>
-    job.priority === 'critical' && !['completed', 'cancelled'].includes(job.status)
-  ) || jobs.find(job =>
-    ['pending', 'scheduled', 'in_progress'].includes(job.status)
-    && ['critical', 'high'].includes(job.priority)
-  );
-
-  if (!primaryJob) {
-    primaryJob = {
-      id: Math.max(0, ...jobs.map(job => Number(job.id) || 0)) + 1,
-      title: payload.title || 'Emergency Response Standby',
-      client: payload.client || 'Emergency Contact',
-      phone: payload.phone || CONTRACTOR_CONFIG.phone,
-      address: payload.address || 'Netherlands',
-      description: reason,
-      service: 'Emergency Response',
-      jobType: 'emergency_response',
-      priority: 'critical',
-      status: 'pending',
-      progress: 0,
-      estimatedCost: Number(payload.estimatedCost || 250),
-      requiredTools: ['Safety Harness', 'Plumbing Kit'],
-      ai: {
-        confidence: 'high',
-        reasoning: 'Created by emergency mode because no open critical job existed.',
-        lastDecisionAt: now
-      },
-      createdAt: now
-    };
-    jobs.unshift(primaryJob);
-    actions.push({ type: 'create_emergency_job', id: primaryJob.id, message: `Created ${primaryJob.title}.` });
-  }
-
-  primaryJob.priority = 'critical';
-  primaryJob.status = 'in_progress';
-  primaryJob.progress = Math.max(Number(primaryJob.progress || 0), 15);
-  primaryJob.actualStart = primaryJob.actualStart || now;
-  primaryJob.startDate = primaryJob.startDate || today;
-  primaryJob.ai = {
-    ...(primaryJob.ai || {}),
-    confidence: 'high',
-    reasoning: `${reason}. Emergency mode escalated this job, dispatched response resources, and opened site-safety follow-up.`,
-    lastDecisionAt: now
-  };
-
-  let responseWorker = workers.find(worker =>
-    String(worker.id) === String(primaryJob.assignedWorkerId)
-    || worker.name === primaryJob.worker
-  );
-  if (!responseWorker) {
-    responseWorker = workers.find(worker => autonomousEngine.isWorkerAvailable(worker, primaryJob))
-      || workers.find(worker => ['available', 'offline'].includes(String(worker.status || '').toLowerCase()));
-  }
-  if (responseWorker) {
-    primaryJob.worker = responseWorker.name;
-    primaryJob.assignedWorkerId = responseWorker.id;
-    responseWorker.status = 'active';
-    responseWorker.currentJob = primaryJob.title;
-    responseWorker.currentJobId = primaryJob.id;
-    actions.push({ type: 'dispatch_worker', id: responseWorker.id, message: `${responseWorker.name} dispatched to ${primaryJob.title}.` });
-  } else {
-    alerts.push({ type: 'no_worker_available', severity: 'critical', message: 'No available worker could be dispatched automatically.' });
-  }
-
-  const toolPlan = reservePlannedTools(primaryJob);
-  for (const tool of tools) {
-    if (String(tool.assignedJobId) === String(primaryJob.id)) {
-      tool.status = 'in_use';
-      tool.assignedWorkerId = responseWorker?.id || tool.assignedWorkerId || null;
-    }
-  }
-  if (toolPlan.reserved?.length) {
-    actions.push({ type: 'reserve_tools', id: primaryJob.id, message: `${toolPlan.reserved.length} tool(s) reserved for emergency response.` });
-  }
-
-  const project = (construction.projects || []).find(item =>
-    ['active', 'preconstruction'].includes(String(item.status || '').toLowerCase())
-  );
-  const projectId = project?.id || null;
-  const records = {
-    incident: addConstructionRecord('incidents', {
-      projectId,
-      title: `Emergency response: ${primaryJob.title}`,
-      severity: 'high',
-      status: 'open',
-      date: today,
-      sourceJobId: primaryJob.id,
-      notes: reason
-    }),
-    task: addConstructionRecord('tasks', {
-      projectId,
-      title: `Coordinate emergency response for ${primaryJob.title}`,
-      assignee: responseWorker?.name || 'Operations Lead',
-      priority: 'critical',
-      status: 'open',
-      dueDate: today,
-      sourceJobId: primaryJob.id
-    }),
-    clientMessage: addConstructionRecord('clientMessages', {
-      projectId,
-      subject: `Emergency update: ${primaryJob.title}`,
-      channel: 'portal',
-      recipient: primaryJob.client || primaryJob.client_name || 'Client',
-      status: 'draft',
-      dueDate: now,
-      sourceJobId: primaryJob.id
-    }),
-    safetyMeeting: addConstructionRecord('safetyMeetings', {
-      projectId,
-      title: `Emergency toolbox talk: ${primaryJob.title}`,
-      status: 'scheduled',
-      date: today,
-      attendees: responseWorker ? 1 : 0,
-      sourceJobId: primaryJob.id
-    }),
-    dailyLog: addConstructionRecord('dailyLogs', {
-      projectId,
-      date: today,
-      status: 'draft',
-      manpower: responseWorker ? 1 : 0,
-      notes: `Emergency mode activated for ${primaryJob.title}. ${responseWorker ? responseWorker.name : 'Operations lead'} assigned for first response.`,
-      sourceJobId: primaryJob.id
-    })
-  };
-  actions.push(
-    { type: 'open_incident', id: records.incident.id, message: `Incident ${records.incident.id} opened.` },
-    { type: 'create_task', id: records.task.id, message: `Critical task ${records.task.id} created.` },
-    { type: 'draft_client_update', id: records.clientMessage.id, message: 'Client portal update drafted.' },
-    { type: 'schedule_safety_talk', id: records.safetyMeeting.id, message: 'Emergency toolbox talk scheduled.' },
-    { type: 'draft_daily_log', id: records.dailyLog.id, message: 'Daily report entry drafted.' }
-  );
-
-  const review = runConstructionAutopilot();
-  saveState();
-  res.json({
-    success: true,
-    activatedAt: now,
-    reason,
-    job: primaryJob,
-    worker: responseWorker || null,
-    toolPlan,
-    records,
-    actions: [...actions, ...(review.actions || [])],
-    alerts,
-    insights: review.insights || [],
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
-});
-
-app.get('/api/workers', (req, res) => {
-  res.json(mergedLegacyAndLedgerWorkers(req.query || {}));
-});
-
-app.post('/api/workers', (req, res) => {
-  const workerData = req.body || {};
-  if (!workerData.name) {
-    return res.status(400).json({ error: 'Worker name is required' });
-  }
-
-  const nextId = Math.max(0, ...workers.map(worker => Number(worker.id) || 0)) + 1;
-  const newWorker = {
-    id: nextId,
-    name: workerData.name,
-    specialty: workerData.specialty || workerData.specialties?.[0] || 'General Maintenance',
-    specialties: Array.isArray(workerData.specialties)
-      ? workerData.specialties
-      : String(workerData.specialty || 'General Maintenance').split(',').map(item => item.trim()).filter(Boolean),
-    skills: Array.isArray(workerData.skills)
-      ? workerData.skills
-      : Array.isArray(workerData.specialties)
-        ? workerData.specialties
-        : [],
-    status: workerData.status || 'available',
-    location: workerData.location || workerData.currentLocation || 'Unassigned',
-    rating: Number(workerData.rating || 5),
-    completedJobs: Number(workerData.completedJobs || 0),
-    hourlyRate: Number(workerData.hourlyRate || workerData.hourly_rate || 0),
-    currentJob: workerData.currentJob || null,
-    currentJobId: workerData.currentJobId || null
-  };
-  syncLegacyWorkerToLedger(newWorker, 'legacy_workers_api');
-  workers.push(newWorker);
-  saveState();
-  res.status(201).json(newWorker);
-});
-
-app.put('/api/workers/:id', (req, res) => {
-  const workerId = parseInt(req.params.id);
-  const workerIndex = workers.findIndex(worker => worker.id === workerId);
-  if (workerIndex === -1) {
-    return handleLedgerRequest(req, res, () => {
-      const existingWorker = findLedgerWorkerForLegacyRoute(req.params.id);
-      if (!existingWorker) {
-        const error = new Error('Worker not found');
-        error.statusCode = 404;
-        throw error;
-      }
-
-      const updates = { ...(req.body || {}) };
-      delete updates.id;
-      const dataUpdates = { ...(updates.data || {}) };
-      if (Object.prototype.hasOwnProperty.call(updates, 'currentJob')) dataUpdates.currentJob = updates.currentJob;
-      if (Object.prototype.hasOwnProperty.call(updates, 'currentJobId')) dataUpdates.currentJobId = updates.currentJobId;
-      const worker = operatingLedger.upsertWorker({
-        ...updates,
-        id: existingWorker.id,
-        data: dataUpdates
-      }, { actor: 'legacy_workers_api' });
-      return {
-        success: true,
-        operationStatus: 'updated',
-        ...mapLedgerWorkerForLegacy(worker),
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    });
-  }
-
-  const updates = { ...(req.body || {}) };
-  delete updates.id;
-  workers[workerIndex] = { ...workers[workerIndex], ...updates, id: workerId };
-  syncLegacyWorkerToLedger(workers[workerIndex], 'legacy_workers_api');
-  saveState();
-  res.json(workers[workerIndex]);
-});
-
-app.delete('/api/workers/:id', (req, res) => {
-  const workerId = req.params.id;
-  const workerIndex = workers.findIndex(worker => String(worker.id) === String(workerId));
-  if (workerIndex === -1) {
-    return handleLedgerRequest(req, res, () => {
-      const existingWorker = findLedgerWorkerForLegacyRoute(workerId);
-      if (!existingWorker) {
-        const error = new Error('Worker not found');
-        error.statusCode = 404;
-        throw error;
-      }
-
-      const retirement = operatingLedger.requestWorkerRetirement(existingWorker.id, req.body || {}, { actor: 'legacy_workers_api' });
-      return {
-        success: true,
-        deleted: false,
-        retained: true,
-        retired: retirement.retired,
-        requiresApproval: retirement.requiresApproval,
-        operationStatus: retirement.operationStatus,
-        approval: retirement.approval,
-        worker: mapLedgerWorkerForLegacy(retirement.worker),
-        ledger: retirement.worker,
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    });
-  }
-
-  const worker = workers[workerIndex];
-  const ledgerWorker = syncLegacyWorkerToLedger(worker, 'legacy_workers_api');
-  const retirement = operatingLedger.requestWorkerRetirement(ledgerWorker.id, {
-    ...(req.body || {}),
-    legacyWorkerId: worker.id
-  }, { actor: 'legacy_workers_api' });
-  worker.retirementApprovalId = retirement.approval?.id || worker.retirementApprovalId || null;
-  worker.retirementRequestedAt = retirement.approval?.createdAt || worker.retirementRequestedAt || null;
-  saveState();
-  res.json({
-    success: true,
-    deleted: false,
-    retained: true,
-    retired: retirement.retired,
-    requiresApproval: retirement.requiresApproval,
-    operationStatus: retirement.operationStatus,
-    approval: retirement.approval,
-    worker: { ...worker },
-    ledger: retirement.worker
-  });
-});
-
-app.get('/api/tools', (req, res) => {
-  res.json(mergedLegacyAndLedgerTools(req.query || {}));
-});
-
-app.post('/api/tools', (req, res) => {
-  const toolData = req.body || {};
-  if (!toolData.name) {
-    return res.status(400).json({ error: 'Tool name is required' });
-  }
-
-  const nextId = Math.max(0, ...tools.map(tool => Number(tool.id) || 0)) + 1;
-  const newTool = {
-    id: nextId,
-    name: toolData.name,
-    category: toolData.category || 'general',
-    status: toolData.status || 'available',
-    currentLocation: toolData.currentLocation || toolData.location || 'Warehouse',
-    homeLocation: toolData.homeLocation || toolData.currentLocation || toolData.location || 'Warehouse',
-    returnDate: toolData.returnDate || null,
-    assignedJobId: toolData.assignedJobId || null,
-    assignedWorkerId: toolData.assignedWorkerId || null
-  };
-  syncLegacyToolToLedger(newTool, 'legacy_tools_api');
-  tools.push(newTool);
-  saveState();
-  res.status(201).json(newTool);
-});
-
-app.put('/api/tools/:id', (req, res) => {
-  const toolId = parseInt(req.params.id);
-  const toolIndex = tools.findIndex(tool => tool.id === toolId);
-  if (toolIndex === -1) {
-    return handleLedgerRequest(req, res, () => {
-      const existingTool = findLedgerToolForLegacyRoute(req.params.id);
-      if (!existingTool) {
-        const error = new Error('Tool not found');
-        error.statusCode = 404;
-        throw error;
-      }
-
-      const updates = { ...(req.body || {}) };
-      delete updates.id;
-      const dataUpdates = { ...(updates.data || {}) };
-      if (Object.prototype.hasOwnProperty.call(updates, 'returnDate')) dataUpdates.returnDate = updates.returnDate;
-      if (Object.prototype.hasOwnProperty.call(updates, 'assignedJobId')) dataUpdates.assignedJobId = updates.assignedJobId;
-      if (Object.prototype.hasOwnProperty.call(updates, 'assignedWorkerId')) dataUpdates.assignedWorkerId = updates.assignedWorkerId;
-      const tool = operatingLedger.upsertTool({
-        ...updates,
-        id: existingTool.id,
-        data: dataUpdates
-      }, { actor: 'legacy_tools_api' });
-      return {
-        success: true,
-        operationStatus: 'updated',
-        ...mapLedgerToolForLegacy(tool),
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    });
-  }
-
-  const updates = { ...(req.body || {}) };
-  delete updates.id;
-  tools[toolIndex] = { ...tools[toolIndex], ...updates, id: toolId };
-  syncLegacyToolToLedger(tools[toolIndex], 'legacy_tools_api');
-  saveState();
-  res.json(tools[toolIndex]);
-});
-
-app.delete('/api/tools/:id', (req, res) => {
-  const toolId = req.params.id;
-  const toolIndex = tools.findIndex(tool => String(tool.id) === String(toolId));
-  if (toolIndex === -1) {
-    return handleLedgerRequest(req, res, () => {
-      const existingTool = findLedgerToolForLegacyRoute(toolId);
-      if (!existingTool) {
-        const error = new Error('Tool not found');
-        error.statusCode = 404;
-        throw error;
-      }
-
-      const retirement = operatingLedger.requestToolRetirement(existingTool.id, req.body || {}, { actor: 'legacy_tools_api' });
-      return {
-        success: true,
-        deleted: false,
-        retained: true,
-        retired: retirement.retired,
-        requiresApproval: retirement.requiresApproval,
-        operationStatus: retirement.operationStatus,
-        approval: retirement.approval,
-        tool: mapLedgerToolForLegacy(retirement.tool),
-        ledger: retirement.tool,
-        dashboard: operatingLedger.dashboardSummary()
-      };
-    });
-  }
-
-  const tool = tools[toolIndex];
-  const ledgerTool = syncLegacyToolToLedger(tool, 'legacy_tools_api');
-  const retirement = operatingLedger.requestToolRetirement(ledgerTool.id, {
-    ...(req.body || {}),
-    legacyToolId: tool.id
-  }, { actor: 'legacy_tools_api' });
-  tool.retirementApprovalId = retirement.approval?.id || tool.retirementApprovalId || null;
-  tool.retirementRequestedAt = retirement.approval?.createdAt || tool.retirementRequestedAt || null;
-  saveState();
-  res.json({
-    success: true,
-    deleted: false,
-    retained: true,
-    retired: retirement.retired,
-    requiresApproval: retirement.requiresApproval,
-    operationStatus: retirement.operationStatus,
-    approval: retirement.approval,
-    tool: { ...tool },
-    ledger: retirement.tool
-  });
-});
-
-app.post('/api/ai/chat', (req, res) => {
-  return res.status(501).json({
+app.use('/api/weather', retiredLedgerFacadeRoute);
+app.use('/api/schedule', retiredLedgerFacadeRoute);
+
+function retiredConstructionRoute(req, res) {
+  return res.status(410).json({
     error: {
-      code: 'chat_unavailable',
-      message: 'Conversational AI is unavailable until a verified provider is configured. Use the persisted command plan and ledger views instead.',
+      code: 'legacy_construction_retired',
+      message: 'The construction compatibility API is retired. Use the operating-ledger job routes.'
+    },
+    migration: {
+      intake: '/api/ledger/intake',
+      dashboard: '/api/ledger/dashboard',
+      jobRecords: '/api/ledger/jobs/:jobId/*',
+      approvals: '/api/ledger/approvals'
+    }
+  });
+}
+
+app.use('/api/construction', retiredConstructionRoute);
+function retiredLegacyResourceRoute(req, res) {
+  const resource = req.baseUrl.endsWith('/workers') ? 'workers'
+    : req.baseUrl.endsWith('/tools') ? 'tools'
+      : 'jobs';
+  const migration = resource === 'jobs'
+    ? { collection: '/api/ledger/jobs', intake: '/api/ledger/intake', records: '/api/ledger/jobs/:jobId/*' }
+    : { collection: `/api/ledger/${resource}` };
+  return res.status(410).json({
+    error: {
+      code: 'legacy_resource_route_retired',
+      message: `The /api/${resource} compatibility API is retired. Use the operating-ledger API.`
+    },
+    migration
+  });
+}
+
+app.use('/api/jobs', retiredLegacyResourceRoute);
+app.use('/api/workers', retiredLegacyResourceRoute);
+app.use('/api/tools', retiredLegacyResourceRoute);
+
+function retiredLegacyAutonomyRoute(req, res) {
+  return res.status(410).json({
+    error: {
+      code: 'legacy_autonomy_retired',
+      message: 'Legacy simulated autonomy is retired. Use /api/ledger/command-plan for review or /api/ledger/autonomous-cycle for approval-gated ledger automation.',
       requestId: req.requestId
     }
+  });
+}
+
+app.get('/api/ai/status', retiredLegacyAutonomyRoute);
+app.post('/api/ai/analyze', retiredLegacyAutonomyRoute);
+app.post('/api/ai/autonomous-cycle', retiredLegacyAutonomyRoute);
+app.post('/api/operations/cycle', (req, res) => res.status(410).json({
+  error: {
+    code: 'legacy_operations_cycle_retired',
+    message: 'The mixed legacy operations cycle is retired. Use /api/ledger/autonomous-cycle or the durable ledger scheduler.'
+  }
+}));
+
+app.post('/api/ledger/communications/:id/delivery-receipt', (req, res) => {
+  if (!['owner', 'office_operator'].includes(req.operator?.role || 'owner')) {
+    return sendError(req, res, 403, 'delivery_receipt_forbidden', 'Only an owner or office operator can record a verified delivery receipt.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const integration = String(payload.integration || '').trim();
+    if (!integration || !verifiedIntegrationIds.has(integration)) {
+      const error = new Error('A configured verified integration is required to record external delivery.');
+      error.statusCode = 409;
+      error.code = 'verified_integration_required';
+      throw error;
+    }
+    const communication = operatingLedger.recordCommunicationDelivery(req.params.id, {
+      integration,
+      providerMessageId: payload.providerMessageId || payload.provider_message_id || null,
+      sentAt: payload.sentAt || payload.sent_at || null,
+      receipt: payload.receipt || null
+    }, { actor: payload.actor || actorFromRequest(req, 'delivery_receipt_api') });
+    return { success: true, communication, job: operatingLedger.getJobDetail(communication.jobId), dashboard: operatingLedger.dashboardSummary() };
+  });
+});
+app.post('/api/emergency/activate', (req, res) => res.status(410).json({
+  error: {
+    code: 'emergency_autonomy_retired',
+    message: 'Emergency auto-dispatch is retired. Create a ledger intake, record the incident, and resolve the required approval gates before any commitment.',
+    requestId: req.requestId
+  }
+}));
+app.post('/api/ai/chat', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'conversational_ai_route_retired',
+      message: 'Unpersisted conversational AI is retired. Use the ledger command plan for reviewable operational guidance.',
+      requestId: req.requestId
+    },
+    migration: { endpoint: '/api/ledger/command-plan', method: 'GET' }
   });
 });
 
@@ -7200,56 +3176,6 @@ app.post('/api/simulate/client-request', (req, res) => {
     }
   });
 
-  const scenarios = [
-    {
-      client: 'Emma Bakker',
-      phone: '+31612345678',
-      address: 'Nieuwmarkt 12, Amsterdam',
-      service: 'Kitchen renovation',
-      urgency: 'medium',
-      description: 'Need kitchen cabinets replaced and new countertop installed'
-    },
-    {
-      client: 'Pieter Visser',
-      phone: '+31687654321',
-      address: 'Lange Voorhout 89, Den Haag',
-      service: 'Garden maintenance',
-      urgency: 'low',
-      description: 'Monthly garden cleanup and hedge trimming'
-    },
-    {
-      client: 'Sanne de Jong',
-      phone: '+31655551111',
-      address: 'Keizersgracht 321, Amsterdam',
-      service: 'Emergency plumbing',
-      urgency: 'critical',
-      description: 'Urgent pipe leak with water in the kitchen'
-    }
-  ];
-
-  const selected = scenarios.find(item => item.service.toLowerCase().includes(String(req.body?.scenario || '').toLowerCase()))
-    || scenarios[Math.floor(Math.random() * scenarios.length)];
-  const job = autonomousEngine.createJobFromRequest(selected, currentState());
-  jobs.unshift(job);
-  const plan = autonomousEngine.createPlan(job, currentState());
-  let execution = null;
-
-  if (req.body?.execute === true && !plan.requiresApproval) {
-    execution = autonomousEngine.executePlan(job.id, currentState());
-  }
-
-  saveState();
-  res.json({
-    success: true,
-    request: selected,
-    job,
-    plan,
-    execution,
-    status: execution?.success ? 'internal_plan_applied' : 'analyzed_with_draft_plan',
-    deliveryMode: 'draft_only',
-    notSent: true,
-    nextSteps: plan.actions.map(action => action.type)
-  });
 });
 
 // AI Chat endpoint
@@ -7260,32 +3186,6 @@ app.post('/api/legacy/ai/chat', (req, res) => {
       message: 'Legacy simulated chat is retired. Use the persisted command plan and ledger views instead.',
       requestId: req.requestId
     }
-  });
-
-  const message = String(req.body?.message || '');
-
-  // Simple AI response simulation
-  let response = "I'm analyzing your request...";
-
-  if (message.toLowerCase().includes('schedule') || message.toLowerCase().includes('plan')) {
-    response = "Based on current weather and worker availability, I recommend scheduling outdoor work for tomorrow morning. Anna is available for bathroom work, and Marco can handle the gutter cleaning after 2 PM.";
-  } else if (message.toLowerCase().includes('weather')) {
-    response = "Current weather in Amsterdam: 16°C, partly cloudy with 20% chance of rain. Good conditions for most outdoor work. I recommend completing gutter cleaning before tomorrow's forecasted rain.";
-  } else if (message.toLowerCase().includes('worker') || message.toLowerCase().includes('team')) {
-    response = "Your team status: Anna is currently working on the bathroom renovation (65% complete), Marco is available for new assignments, and Lisa just completed the lawn maintenance job with excellent client feedback.";
-  } else if (message.toLowerCase().includes('client') || message.toLowerCase().includes('customer')) {
-    response = "Client updates: Maria van der Berg's bathroom renovation is progressing well. A progress update draft with photos is ready for approval before sending. Jan de Vries' availability note should be confirmed in the approval queue before the schedule is committed.";
-  }
-
-  res.json({
-    response,
-    confidence: 'high',
-    suggestions: [
-      'Review today\'s schedule',
-      'Check weather forecast',
-      'Send client updates',
-      'Optimize routes'
-    ]
   });
 });
 
@@ -7298,115 +3198,75 @@ app.post('/api/legacy/simulate/client-request', (req, res) => {
       requestId: req.requestId
     }
   });
-
-  const clientRequests = [
-    {
-      client: 'Emma Bakker',
-      phone: '+31612345678',
-      address: 'Nieuwmarkt 12, Amsterdam',
-      service: 'Kitchen renovation',
-      urgency: 'medium',
-      budget: 'EUR 2000-3000',
-      description: 'Need kitchen cabinets replaced and new countertop installed'
-    },
-    {
-      client: 'Pieter Visser',
-      phone: '+31687654321',
-      address: 'Lange Voorhout 89, Den Haag',
-      service: 'Garden maintenance',
-      urgency: 'low',
-      budget: 'EUR 100-200',
-      description: 'Monthly garden cleanup and hedge trimming'
-    }
-  ];
-
-  const request = clientRequests[Math.floor(Math.random() * clientRequests.length)];
-
-  // Simulate AI analysis
-  const aiAnalysis = {
-    estimatedDuration: '2-3 days',
-    recommendedWorker: 'Anna Kowalski',
-    estimatedCost: request.budget,
-    requiredTools: ['Power tools', 'Measuring equipment', 'Safety gear'],
-    schedulingSuggestion: 'Next available slot: October 20-22',
-    confidence: 'high'
-  };
-
-  res.json({
-    request,
-    aiAnalysis,
-    status: 'analyzed',
-    deliveryMode: 'draft_only',
-    notSent: true,
-    nextSteps: [
-      'Draft quote for approval',
-      'Draft initial consultation schedule',
-      'Draft required tool reservation',
-      'Propose worker assignment'
-    ]
-  });
 });
 
-// Test email/SMS endpoint
 app.post('/api/test/notifications', (req, res) => {
-  const type = String(req.body?.type || 'all').toLowerCase();
-  if (!['email', 'sms', 'all'].includes(type)) {
-    return res.status(400).json({ error: 'Notification type must be email, sms, or all' });
-  }
-
-  const channels = (type === 'all' ? ['email', 'sms'] : [type]).map(channel => ({
-    channel,
-    recipient: channel === 'email' ? CONTRACTOR_CONFIG.email : CONTRACTOR_CONFIG.phone,
-    status: 'dry_run',
-    notSent: true,
-    requiresApproval: true,
-    subject: channel === 'email' ? 'Contractor AI System Test' : undefined,
-    content: 'Dry-run notification draft from Contractor AI. No external message was sent.'
-  }));
-
-  res.json({
-    success: true,
-    message: `${channels.length} notification channel draft(s) prepared; no external messages were sent`,
-    deliveryMode: 'dry_run',
-    notSent: true,
-    timestamp: new Date().toISOString(),
-    channels
+  return res.status(410).json({
+    error: {
+      code: 'test_notification_route_retired',
+      message: 'Synthetic notification drafts are retired. Create a job-linked communication draft in the operating ledger.',
+      requestId: req.requestId
+    },
+    migration: {
+      endpoint: '/api/ledger/jobs/:jobId/communication',
+      method: 'POST',
+      approvalRequired: true
+    }
   });
 });
 
-// File analysis endpoint. Accepts the historical JSON metadata contract and
-// bounded local multipart uploads from the dashboard field-evidence form.
-app.post('/api/upload', async (req, res) => {
+// Ledger evidence intake accepts JSON metadata and bounded multipart uploads.
+app.post('/api/ledger/upload', async (req, res) => {
   let uploadPayload;
+  let idempotency = null;
+  let retainedUpload = null;
+  let ledgerCommitted = false;
   try {
-    uploadPayload = await readUploadPayload(req);
-  } catch (error) {
-    if (error instanceof UploadRequestError) {
-      return sendError(req, res, error.statusCode, error.code, error.message, error.details);
+    uploadPayload = await readUploadPayload(req, {
+      authorizePayload(payload) {
+        const requestedJobId = payload.jobId || payload.job_id || payload.ledgerJobId || payload.ledger_job_id;
+        if (!requestedJobId) {
+          throw new UploadRequestError(400, 'ledger_job_required', 'Evidence uploads must identify an operating-ledger job.');
+        }
+        if (req.operator?.role === 'field_worker' && !fieldWorkerCanAccessJob(req, requestedJobId)) {
+          throw new UploadRequestError(403, 'field_job_scope_forbidden', 'This field worker is not assigned to the evidence job.');
+        }
+        if (!resolveUploadLedgerJobDetail(payload, actorFromRequest(req, 'upload_api'))?.id) {
+          throw new UploadRequestError(404, 'ledger_job_not_found', 'The requested operating-ledger job was not found.');
+        }
+      }
+    });
+    idempotency = uploadIdempotencyClaim(req, uploadPayload.payload || {}, uploadPayload.file);
+    if (idempotency?.replayed) {
+      res.setHeader('Idempotent-Replayed', 'true');
+      return res.status(idempotency.responseStatus).json(idempotency.responseBody);
     }
-    throw error;
-  }
+    if (idempotency && !idempotency.claimed) {
+      if (idempotency.reason === 'request_conflict') {
+        throw new UploadRequestError(409, 'idempotency_key_reused', 'This Idempotency-Key was already used for a different evidence request.');
+      }
+      if (idempotency.reason === 'request_in_progress') {
+        res.setHeader('Retry-After', String(Math.max(1, Math.ceil(Number(idempotency.retryAfterMs || 1000) / 1000))));
+        throw new UploadRequestError(409, 'idempotent_request_in_progress', 'The matching evidence request is still being processed.');
+      }
+      throw new UploadRequestError(503, 'idempotency_claim_failed', 'The evidence retry identity could not be claimed safely.');
+    }
 
-  const payload = uploadPayload.payload || {};
-  const analysis = {
-    ...analyzeUploadPayload(payload),
-    upload: uploadPayload.storedFile ? {
-      storageRef: uploadPayload.storedFile.storageRef,
-      mimeType: uploadPayload.storedFile.mimeType,
-      size: uploadPayload.storedFile.size
-    } : null
-  };
-  const shouldAttachToBuild = payload.attachToBuild !== false && String(payload.attachToBuild || 'true').toLowerCase() !== 'false';
-  const buildResult = shouldAttachToBuild
-    ? createUploadBuildRecords(payload, analysis)
-    : { records: {}, actions: [], job: null };
-  let ledgerDocument = null;
-  let ledgerFollowUp = { records: {}, actions: [] };
-  if (payload.jobId || payload.job_id || payload.ledgerJobId || payload.ledger_job_id) {
-    const storedFile = uploadPayload.storedFile || null;
-    const ledgerDetail = resolveUploadLedgerJobDetail(payload, 'upload_api');
-    if (ledgerDetail?.id) {
-      ledgerDocument = operatingLedger.addDocument(ledgerDetail.id, {
+    const storedFile = uploadPayload.file ? await storeUploadedFile(uploadPayload.file) : null;
+    retainedUpload = storedFile;
+    const payload = withStoredUpload(uploadPayload.payload || {}, storedFile);
+    const analysis = {
+      ...analyzeUploadPayload(payload),
+      upload: storedFile ? {
+        storageRef: storedFile.storageRef,
+        mimeType: storedFile.mimeType,
+        size: storedFile.size
+      } : null
+    };
+    const actor = actorFromRequest(req, 'upload_api');
+    const responseBody = operatingLedger.transaction(() => {
+      const ledgerDetail = resolveUploadLedgerJobDetail(payload, actor);
+      const ledgerDocument = operatingLedger.addDocument(ledgerDetail.id, {
         type: analysis.category === 'field_photo' || String(payload.fileType || '').startsWith('image/') ? 'photo' : 'document',
         title: payload.title || storedFile?.originalName || payload.filename || payload.name || 'Uploaded evidence',
         filename: storedFile?.originalName || payload.filename || payload.name || null,
@@ -7416,29 +3276,69 @@ app.post('/api/upload', async (req, res) => {
         status: analysis.riskDetected ? 'needs_review' : 'stored',
         tags: [analysis.category, payload.category, payload.riskLevel].filter(Boolean),
         analysis
-      }, { actor: 'upload_api' });
-      ledgerFollowUp = createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload, analysis);
+      }, { actor });
+      const ledgerFollowUp = createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload, analysis, actor);
+      const body = {
+        success: true,
+        filename: payload.filename || payload.name || 'metadata-only',
+        uploadedFile: storedFile,
+        analysis,
+        ledgerDocument,
+        ledgerFollowUp,
+        actions: ledgerFollowUp.actions,
+        migration: {
+          legacyBuildAttachmentRetired: payload.attachToBuild !== undefined,
+          job: `/api/ledger/jobs/${ledgerDetail.id}`
+        }
+      };
+      if (idempotency?.claimed) {
+        const completed = operatingLedger.completeIdempotentRequest(
+          idempotency.keyHash,
+          idempotency.requestHash,
+          200,
+          body,
+          idempotency.leaseId
+        );
+        if (!completed) {
+          throw new UploadRequestError(503, 'idempotency_completion_failed', 'The evidence retry receipt could not be completed safely.');
+        }
+      }
+      return body;
+    });
+    ledgerCommitted = true;
+    return res.json(responseBody);
+  } catch (error) {
+    if (retainedUpload && !ledgerCommitted && evidenceStorage?.remove) {
+      try {
+        await evidenceStorage.remove(retainedUpload.storageRef);
+      } catch (cleanupError) {
+        log('warn', 'unreferenced_evidence_cleanup_failed', {
+          requestId: req.requestId,
+          code: cleanupError.code || 'evidence_cleanup_failed'
+        });
+      }
     }
+    if (idempotency?.claimed) {
+      operatingLedger.releaseIdempotentRequest(idempotency.keyHash, idempotency.requestHash, idempotency.leaseId);
+    }
+    if (error instanceof UploadRequestError) {
+      return sendError(req, res, error.statusCode, error.code, error.message, error.details);
+    }
+    throw error;
   }
-
-  if (shouldAttachToBuild) {
-    saveState();
-  }
-
-  res.json({
-    success: true,
-    filename: payload.filename || payload.name || 'metadata-only',
-    uploadedFile: uploadPayload.storedFile,
-    analysis,
-    records: buildResult.records,
-    ledgerDocument,
-    ledgerFollowUp,
-    actions: [...buildResult.actions, ...ledgerFollowUp.actions],
-    job: buildResult.job,
-    summary: constructionSummary(),
-    capabilities: constructionCapabilities()
-  });
 });
+
+app.all('/api/upload', (req, res) => res.status(410).json({
+  error: {
+    code: 'upload_facade_retired',
+    message: 'The unversioned evidence upload facade is retired. Use the operating-ledger evidence endpoint.',
+    requestId: req.requestId
+  },
+  migration: {
+    endpoint: '/api/ledger/upload',
+    method: 'POST'
+  }
+}));
 
 // Debug diagnostics. Disabled in production unless DEBUG_DIAGNOSTICS=true.
 app.get('/api/debug/diagnostics', (req, res) => {
@@ -7446,11 +3346,9 @@ app.get('/api/debug/diagnostics', (req, res) => {
     return sendError(req, res, 404, 'not_found', 'Diagnostics are disabled');
   }
 
-  const validation = validateState();
   const ledgerDiagnostics = operatingLedger.diagnose();
-  const state = currentState();
   res.json({
-    status: validation.valid && ledgerDiagnostics.valid ? 'ok' : 'attention',
+    status: ledgerDiagnostics.valid ? 'ok' : 'attention',
     requestId: req.requestId,
     generatedAt: new Date().toISOString(),
     uptimeSeconds: Math.round(process.uptime()),
@@ -7463,18 +3361,9 @@ app.get('/api/debug/diagnostics', (req, res) => {
       diagnosticsEnabled: true
     },
     persistence: {
-      enabled: true,
-      stateFile: isProduction ? 'hidden' : stateFile,
-      ledgerFile: isProduction ? 'hidden' : ledgerFile
-    },
-    state: {
-      counts: {
-        jobs: state.jobs.length,
-        workers: state.workers.length,
-        tools: state.tools.length
-      },
-      summary: autonomousEngine.summarizeState(state),
-      validation
+      mode: 'ledger_only',
+      ledgerFile: isProduction ? 'hidden' : ledgerFile,
+      legacyImportSourcePresent: !isProduction && fs.existsSync(stateFile)
     },
     ledger: {
       diagnostics: ledgerDiagnostics,
@@ -7483,29 +3372,809 @@ app.get('/api/debug/diagnostics', (req, res) => {
   });
 });
 
+const OPERATIONAL_EXPORT_FORMAT = 'contractor-ai-operational-export/v2';
+const OPERATIONAL_EXPORT_CANONICALIZATION = 'contractor-ai-stable-json/v1';
+
+function operationalExport() {
+  const dashboard = operatingLedger.dashboardSummary();
+  const payload = JSON.parse(JSON.stringify({
+    exportedAt: new Date().toISOString(),
+    format: OPERATIONAL_EXPORT_FORMAT,
+    purpose: 'operator_reconciliation',
+    restorable: false,
+    runtime: runtimeConfiguration(),
+    dashboard,
+    jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
+    tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
+    approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
+    audit: operatingLedger.listAudit({ limit: 1_000 })
+  }));
+  return {
+    ...payload,
+    integrity: {
+      algorithm: 'sha256',
+      canonicalization: OPERATIONAL_EXPORT_CANONICALIZATION,
+      digest: crypto.createHash('sha256').update(stableJson(payload)).digest('hex')
+    }
+  };
+}
+
+function validateOperationalExport(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return { valid: false, code: 'invalid_operational_export', problems: ['The selected file is not a Contractor.AI operational export.'] };
+  }
+  if (snapshot.format === 'contractor-ai-operational-export/v1') {
+    return { valid: false, code: 'legacy_export_unverifiable', problems: ['Version 1 exports have no integrity digest. Create a new export before relying on it for reconciliation.'] };
+  }
+  const problems = [];
+  if (snapshot.format !== OPERATIONAL_EXPORT_FORMAT) problems.push('The selected file uses an unsupported Contractor.AI export format.');
+  if (snapshot.purpose !== 'operator_reconciliation' || snapshot.restorable !== false) {
+    problems.push('The export must identify itself as a non-restorable operator reconciliation artifact.');
+  }
+  if (!snapshot.exportedAt || Number.isNaN(Date.parse(snapshot.exportedAt))) problems.push('Export timestamp is missing or invalid.');
+  if (!snapshot.runtime || typeof snapshot.runtime !== 'object' || Array.isArray(snapshot.runtime)) problems.push('Export is missing runtime metadata.');
+  if (!snapshot.dashboard || typeof snapshot.dashboard !== 'object' || Array.isArray(snapshot.dashboard)) problems.push('Export is missing the dashboard summary.');
+  for (const key of ['jobs', 'tradePartners', 'approvals', 'audit']) {
+    if (!Array.isArray(snapshot[key])) problems.push(`Export is missing the ${key} collection.`);
+  }
+  const integrity = snapshot.integrity;
+  if (
+    integrity?.algorithm !== 'sha256'
+    || integrity?.canonicalization !== OPERATIONAL_EXPORT_CANONICALIZATION
+    || !/^[a-f0-9]{64}$/.test(String(integrity?.digest || ''))
+  ) {
+    problems.push('Export integrity metadata is missing or invalid.');
+  }
+  if (problems.length) return { valid: false, code: 'invalid_operational_export', problems };
+
+  const { integrity: suppliedIntegrity, ...payload } = snapshot;
+  const expectedDigest = crypto.createHash('sha256').update(stableJson(payload)).digest('hex');
+  if (suppliedIntegrity.digest !== expectedDigest) {
+    return { valid: false, code: 'export_integrity_failed', problems: ['The export contents do not match its SHA-256 integrity digest.'] };
+  }
+  return {
+    valid: true,
+    format: snapshot.format,
+    exportedAt: snapshot.exportedAt,
+    artifactType: 'operational_export',
+    purpose: snapshot.purpose,
+    restorable: false,
+    integrity: { verified: true, algorithm: 'sha256', digest: expectedDigest },
+    counts: {
+      jobs: snapshot.jobs.length,
+      tradePartners: snapshot.tradePartners.length,
+      approvals: snapshot.approvals.length,
+      audit: snapshot.audit.length
+    }
+  };
+}
+
+function sha256File(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+function copyEvidenceBackup(sourceRoot, backupDir) {
+  const source = path.resolve(sourceRoot);
+  const targetRoot = path.resolve(backupDir, 'evidence');
+  if (targetRoot.startsWith(`${source}${path.sep}`) || source.startsWith(`${targetRoot}${path.sep}`) || source === targetRoot) {
+    throw new Error('Evidence and backup directories must not overlap.');
+  }
+  const copied = [];
+  const entries = [];
+  if (!fs.existsSync(source)) return { copied, entries };
+  fs.mkdirSync(targetRoot, { recursive: true });
+
+  const visit = (directory, relativeDirectory = '') => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new Error(`Evidence backup refuses symbolic link: ${entry.name}`);
+      const relative = path.join(relativeDirectory, entry.name);
+      const sourcePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(sourcePath, relative);
+        continue;
+      }
+      if (!entry.isFile() || entry.name.startsWith('.')) continue;
+      const target = path.resolve(targetRoot, relative);
+      if (!target.startsWith(`${targetRoot}${path.sep}`)) throw new Error('Evidence backup path could not be resolved safely.');
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(sourcePath, target);
+      const manifestPath = path.posix.join('evidence', relative.replace(/\\/g, '/'));
+      copied.push(path.relative(__dirname, target).replace(/\\/g, '/'));
+      entries.push({ file: manifestPath, bytes: fs.statSync(target).size, sha256: sha256File(target) });
+    }
+  };
+  visit(source);
+  return { copied, entries };
+}
+
+function assertLocalBackupMode() {
+  if (operatingLedger.databaseMode === 'sqlite') return;
+  const error = new Error('Hosted recovery uses the configured PostgreSQL backup policy and versioned object storage; no incomplete local package was created.');
+  error.statusCode = 409;
+  error.code = 'provider_recovery_required';
+  throw error;
+}
+
+function backupOperationalState() {
+  assertLocalBackupMode();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupRoot = path.join(dataDir, 'backups');
+  const backupDir = path.join(backupRoot, timestamp);
+  fs.mkdirSync(backupDir, { recursive: true });
+  if (operatingLedger.databaseMode === 'sqlite') {
+    try {
+      operatingLedger.db.exec('PRAGMA wal_checkpoint(FULL)');
+    } catch (error) {
+      log('warn', 'ledger_backup_checkpoint_failed', { error: serializeError(error) });
+    }
+  }
+
+  const copied = [];
+  const manifestFiles = [];
+  const backupSources = operatingLedger.databaseMode === 'sqlite'
+    ? [stateFile, ledgerFile, `${ledgerFile}-wal`, `${ledgerFile}-shm`]
+    : [stateFile];
+  for (const source of backupSources) {
+    if (!fs.existsSync(source)) continue;
+    const target = path.join(backupDir, path.basename(source));
+    fs.copyFileSync(source, target);
+    copied.push(path.relative(__dirname, target).replace(/\\/g, '/'));
+    manifestFiles.push({ file: path.basename(target), bytes: fs.statSync(target).size, sha256: sha256File(target) });
+  }
+  const evidenceBackup = operatingLedger.databaseMode === 'sqlite'
+    ? copyEvidenceBackup(uploadDir, backupDir)
+    : { copied: [], entries: [] };
+  copied.push(...evidenceBackup.copied);
+  manifestFiles.push(...evidenceBackup.entries);
+  const exportFile = path.join(backupDir, 'operational-export.json');
+  fs.writeFileSync(exportFile, JSON.stringify(operationalExport(), null, 2));
+  copied.push(path.relative(__dirname, exportFile).replace(/\\/g, '/'));
+  manifestFiles.push({ file: path.basename(exportFile), bytes: fs.statSync(exportFile).size, sha256: sha256File(exportFile) });
+  const manifest = {
+    format: 'contractor-ai-backup-manifest/v2',
+    backupId: timestamp,
+    createdAt: new Date().toISOString(),
+    databaseMode: operatingLedger.databaseMode,
+    database: operatingLedger.databaseMode === 'sqlite'
+      ? { engine: 'sqlite', file: path.basename(ledgerFile) }
+      : { engine: operatingLedger.databaseMode, file: null },
+    evidence: {
+      included: operatingLedger.databaseMode === 'sqlite',
+      fileCount: evidenceBackup.entries.length
+    },
+    files: manifestFiles
+  };
+  const manifestFile = path.join(backupDir, 'manifest.json');
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+  copied.push(path.relative(__dirname, manifestFile).replace(/\\/g, '/'));
+  return {
+    backupId: timestamp,
+    databaseMode: operatingLedger.databaseMode,
+    files: copied,
+    evidenceFiles: evidenceBackup.entries.length,
+    verification: { valid: true, checkedFiles: manifestFiles.length },
+    providerBackupRequired: operatingLedger.databaseMode === 'postgres'
+  };
+}
+
+function backupDirectoryForId(backupId) {
+  const normalizedId = String(backupId || '').trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(normalizedId)) {
+    const error = new Error('Backup id is invalid.');
+    error.statusCode = 400;
+    error.code = 'invalid_backup_id';
+    throw error;
+  }
+  const backupRoot = path.resolve(dataDir, 'backups');
+  const backupDir = path.resolve(backupRoot, normalizedId);
+  if (path.dirname(backupDir) !== backupRoot) {
+    const error = new Error('Backup id is invalid.');
+    error.statusCode = 400;
+    error.code = 'invalid_backup_id';
+    throw error;
+  }
+  return backupDir;
+}
+
+function readBackupManifest(backupId) {
+  const backupDir = backupDirectoryForId(backupId);
+  const manifestFile = path.join(backupDir, 'manifest.json');
+  if (!fs.existsSync(manifestFile)) {
+    const error = new Error('Backup manifest was not found.');
+    error.statusCode = 404;
+    error.code = 'backup_not_found';
+    throw error;
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  if (!['contractor-ai-backup-manifest/v1', 'contractor-ai-backup-manifest/v2'].includes(manifest?.format) || !Array.isArray(manifest.files)) {
+    const error = new Error('Backup manifest is invalid.');
+    error.statusCode = 422;
+    error.code = 'invalid_backup_manifest';
+    throw error;
+  }
+  if (manifest.backupId && manifest.backupId !== String(backupId)) {
+    const error = new Error('Backup manifest id does not match its retained directory.');
+    error.statusCode = 422;
+    error.code = 'invalid_backup_manifest';
+    throw error;
+  }
+  if (manifest.format === 'contractor-ai-backup-manifest/v2') {
+    const evidenceEntries = manifest.files.filter(entry => String(entry?.file || '').replace(/\\/g, '/').startsWith('evidence/'));
+    if (manifest.databaseMode === 'sqlite' && (manifest.evidence?.included !== true || Number(manifest.evidence?.fileCount) !== evidenceEntries.length)) {
+      const error = new Error('Backup evidence manifest is incomplete.');
+      error.statusCode = 422;
+      error.code = 'invalid_backup_manifest';
+      throw error;
+    }
+  }
+  return { backupDir, manifest };
+}
+
+function safeManifestTarget(backupDir, manifestPath) {
+  const normalized = String(manifestPath || '').replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  if (!normalized || path.posix.isAbsolute(normalized) || segments.some(segment => !segment || segment === '.' || segment === '..')) {
+    return null;
+  }
+  const target = path.resolve(backupDir, ...segments);
+  return target.startsWith(`${backupDir}${path.sep}`) ? target : null;
+}
+
+function verifyOperationalBackup(backupId) {
+  const { backupDir, manifest } = readBackupManifest(backupId);
+  const failures = [];
+  const seenFiles = new Set();
+  for (const entry of manifest.files) {
+    const file = String(entry?.file || '');
+    if (seenFiles.has(file)) {
+      failures.push({ file, reason: 'duplicate_manifest_path' });
+      continue;
+    }
+    seenFiles.add(file);
+    const target = safeManifestTarget(backupDir, file);
+    if (!target) {
+      failures.push({ file, reason: 'unsafe_manifest_path' });
+      continue;
+    }
+    if (!fs.existsSync(target)) {
+      failures.push({ file, reason: 'missing_file' });
+      continue;
+    }
+    const stats = fs.lstatSync(target);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      failures.push({ file, reason: 'unsafe_file_type' });
+      continue;
+    }
+    const actualBytes = stats.size;
+    const actualHash = sha256File(target);
+    if (actualBytes !== Number(entry.bytes) || actualHash !== entry.sha256) {
+      failures.push({ file, reason: 'checksum_mismatch' });
+    }
+  }
+  return {
+    backupId: manifest.backupId,
+    createdAt: manifest.createdAt,
+    databaseMode: manifest.databaseMode,
+    valid: failures.length === 0,
+    checkedFiles: manifest.files.length,
+    failures,
+    providerBackupRequired: manifest.databaseMode === 'postgres'
+  };
+}
+
+function validateOperationalRestore(backupId) {
+  const verification = verifyOperationalBackup(backupId);
+  if (!verification.valid) return { ...verification, restorable: false, databaseVerification: null };
+
+  const { backupDir, manifest } = readBackupManifest(backupId);
+  const failures = [...verification.failures];
+  if (manifest.format !== 'contractor-ai-backup-manifest/v2') {
+    failures.push({ file: 'manifest.json', reason: 'legacy_manifest_not_restorable' });
+  }
+  if (manifest.databaseMode !== 'sqlite') {
+    failures.push({ file: 'manifest.json', reason: 'provider_recovery_required' });
+  }
+  const databaseFile = String(manifest.database?.file || path.basename(ledgerFile));
+  const databaseEntry = manifest.files.find(entry => entry.file === databaseFile);
+  if (!databaseEntry || !safeManifestTarget(backupDir, databaseFile)) {
+    failures.push({ file: databaseFile, reason: 'missing_restore_database' });
+  }
+
+  let databaseVerification = null;
+  if (failures.length === 0) {
+    try {
+      databaseVerification = verifySqliteBackupDatabase(path.join(backupDir, databaseFile));
+    } catch (error) {
+      failures.push({ file: databaseFile, reason: 'sqlite_restore_validation_failed', message: error.message });
+    }
+  }
+  return {
+    ...verification,
+    valid: failures.length === 0,
+    restorable: failures.length === 0,
+    failures,
+    databaseVerification
+  };
+}
+
+function writeTarString(header, offset, length, value) {
+  const encoded = Buffer.from(String(value || ''), 'utf8');
+  if (encoded.length > length) throw new Error(`Backup archive path field exceeds ${length} bytes.`);
+  encoded.copy(header, offset);
+}
+
+function writeTarOctal(header, offset, length, value) {
+  const octal = Math.max(0, Number(value) || 0).toString(8);
+  if (octal.length > length - 1) throw new Error('Backup archive numeric field is too large.');
+  writeTarString(header, offset, length, `${octal.padStart(length - 1, '0')}\0`);
+}
+
+function splitTarPath(archivePath) {
+  const normalized = String(archivePath || '').replace(/\\/g, '/');
+  if (Buffer.byteLength(normalized, 'utf8') <= 100) return { name: normalized, prefix: '' };
+  for (let index = normalized.lastIndexOf('/'); index > 0; index = normalized.lastIndexOf('/', index - 1)) {
+    const prefix = normalized.slice(0, index);
+    const name = normalized.slice(index + 1);
+    if (Buffer.byteLength(name, 'utf8') <= 100 && Buffer.byteLength(prefix, 'utf8') <= 155) {
+      return { name, prefix };
+    }
+  }
+  throw new Error(`Backup archive path is too long: ${normalized}`);
+}
+
+function createTarHeader(archivePath, stats) {
+  const { name, prefix } = splitTarPath(archivePath);
+  const header = Buffer.alloc(512, 0);
+  writeTarString(header, 0, 100, name);
+  writeTarOctal(header, 100, 8, 0o600);
+  writeTarOctal(header, 108, 8, 0);
+  writeTarOctal(header, 116, 8, 0);
+  writeTarOctal(header, 124, 12, stats.size);
+  writeTarOctal(header, 136, 12, Math.floor(stats.mtimeMs / 1000));
+  header.fill(0x20, 148, 156);
+  header[156] = '0'.charCodeAt(0);
+  writeTarString(header, 257, 6, 'ustar\0');
+  writeTarString(header, 263, 2, '00');
+  writeTarString(header, 265, 32, 'contractor-ai');
+  writeTarString(header, 297, 32, 'contractor-ai');
+  writeTarString(header, 345, 155, prefix);
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  const encodedChecksum = `${checksum.toString(8).padStart(6, '0')}\0 `;
+  writeTarString(header, 148, 8, encodedChecksum);
+  return header;
+}
+
+async function* backupArchiveChunks(backupId, backupDir, manifest) {
+  const root = backupId;
+  const sources = [
+    { file: 'manifest.json', target: path.join(backupDir, 'manifest.json') },
+    ...manifest.files.map(entry => ({ file: String(entry.file), target: safeManifestTarget(backupDir, entry.file) }))
+  ];
+  const archivePaths = new Set();
+  for (const source of sources) {
+    if (!source.target) throw new Error(`Backup archive contains an unsafe path: ${source.file}`);
+    const archivePath = path.posix.join(root, source.file.replace(/\\/g, '/'));
+    if (archivePaths.has(archivePath)) throw new Error(`Backup archive contains a duplicate path: ${source.file}`);
+    archivePaths.add(archivePath);
+    const stats = fs.lstatSync(source.target);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Backup archive refuses unsafe file type: ${source.file}`);
+    yield createTarHeader(archivePath, stats);
+    for await (const chunk of fs.createReadStream(source.target)) yield chunk;
+    const padding = (512 - (stats.size % 512)) % 512;
+    if (padding) yield Buffer.alloc(padding, 0);
+  }
+  yield Buffer.alloc(1024, 0);
+}
+
+function listOperationalBackups() {
+  const backupRoot = path.join(dataDir, 'backups');
+  if (!fs.existsSync(backupRoot)) return [];
+  return fs.readdirSync(backupRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => {
+      try {
+        const { manifest } = readBackupManifest(entry.name);
+        return {
+          backupId: manifest.backupId,
+          createdAt: manifest.createdAt,
+          databaseMode: manifest.databaseMode,
+          format: manifest.format,
+          files: manifest.files.length,
+          evidenceFiles: Number(manifest.evidence?.fileCount || 0),
+          downloadAvailable: manifest.databaseMode === 'sqlite'
+        };
+      } catch {
+        return { backupId: entry.name, createdAt: null, databaseMode: 'unknown', files: 0, manifestStatus: 'unreadable' };
+      }
+    })
+    .sort((left, right) => String(right.backupId).localeCompare(String(left.backupId)));
+}
+
+function isQaRecord(record) {
+  const text = [
+    record?.id,
+    record?.title,
+    record?.name,
+    record?.description,
+    record?.summary,
+    record?.reason,
+    record?.role,
+    record?.category,
+    record?.company,
+    record?.clientName,
+    record?.client_name
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/\b(browser|qa|demo|sample)\b/.test(text)) return true;
+
+  // These are the three historical local seed records. Match their full
+  // identity rather than every legacy import so a controlled QA reset cannot
+  // archive migrated customer work.
+  const legacySeedSignatures = new Set([
+    'legacy_job_1|bathroom renovation|maria van der berg',
+    'legacy_job_2|gutter cleaning & inspection|jan de vries',
+    'legacy_job_3|weekly lawn maintenance|sophie janssen'
+  ]);
+  const signature = [record?.id, record?.title, record?.clientName || record?.client_name]
+    .map(value => String(value || '').trim().toLowerCase())
+    .join('|');
+  if (legacySeedSignatures.has(signature)) return true;
+
+  const exactTestFixtureSignatures = new Set([
+    'replay-safe field progress|field progress client|verify exact offline retries and transactional rollback.'
+  ]);
+  const fixtureSignature = [record?.title, record?.clientName || record?.client_name, record?.description]
+    .map(value => String(value || '').trim().toLowerCase())
+    .join('|');
+  return exactTestFixtureSignatures.has(fixtureSignature);
+}
+
+app.get('/api/operations/export', (req, res) => {
+  res.setHeader('Content-Disposition', 'attachment; filename="contractor-ai-operational-export.json"');
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(operationalExport());
+});
+
+app.post('/api/operations/exports/validate', (req, res) => {
+  const result = validateOperationalExport(req.body?.snapshot || req.body);
+  if (!result.valid) {
+    return sendError(req, res, 422, result.code, 'The operational export failed integrity validation.', { problems: result.problems });
+  }
+  return res.json({
+    success: true,
+    ...result,
+    nextStep: 'Use this export for human-readable reconciliation only. Use a verified backup package for local recovery.'
+  });
+});
+
+app.post('/api/operations/backup', (req, res) => {
+  try {
+    return res.status(201).json({ success: true, backup: backupOperationalState() });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_failed', error.statusCode ? error.message : 'Unable to create a local operational backup.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/backups', (req, res) => {
+  try {
+    assertLocalBackupMode();
+    return res.json({ backups: listOperationalBackups() });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_list_failed', error.statusCode ? error.message : 'Unable to list local operational backups.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/backups/:backupId/verify', (req, res) => {
+  try {
+    assertLocalBackupMode();
+    const verification = verifyOperationalBackup(req.params.backupId);
+    return res.status(verification.valid ? 200 : 409).json({ verification });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_verification_failed', error.statusCode ? error.message : 'Unable to verify backup integrity.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/backups/:backupId/download', asyncHandler(async (req, res) => {
+  if (operatingLedger.databaseMode !== 'sqlite') {
+    return sendError(req, res, 409, 'provider_recovery_required', 'Hosted recovery uses the configured PostgreSQL backup policy and versioned object storage.');
+  }
+  try {
+    const verification = verifyOperationalBackup(req.params.backupId);
+    if (!verification.valid) {
+      return res.status(409).json({
+        error: {
+          code: 'backup_integrity_failed',
+          message: 'The backup package was not downloaded because integrity verification failed.',
+          requestId: req.requestId
+        },
+        verification
+      });
+    }
+    const { backupDir, manifest } = readBackupManifest(req.params.backupId);
+    const manifestHash = sha256File(path.join(backupDir, 'manifest.json'));
+    const filename = `contractor-ai-backup-${manifest.backupId}.tar.gz`;
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Contractor-AI-Manifest-SHA256', manifestHash);
+    log('info', 'backup_package_download', {
+      requestId: req.requestId,
+      backupId: manifest.backupId,
+      actor: actorFromRequest(req, 'local_owner'),
+      files: verification.checkedFiles
+    });
+    await pipeline(
+      Readable.from(backupArchiveChunks(manifest.backupId, backupDir, manifest)),
+      zlib.createGzip({ level: zlib.constants.Z_BEST_SPEED }),
+      res
+    );
+  } catch (error) {
+    if (res.headersSent) throw error;
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_package_failed', error.statusCode ? error.message : 'Unable to create the verified backup package.', serializeError(error));
+  }
+}));
+
+app.post('/api/operations/restore/validate', (req, res) => {
+  if (req.body?.snapshot || req.body?.format) {
+    return sendError(req, res, 422, 'operational_export_not_restorable', 'Operational exports are reconciliation artifacts and cannot be used as restore packages.', {
+      exportValidationEndpoint: '/api/operations/exports/validate',
+      requiredArtifact: 'contractor-ai-backup-manifest/v2'
+    });
+  }
+  const backupId = String(req.body?.backupId || '').trim();
+  if (!backupId) return sendError(req, res, 400, 'backup_id_required', 'Select a retained local backup package to validate for restore.');
+  try {
+    assertLocalBackupMode();
+    const verification = validateOperationalRestore(backupId);
+    return res.status(verification.valid ? 200 : 409).json({
+      success: verification.valid,
+      valid: verification.valid,
+      artifactType: 'backup_package',
+      restorable: verification.restorable,
+      verification,
+      nextStep: verification.valid
+        ? `Stop the application, then run npm run restore:local -- --backup-id ${backupId} --confirm RESTORE_${backupId}.`
+        : 'Do not restore this package. Create and verify a new local backup.'
+    });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'restore_validation_failed', error.statusCode ? error.message : 'Unable to validate the local restore package.', serializeError(error));
+  }
+});
+
+async function operationalReadiness() {
+  const storageVerification = await verifyEvidenceStorage();
+  const runtime = runtimeConfiguration({ storageVerification });
+  const ledgerDiagnostics = operatingLedger.diagnose();
+  const status = runtime.ready && ledgerDiagnostics.valid ? 'ready' : 'attention';
+  return { status, runtime, ledgerDiagnostics, storageVerification };
+}
+
+app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
+  const localSQLite = runtime.mode === 'local' && runtime.databaseMode === 'sqlite';
+  const hostedPostgres = runtime.mode === 'hosted' && runtime.databaseMode === 'postgres';
+  return res.json({
+    status,
+    localFirst: true,
+    capabilities: {
+      export: {
+        available: true,
+        format: OPERATIONAL_EXPORT_FORMAT,
+        purpose: 'operator_reconciliation',
+        restorable: false,
+        integrity: 'sha256',
+        validationEndpoint: '/api/operations/exports/validate'
+      },
+      backup: {
+        available: localSQLite,
+        databaseMode: runtime.databaseMode,
+        manifestVerification: localSQLite,
+        evidenceIncluded: localSQLite,
+        portableDownload: localSQLite,
+        packageFormat: localSQLite ? 'tar.gz' : null
+      },
+      restore: {
+        available: localSQLite,
+        validation: localSQLite ? 'retained_backup_id' : 'provider_managed',
+        stoppedRuntimeRequired: localSQLite,
+        providerRecoveryRequired: hostedPostgres
+      },
+      providerRecovery: {
+        available: hostedPostgres,
+        postgresBackupMode: runtime.hosting.recovery.postgresBackupMode,
+        objectVersioningEnabled: runtime.hosting.recovery.objectVersioningEnabled,
+        policyConfigured: runtime.hosting.recovery.policyConfigured,
+        applicationPackageAvailable: localSQLite
+      },
+      hostedMigration: {
+        available: localSQLite,
+        source: localSQLite ? 'verified_backup_v2' : null,
+        target: 'postgresql+s3',
+        evidenceReadBackVerification: true,
+        emptyTargetRequired: true,
+        command: localSQLite ? 'npm run migrate:hosted' : null
+      },
+      persistence: {
+        databaseMode: runtime.databaseMode,
+        durable: runtime.mode === 'hosted' ? hostedPostgres : localSQLite,
+        schemaInitialization: {
+          serialized: true,
+          mechanism: runtime.databaseMode === 'postgres' ? 'postgres_advisory_lock' : 'sqlite_write_transaction'
+        }
+      },
+      requestSafety: {
+        evidenceUploadIdempotency: 'durable',
+        evidenceUploadLeaseOwnership: 'unique_claim_token',
+        evidenceUploadReclaimSafe: true,
+        progressEntryKey: 'durable',
+        dailyLogEntryKey: 'durable',
+        taskLifecycle: 'retained',
+        taskCompletionEvidenceRequired: true,
+        fieldTaskScopeEnforced: true,
+        fieldMutationAtomicity: true,
+        equipmentRetirement: 'approval_gated',
+        equipmentActiveReservationGate: true,
+        equipmentDormantReservationRelease: 'retained_atomic',
+        equipmentInspectionReadiness: 'derived_and_reservation_gated',
+        equipmentInspectionEvidence: 'retained_internal_history',
+        equipmentMaintenanceEvidence: 'retained_internal_history',
+        equipmentReinspectionGate: true,
+        equipmentDispatchReadiness: 'live_canonical_state',
+        workforceDispatchReadiness: 'live_canonical_state',
+        unavailableWorkerDispatchGate: true,
+        assignmentScopedCrewEvidence: true,
+        releasedAssignmentEvidenceInvalidation: true,
+        workerInstructionPublication: 'approval_gated',
+        browserOutboxScope: 'operator',
+        replayRetentionHours: 24,
+        payloadConflictRejected: true
+      },
+      evidenceStorage: {
+        mode: runtime.storageMode,
+        privateAccess: Boolean(evidenceStorage),
+        status: storageVerification.status,
+        verifiedAt: storageVerification.checkedAt,
+        latencyMs: storageVerification.latencyMs ?? null,
+        errorCode: storageVerification.code || null,
+        initializationError: evidenceStorageInitError?.code || null
+      },
+      authentication: {
+        required: runtime.auth.required,
+        configuredRoles: runtime.auth.configuredRoles,
+        loginRateLimit: runtime.auth.loginRateLimit
+      },
+      communications: {
+        outboundDraftOnly: true,
+        deliveryReceiptApprovalRequired: true,
+        verifiedIntegrationCount: verifiedIntegrationIds.size
+      },
+      automation: {
+        ledgerOnly: true,
+        schedulerEnabled: runtime.autonomousScheduler.enabled,
+        intervalSeconds: runtime.autonomousScheduler.intervalSeconds,
+        coordination: 'durable_compare_and_swap_lease',
+        multiReplicaSafe: true,
+        externalCommitments: 0
+      }
+    },
+    runtime,
+    ledger: { valid: ledgerDiagnostics.valid, issueCount: ledgerDiagnostics.issueCount, migrations: ledgerDiagnostics.migrations }
+  });
+}));
+
+app.post('/api/operations/reset-qa', (req, res) => {
+  if (req.body?.confirmation !== 'RESET_QA') {
+    return sendError(req, res, 400, 'confirmation_required', 'Set confirmation to RESET_QA before archiving QA and demo records.');
+  }
+  try {
+    const actor = req.body?.actor || 'operations_reset';
+    const backup = backupOperationalState();
+    const ledgerJobs = operatingLedger.listJobs({ includeArchived: true, limit: 500 })
+      .filter(job => job.status !== 'archived' && isQaRecord(job));
+    const qaWorkers = operatingLedger.listWorkers({ limit: 500 })
+      .filter(worker => worker.status !== 'retired' && isQaRecord(worker));
+    const qaTools = operatingLedger.listTools({ limit: 500 })
+      .filter(tool => tool.status !== 'retired' && isQaRecord(tool));
+    const qaJobIds = new Set(ledgerJobs.map(job => job.id));
+    const qaApprovals = operatingLedger.listApprovals({ status: 'pending', limit: 500 })
+      .filter(approval => qaJobIds.has(approval.jobId) || isQaRecord(approval));
+    for (const approval of qaApprovals) {
+      operatingLedger.resolveApproval(approval.id, {
+        status: 'rejected',
+        resolvedBy: actor,
+        reason: 'QA/demo record archived by the controlled local reset.'
+      }, { actor });
+    }
+    for (const job of ledgerJobs) {
+      operatingLedger.updateJob(job.id, {
+        status: 'archived',
+        phase: 'archived',
+        data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
+      }, { actor });
+    }
+    for (const worker of qaWorkers) {
+      operatingLedger.retireWorker(worker.id, { actor });
+    }
+    for (const tool of qaTools) {
+      operatingLedger.retireTool(tool.id, { actor });
+    }
+    return res.json({
+      success: true,
+      backup,
+      archivedLedgerJobIds: ledgerJobs.map(job => job.id),
+      retiredWorkerIds: qaWorkers.map(worker => worker.id),
+      retiredToolIds: qaTools.map(tool => tool.id),
+      rejectedApprovalIds: qaApprovals.map(approval => approval.id),
+      archivedCount: ledgerJobs.length + qaWorkers.length + qaTools.length,
+      dashboard: operatingLedger.dashboardSummary()
+    });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'qa_reset_failed', error.statusCode ? error.message : 'Unable to archive QA and demo records.', serializeError(error));
+  }
+});
+
+app.get('/api/readiness', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics } = await operationalReadiness();
+  return res.status(status === 'ready' ? 200 : 503).json({
+    status,
+    runtime,
+    ledger: { valid: ledgerDiagnostics.valid, issueCount: ledgerDiagnostics.issueCount, migrations: ledgerDiagnostics.migrations },
+    deployment: {
+      localFirst: true,
+      hostedRequirements: [
+        'EU-region container host',
+        'managed PostgreSQL via CONTRACTOR_AI_DATABASE_URL',
+        'S3-compatible EU object storage',
+        'HTTPS public origin and a strong auth token',
+        'retained DPA and recovery-policy references',
+        'PostgreSQL backups and evidence object versioning'
+      ]
+    }
+  });
+}));
+
+app.get('/api/health/ready', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
+  return res.status(status === 'ready' ? 200 : 503).json({
+    status,
+    requestId: req.requestId,
+    checkedAt: new Date().toISOString(),
+    checks: {
+      configuration: runtime.ready ? 'ready' : 'attention',
+      database: ledgerDiagnostics.valid ? 'ready' : 'attention',
+      evidenceStorage: storageVerification.status
+    }
+  });
+}));
+
 // Health check
 app.get('/api/health', (req, res) => {
-  const validation = validateState();
   const ledgerDiagnostics = operatingLedger.diagnose();
+  const runtime = runtimeConfiguration();
   res.json({
-    status: validation.valid && ledgerDiagnostics.valid ? 'healthy' : 'degraded',
+    status: ledgerDiagnostics.valid && runtime.ready ? 'healthy' : 'degraded',
     requestId: req.requestId,
     timestamp: new Date().toISOString(),
     version: '1.0.0',
     uptimeSeconds: Math.round(process.uptime()),
     services: {
-      ai: 'operational',
-      database: 'operational',
-      notifications: 'operational',
-      state: validation.valid ? 'operational' : 'attention',
+      ai: 'ledger_only',
+      database: ledgerDiagnostics.valid ? 'operational' : 'attention',
+      evidenceStorage: runtime.evidenceStorage.status,
+      notifications: 'draft_only',
       ledger: ledgerDiagnostics.valid ? 'operational' : 'attention'
     },
+    runtime,
     diagnostics: {
-      issueCount: validation.issueCount + ledgerDiagnostics.issueCount,
-      errorCount: validation.issues.filter(issue => issue.severity === 'error').length + ledgerDiagnostics.issues.filter(issue => issue.severity === 'error').length,
-      warningCount: validation.issues.filter(issue => issue.severity === 'warning').length + ledgerDiagnostics.issues.filter(issue => issue.severity === 'warning').length,
+      issueCount: ledgerDiagnostics.issueCount,
+      errorCount: ledgerDiagnostics.issues.filter(issue => issue.severity === 'error').length,
+      warningCount: ledgerDiagnostics.issues.filter(issue => issue.severity === 'warning').length,
       ledgerIssueCount: ledgerDiagnostics.issueCount
-    }
+    },
+    migrations: ledgerDiagnostics.migrations
   });
 });
 
@@ -7513,38 +4182,142 @@ app.use('/api', (req, res) => {
   return sendError(req, res, 404, 'not_found', 'API endpoint not found');
 });
 
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir, { index: false, fallthrough: true }));
+}
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (!fs.existsSync(path.join(distDir, 'index.html'))) {
+    return sendError(req, res, 503, 'web_client_not_built', 'Run npm run build before starting the production web client.');
+  }
+  return res.sendFile(path.join(distDir, 'index.html'));
+});
+
 app.use((error, req, res, next) => {
-  log('error', 'unhandled_request_error', {
+  const statusCode = Number(error?.statusCode || error?.status || 0);
+  const invalidJson = error?.type === 'entity.parse.failed'
+    || (error instanceof SyntaxError && statusCode === 400 && Object.prototype.hasOwnProperty.call(error, 'body'));
+  const requestTooLarge = error?.type === 'entity.too.large' || statusCode === 413;
+  const handledRequestError = invalidJson || requestTooLarge;
+  log(handledRequestError ? 'warn' : 'error', handledRequestError ? 'request_body_rejected' : 'unhandled_request_error', {
     requestId: req.requestId,
     method: req.method,
     path: req.originalUrl,
-    error: serializeError(error)
+    code: invalidJson ? 'invalid_json' : requestTooLarge ? 'request_body_too_large' : 'internal_error',
+    ...(handledRequestError ? {} : { error: serializeError(error) })
   });
 
   if (res.headersSent) {
     return next(error);
   }
 
+  if (invalidJson) {
+    return sendError(req, res, 400, 'invalid_json', 'Request body must contain valid JSON');
+  }
+  if (requestTooLarge) {
+    return sendError(req, res, 413, 'request_body_too_large', 'Request body exceeds the configured size limit');
+  }
+
   return sendError(req, res, 500, 'internal_error', 'Unexpected server error', serializeError(error));
 });
 
-process.on('unhandledRejection', reason => {
-  log('error', 'unhandled_rejection', { error: serializeError(reason) });
-});
-
-process.on('uncaughtException', error => {
-  log('error', 'uncaught_exception', { error: serializeError(error) });
-  process.exitCode = 1;
-});
-
-// Start server only when run directly. Serverless hosts import the app.
-if (require.main === module) {
-  app.listen(port, () => {
+async function startDirectServer() {
+  const storageVerification = await verifyEvidenceStorage({ force: true });
+  const startupRuntime = runtimeConfiguration({ storageVerification });
+  if (isProduction && !startupRuntime.ready) {
+    log('error', 'production_runtime_not_ready', { issues: startupRuntime.issues.map(issue => issue.code) });
+    await shutdownRuntime({ signal: 'startup_not_ready' });
+    process.exitCode = 1;
+    return;
+  }
+  directServer = configureHttpServer(app.listen(port, () => {
     log('info', 'server_started', {
       port,
       dashboard: `http://localhost:${port}`,
-      health: `http://localhost:${port}/api/health`
+      health: `http://localhost:${port}/api/health`,
+      readiness: `http://localhost:${port}/api/health/ready`
     });
+  }));
+  return directServer;
+}
+
+let directServer = null;
+let shutdownPromise = null;
+
+function closeHttpServer(server, timeoutMs = 10_000) {
+  if (!server?.listening) return Promise.resolve({ drained: true, forced: false });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      server.closeAllConnections?.();
+      finish(null, { drained: false, forced: true });
+    }, timeoutMs);
+    timeout.unref();
+    server.close(error => finish(error, { drained: true, forced: false }));
+    server.closeIdleConnections?.();
+  });
+}
+
+function shutdownRuntime({ server = directServer, signal = 'shutdown', timeoutMs = 10_000 } = {}) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const timersCleared = clearAutonomousSchedulerTimers();
+    log('info', 'runtime_shutdown_started', { signal, timersCleared });
+    const http = await closeHttpServer(server, timeoutMs);
+    operatingLedger.close();
+    log('info', 'runtime_shutdown_completed', { signal, timersCleared, http });
+    return { signal, timersCleared, http };
+  })().catch(error => {
+    log('error', 'runtime_shutdown_failed', { signal, error: serializeError(error) });
+    throw error;
+  });
+  return shutdownPromise;
+}
+
+app.locals.runtimeControl = Object.freeze({
+  configureHttpServer,
+  shutdown: options => shutdownRuntime(options),
+  schedulerTimerCount: () => autonomousSchedulerTimers.size,
+  httpTimeouts: Object.freeze({
+    keepAliveTimeoutMs: httpKeepAliveTimeoutMs,
+    headersTimeoutMs: httpHeadersTimeoutMs
+  })
+});
+
+function handleFatalRuntimeError(event, error) {
+  log('error', event, { error: serializeError(error) });
+  process.exitCode = 1;
+  if (require.main !== module) return;
+  shutdownRuntime({ signal: event })
+    .catch(() => {})
+    .finally(() => process.exit(1));
+}
+
+process.on('unhandledRejection', reason => handleFatalRuntimeError('unhandled_rejection', reason));
+process.on('uncaughtException', error => handleFatalRuntimeError('uncaught_exception', error));
+
+// Start server only when run directly. Serverless hosts import the app.
+if (require.main === module) {
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.once(signal, () => {
+      shutdownRuntime({ signal })
+        .then(() => { process.exitCode = 0; })
+        .catch(() => { process.exitCode = 1; });
+    });
+  }
+  startDirectServer().catch(error => {
+    log('error', 'runtime_startup_failed', { error: serializeError(error) });
+    shutdownRuntime({ signal: 'startup_failed' })
+      .catch(() => {})
+      .finally(() => { process.exitCode = 1; });
   });
 }
 

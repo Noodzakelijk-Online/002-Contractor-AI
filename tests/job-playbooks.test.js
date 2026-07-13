@@ -139,7 +139,7 @@ test('intake can attach a matched operating playbook package in one request', as
   assert.ok(detail.body.job.audit.some(event => event.action === 'apply_job_playbook'));
 });
 
-test('legacy job playbook route creates renovation decisions and field controls in the ledger', async t => {
+test('ledger job playbook creates renovation decisions and field controls', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -147,11 +147,11 @@ test('legacy job playbook route creates renovation decisions and field controls 
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const legacyJob = await request(baseUrl, '/api/jobs', {
+  const intake = await request(baseUrl, '/api/ledger/intake', {
     method: 'POST',
     body: JSON.stringify({
       title: 'Bathroom renovation playbook',
-      client: 'Legacy Playbook Client',
+      client: { name: 'Playbook Client' },
       address: 'Kerkstraat 18, Utrecht',
       description: 'Renovate bathroom, coordinate tile selections, protect site and keep daily evidence.',
       priority: 'high',
@@ -159,22 +159,22 @@ test('legacy job playbook route creates renovation decisions and field controls 
       estimatedHours: 90
     })
   });
-  assert.equal(legacyJob.response.status, 201);
-  assert.ok(legacyJob.body.ledgerJobId);
+  assert.equal(intake.response.status, 201);
+  const jobId = intake.body.job.id;
 
-  const applied = await request(baseUrl, `/api/jobs/${legacyJob.body.id}/playbook`, {
+  const applied = await request(baseUrl, `/api/ledger/jobs/${jobId}/playbook`, {
     method: 'POST',
-    body: JSON.stringify({ playbookKey: 'renovation', actor: 'legacy_test' })
+    body: JSON.stringify({ playbookKey: 'renovation', actor: 'playbook_test' })
   });
   assert.equal(applied.response.status, 201);
   assert.equal(applied.body.playbook.key, 'renovation');
-  assert.equal(applied.body.ledgerJob.id, legacyJob.body.ledgerJobId);
+  assert.equal(applied.body.job.id, jobId);
   assert.ok(applied.body.created.some(record => record.type === 'client_selection'));
   assert.ok(applied.body.created.some(record => record.type === 'rfi'));
   assert.ok(applied.body.created.some(record => record.type === 'field_report'));
   assert.ok(applied.body.created.some(record => record.type === 'budget_line'));
 
-  const detail = await request(baseUrl, `/api/ledger/jobs/${legacyJob.body.ledgerJobId}`);
+  const detail = await request(baseUrl, `/api/ledger/jobs/${jobId}`);
   assert.equal(detail.response.status, 200);
   assert.ok(detail.body.job.clientSelections.some(selection => selection.title === 'Finish selection'));
   assert.ok(detail.body.job.rfis.some(rfi => /Hidden condition/i.test(rfi.title)));

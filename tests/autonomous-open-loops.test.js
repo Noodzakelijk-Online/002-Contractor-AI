@@ -150,7 +150,20 @@ test('autonomous cycle converts open field loops into approval-safe internal wor
 
   const cycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
     method: 'POST',
-    body: JSON.stringify({ dryRun: false, actor: 'open-loop-test' })
+    body: JSON.stringify({
+      dryRun: false,
+      actor: 'open-loop-test',
+      actionTypes: [
+        'renew_permit',
+        'resolve_observation',
+        'review_incident',
+        'safety_review',
+        'aftercare_follow_up',
+        'recurring_job_due'
+      ],
+      jobIds: [jobId],
+      maxActions: 6
+    })
   });
   assert.equal(cycle.response.status, 200);
 
@@ -236,7 +249,7 @@ test('autonomous cycle converts open field loops into approval-safe internal wor
     assert.ok(detail.body.job.audit.some(event => event.action === action), `missing audit action ${action}`);
   }
 
-  const approvals = await request(baseUrl, '/api/approvals?status=pending&limit=100');
+  const approvals = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');
   assert.equal(approvals.response.status, 200);
   for (const approvalId of [aftercareAction.approvalId, recurringAction.approvalId]) {
     assert.ok(approvals.body.approvals.some(approval =>

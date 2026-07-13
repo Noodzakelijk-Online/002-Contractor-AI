@@ -1,8 +1,0 @@
-Completed scratch marker for the dashboard action-audit cleanup.
-
-This file was originally a zero-byte artifact created while inspecting
-`fn.indexOf(name)` behavior around `public/index.html` action handlers.
-
-The useful diagnostic now lives in `tmp-actioncheck4.js`, which reads the
-dashboard, locates `runLedgerAction`, and reports route/dispatch and
-approval-sensitive action literals for quick manual review.

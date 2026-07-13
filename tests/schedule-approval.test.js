@@ -54,7 +54,7 @@ test('schedule approval commits the proposed window only after approval', async 
   assert.ok(jobId);
   assert.notEqual(intake.body.job.scheduledStart, plannedStart);
 
-  const recommendation = await request(baseUrl, '/api/schedule/recommend', {
+  const recommendation = await request(baseUrl, '/api/ledger/schedule/recommend', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart, plannedEnd })
   });
@@ -63,7 +63,7 @@ test('schedule approval commits the proposed window only after approval', async 
   assert.equal(recommendation.body.recommendation.plannedEnd, plannedEnd);
   assert.ok(recommendation.body.recommendation.nextActions.some(action => action.type === 'request_schedule_approval'));
 
-  const approvalRequest = await request(baseUrl, '/api/schedule/request-approval', {
+  const approvalRequest = await request(baseUrl, '/api/ledger/schedule/request-approval', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart, plannedEnd })
   });
@@ -77,7 +77,7 @@ test('schedule approval commits the proposed window only after approval', async 
   assert.notEqual(approvalRequest.body.job.scheduledStart, plannedStart);
   assert.ok(approvalRequest.body.job.audit.some(event => event.action === 'request_schedule_approval'));
 
-  const duplicateRequest = await request(baseUrl, '/api/schedule/request-approval', {
+  const duplicateRequest = await request(baseUrl, '/api/ledger/schedule/request-approval', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart, plannedEnd })
   });
@@ -89,7 +89,7 @@ test('schedule approval commits the proposed window only after approval', async 
   assert.equal(detailBeforeResolve.response.status, 200);
   assert.notEqual(detailBeforeResolve.body.job.scheduledStart, plannedStart);
 
-  const resolved = await request(baseUrl, `/api/approvals/${approvalRequest.body.approval.id}/resolve`, {
+  const resolved = await request(baseUrl, `/api/ledger/approvals/${approvalRequest.body.approval.id}/resolve`, {
     method: 'POST',
     body: JSON.stringify({ status: 'approved', resolvedBy: 'Schedule Test', reason: 'Schedule window reviewed.' })
   });
@@ -154,7 +154,7 @@ test('schedule approval creates the recommended worker assignment when the job h
   const jobId = intake.body.job.id;
   assert.equal(intake.body.job.assignments.length, 0);
 
-  const approvalRequest = await request(baseUrl, '/api/schedule/request-approval', {
+  const approvalRequest = await request(baseUrl, '/api/ledger/schedule/request-approval', {
     method: 'POST',
     body: JSON.stringify({ jobId, plannedStart, plannedEnd })
   });
@@ -165,7 +165,7 @@ test('schedule approval creates the recommended worker assignment when the job h
   assert.equal(approvalRequest.body.proposedAssignment.scheduledStart, plannedStart);
   assert.equal(approvalRequest.body.job.assignments.length, 0);
 
-  const resolved = await request(baseUrl, `/api/approvals/${approvalRequest.body.approval.id}/resolve`, {
+  const resolved = await request(baseUrl, `/api/ledger/approvals/${approvalRequest.body.approval.id}/resolve`, {
     method: 'POST',
     body: JSON.stringify({ status: 'approved', resolvedBy: 'Schedule Test', reason: 'Schedule and crew reviewed.' })
   });

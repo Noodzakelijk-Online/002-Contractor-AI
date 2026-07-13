@@ -19,7 +19,7 @@ async function request(baseUrl, route, options = {}) {
   return { response, body: await response.json() };
 }
 
-test('dashboard publishes persisted ledger records as the primary command-center source', async t => {
+test('canonical ledger dashboard and resource routes publish the command-center source', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -38,31 +38,21 @@ test('dashboard publishes persisted ledger records as the primary command-center
   });
   assert.equal(intake.response.status, 201);
 
-  const dashboard = await request(baseUrl, '/api/dashboard');
+  const dashboard = await request(baseUrl, '/api/ledger/dashboard');
+  const jobs = await request(baseUrl, '/api/ledger/jobs?limit=500');
+  const workers = await request(baseUrl, '/api/ledger/workers?limit=500');
+  const tools = await request(baseUrl, '/api/ledger/tools?limit=500');
   assert.equal(dashboard.response.status, 200);
-  assert.equal(dashboard.body.dashboardSource, 'ledger');
-  assert.ok(Array.isArray(dashboard.body.jobs));
-  assert.ok(Array.isArray(dashboard.body.ledgerJobs));
-  assert.ok(Array.isArray(dashboard.body.ledgerWorkers));
-  assert.ok(Array.isArray(dashboard.body.ledgerTools));
-  assert.deepEqual(
-    dashboard.body.jobs.map(job => job.id).sort(),
-    dashboard.body.ledgerJobs.map(job => job.id).sort()
-  );
-  assert.deepEqual(
-    dashboard.body.workers.map(worker => worker.id).sort(),
-    dashboard.body.ledgerWorkers.map(worker => worker.id).sort()
-  );
-  assert.deepEqual(
-    dashboard.body.tools.map(tool => tool.id).sort(),
-    dashboard.body.ledgerTools.map(tool => tool.id).sort()
-  );
-  assert.equal(dashboard.body.metrics.ledgerOnly, true);
-  assert.equal(dashboard.body.metrics.onTimeRate, null);
-  const persistedJob = dashboard.body.ledgerJobs.find(job => job.id === intake.body.job.id);
+  assert.equal(jobs.response.status, 200);
+  assert.equal(workers.response.status, 200);
+  assert.equal(tools.response.status, 200);
+  assert.ok(dashboard.body.dashboard.metrics);
+  assert.ok(dashboard.body.dashboard.capabilities.length > 0);
+  assert.ok(Array.isArray(jobs.body.jobs));
+  assert.ok(Array.isArray(workers.body.workers));
+  assert.ok(Array.isArray(tools.body.tools));
+  const persistedJob = jobs.body.jobs.find(job => job.id === intake.body.job.id);
   assert.ok(persistedJob);
-  assert.equal(persistedJob.source, 'ledger');
   assert.equal(persistedJob.title, 'Ledger-first dashboard regression');
-  assert.ok(dashboard.body.ledger);
-  assert.ok(dashboard.body.ledger.metrics);
+  assert.equal(dashboard.body.dashboard.metrics.jobs, jobs.body.jobs.length);
 });

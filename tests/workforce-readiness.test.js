@@ -132,7 +132,79 @@ test('workforce readiness coordinates crew assignment, instruction, access and t
   assert.ok(accessJob);
   assert.equal(accessJob.flags.siteAccess, true);
   assert.equal(accessJob.counts.dueOrientations, 1);
-  assert.ok(accessJob.nextActions.some(action => action.type === 'complete_worker_orientation'));
+  const orientationAction = accessJob.nextActions.find(action => action.type === 'complete_worker_orientation');
+  assert.ok(orientationAction);
+  assert.equal(orientationAction.orientationId, orientation.body.orientation.id);
+  assert.equal(orientationAction.workerId, workerId);
+
+  const completedOrientation = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(assignedJobId)}/lifecycle/orientation/${encodeURIComponent(orientationAction.orientationId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      status: 'completed',
+      verificationReference: 'ORIENTATION-QA-001',
+      notes: 'PPE, site rules, emergency procedure, and stop-work authority were reviewed.'
+    })
+  });
+  assert.equal(completedOrientation.response.status, 200);
+  assert.equal(completedOrientation.body.record.status, 'pending_approval');
+  assert.equal(completedOrientation.body.record.data.verificationReference, 'ORIENTATION-QA-001');
+  assert.equal(completedOrientation.body.approvalRequired, true);
+  assert.equal(completedOrientation.body.approval.targetType, 'worker_orientation');
+
+  const orientationApprovalQueue = await request(baseUrl, '/api/ledger/workforce?mode=approval&limit=100');
+  const orientationApprovalJob = orientationApprovalQueue.body.jobs.find(job => job.jobId === assignedJobId);
+  assert.ok(orientationApprovalJob);
+  const reviewOrientationAction = orientationApprovalJob.nextActions.find(action => action.type === 'review_worker_approval');
+  assert.equal(reviewOrientationAction.approvalId, completedOrientation.body.approval.id);
+
+  const approvedOrientation = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(completedOrientation.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Workforce QA approver' })
+  });
+  assert.equal(approvedOrientation.response.status, 200);
+  assert.equal(approvedOrientation.body.approval.status, 'approved');
+
+  const accessGateQueue = await request(baseUrl, '/api/ledger/workforce?mode=access&limit=100');
+  const accessGateJob = accessGateQueue.body.jobs.find(job => job.jobId === assignedJobId);
+  const prepareAccessAction = accessGateJob.nextActions.find(action => action.type === 'prepare_site_access');
+  assert.ok(prepareAccessAction);
+  assert.equal(prepareAccessAction.assignmentId, assignment.body.assignment.id);
+  assert.equal(prepareAccessAction.orientationId, orientation.body.orientation.id);
+
+  const accessGate = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(assignedJobId)}/site-access`, {
+    method: 'POST',
+    body: JSON.stringify({
+      assignmentId: prepareAccessAction.assignmentId,
+      workerId,
+      workerName: 'Crew QA Lead',
+      orientationId: prepareAccessAction.orientationId,
+      status: 'blocked',
+      orientationValid: true,
+      notes: 'Assignment-scoped gate retained after orientation approval.'
+    })
+  });
+  assert.equal(accessGate.response.status, 201);
+
+  const clearanceQueue = await request(baseUrl, '/api/ledger/workforce?mode=access&limit=100');
+  const clearanceJob = clearanceQueue.body.jobs.find(job => job.jobId === assignedJobId);
+  const clearAccessAction = clearanceJob.nextActions.find(action => action.type === 'clear_site_access');
+  assert.ok(clearAccessAction);
+  assert.equal(clearAccessAction.recordId, accessGate.body.siteAccessLog.id);
+
+  const clearance = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(assignedJobId)}/lifecycle/site_access/${encodeURIComponent(clearAccessAction.recordId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'cleared', notes: 'Identity, orientation, access point, and retained crew assignment were verified.' })
+  });
+  assert.equal(clearance.response.status, 200);
+  assert.equal(clearance.body.record.status, 'pending_approval');
+  const approvedClearance = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(clearance.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Workforce QA approver' })
+  });
+  assert.equal(approvedClearance.response.status, 200);
+
+  const clearedAccessQueue = await request(baseUrl, '/api/ledger/workforce?mode=access&limit=100');
+  assert.equal(clearedAccessQueue.body.jobs.some(job => job.jobId === assignedJobId), false);
 
   const conflictJobId = await createJob(baseUrl, {
     title: 'Crew queue conflict job',
@@ -177,7 +249,9 @@ test('workforce readiness coordinates crew assignment, instruction, access and t
   const timeJob = timeQueue.body.jobs.find(job => job.jobId === timeJobId);
   assert.ok(timeJob);
   assert.equal(timeJob.flags.timeMissing, true);
-  assert.ok(timeJob.nextActions.some(action => action.type === 'record_time_log'));
+  const timeAction = timeJob.nextActions.find(action => action.type === 'record_time_log');
+  assert.ok(timeAction);
+  assert.ok(Object.hasOwn(timeAction, 'workerId'));
 
   const timeLog = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(timeJobId)}/time-logs`, {
     method: 'POST',
@@ -189,11 +263,15 @@ test('workforce readiness coordinates crew assignment, instruction, access and t
       rate: 72,
       status: 'submitted',
       costCode: 'labor',
+      workerName: 'Crew QA Lead',
+      verificationReference: 'TIMESHEET-QA-001',
       notes: 'Crew QA recorded time.'
     })
   });
   assert.equal(timeLog.response.status, 201);
   assert.equal(timeLog.body.timeLog.hours, 3.5);
+  assert.equal(timeLog.body.timeLog.data.workerName, 'Crew QA Lead');
+  assert.equal(timeLog.body.timeLog.data.verificationReference, 'TIMESHEET-QA-001');
 
   const clearedTimeQueue = await request(baseUrl, '/api/ledger/workforce?mode=time&limit=100');
   assert.equal(clearedTimeQueue.response.status, 200);

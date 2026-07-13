@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { PostgresSyncDatabase } = require('./postgres-sync-database');
 
 const LEDGER_CAPABILITY_BLUEPRINT = [
   {
@@ -201,6 +202,38 @@ const LEDGER_CLOSED_STATUSES = new Set([
   'stored',
   'submitted',
   'verified'
+]);
+
+const ASSIGNMENT_CLOSED_STATUSES = new Set([
+  'released',
+  'cancelled',
+  'completed',
+  'closed',
+  'rejected',
+  'declined',
+  'offline'
+]);
+
+const TOOL_RESERVATION_CLOSED_STATUSES = new Set([
+  'released',
+  'returned',
+  'cancelled',
+  'rejected',
+  'declined',
+  'completed',
+  'closed',
+  'lost',
+  'retired'
+]);
+
+const INACTIVE_JOB_STATUSES = new Set([
+  'archived',
+  'pending_archive_approval',
+  'cancelled',
+  'canceled',
+  'rejected',
+  'deleted',
+  'void'
 ]);
 
 function capabilityRequirementActionTarget(requirementKey) {
@@ -533,6 +566,24 @@ function normalizeStatus(value, fallback = 'open') {
   return normalizeText(value, fallback).toLowerCase().replace(/[\s-]+/g, '_');
 }
 
+function normalizeWorkerStatus(value, fallback = 'available') {
+  const status = normalizeStatus(value, fallback);
+  const aliases = {
+    active: 'busy',
+    on_job: 'busy',
+    working: 'busy',
+    ready: 'available',
+    idle: 'available',
+    standby: 'available',
+    unavailable: 'offline',
+    blocked: 'on_hold',
+    sick: 'on_leave',
+    leave: 'on_leave',
+    onleave: 'on_leave'
+  };
+  return aliases[status] || status;
+}
+
 function isLedgerCapabilityRecordOpen(record = {}) {
   const status = normalizeStatus(record.status || record.riskLevel || record.priority, 'open');
   return !LEDGER_CLOSED_STATUSES.has(status);
@@ -560,6 +611,28 @@ function normalizeBoolean(value, fallback = false) {
   if (['true', 'yes', 'y', '1', 'on'].includes(text)) return true;
   if (['false', 'no', 'n', '0', 'off'].includes(text)) return false;
   return fallback;
+}
+
+function normalizeRetainedDate(value, options = {}) {
+  const text = normalizeText(value, '');
+  if (!text) {
+    if (options.required) {
+      const error = new Error(`${options.label || 'Date'} is required`);
+      error.statusCode = 400;
+      error.code = options.code || 'date_required';
+      throw error;
+    }
+    return null;
+  }
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(text);
+  const milliseconds = Date.parse(dateOnly ? `${text}T00:00:00.000Z` : text);
+  if (!Number.isFinite(milliseconds) || (dateOnly && new Date(milliseconds).toISOString().slice(0, 10) !== text)) {
+    const error = new Error(`${options.label || 'Date'} must be a valid date`);
+    error.statusCode = 400;
+    error.code = options.code || 'date_invalid';
+    throw error;
+  }
+  return dateOnly ? text : new Date(milliseconds).toISOString();
 }
 
 function normalizeList(value) {
@@ -608,16 +681,262 @@ function safeLimit(value, fallback = 50, max = 500) {
   return Number.isFinite(limit) ? limit : fallback;
 }
 
+const LEDGER_SCHEMA_MIGRATIONS = [
+  {
+    version: '001_initial_ledger_schema',
+    description: 'Record the consolidated operating ledger baseline.',
+    apply() {}
+  },
+  {
+    version: '002_document_storage_index',
+    description: 'Index retained evidence references for controlled retrieval.',
+    apply(db) {
+      db.exec('CREATE INDEX IF NOT EXISTS idx_documents_storage_ref ON documents(storage_ref)');
+    }
+  },
+  {
+    version: '003_durable_scheduler_leases',
+    description: 'Persist autonomous scheduler leases and execution outcomes.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+          job_key TEXT PRIMARY KEY,
+          status TEXT NOT NULL DEFAULT 'idle',
+          interval_seconds INTEGER NOT NULL,
+          lease_id TEXT,
+          lease_until TEXT,
+          last_started_at TEXT,
+          last_completed_at TEXT,
+          run_count INTEGER NOT NULL DEFAULT 0,
+          last_result_json TEXT NOT NULL DEFAULT '{}',
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due ON scheduled_jobs(status, lease_until, last_completed_at);
+      `);
+    }
+  },
+  {
+    version: '004_durable_request_idempotency',
+    description: 'Persist bounded idempotency leases and completed API responses.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS idempotency_records (
+          key_hash TEXT PRIMARY KEY,
+          scope TEXT NOT NULL,
+          request_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'processing',
+          lease_until TEXT,
+          response_status INTEGER,
+          response_body_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_idempotency_records_expiry ON idempotency_records(expires_at);
+      `);
+    }
+  },
+  {
+    version: '005_postgres_double_precision',
+    description: 'Preserve SQLite numeric precision for hosted finance, scheduling, and progress values.',
+    apply(db, context = {}) {
+      if (context.databaseMode !== 'postgres') return;
+      const columns = db.prepare(`
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND data_type = 'real'
+        ORDER BY table_name, ordinal_position
+      `).all();
+      for (const column of columns) {
+        const tableName = String(column.table_name || '');
+        const columnName = String(column.column_name || '');
+        if (!/^[a-z_][a-z0-9_]*$/i.test(tableName) || !/^[a-z_][a-z0-9_]*$/i.test(columnName)) {
+          throw new Error('PostgreSQL precision migration found an unsafe schema identifier.');
+        }
+        db.exec(`ALTER TABLE "${tableName}" ALTER COLUMN "${columnName}" TYPE DOUBLE PRECISION`);
+      }
+    }
+  },
+  {
+    version: '006_trade_partner_compliance',
+    description: 'Retain supplier and subcontractor identity, compliance, and approval evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS trade_partners (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          partner_type TEXT NOT NULL DEFAULT 'supplier',
+          contact_name TEXT,
+          email TEXT,
+          phone TEXT,
+          address TEXT,
+          city TEXT,
+          country TEXT NOT NULL DEFAULT 'NL',
+          registration_number TEXT,
+          vat_number TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          insurance_expires_at TEXT,
+          vca_expires_at TEXT,
+          specialties_json TEXT NOT NULL DEFAULT '[]',
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_partners_status ON trade_partners(status, partner_type, updated_at);
+      `);
+    }
+  },
+  {
+    version: '007_inactive_job_portal_revocation',
+    description: 'Revoke legacy active client portal links retained by inactive jobs.',
+    apply(db) {
+      const inactiveStatuses = [...INACTIVE_JOB_STATUSES];
+      const placeholders = inactiveStatuses.map(() => '?').join(', ');
+      const rows = db.prepare(`
+        SELECT access.*
+        FROM client_portal_access access
+        INNER JOIN jobs job ON job.id = access.job_id
+        WHERE access.status = 'active' AND LOWER(job.status) IN (${placeholders})
+        ORDER BY access.created_at ASC
+      `).all(...inactiveStatuses);
+      for (const row of rows) {
+        const timestamp = nowIso();
+        const reason = 'Legacy active portal access was revoked because the retained job is inactive.';
+        const before = {
+          id: row.id,
+          jobId: row.job_id,
+          clientId: row.client_id || null,
+          status: row.status,
+          approvalId: row.approval_id || null,
+          expiresAt: row.expires_at || null,
+          lastAccessedAt: row.last_accessed_at || null,
+          revokedAt: row.revoked_at || null,
+          data: fromJson(row.data_json, {})
+        };
+        const data = {
+          ...before.data,
+          revocation: {
+            reason,
+            revokedAt: timestamp,
+            actor: 'ledger_migration'
+          }
+        };
+        db.prepare(`
+          UPDATE client_portal_access
+          SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?), data_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(timestamp, toJson(data), timestamp, row.id);
+        db.prepare(`
+          INSERT INTO audit_events (
+            id, entity_type, entity_id, job_id, action, actor,
+            before_json, after_json, metadata_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          makeId('audit'),
+          'client_portal_access',
+          row.id,
+          row.job_id,
+          'revoke_client_portal_access',
+          'ledger_migration',
+          toJson(before),
+          toJson({ ...before, status: 'revoked', revokedAt: row.revoked_at || timestamp, data }),
+          toJson({
+            reason,
+            migration: '007_inactive_job_portal_revocation',
+            externalCommitments: 0
+          }),
+          timestamp
+        );
+      }
+    }
+  },
+  {
+    version: '008_idempotency_lease_ownership',
+    description: 'Bind evidence idempotency completion and cleanup to the active lease owner.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE idempotency_records ADD COLUMN lease_id TEXT;
+        CREATE INDEX IF NOT EXISTS idx_idempotency_records_lease ON idempotency_records(status, lease_until, lease_id);
+      `);
+    }
+  },
+  {
+    version: '009_durable_operator_sessions',
+    description: 'Persist revocable browser sessions without retaining operator access keys.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_sessions (
+          session_id_hash TEXT PRIMARY KEY,
+          operator_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          token_fingerprint TEXT NOT NULL,
+          issued_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          revocation_reason TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_operator_sessions_expiry ON operator_sessions(expires_at, revoked_at);
+        CREATE INDEX IF NOT EXISTS idx_operator_sessions_principal ON operator_sessions(operator_id, role, revoked_at);
+      `);
+    }
+  },
+  {
+    version: '010_durable_auth_rate_limits',
+    description: 'Persist hashed authentication failure windows across restarts and application replicas.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS auth_rate_limits (
+          key_hash TEXT PRIMARY KEY,
+          window_started_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_expiry ON auth_rate_limits(expires_at);
+      `);
+    }
+  }
+];
+
 class ContractorOperatingLedger {
-  constructor({ dbFile, stateProvider, logger } = {}) {
+  constructor(options = {}) {
+    const unknownOptions = Object.keys(options).filter(key => !['dbFile', 'databaseUrl', 'stateProvider', 'logger'].includes(key));
+    if (unknownOptions.length) {
+      throw new Error(`Unsupported operating-ledger option(s): ${unknownOptions.join(', ')}. Use dbFile for the SQLite path.`);
+    }
+    const { dbFile, databaseUrl, stateProvider, logger } = options;
     this.dbFile = dbFile || path.join(__dirname, 'data', 'contractor-ledger.sqlite');
+    this.databaseMode = databaseUrl ? 'postgres' : 'sqlite';
     this.stateProvider = typeof stateProvider === 'function' ? stateProvider : () => ({ jobs: [], workers: [], tools: [] });
     this.logger = typeof logger === 'function' ? logger : () => {};
     this.transactionDepth = 0;
-    fs.mkdirSync(path.dirname(this.dbFile), { recursive: true });
-    this.db = new DatabaseSync(this.dbFile);
-    this.initialize();
-    this.seedFromState();
+    if (databaseUrl) {
+      this.db = new PostgresSyncDatabase({ connectionString: databaseUrl });
+    } else {
+      fs.mkdirSync(path.dirname(this.dbFile), { recursive: true });
+      this.db = new DatabaseSync(this.dbFile);
+    }
+    const initializeLedger = () => {
+      this.initialize();
+      this.applyMigrations();
+      this.seedFromState();
+    };
+    try {
+      if (this.databaseMode === 'postgres') {
+        this.db.withAdvisoryLock(2026071302, initializeLedger);
+      } else {
+        initializeLedger();
+      }
+    } catch (error) {
+      try {
+        this.db.close();
+      } catch {
+        // Preserve the startup error that made the ledger unusable.
+      }
+      throw error;
+    }
   }
 
   initialize() {
@@ -637,6 +956,27 @@ class ContractorOperatingLedger {
         country TEXT NOT NULL DEFAULT 'NL',
         vat_number TEXT,
         preferred_language TEXT NOT NULL DEFAULT 'nl',
+        data_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS trade_partners (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        partner_type TEXT NOT NULL DEFAULT 'supplier',
+        contact_name TEXT,
+        email TEXT,
+        phone TEXT,
+        address TEXT,
+        city TEXT,
+        country TEXT NOT NULL DEFAULT 'NL',
+        registration_number TEXT,
+        vat_number TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        insurance_expires_at TEXT,
+        vca_expires_at TEXT,
+        specialties_json TEXT NOT NULL DEFAULT '[]',
         data_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -1474,6 +1814,7 @@ class ContractorOperatingLedger {
       );
 
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+      CREATE INDEX IF NOT EXISTS idx_trade_partners_status ON trade_partners(status, partner_type, updated_at);
       CREATE INDEX IF NOT EXISTS idx_jobs_type_status ON jobs(job_type, status);
       CREATE INDEX IF NOT EXISTS idx_jobs_client ON jobs(client_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_job ON job_tasks(job_id);
@@ -1524,6 +1865,398 @@ class ContractorOperatingLedger {
     this.db.close();
   }
 
+  applyMigrations() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ledger_schema_migrations (
+        version TEXT PRIMARY KEY,
+        description TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    this.transaction(() => {
+      const applied = new Set(this.db.prepare('SELECT version FROM ledger_schema_migrations').all().map(row => row.version));
+      for (const migration of LEDGER_SCHEMA_MIGRATIONS) {
+        if (applied.has(migration.version)) continue;
+        migration.apply(this.db, { databaseMode: this.databaseMode });
+        this.db.prepare('INSERT INTO ledger_schema_migrations (version, description, applied_at) VALUES (?, ?, ?)')
+          .run(migration.version, migration.description, nowIso());
+      }
+    });
+  }
+
+  migrationStatus() {
+    const applied = this.db.prepare('SELECT version, description, applied_at FROM ledger_schema_migrations ORDER BY version').all().map(row => ({
+      version: row.version,
+      description: row.description,
+      appliedAt: row.applied_at
+    }));
+    return {
+      currentVersion: LEDGER_SCHEMA_MIGRATIONS.at(-1)?.version || null,
+      applied,
+      pending: LEDGER_SCHEMA_MIGRATIONS.filter(migration => !applied.some(entry => entry.version === migration.version)).map(migration => migration.version)
+    };
+  }
+
+  createOperatorSession(input = {}) {
+    const sessionIdHash = normalizeText(input.sessionIdHash);
+    const operatorId = normalizeText(input.operatorId);
+    const role = normalizeText(input.role);
+    const tokenFingerprint = normalizeText(input.tokenFingerprint);
+    const issuedAt = normalizeText(input.issuedAt);
+    const expiresAt = normalizeText(input.expiresAt);
+    const issuedTime = Date.parse(issuedAt);
+    const expiresTime = Date.parse(expiresAt);
+    if (!sessionIdHash || !operatorId || !role || !tokenFingerprint) {
+      throw new Error('Operator session identity is incomplete.');
+    }
+    if (!Number.isFinite(issuedTime) || !Number.isFinite(expiresTime) || expiresTime <= issuedTime) {
+      throw new Error('Operator session timestamps are invalid.');
+    }
+    const timestamp = nowIso();
+    const revokedRetentionCutoff = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000)).toISOString();
+    return this.transaction(() => {
+      this.db.prepare(`
+        DELETE FROM operator_sessions
+        WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?)
+      `).run(timestamp, revokedRetentionCutoff);
+      this.db.prepare(`
+        INSERT INTO operator_sessions (
+          session_id_hash, operator_id, role, token_fingerprint,
+          issued_at, expires_at, revoked_at, revocation_reason, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+      `).run(
+        sessionIdHash,
+        operatorId,
+        role,
+        tokenFingerprint,
+        new Date(issuedTime).toISOString(),
+        new Date(expiresTime).toISOString(),
+        timestamp,
+        timestamp
+      );
+      return this.getOperatorSession(sessionIdHash, { at: new Date(issuedTime).toISOString() });
+    });
+  }
+
+  getOperatorSession(sessionIdHash, options = {}) {
+    const normalizedId = normalizeText(sessionIdHash);
+    if (!normalizedId) return null;
+    const at = normalizeText(options.at, nowIso());
+    const row = options.includeRevoked === true
+      ? this.db.prepare('SELECT * FROM operator_sessions WHERE session_id_hash = ?').get(normalizedId)
+      : this.db.prepare(`
+          SELECT * FROM operator_sessions
+          WHERE session_id_hash = ? AND revoked_at IS NULL AND issued_at <= ? AND expires_at > ?
+        `).get(normalizedId, at, at);
+    if (!row) return null;
+    return {
+      sessionIdHash: row.session_id_hash,
+      operatorId: row.operator_id,
+      role: row.role,
+      tokenFingerprint: row.token_fingerprint,
+      issuedAt: row.issued_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at || null,
+      revocationReason: row.revocation_reason || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  revokeOperatorSession(sessionIdHash, options = {}) {
+    const normalizedId = normalizeText(sessionIdHash);
+    if (!normalizedId) return false;
+    const timestamp = normalizeText(options.revokedAt, nowIso());
+    const reason = normalizeText(options.reason, 'operator_logout').slice(0, 160);
+    const result = this.db.prepare(`
+      UPDATE operator_sessions
+      SET revoked_at = ?, revocation_reason = ?, updated_at = ?
+      WHERE session_id_hash = ? AND revoked_at IS NULL
+    `).run(timestamp, reason, timestamp, normalizedId);
+    return Number(result.changes || 0) === 1;
+  }
+
+  revokeAllOperatorSessions(options = {}) {
+    const timestamp = normalizeText(options.revokedAt, nowIso());
+    const reason = normalizeText(options.reason, 'operator_session_invalidation').slice(0, 160);
+    const result = this.db.prepare(`
+      UPDATE operator_sessions
+      SET revoked_at = ?, revocation_reason = ?, updated_at = ?
+      WHERE revoked_at IS NULL
+    `).run(timestamp, reason, timestamp);
+    return Number(result.changes || 0);
+  }
+
+  getAuthenticationRateLimit(keyHash, options = {}) {
+    const normalizedKeyHash = normalizeText(keyHash).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) throw new Error('Authentication rate-limit key must be a SHA-256 hash');
+    const limit = Math.max(1, Math.round(normalizeNumber(options.limit, 10)));
+    const windowMs = Math.max(1_000, Math.round(normalizeNumber(options.windowMs, 900_000)));
+    const now = options.now ? new Date(options.now) : new Date();
+    if (Number.isNaN(now.getTime())) throw new Error('Authentication rate-limit time is invalid');
+    const timestamp = now.toISOString();
+    let row = this.db.prepare('SELECT * FROM auth_rate_limits WHERE key_hash = ?').get(normalizedKeyHash);
+    if (row && row.expires_at <= timestamp) {
+      this.db.prepare('DELETE FROM auth_rate_limits WHERE key_hash = ? AND expires_at <= ?').run(normalizedKeyHash, timestamp);
+      row = null;
+    }
+    const attemptCount = Number(row?.attempt_count || 0);
+    return {
+      keyHash: normalizedKeyHash,
+      attemptCount,
+      limit,
+      remaining: Math.max(0, limit - attemptCount),
+      limited: attemptCount >= limit,
+      windowStartedAt: row?.window_started_at || null,
+      expiresAt: row?.expires_at || new Date(now.getTime() + windowMs).toISOString()
+    };
+  }
+
+  recordAuthenticationFailure(keyHash, options = {}) {
+    const normalizedKeyHash = normalizeText(keyHash).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) throw new Error('Authentication rate-limit key must be a SHA-256 hash');
+    const limit = Math.max(1, Math.round(normalizeNumber(options.limit, 10)));
+    const windowMs = Math.max(1_000, Math.round(normalizeNumber(options.windowMs, 900_000)));
+    const now = options.now ? new Date(options.now) : new Date();
+    if (Number.isNaN(now.getTime())) throw new Error('Authentication rate-limit time is invalid');
+    const timestamp = now.toISOString();
+    const expiresAt = new Date(now.getTime() + windowMs).toISOString();
+
+    return this.transaction(() => {
+      this.db.prepare('DELETE FROM auth_rate_limits WHERE expires_at <= ?').run(timestamp);
+      this.db.prepare(`
+        INSERT OR IGNORE INTO auth_rate_limits (key_hash, window_started_at, attempt_count, updated_at, expires_at)
+        VALUES (?, ?, 0, ?, ?)
+      `).run(normalizedKeyHash, timestamp, timestamp, expiresAt);
+      this.db.prepare(`
+        UPDATE auth_rate_limits
+        SET attempt_count = attempt_count + 1, updated_at = ?
+        WHERE key_hash = ?
+      `).run(timestamp, normalizedKeyHash);
+      return this.getAuthenticationRateLimit(normalizedKeyHash, { limit, windowMs, now: timestamp });
+    });
+  }
+
+  clearAuthenticationRateLimit(keyHash) {
+    const normalizedKeyHash = normalizeText(keyHash).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) return false;
+    const result = this.db.prepare('DELETE FROM auth_rate_limits WHERE key_hash = ?').run(normalizedKeyHash);
+    return Number(result.changes || 0) > 0;
+  }
+
+  getScheduledJob(jobKey) {
+    const row = this.db.prepare('SELECT * FROM scheduled_jobs WHERE job_key = ?').get(String(jobKey || ''));
+    if (!row) return null;
+    return {
+      jobKey: row.job_key,
+      status: row.status,
+      intervalSeconds: Number(row.interval_seconds || 0),
+      leaseId: row.lease_id,
+      leaseUntil: row.lease_until,
+      lastStartedAt: row.last_started_at,
+      lastCompletedAt: row.last_completed_at,
+      runCount: Number(row.run_count || 0),
+      lastResult: fromJson(row.last_result_json, {}),
+      updatedAt: row.updated_at
+    };
+  }
+
+  claimScheduledJob(jobKey, options = {}) {
+    const key = normalizeText(jobKey, 'autonomous_cycle');
+    const intervalSeconds = Math.max(30, Math.round(normalizeNumber(options.intervalSeconds, 300)));
+    const leaseSeconds = Math.max(10, Math.round(normalizeNumber(options.leaseSeconds, 120)));
+    const now = options.now ? new Date(options.now) : new Date();
+    if (Number.isNaN(now.getTime())) throw new Error('Scheduler claim time is invalid');
+    const nowValue = now.toISOString();
+    const leaseUntil = new Date(now.getTime() + (leaseSeconds * 1000)).toISOString();
+
+    return this.transaction(() => {
+      let row = this.db.prepare('SELECT * FROM scheduled_jobs WHERE job_key = ?').get(key);
+      if (!row) {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO scheduled_jobs (job_key, status, interval_seconds, lease_id, lease_until, last_started_at, last_completed_at, run_count, last_result_json, updated_at)
+          VALUES (?, 'idle', ?, NULL, NULL, NULL, NULL, 0, '{}', ?)
+        `).run(key, intervalSeconds, nowValue);
+        row = this.db.prepare('SELECT * FROM scheduled_jobs WHERE job_key = ?').get(key);
+      }
+
+      const current = this.getScheduledJob(key);
+      const activeLease = current.leaseUntil && current.leaseUntil > nowValue;
+      const nextDueAt = current.lastCompletedAt
+        ? new Date(new Date(current.lastCompletedAt).getTime() + (current.intervalSeconds * 1000)).toISOString()
+        : nowValue;
+      if (activeLease || nextDueAt > nowValue) {
+        return { claimed: false, reason: activeLease ? 'lease_active' : 'not_due', job: current, nextDueAt };
+      }
+
+      const leaseId = makeId('lease');
+      const claimed = this.db.prepare(`
+        UPDATE scheduled_jobs
+        SET status = 'running', interval_seconds = ?, lease_id = ?, lease_until = ?, last_started_at = ?, run_count = run_count + 1, updated_at = ?
+        WHERE job_key = ?
+          AND COALESCE(lease_id, '') = COALESCE(?, '')
+          AND COALESCE(lease_until, '') = COALESCE(?, '')
+      `).run(intervalSeconds, leaseId, leaseUntil, nowValue, nowValue, key, current.leaseId, current.leaseUntil);
+      if (Number(claimed.changes || 0) !== 1) {
+        const latest = this.getScheduledJob(key);
+        const latestActiveLease = latest?.leaseUntil && latest.leaseUntil > nowValue;
+        const latestNextDueAt = latest?.lastCompletedAt
+          ? new Date(new Date(latest.lastCompletedAt).getTime() + (latest.intervalSeconds * 1000)).toISOString()
+          : nowValue;
+        return {
+          claimed: false,
+          reason: latestActiveLease ? 'lease_active' : latestNextDueAt > nowValue ? 'not_due' : 'claim_lost',
+          job: latest,
+          nextDueAt: latestNextDueAt
+        };
+      }
+      return { claimed: true, leaseId, job: this.getScheduledJob(key), nextDueAt };
+    });
+  }
+
+  completeScheduledJob(jobKey, leaseId, result = {}, options = {}) {
+    const key = normalizeText(jobKey, 'autonomous_cycle');
+    const now = options.now ? new Date(options.now) : new Date();
+    if (Number.isNaN(now.getTime())) throw new Error('Scheduler completion time is invalid');
+    const nowValue = now.toISOString();
+    const success = result.success !== false;
+    return this.transaction(() => {
+      const current = this.getScheduledJob(key);
+      if (!current || current.leaseId !== leaseId) {
+        return { completed: false, reason: 'lease_not_owned', job: current };
+      }
+      const completed = this.db.prepare(`
+        UPDATE scheduled_jobs
+        SET status = ?, lease_id = NULL, lease_until = NULL, last_completed_at = ?, last_result_json = ?, updated_at = ?
+        WHERE job_key = ? AND lease_id = ?
+      `).run(success ? 'idle' : 'failed', nowValue, toJson(result), nowValue, key, leaseId);
+      if (Number(completed.changes || 0) !== 1) {
+        return { completed: false, reason: 'lease_not_owned', job: this.getScheduledJob(key) };
+      }
+      const job = this.getScheduledJob(key);
+      this.audit({ entityType: 'scheduled_job', entityId: key, action: success ? 'complete_scheduled_job' : 'fail_scheduled_job', actor: options.actor || 'scheduler', after: job });
+      return { completed: true, job };
+    });
+  }
+
+  claimIdempotentRequest({ keyHash, scope, requestHash, ttlMs = 24 * 60 * 60 * 1000, leaseMs = 2 * 60 * 1000, now: requestedNow } = {}) {
+    const normalizedKeyHash = normalizeText(keyHash);
+    const normalizedScope = normalizeText(scope);
+    const normalizedRequestHash = normalizeText(requestHash);
+    if (!normalizedKeyHash || !normalizedScope || !normalizedRequestHash) {
+      throw new Error('Idempotency key hash, scope, and request hash are required.');
+    }
+
+    const now = requestedNow ? new Date(requestedNow) : new Date();
+    if (Number.isNaN(now.getTime())) throw new Error('Idempotency claim time is invalid.');
+    const timestamp = now.toISOString();
+    const leaseId = makeId('request_lease');
+    const leaseUntil = new Date(now.getTime() + Math.max(5_000, Number(leaseMs) || 0)).toISOString();
+    const expiresAt = new Date(now.getTime() + Math.max(60_000, Number(ttlMs) || 0)).toISOString();
+
+    return this.transaction(() => {
+      this.db.prepare('DELETE FROM idempotency_records WHERE expires_at <= ?').run(timestamp);
+      const inserted = this.db.prepare(`
+        INSERT OR IGNORE INTO idempotency_records (
+          key_hash, scope, request_hash, status, lease_id, lease_until, response_status,
+          response_body_json, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, 'processing', ?, ?, NULL, NULL, ?, ?, ?)
+      `).run(normalizedKeyHash, normalizedScope, normalizedRequestHash, leaseId, leaseUntil, timestamp, timestamp, expiresAt);
+
+      if (Number(inserted.changes || 0) === 1) {
+        return { claimed: true, replayed: false, keyHash: normalizedKeyHash, leaseId, leaseUntil, expiresAt };
+      }
+
+      const existing = this.db.prepare('SELECT * FROM idempotency_records WHERE key_hash = ?').get(normalizedKeyHash);
+      if (!existing) return { claimed: false, replayed: false, reason: 'claim_lost' };
+      if (existing.scope !== normalizedScope || existing.request_hash !== normalizedRequestHash) {
+        return { claimed: false, replayed: false, reason: 'request_conflict' };
+      }
+      if (existing.status === 'completed') {
+        return {
+          claimed: false,
+          replayed: true,
+          responseStatus: Number(existing.response_status || 200),
+          responseBody: fromJson(existing.response_body_json, {}),
+          completedAt: existing.updated_at,
+          expiresAt: existing.expires_at
+        };
+      }
+
+      const activeLeaseUntil = Date.parse(existing.lease_until || '');
+      if (Number.isFinite(activeLeaseUntil) && activeLeaseUntil > now.getTime()) {
+        return {
+          claimed: false,
+          replayed: false,
+          reason: 'request_in_progress',
+          retryAfterMs: activeLeaseUntil - now.getTime()
+        };
+      }
+
+      const reclaimed = this.db.prepare(`
+        UPDATE idempotency_records
+        SET status = 'processing', lease_id = ?, lease_until = ?, response_status = NULL,
+            response_body_json = NULL, updated_at = ?, expires_at = ?
+        WHERE key_hash = ? AND request_hash = ? AND status = 'processing'
+          AND COALESCE(lease_id, '') = COALESCE(?, '')
+          AND COALESCE(lease_until, '') = COALESCE(?, '')
+      `).run(
+        leaseId,
+        leaseUntil,
+        timestamp,
+        expiresAt,
+        normalizedKeyHash,
+        normalizedRequestHash,
+        existing.lease_id,
+        existing.lease_until
+      );
+      if (Number(reclaimed.changes || 0) === 1) {
+        return { claimed: true, replayed: false, reclaimed: true, keyHash: normalizedKeyHash, leaseId, leaseUntil, expiresAt };
+      }
+      const latest = this.db.prepare('SELECT * FROM idempotency_records WHERE key_hash = ?').get(normalizedKeyHash);
+      const latestLeaseUntil = Date.parse(latest?.lease_until || '');
+      if (
+        latest
+        && latest.scope === normalizedScope
+        && latest.request_hash === normalizedRequestHash
+        && latest.status === 'processing'
+        && Number.isFinite(latestLeaseUntil)
+        && latestLeaseUntil > now.getTime()
+      ) {
+        return {
+          claimed: false,
+          replayed: false,
+          reason: 'request_in_progress',
+          retryAfterMs: latestLeaseUntil - now.getTime()
+        };
+      }
+      return { claimed: false, replayed: false, reason: 'claim_lost' };
+    });
+  }
+
+  completeIdempotentRequest(keyHash, requestHash, responseStatus, responseBody, leaseId) {
+    const normalizedLeaseId = normalizeText(leaseId);
+    if (!normalizedLeaseId) return false;
+    const timestamp = nowIso();
+    const updated = this.db.prepare(`
+      UPDATE idempotency_records
+      SET status = 'completed', lease_id = NULL, lease_until = NULL, response_status = ?,
+          response_body_json = ?, updated_at = ?
+      WHERE key_hash = ? AND request_hash = ? AND status = 'processing' AND lease_id = ?
+    `).run(Number(responseStatus || 200), toJson(responseBody, {}), timestamp, keyHash, requestHash, normalizedLeaseId);
+    return Number(updated.changes || 0) === 1;
+  }
+
+  releaseIdempotentRequest(keyHash, requestHash, leaseId) {
+    const normalizedLeaseId = normalizeText(leaseId);
+    if (!normalizedLeaseId) return false;
+    const released = this.db.prepare(`
+      DELETE FROM idempotency_records
+      WHERE key_hash = ? AND request_hash = ? AND status = 'processing' AND lease_id = ?
+    `).run(keyHash, requestHash, normalizedLeaseId);
+    return Number(released.changes || 0) === 1;
+  }
+
   transaction(callback) {
     if (this.transactionDepth > 0) {
       this.transactionDepth += 1;
@@ -1551,15 +2284,139 @@ class ContractorOperatingLedger {
     return Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count || 0);
   }
 
+  operationalJobStatusSql(alias = 'jobs') {
+    const inactive = [...INACTIVE_JOB_STATUSES].map(status => `'${status}'`).join(', ');
+    return `${alias}.status NOT IN (${inactive})`;
+  }
+
+  jobAllowsOperations(status) {
+    return !INACTIVE_JOB_STATUSES.has(normalizeStatus(status, 'intake'));
+  }
+
+  activeAssignmentStatusSql(alias = 'assignments') {
+    const closed = [...ASSIGNMENT_CLOSED_STATUSES].map(status => `'${status}'`).join(', ');
+    return `${alias}.status NOT IN (${closed})`;
+  }
+
+  activeToolReservationStatusSql(alias = 'tool_reservations') {
+    const closed = [...TOOL_RESERVATION_CLOSED_STATUSES].map(status => `'${status}'`).join(', ');
+    return `${alias}.status NOT IN (${closed})`;
+  }
+
+  workerAssignmentScope(workerId) {
+    const rows = this.db.prepare(`
+      SELECT assignments.*, jobs.title AS job_title, jobs.status AS job_status,
+        CASE WHEN jobs.id IS NULL OR ${this.operationalJobStatusSql('jobs')} THEN 1 ELSE 0 END AS is_operational
+      FROM assignments
+      LEFT JOIN jobs ON jobs.id = assignments.job_id
+      WHERE assignments.worker_id = ?
+        AND ${this.activeAssignmentStatusSql('assignments')}
+      ORDER BY assignments.created_at ASC
+    `).all(workerId).map(row => ({
+      id: row.id,
+      jobId: row.job_id,
+      jobTitle: row.job_title || row.job_id || 'Unlinked assignment',
+      jobStatus: row.job_status || null,
+      status: row.status,
+      scheduledStart: row.scheduled_start || null,
+      scheduledEnd: row.scheduled_end || null,
+      operational: Number(row.is_operational || 0) === 1
+    }));
+    return {
+      retained: rows,
+      operational: rows.filter(row => row.operational),
+      dormant: rows.filter(row => !row.operational)
+    };
+  }
+
+  toolReservationScope(toolId) {
+    const rows = this.db.prepare(`
+      SELECT tool_reservations.*, jobs.title AS job_title, jobs.status AS job_status,
+        CASE WHEN jobs.id IS NULL OR ${this.operationalJobStatusSql('jobs')} THEN 1 ELSE 0 END AS is_operational
+      FROM tool_reservations
+      LEFT JOIN jobs ON jobs.id = tool_reservations.job_id
+      WHERE tool_reservations.tool_id = ?
+        AND ${this.activeToolReservationStatusSql('tool_reservations')}
+      ORDER BY tool_reservations.created_at ASC
+    `).all(toolId).map(row => ({
+      id: row.id,
+      jobId: row.job_id,
+      jobTitle: row.job_title || row.job_id || 'Unlinked reservation',
+      jobStatus: row.job_status || null,
+      status: row.status,
+      neededFrom: row.needed_from || null,
+      neededUntil: row.needed_until || null,
+      operational: Number(row.is_operational || 0) === 1
+    }));
+    return {
+      retained: rows,
+      operational: rows.filter(row => row.operational),
+      dormant: rows.filter(row => !row.operational)
+    };
+  }
+
+  activeRecordScope(table) {
+    if (table === 'jobs') {
+      return {
+        from: 'jobs AS records',
+        condition: this.operationalJobStatusSql('records')
+      };
+    }
+    if (table === 'job_requests') {
+      return {
+        from: 'job_requests AS records LEFT JOIN jobs ON jobs.request_id = records.id',
+        condition: `(jobs.id IS NULL OR ${this.operationalJobStatusSql('jobs')})`
+      };
+    }
+    return {
+      from: `${table} AS records LEFT JOIN jobs ON jobs.id = records.job_id`,
+      condition: `(records.job_id IS NULL OR ${this.operationalJobStatusSql('jobs')})`
+    };
+  }
+
+  countActiveRecords(table, condition = '1 = 1', params = []) {
+    const scope = this.activeRecordScope(table);
+    return Number(this.db.prepare(`
+      SELECT COUNT(DISTINCT records.id) AS count
+      FROM ${scope.from}
+      WHERE ${scope.condition} AND (${condition})
+    `).get(...params).count || 0);
+  }
+
+  sumActiveRecords(table, column, condition = '1 = 1', params = []) {
+    const scope = this.activeRecordScope(table);
+    return normalizeNumber(this.db.prepare(`
+      SELECT COALESCE(SUM(records.${column}), 0) AS total
+      FROM ${scope.from}
+      WHERE ${scope.condition} AND (${condition})
+    `).get(...params).total, 0);
+  }
+
   getJobRow(jobId) {
     return this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
   }
 
-  requireJob(jobId) {
+  requireJob(jobId, { allowInactive = false } = {}) {
     const row = this.getJobRow(jobId);
     if (!row) {
       const error = new Error('Ledger job not found');
       error.statusCode = 404;
+      throw error;
+    }
+    const status = normalizeStatus(row.status, 'intake');
+    if (!allowInactive && !this.jobAllowsOperations(status)) {
+      const restoreAvailable = ['archived', 'pending_archive_approval'].includes(status);
+      const recovery = restoreAvailable
+        ? 'Use the approval-gated restore workflow before recording new operational changes.'
+        : 'This terminal job state does not permit new operational changes.';
+      const error = new Error(`Job ${row.title || row.id} is ${status} and read-only. ${recovery}`);
+      error.statusCode = 409;
+      error.code = 'job_inactive_read_only';
+      error.details = {
+        jobId: row.id,
+        jobStatus: status,
+        restoreAvailable
+      };
       throw error;
     }
     return row;
@@ -1575,16 +2432,17 @@ class ContractorOperatingLedger {
   }
 
   seedFromState() {
-    if (this.count('jobs') || this.count('clients')) {
-      return;
-    }
-
     const state = this.stateProvider() || {};
     const stateJobs = Array.isArray(state.jobs) ? state.jobs : [];
     const stateWorkers = Array.isArray(state.workers) ? state.workers : [];
     const stateTools = Array.isArray(state.tools) ? state.tools : [];
 
+    if (!stateJobs.length && !stateWorkers.length && !stateTools.length) {
+      return;
+    }
+
     this.transaction(() => {
+      if (this.count('jobs') || this.count('clients')) return;
       for (const worker of stateWorkers) {
         const id = `legacy_worker_${worker.id}`;
         const timestamp = nowIso();
@@ -1675,7 +2533,7 @@ class ContractorOperatingLedger {
           job.priority === 'critical' ? 'high' : 'normal',
           normalizeNumber(job.estimatedHours || job.estimated_hours, 0),
           normalizeNumber(job.estimatedCost || job.estimated_cost, 0),
-          normalizeNumber(job.actualCost || job.actual_cost || job.estimatedCost || job.estimated_cost, 0),
+          normalizeNumber(job.contractValue || job.contract_value || job.estimatedCost || job.estimated_cost, 0),
           normalizeNumber(job.marginTargetPercent || job.margin_target_percent, 20),
           Math.max(0, Math.min(100, normalizeNumber(job.progress || job.progress_percentage, 0))),
           rowDate(job.scheduledStart || job.startDate),
@@ -1814,23 +2672,495 @@ class ContractorOperatingLedger {
     return after;
   }
 
+  assessTradePartnerCompliance(partner, options = {}) {
+    if (!partner) {
+      return {
+        status: 'missing',
+        compliant: false,
+        blockers: [{ code: 'trade_partner_missing', message: 'A retained trade partner is required.' }],
+        warnings: [],
+        checkedAt: nowIso()
+      };
+    }
+
+    const data = partner.data || {};
+    const status = normalizeStatus(partner.status, 'active');
+    const partnerType = normalizeStatus(partner.partnerType, 'supplier');
+    const requiresInsurance = normalizeBoolean(data.requiresInsurance, ['subcontractor', 'both'].includes(partnerType));
+    const requiresVca = normalizeBoolean(data.requiresVca, false);
+    const vatExempt = normalizeBoolean(data.vatExempt, false);
+    const checkedAt = options.now ? new Date(options.now) : new Date();
+    const checkedTimestamp = Number.isNaN(checkedAt.getTime()) ? new Date() : checkedAt;
+    const blockers = [];
+    const warnings = [];
+    const addBlocker = (code, message) => blockers.push({ code, message });
+    const addWarning = (code, message) => warnings.push({ code, message });
+    const checkExpiry = (value, { required, label, code }) => {
+      if (!value) {
+        if (required) addBlocker(`${code}_missing`, `${label} expiry evidence is required.`);
+        return;
+      }
+      const expiry = new Date(value);
+      if (Number.isNaN(expiry.getTime())) {
+        addBlocker(`${code}_invalid`, `${label} expiry evidence is invalid.`);
+        return;
+      }
+      const daysRemaining = Math.ceil((expiry.getTime() - checkedTimestamp.getTime()) / 86_400_000);
+      if (daysRemaining < 0) {
+        addBlocker(`${code}_expired`, `${label} evidence expired ${Math.abs(daysRemaining)} day(s) ago.`);
+      } else if (daysRemaining <= 30) {
+        addWarning(`${code}_expiring`, `${label} evidence expires in ${daysRemaining} day(s).`);
+      }
+    };
+
+    if (status !== 'active') addBlocker('trade_partner_inactive', `Trade partner status is ${status}.`);
+    if (!normalizeText(partner.registrationNumber, '')) addBlocker('registration_number_missing', 'Registration or KVK evidence is required.');
+    if (!vatExempt && !normalizeText(partner.vatNumber, '')) addBlocker('vat_number_missing', 'VAT evidence or an explicit VAT exemption is required.');
+    if (!normalizeText(data.verificationReference, '')) addBlocker('verification_reference_missing', 'A retained verification reference is required.');
+    if (!data.verifiedAt || Number.isNaN(new Date(data.verifiedAt).getTime())) {
+      addBlocker('verification_date_missing', 'A valid verification date is required.');
+    } else if (new Date(data.verifiedAt).getTime() > checkedTimestamp.getTime() + 86_400_000) {
+      addBlocker('verification_date_future', 'The verification date cannot be in the future.');
+    }
+    checkExpiry(partner.insuranceExpiresAt, { required: requiresInsurance, label: 'Liability insurance', code: 'insurance' });
+    checkExpiry(partner.vcaExpiresAt, { required: requiresVca, label: 'VCA', code: 'vca' });
+
+    const inactive = blockers.some(item => item.code === 'trade_partner_inactive');
+    const expired = blockers.some(item => item.code.endsWith('_expired'));
+    const complianceStatus = inactive
+      ? 'blocked'
+      : expired
+        ? 'expired'
+        : blockers.length
+          ? 'needs_review'
+          : warnings.length
+            ? 'expiring'
+            : 'verified';
+    return {
+      status: complianceStatus,
+      compliant: blockers.length === 0,
+      blockers,
+      warnings,
+      checkedAt: checkedTimestamp.toISOString(),
+      requirements: {
+        registrationNumber: true,
+        vatNumber: !vatExempt,
+        insurance: requiresInsurance,
+        vca: requiresVca,
+        verificationReference: true
+      }
+    };
+  }
+
+  getTradePartner(partnerId) {
+    const row = this.db.prepare('SELECT * FROM trade_partners WHERE id = ?').get(partnerId);
+    if (!row) {
+      const error = new Error('Trade partner not found');
+      error.statusCode = 404;
+      error.code = 'trade_partner_not_found';
+      throw error;
+    }
+    return this.mapTradePartner(row);
+  }
+
+  findTradePartnerByName(name) {
+    const normalizedName = normalizeText(name, '');
+    if (!normalizedName) return null;
+    const row = this.db.prepare(`
+      SELECT * FROM trade_partners
+      WHERE lower(name) = lower(?)
+      ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'on_hold' THEN 1 ELSE 2 END, updated_at DESC
+      LIMIT 1
+    `).get(normalizedName);
+    return row ? this.mapTradePartner(row) : null;
+  }
+
+  listTradePartners(filters = {}) {
+    const requestedStatus = normalizeStatus(filters.status, '');
+    const requestedType = normalizeStatus(filters.partnerType || filters.partner_type || filters.type, '');
+    const includeRetired = normalizeBoolean(filters.includeRetired ?? filters.include_retired, false)
+      || requestedStatus === 'retired';
+    const search = normalizeText(filters.search || filters.q, '').toLowerCase();
+    const limit = safeLimit(filters.limit, 100, 500);
+    const pendingRetirements = new Map(this.db.prepare(`
+      SELECT target_id, id FROM approvals
+      WHERE target_type = 'trade_partner_retirement' AND status = 'pending'
+    `).all().map(row => [row.target_id, row.id]));
+    const rows = this.db.prepare(`
+      SELECT * FROM trade_partners
+      ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'on_hold' THEN 1 ELSE 2 END, updated_at DESC
+      LIMIT 500
+    `).all().map(row => {
+      const partner = this.mapTradePartner(row);
+      return { ...partner, retirementApprovalId: pendingRetirements.get(partner.id) || null };
+    });
+    return rows.filter(partner => {
+      if (!includeRetired && partner.status === 'retired') return false;
+      if (requestedStatus && partner.status !== requestedStatus) return false;
+      if (requestedType && partner.partnerType !== requestedType && partner.partnerType !== 'both') return false;
+      if (!search) return true;
+      return JSON.stringify({
+        name: partner.name,
+        partnerType: partner.partnerType,
+        contactName: partner.contactName,
+        email: partner.email,
+        city: partner.city,
+        registrationNumber: partner.registrationNumber,
+        vatNumber: partner.vatNumber,
+        specialties: partner.specialties
+      }).toLowerCase().includes(search);
+    }).slice(0, limit);
+  }
+
+  summarizeTradePartners(partners = this.listTradePartners({ includeRetired: true, limit: 500 })) {
+    return partners.reduce((summary, partner) => {
+      summary.total += 1;
+      if (partner.status === 'active') summary.active += 1;
+      if (partner.status === 'retired') summary.retired += 1;
+      if (partner.compliance.status === 'verified') summary.verified += 1;
+      if (partner.compliance.status === 'expiring') summary.expiring += 1;
+      if (['needs_review', 'expired', 'blocked'].includes(partner.compliance.status)) summary.actionRequired += 1;
+      return summary;
+    }, { total: 0, active: 0, verified: 0, expiring: 0, actionRequired: 0, retired: 0 });
+  }
+
+  upsertTradePartner(payload = {}, options = {}) {
+    const id = normalizeText(options.id || payload.id, makeId('partner'));
+    const before = this.db.prepare('SELECT * FROM trade_partners WHERE id = ?').get(id);
+    const existing = before ? this.mapTradePartner(before) : null;
+    if (existing?.status === 'retired') {
+      const error = new Error('Retired trade partners are retained and cannot be edited directly');
+      error.statusCode = 409;
+      error.code = 'trade_partner_retired';
+      throw error;
+    }
+    const name = normalizeText(payload.name ?? existing?.name, '');
+    if (name.length < 2) {
+      const error = new Error('Trade partner name must contain at least two characters');
+      error.statusCode = 400;
+      error.code = 'trade_partner_name_required';
+      throw error;
+    }
+    const partnerType = normalizeStatus(payload.partnerType ?? payload.partner_type ?? payload.type ?? existing?.partnerType, 'supplier');
+    if (!['supplier', 'subcontractor', 'both'].includes(partnerType)) {
+      const error = new Error('Trade partner type must be supplier, subcontractor, or both');
+      error.statusCode = 400;
+      error.code = 'trade_partner_type_invalid';
+      throw error;
+    }
+    const status = normalizeStatus(payload.status ?? existing?.status, 'active');
+    if (!['active', 'on_hold'].includes(status)) {
+      const error = new Error('Trade partner status changes to retired require the approval-gated retirement route');
+      error.statusCode = 409;
+      error.code = 'trade_partner_retirement_route_required';
+      throw error;
+    }
+    const duplicate = this.db.prepare(`
+      SELECT id FROM trade_partners
+      WHERE lower(name) = lower(?) AND id <> ? AND status <> 'retired'
+      LIMIT 1
+    `).get(name, id);
+    if (duplicate) {
+      const error = new Error('An active trade partner with this name already exists');
+      error.statusCode = 409;
+      error.code = 'trade_partner_duplicate';
+      throw error;
+    }
+    const email = normalizeText(payload.email ?? existing?.email, '');
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      const error = new Error('Trade partner email address is invalid');
+      error.statusCode = 400;
+      error.code = 'trade_partner_email_invalid';
+      throw error;
+    }
+    const optionalDate = (value, fallback) => {
+      if (value === undefined) return fallback || null;
+      if (value === null || value === '') return null;
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) {
+        const error = new Error('Trade partner compliance dates must be valid dates');
+        error.statusCode = 400;
+        error.code = 'trade_partner_date_invalid';
+        throw error;
+      }
+      return parsed.toISOString();
+    };
+    const existingData = existing?.data || {};
+    const requiresInsuranceInput = payload.requiresInsurance ?? payload.requires_insurance;
+    const requiresVcaInput = payload.requiresVca ?? payload.requires_vca;
+    const vatExemptInput = payload.vatExempt ?? payload.vat_exempt;
+    const data = {
+      ...existingData,
+      ...(payload.data || {}),
+      requiresInsurance: requiresInsuranceInput === undefined
+        ? (existingData.requiresInsurance ?? ['subcontractor', 'both'].includes(partnerType))
+        : normalizeBoolean(requiresInsuranceInput, false),
+      requiresVca: requiresVcaInput === undefined
+        ? normalizeBoolean(existingData.requiresVca, false)
+        : normalizeBoolean(requiresVcaInput, false),
+      vatExempt: vatExemptInput === undefined
+        ? normalizeBoolean(existingData.vatExempt, false)
+        : normalizeBoolean(vatExemptInput, false),
+      verificationReference: payload.verificationReference ?? payload.verification_reference ?? existingData.verificationReference ?? null,
+      verifiedAt: optionalDate(payload.verifiedAt ?? payload.verified_at, existingData.verifiedAt),
+      notes: payload.notes ?? payload.note ?? existingData.notes ?? null
+    };
+    const specialties = payload.specialties === undefined
+      ? existing?.specialties || []
+      : normalizeList(payload.specialties);
+    const timestamp = nowIso();
+    const values = [
+      name,
+      partnerType,
+      payload.contactName ?? payload.contact_name ?? existing?.contactName ?? null,
+      email || null,
+      payload.phone ?? existing?.phone ?? null,
+      payload.address ?? existing?.address ?? null,
+      payload.city ?? existing?.city ?? null,
+      normalizeText(payload.country ?? existing?.country, 'NL').toUpperCase(),
+      payload.registrationNumber ?? payload.registration_number ?? payload.kvkNumber ?? payload.kvk_number ?? existing?.registrationNumber ?? null,
+      payload.vatNumber ?? payload.vat_number ?? existing?.vatNumber ?? null,
+      status,
+      optionalDate(payload.insuranceExpiresAt ?? payload.insurance_expires_at, existing?.insuranceExpiresAt),
+      optionalDate(payload.vcaExpiresAt ?? payload.vca_expires_at, existing?.vcaExpiresAt),
+      toJson(specialties, []),
+      toJson(data),
+      timestamp
+    ];
+    if (before) {
+      this.db.prepare(`
+        UPDATE trade_partners
+        SET name = ?, partner_type = ?, contact_name = ?, email = ?, phone = ?, address = ?, city = ?, country = ?,
+          registration_number = ?, vat_number = ?, status = ?, insurance_expires_at = ?, vca_expires_at = ?,
+          specialties_json = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(...values, id);
+    } else {
+      this.db.prepare(`
+        INSERT INTO trade_partners (
+          id, name, partner_type, contact_name, email, phone, address, city, country, registration_number,
+          vat_number, status, insurance_expires_at, vca_expires_at, specialties_json, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, ...values.slice(0, -1), timestamp, timestamp);
+    }
+    const after = this.getTradePartner(id);
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'trade_partner',
+        entityId: id,
+        action: before ? 'update_trade_partner' : 'create_trade_partner',
+        actor: options.actor || 'Contractor.AI',
+        before: existing,
+        after,
+        metadata: { complianceStatus: after.compliance.status, externalCommitments: 0 }
+      });
+    }
+    return after;
+  }
+
+  requestTradePartnerRetirement(partnerId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const partner = this.getTradePartner(partnerId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      if (partner.status === 'retired') {
+        return { partner, approval: null, retained: true, retired: true, requiresApproval: false, operationStatus: 'already_retired' };
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'trade_partner_retirement' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(partnerId);
+      if (pending) {
+        return { partner, approval: this.mapApproval(pending), retained: true, retired: false, requiresApproval: true, operationStatus: 'pending_approval' };
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) {
+        const error = new Error('Trade partner retirement requires an operational reason of at least eight characters');
+        error.statusCode = 400;
+        error.code = 'trade_partner_retirement_reason_required';
+        throw error;
+      }
+      const activeProcurement = Number(this.db.prepare(`
+        SELECT COUNT(*) AS count FROM procurement_orders
+        WHERE status NOT IN ('cancelled', 'canceled', 'rejected', 'void', 'closed', 'received')
+          AND (lower(COALESCE(supplier, '')) = lower(?) OR data_json LIKE ?)
+      `).get(partner.name, `%${partner.id}%`).count || 0);
+      const activePurchaseOrders = Number(this.db.prepare(`
+        SELECT COUNT(*) AS count FROM purchase_orders
+        WHERE status NOT IN ('cancelled', 'canceled', 'rejected', 'void', 'closed', 'received')
+          AND (lower(COALESCE(supplier, '')) = lower(?) OR data_json LIKE ?)
+      `).get(partner.name, `%${partner.id}%`).count || 0);
+      const approval = this.createApproval({
+        targetType: 'trade_partner_retirement',
+        targetId: partnerId,
+        approvalType: 'destructive_action',
+        requestedBy: actor,
+        summary: `Retire trade partner: ${partner.name}`,
+        reason,
+        data: {
+          partnerId,
+          name: partner.name,
+          partnerType: partner.partnerType,
+          previousStatus: partner.status,
+          requestedStatus: 'retired',
+          activeProcurement,
+          activePurchaseOrders,
+          compliance: partner.compliance
+        }
+      }, { actor, audit: false });
+      this.audit({
+        entityType: 'trade_partner',
+        entityId: partnerId,
+        action: 'request_trade_partner_retirement',
+        actor,
+        before: partner,
+        after: { ...partner, retirementApprovalId: approval.id },
+        metadata: { approvalId: approval.id, activeProcurement, activePurchaseOrders, externalCommitments: 0 }
+      });
+      return { partner, approval, retained: true, retired: false, requiresApproval: true, operationStatus: 'pending_approval' };
+    });
+  }
+
+  resolveTradePartnerForSpend(payload = {}, supplier = '') {
+    const data = payload.data && typeof payload.data === 'object' ? payload.data : {};
+    const partnerId = payload.tradePartnerId || payload.trade_partner_id || payload.partnerId || payload.partner_id
+      || payload.supplierId || payload.supplier_id || data.tradePartnerId || null;
+    if (partnerId) return this.getTradePartner(partnerId);
+    return this.findTradePartnerByName(supplier || payload.supplier || payload.vendor || '');
+  }
+
+  tradePartnerComplianceSnapshot(partner) {
+    if (!partner) return null;
+    return {
+      partnerId: partner.id,
+      name: partner.name,
+      partnerType: partner.partnerType,
+      status: partner.status,
+      complianceStatus: partner.compliance.status,
+      compliant: partner.compliance.compliant,
+      blockers: partner.compliance.blockers,
+      warnings: partner.compliance.warnings,
+      checkedAt: partner.compliance.checkedAt
+    };
+  }
+
+  assertTradePartnerReadyForCommitment(record, recordType = 'supplier commitment') {
+    const data = fromJson(record?.data_json, record?.data || {});
+    const partner = this.resolveTradePartnerForSpend({ ...data, tradePartnerId: data.tradePartnerId }, record?.supplier || '');
+    if (!partner) {
+      const error = new Error(`A retained trade partner must be linked before approving this ${recordType}`);
+      error.statusCode = 409;
+      error.code = 'trade_partner_required';
+      throw error;
+    }
+    if (!partner.compliance.compliant) {
+      const reasons = partner.compliance.blockers.map(item => item.message).slice(0, 3).join(' ');
+      const error = new Error(`${partner.name} is not compliance-ready. ${reasons}`.trim());
+      error.statusCode = 409;
+      error.code = 'trade_partner_compliance_required';
+      throw error;
+    }
+    return partner;
+  }
+
+  tradePartnerReadinessForSpend(record) {
+    const data = fromJson(record?.data_json, record?.data || {});
+    try {
+      const partner = this.resolveTradePartnerForSpend({ ...data, tradePartnerId: data.tradePartnerId }, record?.supplier || '');
+      if (!partner) {
+        return {
+          partner: null,
+          compliance: this.assessTradePartnerCompliance(null),
+          supplier: record?.supplier || null
+        };
+      }
+      return { partner, compliance: partner.compliance, supplier: partner.name };
+    } catch (error) {
+      return {
+        partner: null,
+        compliance: {
+          status: 'missing',
+          compliant: false,
+          blockers: [{ code: error.code || 'trade_partner_missing', message: error.message }],
+          warnings: [],
+          checkedAt: nowIso()
+        },
+        supplier: record?.supplier || null
+      };
+    }
+  }
+
   upsertWorker(payload = {}, options = {}) {
     const id = normalizeText(options.id || payload.id, makeId('worker'));
     const before = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(id);
+    const existing = before ? this.mapWorker(before) : null;
+    if (existing?.status === 'retired') {
+      const error = new Error('Retired workers are retained and cannot be edited directly');
+      error.statusCode = 409;
+      error.code = 'worker_retired';
+      throw error;
+    }
+    const name = normalizeText(payload.name ?? existing?.name, '');
+    if (name.length < 2) {
+      const error = new Error('Worker name must contain at least two characters');
+      error.statusCode = 400;
+      error.code = 'worker_name_required';
+      throw error;
+    }
+    const status = normalizeWorkerStatus(payload.status ?? existing?.status, 'available');
+    const editableStatuses = new Set(['available', 'busy', 'traveling', 'offline', 'on_leave', 'on_hold', 'inactive']);
+    if (status === 'retired') {
+      const error = new Error('Worker retirement requires the approval-gated retirement route');
+      error.statusCode = 409;
+      error.code = 'worker_retirement_route_required';
+      throw error;
+    }
+    if (!editableStatuses.has(status)) {
+      const error = new Error('Worker status must be available, busy, traveling, offline, on leave, on hold, or inactive');
+      error.statusCode = 400;
+      error.code = 'worker_status_invalid';
+      throw error;
+    }
+    const email = normalizeText(payload.email ?? existing?.email, '');
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      const error = new Error('Worker email address is invalid');
+      error.statusCode = 400;
+      error.code = 'worker_email_invalid';
+      throw error;
+    }
+    if (email) {
+      const duplicateEmail = this.db.prepare(`
+        SELECT id FROM workers
+        WHERE lower(email) = lower(?) AND id <> ? AND status <> 'retired'
+        LIMIT 1
+      `).get(email, id);
+      if (duplicateEmail) {
+        const error = new Error('An active worker with this email address already exists');
+        error.statusCode = 409;
+        error.code = 'worker_email_duplicate';
+        throw error;
+      }
+    }
     const timestamp = nowIso();
-    const skills = Array.isArray(payload.skills)
-      ? payload.skills
-      : Array.isArray(payload.specialties)
-        ? payload.specialties
-        : normalizeText(payload.specialty || payload.role, '')
-          ? [normalizeText(payload.specialty || payload.role)]
-          : fromJson(before?.skills_json, []);
+    const skillsInput = payload.skills ?? payload.specialties;
+    const skills = skillsInput === undefined
+      ? (before ? fromJson(before.skills_json, []) : normalizeText(payload.specialty || payload.role, '') ? [normalizeText(payload.specialty || payload.role)] : [])
+      : normalizeList(skillsInput);
+    const hourlyRate = normalizeNumber(payload.hourlyRate ?? payload.hourly_rate ?? before?.hourly_rate, 0);
+    if (hourlyRate < 0) {
+      const error = new Error('Worker hourly rate cannot be negative');
+      error.statusCode = 400;
+      error.code = 'worker_hourly_rate_invalid';
+      throw error;
+    }
     const data = {
       ...fromJson(before?.data_json, {}),
       ...(payload.data || {}),
       legacyId: payload.legacyId ?? payload.legacy_id ?? fromJson(before?.data_json, {}).legacyId ?? null,
       rating: payload.rating ?? fromJson(before?.data_json, {}).rating ?? null,
-      completedJobs: payload.completedJobs ?? payload.completed_jobs ?? fromJson(before?.data_json, {}).completedJobs ?? null
+      completedJobs: payload.completedJobs ?? payload.completed_jobs ?? fromJson(before?.data_json, {}).completedJobs ?? null,
+      notes: payload.notes ?? payload.note ?? fromJson(before?.data_json, {}).notes ?? null
     };
 
     if (before) {
@@ -1839,13 +3169,13 @@ class ContractorOperatingLedger {
         SET name = ?, role = ?, email = ?, phone = ?, status = ?, home_region = ?, hourly_rate = ?, skills_json = ?, data_json = ?, updated_at = ?
         WHERE id = ?
       `).run(
-        normalizeText(payload.name ?? before.name, before.name),
+        name,
         payload.role ?? payload.specialty ?? before.role,
-        payload.email ?? before.email,
+        email || null,
         payload.phone ?? before.phone,
-        normalizeStatus(payload.status, before.status),
+        status,
         payload.homeRegion ?? payload.home_region ?? payload.location ?? payload.currentLocation ?? before.home_region,
-        normalizeNumber(payload.hourlyRate ?? payload.hourly_rate ?? before.hourly_rate, 0),
+        hourlyRate,
         toJson(skills, []),
         toJson(data),
         timestamp,
@@ -1857,13 +3187,13 @@ class ContractorOperatingLedger {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
-        normalizeText(payload.name, 'Worker'),
+        name,
         payload.role || payload.specialty || null,
-        payload.email || null,
+        email || null,
         payload.phone || null,
-        normalizeStatus(payload.status, 'available'),
+        status,
         payload.homeRegion || payload.home_region || payload.location || payload.currentLocation || null,
-        normalizeNumber(payload.hourlyRate || payload.hourly_rate, 0),
+        hourlyRate,
         toJson(skills, []),
         toJson(data),
         timestamp,
@@ -1871,31 +3201,97 @@ class ContractorOperatingLedger {
       );
     }
 
-    const after = this.mapWorker(this.db.prepare('SELECT * FROM workers WHERE id = ?').get(id));
+    const after = this.getWorker(id);
     if (options.audit !== false) {
       this.audit({
         entityType: 'worker',
         entityId: id,
         action: before ? 'update_worker' : 'create_worker',
         actor: options.actor || 'Contractor.AI',
-        before: before ? this.mapWorker(before) : null,
-        after
+        before: existing,
+        after,
+        metadata: { externalCommitments: 0 }
       });
     }
     return after;
   }
 
   listWorkers(filters = {}) {
-    const status = normalizeText(filters.status, '');
+    const status = normalizeWorkerStatus(filters.status, '');
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
+    const pendingRetirements = new Map(this.db.prepare(`
+      SELECT target_id, id FROM approvals
+      WHERE target_type = 'worker_retirement' AND status = 'pending'
+    `).all().map(row => [row.target_id, row.id]));
+    const assignmentCounts = new Map(this.db.prepare(`
+      SELECT assignments.worker_id,
+        SUM(CASE WHEN jobs.id IS NULL OR ${this.operationalJobStatusSql('jobs')} THEN 1 ELSE 0 END) AS active_count,
+        SUM(CASE WHEN jobs.id IS NOT NULL AND NOT (${this.operationalJobStatusSql('jobs')}) THEN 1 ELSE 0 END) AS dormant_count
+      FROM assignments
+      LEFT JOIN jobs ON jobs.id = assignments.job_id
+      WHERE assignments.worker_id IS NOT NULL
+        AND ${this.activeAssignmentStatusSql('assignments')}
+      GROUP BY assignments.worker_id
+    `).all().map(row => [row.worker_id, {
+      active: Number(row.active_count || 0),
+      dormant: Number(row.dormant_count || 0)
+    }]));
     return this.db.prepare(`
       SELECT * FROM workers
-      WHERE (? = '' OR status = ?)
-        AND (? = '' OR lower(name || ' ' || COALESCE(role, '') || ' ' || COALESCE(home_region, '')) LIKE ?)
+      WHERE (? = '' OR lower(name || ' ' || COALESCE(role, '') || ' ' || COALESCE(home_region, '') || ' ' || COALESCE(email, '') || ' ' || skills_json) LIKE ?)
       ORDER BY updated_at DESC
-      LIMIT ?
-    `).all(status, status, search, `%${search}%`, limit).map(row => this.mapWorker(row));
+    `).all(search, `%${search}%`).map(row => {
+      const worker = this.mapWorker(row);
+      const workerAssignments = assignmentCounts.get(worker.id) || { active: 0, dormant: 0 };
+      return {
+        ...worker,
+        retirementApprovalId: pendingRetirements.get(worker.id) || null,
+        activeAssignmentCount: workerAssignments.active,
+        dormantAssignmentCount: workerAssignments.dormant,
+        retainedAssignmentCount: workerAssignments.active + workerAssignments.dormant
+      };
+    }).filter(worker => !status || worker.status === status).slice(0, limit);
+  }
+
+  getWorker(workerId) {
+    const row = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+    if (!row) {
+      const error = new Error('Worker not found');
+      error.statusCode = 404;
+      error.code = 'worker_not_found';
+      throw error;
+    }
+    const pendingRetirement = this.db.prepare(`
+      SELECT id FROM approvals
+      WHERE target_type = 'worker_retirement' AND target_id = ? AND status = 'pending'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(workerId);
+    const assignmentScope = this.workerAssignmentScope(workerId);
+    return {
+      ...this.mapWorker(row),
+      retirementApprovalId: pendingRetirement?.id || null,
+      activeAssignmentCount: assignmentScope.operational.length,
+      dormantAssignmentCount: assignmentScope.dormant.length,
+      retainedAssignmentCount: assignmentScope.retained.length
+    };
+  }
+
+  summarizeWorkers(workers = this.listWorkers({ limit: 500 })) {
+    return workers.reduce((summary, worker) => {
+      summary.total += 1;
+      summary.activeAssignments += Number(worker.activeAssignmentCount || 0);
+      summary.dormantAssignments += Number(worker.dormantAssignmentCount || 0);
+      if (worker.status === 'retired') summary.retired += 1;
+      else {
+        summary.active += 1;
+        if (worker.status === 'available') summary.available += 1;
+        else summary.unavailable += 1;
+      }
+      if (worker.retirementApprovalId) summary.pendingRetirement += 1;
+      return summary;
+    }, { total: 0, active: 0, available: 0, unavailable: 0, pendingRetirement: 0, retired: 0, activeAssignments: 0, dormantAssignments: 0 });
   }
 
   retireWorker(workerId, options = {}) {
@@ -1914,7 +3310,7 @@ class ContractorOperatingLedger {
     return this.transaction(() => {
       const before = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
       if (!before) return null;
-      const worker = this.mapWorker(before);
+      const worker = this.getWorker(workerId);
       const actor = options.actor || payload.actor || 'Contractor.AI';
       if (normalizeStatus(before.status, '') === 'retired') {
         return {
@@ -1946,7 +3342,16 @@ class ContractorOperatingLedger {
         };
       }
 
-      const reason = payload.reason || payload.notes || 'Worker retirement requested; retained until human approval is resolved.';
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) {
+        const error = new Error('Worker retirement requires an operational reason of at least eight characters');
+        error.statusCode = 400;
+        error.code = 'worker_retirement_reason_required';
+        throw error;
+      }
+      const assignmentScope = this.workerAssignmentScope(workerId);
+      const activeAssignments = assignmentScope.operational;
+      const dormantAssignments = assignmentScope.dormant;
       const approval = this.createApproval({
         targetType: 'worker_retirement',
         targetId: workerId,
@@ -1961,6 +3366,10 @@ class ContractorOperatingLedger {
           role: worker.role,
           requestedAction: 'retire',
           requestedStatus: 'retired',
+          activeAssignmentCount: activeAssignments.length,
+          activeAssignments,
+          dormantAssignmentCount: dormantAssignments.length,
+          dormantAssignments,
           before: worker
         }
       }, { actor });
@@ -1972,11 +3381,16 @@ class ContractorOperatingLedger {
         actor,
         before: worker,
         after: { ...worker, retirementApprovalId: approval.id },
-        metadata: { approvalId: approval.id }
+        metadata: {
+          approvalId: approval.id,
+          activeAssignmentCount: activeAssignments.length,
+          dormantAssignmentCount: dormantAssignments.length,
+          externalCommitments: 0
+        }
       });
 
       return {
-        worker,
+        worker: { ...worker, retirementApprovalId: approval.id },
         approval,
         retained: true,
         retired: false,
@@ -1986,16 +3400,152 @@ class ContractorOperatingLedger {
     });
   }
 
+  assessToolInspection(tool = {}, referenceAt = nowIso()) {
+    const data = tool.data || fromJson(tool.data_json, {});
+    const history = Array.isArray(data.inspectionHistory) ? data.inspectionHistory : [];
+    const latestInspection = history.length ? history[history.length - 1] : null;
+    const maintenanceHistory = Array.isArray(data.maintenanceHistory) ? data.maintenanceHistory : [];
+    const latestMaintenance = maintenanceHistory.length ? maintenanceHistory[maintenanceHistory.length - 1] : null;
+    const lastResult = normalizeStatus(latestInspection?.result || data.lastInspectionResult, '');
+    const dueAt = normalizeText(data.inspectionDueAt, '') || null;
+    const required = normalizeBoolean(data.inspectionRequired, Boolean(dueAt));
+    const dueDate = dueAt ? String(dueAt).slice(0, 10) : null;
+    const referenceDate = new Date(Date.parse(referenceAt) || Date.now()).toISOString().slice(0, 10);
+    const dueMilliseconds = dueDate ? Date.parse(`${dueDate}T00:00:00.000Z`) : Number.NaN;
+    const referenceMilliseconds = Date.parse(`${referenceDate}T00:00:00.000Z`);
+    const daysUntilDue = Number.isFinite(dueMilliseconds)
+      ? Math.round((dueMilliseconds - referenceMilliseconds) / 86_400_000)
+      : null;
+
+    let status = 'not_required';
+    let blocksReservation = false;
+    const maintenanceResolvedLatestInspection = normalizeStatus(latestMaintenance?.outcome, '') === 'completed'
+      && latestInspection?.id
+      && String(latestMaintenance.sourceInspectionId || '') === String(latestInspection.id);
+    if (lastResult === 'failed') {
+      status = maintenanceResolvedLatestInspection ? 'reinspection_required' : 'failed';
+      blocksReservation = true;
+    } else if (lastResult === 'limited') {
+      status = maintenanceResolvedLatestInspection ? 'reinspection_required' : 'limited';
+      blocksReservation = true;
+    } else if (required && !dueAt) {
+      status = 'not_recorded';
+      blocksReservation = true;
+    } else if (required && !Number.isFinite(dueMilliseconds)) {
+      status = 'invalid';
+      blocksReservation = true;
+    } else if (required && daysUntilDue < 0) {
+      status = 'overdue';
+      blocksReservation = true;
+    } else if (required && daysUntilDue <= 30) {
+      status = 'due_soon';
+    } else if (required) {
+      status = 'current';
+    }
+
+    return {
+      required,
+      status,
+      dueAt,
+      daysUntilDue,
+      blocksReservation,
+      requiresAttention: blocksReservation || status === 'due_soon',
+      reservationReady: !blocksReservation,
+      latestInspection,
+      maintenanceResolvedLatestInspection,
+      lastInspectedAt: latestInspection?.inspectedAt || data.lastInspectedAt || null,
+      lastResult: lastResult || null,
+      historyCount: history.length
+    };
+  }
+
+  assessToolMaintenance(tool = {}) {
+    const data = tool.data || fromJson(tool.data_json, {});
+    const history = Array.isArray(data.maintenanceHistory) ? data.maintenanceHistory : [];
+    const latestMaintenance = history.length ? history[history.length - 1] : null;
+    const outcome = normalizeStatus(latestMaintenance?.outcome || data.lastMaintenanceOutcome, 'not_recorded');
+    return {
+      status: outcome,
+      latestMaintenance,
+      lastMaintainedAt: latestMaintenance?.performedAt || data.lastMaintainedAt || null,
+      historyCount: history.length,
+      requiresAttention: outcome === 'follow_up_required'
+    };
+  }
+
   upsertTool(payload = {}, options = {}) {
     const id = normalizeText(options.id || payload.id, makeId('tool'));
     const before = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(id);
+    const existing = before ? this.mapTool(before) : null;
+    if (existing?.status === 'retired') {
+      const error = new Error('Retired equipment is retained and cannot be edited directly');
+      error.statusCode = 409;
+      error.code = 'tool_retired';
+      throw error;
+    }
+    const name = normalizeText(payload.name ?? existing?.name, '');
+    if (name.length < 2) {
+      const error = new Error('Equipment name must contain at least two characters');
+      error.statusCode = 400;
+      error.code = 'tool_name_required';
+      throw error;
+    }
+    const status = normalizeStatus(payload.status ?? existing?.status, 'available');
+    const editableStatuses = new Set(['available', 'in_use', 'maintenance', 'inspection_due', 'inactive', 'lost']);
+    if (status === 'retired') {
+      const error = new Error('Equipment retirement requires the approval-gated retirement route');
+      error.statusCode = 409;
+      error.code = 'tool_retirement_route_required';
+      throw error;
+    }
+    if (!editableStatuses.has(status)) {
+      const error = new Error('Equipment status must be available, in use, maintenance, inspection due, inactive, or lost');
+      error.statusCode = 400;
+      error.code = 'tool_status_invalid';
+      throw error;
+    }
     const timestamp = nowIso();
+    const existingData = fromJson(before?.data_json, {});
+    const incomingData = payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+      ? payload.data
+      : {};
+    const inspectionDueInput = Object.prototype.hasOwnProperty.call(incomingData, 'inspectionDueAt')
+      ? incomingData.inspectionDueAt
+      : Object.prototype.hasOwnProperty.call(payload, 'inspectionDueAt')
+        ? payload.inspectionDueAt
+        : Object.prototype.hasOwnProperty.call(payload, 'inspection_due_at')
+          ? payload.inspection_due_at
+          : existingData.inspectionDueAt ?? null;
+    const inspectionDueAt = normalizeRetainedDate(inspectionDueInput, {
+      label: 'Equipment inspection due date',
+      code: 'tool_inspection_due_invalid'
+    });
+    const inspectionRequired = normalizeBoolean(
+      incomingData.inspectionRequired ?? payload.inspectionRequired ?? payload.inspection_required,
+      normalizeBoolean(existingData.inspectionRequired, Boolean(inspectionDueAt))
+    );
+    if (inspectionRequired && !inspectionDueAt) {
+      const error = new Error('Equipment requiring inspection must retain its next inspection due date');
+      error.statusCode = 400;
+      error.code = 'tool_inspection_due_required';
+      throw error;
+    }
     const data = {
-      ...fromJson(before?.data_json, {}),
-      ...(payload.data || {}),
-      legacyId: payload.legacyId ?? payload.legacy_id ?? fromJson(before?.data_json, {}).legacyId ?? null,
-      assignedJobId: payload.assignedJobId ?? payload.assigned_job_id ?? fromJson(before?.data_json, {}).assignedJobId ?? null,
-      assignedWorkerId: payload.assignedWorkerId ?? payload.assigned_worker_id ?? fromJson(before?.data_json, {}).assignedWorkerId ?? null
+      ...existingData,
+      ...incomingData,
+      legacyId: payload.legacyId ?? payload.legacy_id ?? existingData.legacyId ?? null,
+      assignedJobId: payload.assignedJobId ?? payload.assigned_job_id ?? existingData.assignedJobId ?? null,
+      assignedWorkerId: payload.assignedWorkerId ?? payload.assigned_worker_id ?? existingData.assignedWorkerId ?? null,
+      inspectionRequired,
+      inspectionDueAt,
+      inspectionHistory: Array.isArray(existingData.inspectionHistory) ? existingData.inspectionHistory : [],
+      lastInspectionId: existingData.lastInspectionId || null,
+      lastInspectedAt: existingData.lastInspectedAt || null,
+      lastInspectionResult: existingData.lastInspectionResult || null,
+      maintenanceHistory: Array.isArray(existingData.maintenanceHistory) ? existingData.maintenanceHistory : [],
+      lastMaintenanceId: existingData.lastMaintenanceId || null,
+      lastMaintainedAt: existingData.lastMaintainedAt || null,
+      lastMaintenanceOutcome: existingData.lastMaintenanceOutcome || null
     };
 
     if (before) {
@@ -2004,9 +3554,9 @@ class ContractorOperatingLedger {
         SET name = ?, category = ?, status = ?, home_location = ?, current_location = ?, data_json = ?, updated_at = ?
         WHERE id = ?
       `).run(
-        normalizeText(payload.name ?? before.name, before.name),
+        name,
         normalizeText(payload.category ?? before.category, 'general'),
-        normalizeStatus(payload.status, before.status),
+        status,
         payload.homeLocation ?? payload.home_location ?? before.home_location,
         payload.currentLocation ?? payload.current_location ?? payload.location ?? before.current_location,
         toJson(data),
@@ -2019,9 +3569,9 @@ class ContractorOperatingLedger {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
-        normalizeText(payload.name, 'Tool'),
+        name,
         normalizeText(payload.category, 'general'),
-        normalizeStatus(payload.status, 'available'),
+        status,
         payload.homeLocation || payload.home_location || payload.currentLocation || payload.current_location || payload.location || 'Warehouse',
         payload.currentLocation || payload.current_location || payload.location || 'Warehouse',
         toJson(data),
@@ -2044,17 +3594,374 @@ class ContractorOperatingLedger {
     return after;
   }
 
+  recordToolInspection(toolId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const beforeRow = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId);
+      if (!beforeRow) return null;
+      const before = this.mapTool(beforeRow);
+      if (normalizeStatus(before.status, '') === 'retired') {
+        const error = new Error('Retired equipment cannot receive a new operational inspection record');
+        error.statusCode = 409;
+        error.code = 'tool_retired';
+        throw error;
+      }
+      const pendingRetirement = this.db.prepare(`
+        SELECT id FROM approvals
+        WHERE target_type = 'tool_retirement' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(toolId);
+      if (pendingRetirement) {
+        const error = new Error('Resolve the pending retirement decision before recording another equipment inspection');
+        error.statusCode = 409;
+        error.code = 'tool_retirement_pending';
+        error.details = { toolId, approvalId: pendingRetirement.id };
+        throw error;
+      }
+
+      const result = normalizeStatus(payload.result, '');
+      if (!['passed', 'failed', 'limited'].includes(result)) {
+        const error = new Error('Equipment inspection result must be passed, failed, or limited');
+        error.statusCode = 400;
+        error.code = 'tool_inspection_result_invalid';
+        throw error;
+      }
+      const inspector = normalizeText(payload.inspector || payload.inspectedBy, '');
+      if (inspector.length < 2) {
+        const error = new Error('Retain the name or internal reference of the person who performed the inspection');
+        error.statusCode = 400;
+        error.code = 'tool_inspector_required';
+        throw error;
+      }
+      const inspectedAt = normalizeRetainedDate(payload.inspectedAt || payload.inspected_at || nowIso(), {
+        required: true,
+        label: 'Equipment inspection date',
+        code: 'tool_inspection_date_invalid'
+      });
+      const inspectedDate = String(inspectedAt).slice(0, 10);
+      const today = nowIso().slice(0, 10);
+      if (inspectedDate > today) {
+        const error = new Error('Equipment inspection evidence cannot be dated in the future');
+        error.statusCode = 400;
+        error.code = 'tool_inspection_future_date';
+        throw error;
+      }
+      const data = fromJson(beforeRow.data_json, {});
+      const inspectionBefore = this.assessToolInspection(before);
+      if (result === 'passed' && ['failed', 'limited'].includes(inspectionBefore.status)) {
+        const error = new Error('Retain completed maintenance linked to the failed or limited inspection before recording a passing reinspection');
+        error.statusCode = 409;
+        error.code = 'tool_maintenance_required_before_reinspection';
+        error.details = {
+          toolId,
+          inspectionId: inspectionBefore.latestInspection?.id || null,
+          inspectionStatus: inspectionBefore.status
+        };
+        throw error;
+      }
+      const inspectionRequired = normalizeBoolean(data.inspectionRequired, Boolean(data.inspectionDueAt));
+      const nextDueAt = normalizeRetainedDate(payload.nextDueAt || payload.next_due_at, {
+        required: result === 'passed' && inspectionRequired,
+        label: 'Next equipment inspection due date',
+        code: result === 'passed' && inspectionRequired ? 'tool_inspection_next_due_required' : 'tool_inspection_next_due_invalid'
+      });
+      if (result === 'passed' && nextDueAt && String(nextDueAt).slice(0, 10) <= inspectedDate) {
+        const error = new Error('The next equipment inspection must be due after the retained inspection date');
+        error.statusCode = 400;
+        error.code = 'tool_inspection_next_due_invalid';
+        throw error;
+      }
+      const notes = normalizeText(payload.notes || payload.findings, '');
+      if (result !== 'passed' && notes.length < 8) {
+        const error = new Error('Failed or limited inspections require retained findings of at least eight characters');
+        error.statusCode = 400;
+        error.code = 'tool_inspection_findings_required';
+        throw error;
+      }
+
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const inspection = {
+        id: makeId('toolinspection'),
+        result,
+        inspector,
+        inspectedAt,
+        nextDueAt,
+        reference: normalizeText(payload.reference || payload.evidenceReference, '') || null,
+        notes: notes || null,
+        recordedAt: timestamp,
+        recordedBy: actor,
+        certificationClaimed: false
+      };
+      const history = Array.isArray(data.inspectionHistory) ? data.inspectionHistory : [];
+      let status = normalizeStatus(before.status, 'available');
+      if (result === 'failed') status = 'maintenance';
+      else if (result === 'limited') status = 'inspection_due';
+      else if (status === 'inspection_due') status = 'available';
+      const nextData = {
+        ...data,
+        inspectionRequired,
+        inspectionDueAt: result === 'passed' ? nextDueAt : (data.inspectionDueAt || inspectedAt),
+        inspectionHistory: [...history, inspection],
+        lastInspectionId: inspection.id,
+        lastInspectedAt: inspectedAt,
+        lastInspectionResult: result
+      };
+      this.db.prepare('UPDATE tools SET status = ?, data_json = ?, updated_at = ? WHERE id = ?')
+        .run(status, toJson(nextData), timestamp, toolId);
+      const after = this.mapTool(this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId));
+      const inspectionState = this.assessToolInspection(after);
+      this.audit({
+        entityType: 'tool',
+        entityId: toolId,
+        action: 'record_tool_inspection',
+        actor,
+        before: { ...before, inspection: this.assessToolInspection(before) },
+        after: { ...after, inspection: inspectionState },
+        metadata: {
+          inspectionId: inspection.id,
+          result,
+          activeReservationCount: this.toolReservationScope(toolId).operational.length,
+          certificationClaimed: false,
+          externalCommitments: 0
+        }
+      });
+      return {
+        tool: { ...after, inspection: inspectionState },
+        inspection,
+        retained: true,
+        reservationReady: inspectionState.reservationReady,
+        externalCommitments: 0
+      };
+    });
+  }
+
+  recordToolMaintenance(toolId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const beforeRow = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId);
+      if (!beforeRow) return null;
+      const before = this.mapTool(beforeRow);
+      if (normalizeStatus(before.status, '') === 'retired') {
+        const error = new Error('Retired equipment cannot receive a new operational maintenance record');
+        error.statusCode = 409;
+        error.code = 'tool_retired';
+        throw error;
+      }
+      const pendingRetirement = this.db.prepare(`
+        SELECT id FROM approvals
+        WHERE target_type = 'tool_retirement' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(toolId);
+      if (pendingRetirement) {
+        const error = new Error('Resolve the pending retirement decision before recording equipment maintenance');
+        error.statusCode = 409;
+        error.code = 'tool_retirement_pending';
+        error.details = { toolId, approvalId: pendingRetirement.id };
+        throw error;
+      }
+      const requestedSpend = normalizeNumber(
+        payload.amount ?? payload.cost ?? payload.spendAmount ?? payload.spend_amount,
+        0
+      );
+      if (requestedSpend > 0 || normalizeBoolean(payload.externalCommitment ?? payload.external_commitment, false)) {
+        const error = new Error('This maintenance evidence route cannot create supplier spend or an external service commitment');
+        error.statusCode = 409;
+        error.code = 'tool_maintenance_spend_requires_approval';
+        throw error;
+      }
+
+      const outcome = normalizeStatus(payload.outcome || payload.result, '');
+      if (!['completed', 'follow_up_required'].includes(outcome)) {
+        const error = new Error('Equipment maintenance outcome must be completed or follow up required');
+        error.statusCode = 400;
+        error.code = 'tool_maintenance_outcome_invalid';
+        throw error;
+      }
+      const maintenanceType = normalizeStatus(payload.maintenanceType || payload.maintenance_type || payload.type, 'corrective');
+      if (!['corrective', 'preventive', 'repair', 'service'].includes(maintenanceType)) {
+        const error = new Error('Equipment maintenance type must be corrective, preventive, repair, or service');
+        error.statusCode = 400;
+        error.code = 'tool_maintenance_type_invalid';
+        throw error;
+      }
+      const performedBy = normalizeText(payload.performedBy || payload.performed_by || payload.technician, '');
+      if (performedBy.length < 2) {
+        const error = new Error('Retain the person or internal reference responsible for the maintenance evidence');
+        error.statusCode = 400;
+        error.code = 'tool_maintenance_performer_required';
+        throw error;
+      }
+      const performedAt = normalizeRetainedDate(payload.performedAt || payload.performed_at || nowIso(), {
+        required: true,
+        label: 'Equipment maintenance date',
+        code: 'tool_maintenance_date_invalid'
+      });
+      if (String(performedAt).slice(0, 10) > nowIso().slice(0, 10)) {
+        const error = new Error('Equipment maintenance evidence cannot be dated in the future');
+        error.statusCode = 400;
+        error.code = 'tool_maintenance_future_date';
+        throw error;
+      }
+      const notes = normalizeText(payload.notes || payload.workPerformed || payload.work_performed, '');
+      if (notes.length < 8) {
+        const error = new Error('Equipment maintenance requires retained work evidence of at least eight characters');
+        error.statusCode = 400;
+        error.code = 'tool_maintenance_evidence_required';
+        throw error;
+      }
+
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const data = fromJson(beforeRow.data_json, {});
+      const inspectionBefore = this.assessToolInspection(before);
+      const maintenance = {
+        id: makeId('toolmaintenance'),
+        outcome,
+        maintenanceType,
+        performedBy,
+        performedAt,
+        reference: normalizeText(payload.reference || payload.evidenceReference, '') || null,
+        notes,
+        sourceInspectionId: inspectionBefore.latestInspection?.id || null,
+        recordedAt: timestamp,
+        recordedBy: actor,
+        supplierSpend: 0,
+        externalCommitments: 0
+      };
+      const history = Array.isArray(data.maintenanceHistory) ? data.maintenanceHistory : [];
+      let status = normalizeStatus(before.status, 'available');
+      if (outcome === 'follow_up_required') {
+        status = 'maintenance';
+      } else if (inspectionBefore.required && inspectionBefore.blocksReservation) {
+        status = 'inspection_due';
+      } else if (['maintenance', 'inspection_due'].includes(status)) {
+        status = 'available';
+      }
+      const nextData = {
+        ...data,
+        maintenanceHistory: [...history, maintenance],
+        lastMaintenanceId: maintenance.id,
+        lastMaintainedAt: performedAt,
+        lastMaintenanceOutcome: outcome
+      };
+      this.db.prepare('UPDATE tools SET status = ?, data_json = ?, updated_at = ? WHERE id = ?')
+        .run(status, toJson(nextData), timestamp, toolId);
+      const after = this.mapTool(this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId));
+      const inspectionState = this.assessToolInspection(after);
+      const maintenanceState = this.assessToolMaintenance(after);
+      this.audit({
+        entityType: 'tool',
+        entityId: toolId,
+        action: 'record_tool_maintenance',
+        actor,
+        before: {
+          ...before,
+          inspection: inspectionBefore,
+          maintenance: this.assessToolMaintenance(before)
+        },
+        after: { ...after, inspection: inspectionState, maintenance: maintenanceState },
+        metadata: {
+          maintenanceId: maintenance.id,
+          outcome,
+          sourceInspectionId: maintenance.sourceInspectionId,
+          activeReservationCount: this.toolReservationScope(toolId).operational.length,
+          supplierSpend: 0,
+          externalCommitments: 0
+        }
+      });
+      return {
+        tool: { ...after, inspection: inspectionState, maintenance: maintenanceState },
+        maintenance,
+        retained: true,
+        reinspectionRequired: inspectionState.status === 'reinspection_required',
+        reservationReady: inspectionState.reservationReady && status === 'available',
+        externalCommitments: 0
+      };
+    });
+  }
+
   listTools(filters = {}) {
     const status = normalizeText(filters.status, '');
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
+    const pendingRetirements = new Map(this.db.prepare(`
+      SELECT target_id, id FROM approvals
+      WHERE target_type = 'tool_retirement' AND status = 'pending'
+    `).all().map(row => [row.target_id, row.id]));
+    const reservationCounts = new Map(this.db.prepare(`
+      SELECT tool_reservations.tool_id,
+        SUM(CASE WHEN jobs.id IS NULL OR ${this.operationalJobStatusSql('jobs')} THEN 1 ELSE 0 END) AS active_count,
+        SUM(CASE WHEN jobs.id IS NOT NULL AND NOT (${this.operationalJobStatusSql('jobs')}) THEN 1 ELSE 0 END) AS dormant_count
+      FROM tool_reservations
+      LEFT JOIN jobs ON jobs.id = tool_reservations.job_id
+      WHERE tool_reservations.tool_id IS NOT NULL
+        AND ${this.activeToolReservationStatusSql('tool_reservations')}
+      GROUP BY tool_reservations.tool_id
+    `).all().map(row => [row.tool_id, {
+      active: Number(row.active_count || 0),
+      dormant: Number(row.dormant_count || 0)
+    }]));
     return this.db.prepare(`
       SELECT * FROM tools
       WHERE (? = '' OR status = ?)
         AND (? = '' OR lower(name || ' ' || category || ' ' || COALESCE(current_location, '')) LIKE ?)
       ORDER BY updated_at DESC
       LIMIT ?
-    `).all(status, status, search, `%${search}%`, limit).map(row => this.mapTool(row));
+    `).all(status, status, search, `%${search}%`, limit).map(row => {
+      const tool = this.mapTool(row);
+      const reservations = reservationCounts.get(tool.id) || { active: 0, dormant: 0 };
+      return {
+        ...tool,
+        inspection: this.assessToolInspection(tool),
+        maintenance: this.assessToolMaintenance(tool),
+        retirementApprovalId: pendingRetirements.get(tool.id) || null,
+        activeReservationCount: reservations.active,
+        dormantReservationCount: reservations.dormant,
+        retainedReservationCount: reservations.active + reservations.dormant
+      };
+    });
+  }
+
+  summarizeTools(tools = this.listTools({ limit: 500 })) {
+    return tools.reduce((summary, tool) => {
+      summary.total += 1;
+      summary.activeReservations += Number(tool.activeReservationCount || 0);
+      summary.dormantReservations += Number(tool.dormantReservationCount || 0);
+      if (tool.status === 'retired') summary.retired += 1;
+      else {
+        summary.active += 1;
+        const inspectionAttention = tool.inspection?.requiresAttention === true;
+        const reservationReady = tool.status === 'available'
+          && !tool.retirementApprovalId
+          && tool.inspection?.blocksReservation !== true;
+        if (reservationReady) summary.available += 1;
+        if (!reservationReady || inspectionAttention) summary.attention += 1;
+      }
+      if (tool.retirementApprovalId) summary.pendingRetirement += 1;
+      if (tool.inspection?.status === 'overdue') summary.inspectionOverdue += 1;
+      if (tool.inspection?.status === 'due_soon') summary.inspectionDueSoon += 1;
+      if (['not_recorded', 'invalid'].includes(tool.inspection?.status)) summary.inspectionMissing += 1;
+      if (tool.inspection?.blocksReservation) summary.inspectionBlocked += 1;
+      if (tool.status === 'maintenance' || tool.maintenance?.requiresAttention) summary.maintenanceAttention += 1;
+      summary.maintenanceRecords += Number(tool.maintenance?.historyCount || 0);
+      return summary;
+    }, {
+      total: 0,
+      active: 0,
+      available: 0,
+      attention: 0,
+      pendingRetirement: 0,
+      retired: 0,
+      activeReservations: 0,
+      dormantReservations: 0,
+      inspectionOverdue: 0,
+      inspectionDueSoon: 0,
+      inspectionMissing: 0,
+      inspectionBlocked: 0,
+      maintenanceAttention: 0,
+      maintenanceRecords: 0
+    });
   }
 
   retireTool(toolId, options = {}) {
@@ -2073,7 +3980,7 @@ class ContractorOperatingLedger {
     return this.transaction(() => {
       const before = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId);
       if (!before) return null;
-      const tool = this.mapTool(before);
+      const tool = this.listTools({ limit: 500 }).find(item => item.id === toolId) || this.mapTool(before);
       const actor = options.actor || payload.actor || 'Contractor.AI';
       if (normalizeStatus(before.status, '') === 'retired') {
         return {
@@ -2105,7 +4012,16 @@ class ContractorOperatingLedger {
         };
       }
 
-      const reason = payload.reason || payload.notes || 'Tool retirement requested; retained until human approval is resolved.';
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) {
+        const error = new Error('Equipment retirement requires an operational reason of at least eight characters');
+        error.statusCode = 400;
+        error.code = 'tool_retirement_reason_required';
+        throw error;
+      }
+      const reservationScope = this.toolReservationScope(toolId);
+      const activeReservations = reservationScope.operational;
+      const dormantReservations = reservationScope.dormant;
       const approval = this.createApproval({
         targetType: 'tool_retirement',
         targetId: toolId,
@@ -2120,6 +4036,10 @@ class ContractorOperatingLedger {
           category: tool.category,
           requestedAction: 'retire',
           requestedStatus: 'retired',
+          activeReservationCount: activeReservations.length,
+          activeReservations,
+          dormantReservationCount: dormantReservations.length,
+          dormantReservations,
           before: tool
         }
       }, { actor });
@@ -2131,11 +4051,16 @@ class ContractorOperatingLedger {
         actor,
         before: tool,
         after: { ...tool, retirementApprovalId: approval.id },
-        metadata: { approvalId: approval.id }
+        metadata: {
+          approvalId: approval.id,
+          activeReservationCount: activeReservations.length,
+          dormantReservationCount: dormantReservations.length,
+          externalCommitments: 0
+        }
       });
 
       return {
-        tool,
+        tool: { ...tool, retirementApprovalId: approval.id },
         approval,
         retained: true,
         retired: false,
@@ -2280,7 +4205,7 @@ class ContractorOperatingLedger {
       }
 
       const progress = this.addProgressUpdate(job.id, {
-        status: 'intake',
+        status: job.status,
         progressPercent: job.progressPercent,
         note: 'Client intake captured and operating ledger opened.'
       }, { actor, audit: false });
@@ -2765,580 +4690,601 @@ class ContractorOperatingLedger {
   }
 
   createQuote(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const id = makeId('quote');
-    const lineItems = Array.isArray(payload.lineItems) && payload.lineItems.length
-      ? payload.lineItems.map(item => ({
-        description: normalizeText(item.description || item.title || item.name, 'Contractor work'),
-        quantity: normalizeNumber(item.quantity, 1),
-        unitPrice: normalizeNumber(item.unitPrice || item.unit_price || item.price || item.amount, 0),
-        costCode: item.costCode || item.cost_code || null
-      }))
-      : [{
-        description: job.title,
-        quantity: 1,
-        unitPrice: normalizeNumber(payload.subtotal || job.estimated_cost || job.estimatedCost || 0),
-        costCode: 'contract'
-      }];
-    const calculatedSubtotal = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-    const subtotal = normalizeNumber(payload.subtotal, calculatedSubtotal);
-    const taxRate = normalizeNumber(payload.taxRate || payload.tax_rate, 21);
-    const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, subtotal * (taxRate / 100));
-    const total = normalizeNumber(payload.total, subtotal + taxAmount);
-    const status = normalizeStatus(payload.status, 'draft');
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const id = makeId('quote');
+      const lineItems = Array.isArray(payload.lineItems) && payload.lineItems.length
+        ? payload.lineItems.map(item => ({
+          description: normalizeText(item.description || item.title || item.name, 'Contractor work'),
+          quantity: normalizeNumber(item.quantity, 1),
+          unitPrice: normalizeNumber(item.unitPrice || item.unit_price || item.price || item.amount, 0),
+          costCode: item.costCode || item.cost_code || null
+        }))
+        : [{
+          description: job.title,
+          quantity: 1,
+          unitPrice: normalizeNumber(payload.subtotal || job.estimated_cost || job.estimatedCost || 0),
+          costCode: 'contract'
+        }];
+      const calculatedSubtotal = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+      const subtotal = normalizeNumber(payload.subtotal, calculatedSubtotal);
+      const taxRate = normalizeNumber(payload.taxRate || payload.tax_rate, 21);
+      const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, subtotal * (taxRate / 100));
+      const total = normalizeNumber(payload.total, subtotal + taxAmount);
+      const status = normalizeStatus(payload.status, 'draft');
 
-    this.db.prepare(`
-      INSERT INTO quotes (id, job_id, status, currency, subtotal, tax_rate, tax_amount, total, valid_until, line_items_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      status,
-      normalizeText(payload.currency, 'EUR').toUpperCase(),
-      subtotal,
-      taxRate,
-      taxAmount,
-      total,
-      payload.validUntil || payload.valid_until || null,
-      toJson(lineItems, []),
-      toJson({ notes: payload.notes || null }),
-      timestamp,
-      timestamp
-    );
+      this.db.prepare(`
+        INSERT INTO quotes (id, job_id, status, currency, subtotal, tax_rate, tax_amount, total, valid_until, line_items_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        status,
+        normalizeText(payload.currency, 'EUR').toUpperCase(),
+        subtotal,
+        taxRate,
+        taxAmount,
+        total,
+        payload.validUntil || payload.valid_until || null,
+        toJson(lineItems, []),
+        toJson({ notes: payload.notes || null }),
+        timestamp,
+        timestamp
+      );
 
-    const approval = this.createApproval({
-      targetType: 'quote',
-      targetId: id,
-      jobId,
-      approvalType: 'quote_issue',
-      summary: `Approve quote ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency, 'EUR').toUpperCase()}`,
-      reason: 'Quotes must be approved before sending externally.',
-      data: { total, taxRate, lineItems }
-    }, { actor, audit: false });
-    this.db.prepare('UPDATE quotes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const approval = this.createApproval({
+        targetType: 'quote',
+        targetId: id,
+        jobId,
+        approvalType: 'quote_issue',
+        summary: `Approve quote ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency, 'EUR').toUpperCase()}`,
+        reason: 'Quotes must be approved before sending externally.',
+        data: { total, taxRate, lineItems }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE quotes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
 
-    const quote = this.mapQuote(this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'quote', entityId: id, jobId, action: 'create_quote', actor, after: quote });
-    }
-    return quote;
+      const quote = this.mapQuote(this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'quote', entityId: id, jobId, action: 'create_quote', actor, after: quote });
+      }
+      return quote;
+    });
   }
 
   createSiteVisit(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const id = makeId('visit');
-    const requestedStatus = normalizeStatus(payload.status, 'scheduled');
-    const approvalStatuses = ['confirmed', 'client_confirmed', 'committed', 'approved', 'sent'];
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
-    const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
-    const checklist = normalizeList(payload.checklist).length
-      ? normalizeList(payload.checklist)
-      : this.defaultSiteVisitChecklist(job);
-    const photos = normalizeList(payload.photos || payload.photoRefs || payload.photo_refs);
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const id = makeId('visit');
+      const requestedStatus = normalizeStatus(payload.status, 'scheduled');
+      const approvalStatuses = ['confirmed', 'client_confirmed', 'committed', 'approved', 'sent'];
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
+      const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+      const checklist = normalizeList(payload.checklist).length
+        ? normalizeList(payload.checklist)
+        : this.defaultSiteVisitChecklist(job);
+      const photos = normalizeList(payload.photos || payload.photoRefs || payload.photo_refs);
 
-    this.db.prepare(`
-      INSERT INTO site_visits (id, job_id, visit_type, status, scheduled_at, completed_at, assignee, findings, checklist_json, photos_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeStatus(payload.visitType || payload.visit_type, 'site_survey'),
-      status,
-      payload.scheduledAt || payload.scheduled_at || payload.date || null,
-      payload.completedAt || payload.completed_at || null,
-      payload.assignee || payload.assignedTo || payload.assigned_to || null,
-      payload.findings || payload.notes || null,
-      toJson(checklist, []),
-      toJson(photos, []),
-      toJson({
-        notes: payload.notes || null,
-        source: payload.source || null,
-        requestedStatus,
-        requiresApproval
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'site_visit',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO site_visits (id, job_id, visit_type, status, scheduled_at, completed_at, assignee, findings, checklist_json, photos_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'site_visit_commitment',
-        summary: `Approve site visit for ${job.title}`,
-        reason: 'Client-facing appointments and crew commitments require approval before confirmation.',
-        data: {
-          visitType: normalizeStatus(payload.visitType || payload.visit_type, 'site_survey'),
-          scheduledAt: payload.scheduledAt || payload.scheduled_at || payload.date || null,
-          assignee: payload.assignee || payload.assignedTo || payload.assigned_to || null,
+        normalizeStatus(payload.visitType || payload.visit_type, 'site_survey'),
+        status,
+        payload.scheduledAt || payload.scheduled_at || payload.date || null,
+        payload.completedAt || payload.completed_at || null,
+        payload.assignee || payload.assignedTo || payload.assigned_to || null,
+        payload.findings || payload.notes || null,
+        toJson(checklist, []),
+        toJson(photos, []),
+        toJson({
+          notes: payload.notes || null,
+          source: payload.source || null,
           requestedStatus,
-          checklist
-        }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE site_visits SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+          requiresApproval
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const siteVisit = this.mapSiteVisit(this.db.prepare('SELECT * FROM site_visits WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({
-        entityType: 'site_visit',
-        entityId: id,
-        jobId,
-        action: 'create_site_visit',
-        actor,
-        after: siteVisit,
-        metadata: { approvalId: approval?.id || null }
-      });
-    }
-    return siteVisit;
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'site_visit',
+          targetId: id,
+          jobId,
+          approvalType: 'site_visit_commitment',
+          summary: `Approve site visit for ${job.title}`,
+          reason: 'Client-facing appointments and crew commitments require approval before confirmation.',
+          data: {
+            visitType: normalizeStatus(payload.visitType || payload.visit_type, 'site_survey'),
+            scheduledAt: payload.scheduledAt || payload.scheduled_at || payload.date || null,
+            assignee: payload.assignee || payload.assignedTo || payload.assigned_to || null,
+            requestedStatus,
+            checklist
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE site_visits SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const siteVisit = this.mapSiteVisit(this.db.prepare('SELECT * FROM site_visits WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'site_visit',
+          entityId: id,
+          jobId,
+          action: 'create_site_visit',
+          actor,
+          after: siteVisit,
+          metadata: { approvalId: approval?.id || null }
+        });
+      }
+      return siteVisit;
+    });
   }
 
   createChangeOrder(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const id = makeId('change');
-    let quoteId = payload.quoteId || payload.quote_id || null;
-    if (quoteId) {
-      const quote = this.db.prepare('SELECT id FROM quotes WHERE id = ? AND job_id = ?').get(quoteId, jobId);
-      if (!quote) {
-        const error = new Error('Change order quote does not belong to this job');
-        error.statusCode = 400;
-        throw error;
-      }
-    } else {
-      const quote = this.db.prepare('SELECT id FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
-      quoteId = quote?.id || null;
-    }
-
-    const rawLineItems = Array.isArray(payload.lineItems) && payload.lineItems.length ? payload.lineItems : [];
-    const lineItems = rawLineItems.length
-      ? rawLineItems.map(item => ({
-        description: normalizeText(item.description || item.title || item.name, 'Scope change'),
-        quantity: normalizeNumber(item.quantity, 1),
-        unitPrice: normalizeNumber(item.unitPrice || item.unit_price || item.price || item.amount, 0),
-        costCode: item.costCode || item.cost_code || 'change_order'
-      }))
-      : [{
-        description: normalizeText(payload.title || payload.scopeDelta || payload.scope_delta, 'Scope change'),
-        quantity: 1,
-        unitPrice: normalizeNumber(payload.amount || payload.subtotal, 0),
-        costCode: 'change_order'
-      }];
-    const calculatedAmount = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-    const amount = normalizeNumber(payload.amount || payload.subtotal, calculatedAmount);
-    const taxRate = normalizeNumber(payload.taxRate || payload.tax_rate, 21);
-    const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, amount * (taxRate / 100));
-    const total = normalizeNumber(payload.total, amount + taxAmount);
-    const scheduleDeltaDays = normalizeNumber(payload.scheduleDeltaDays || payload.schedule_delta_days, 0);
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const commitmentStatuses = ['sent', 'submitted', 'approved', 'accepted', 'committed', 'issued'];
-    const hasImpact = Math.abs(total) > 0 || Math.abs(scheduleDeltaDays) > 0 || Boolean(normalizeText(payload.scopeDelta || payload.scope_delta, ''));
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, hasImpact || commitmentStatuses.includes(requestedStatus));
-    const status = requiresApproval && commitmentStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO change_orders (id, job_id, quote_id, title, status, scope_delta, currency, amount, tax_rate, tax_amount, total, schedule_delta_days, line_items_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      quoteId,
-      normalizeText(payload.title, 'Scope change'),
-      status,
-      payload.scopeDelta || payload.scope_delta || payload.description || null,
-      normalizeText(payload.currency, 'EUR').toUpperCase(),
-      amount,
-      taxRate,
-      taxAmount,
-      total,
-      scheduleDeltaDays,
-      toJson(lineItems, []),
-      toJson({
-        notes: payload.notes || null,
-        source: payload.source || null,
-        requestedStatus,
-        requiresApproval
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'change_order',
-        targetId: id,
-        jobId,
-        approvalType: 'scope_change',
-        summary: `Approve change order ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency, 'EUR').toUpperCase()}`,
-        reason: 'Scope, price, or schedule changes require approval before client commitment.',
-        data: {
-          quoteId,
-          amount,
-          taxRate,
-          taxAmount,
-          total,
-          scheduleDeltaDays,
-          requestedStatus,
-          lineItems
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const id = makeId('change');
+      let quoteId = payload.quoteId || payload.quote_id || null;
+      if (quoteId) {
+        const quote = this.db.prepare('SELECT id FROM quotes WHERE id = ? AND job_id = ?').get(quoteId, jobId);
+        if (!quote) {
+          const error = new Error('Change order quote does not belong to this job');
+          error.statusCode = 400;
+          throw error;
         }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE change_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+      } else {
+        const quote = this.db.prepare('SELECT id FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
+        quoteId = quote?.id || null;
+      }
 
-    const changeOrder = this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({
-        entityType: 'change_order',
-        entityId: id,
+      const rawLineItems = Array.isArray(payload.lineItems) && payload.lineItems.length ? payload.lineItems : [];
+      const lineItems = rawLineItems.length
+        ? rawLineItems.map(item => ({
+          description: normalizeText(item.description || item.title || item.name, 'Scope change'),
+          quantity: normalizeNumber(item.quantity, 1),
+          unitPrice: normalizeNumber(item.unitPrice || item.unit_price || item.price || item.amount, 0),
+          costCode: item.costCode || item.cost_code || 'change_order'
+        }))
+        : [{
+          description: normalizeText(payload.title || payload.scopeDelta || payload.scope_delta, 'Scope change'),
+          quantity: 1,
+          unitPrice: normalizeNumber(payload.amount || payload.subtotal, 0),
+          costCode: 'change_order'
+        }];
+      const calculatedAmount = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+      const amount = normalizeNumber(payload.amount || payload.subtotal, calculatedAmount);
+      const taxRate = normalizeNumber(payload.taxRate || payload.tax_rate, 21);
+      const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, amount * (taxRate / 100));
+      const total = normalizeNumber(payload.total, amount + taxAmount);
+      const scheduleDeltaDays = normalizeNumber(payload.scheduleDeltaDays || payload.schedule_delta_days, 0);
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const commitmentStatuses = ['sent', 'submitted', 'approved', 'accepted', 'committed', 'issued'];
+      const hasImpact = Math.abs(total) > 0 || Math.abs(scheduleDeltaDays) > 0 || Boolean(normalizeText(payload.scopeDelta || payload.scope_delta, ''));
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, hasImpact || commitmentStatuses.includes(requestedStatus));
+      const status = requiresApproval && commitmentStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO change_orders (id, job_id, quote_id, title, status, scope_delta, currency, amount, tax_rate, tax_amount, total, schedule_delta_days, line_items_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        action: 'create_change_order',
-        actor,
-        after: changeOrder,
-        metadata: { approvalId: approval?.id || null }
-      });
-    }
-    return changeOrder;
+        quoteId,
+        normalizeText(payload.title, 'Scope change'),
+        status,
+        payload.scopeDelta || payload.scope_delta || payload.description || null,
+        normalizeText(payload.currency, 'EUR').toUpperCase(),
+        amount,
+        taxRate,
+        taxAmount,
+        total,
+        scheduleDeltaDays,
+        toJson(lineItems, []),
+        toJson({
+          notes: payload.notes || null,
+          source: payload.source || null,
+          requestedStatus,
+          requiresApproval
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'change_order',
+          targetId: id,
+          jobId,
+          approvalType: 'scope_change',
+          summary: `Approve change order ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency, 'EUR').toUpperCase()}`,
+          reason: 'Scope, price, or schedule changes require approval before client commitment.',
+          data: {
+            quoteId,
+            amount,
+            taxRate,
+            taxAmount,
+            total,
+            scheduleDeltaDays,
+            requestedStatus,
+            lineItems
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE change_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const changeOrder = this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'change_order',
+          entityId: id,
+          jobId,
+          action: 'create_change_order',
+          actor,
+          after: changeOrder,
+          metadata: { approvalId: approval?.id || null }
+        });
+      }
+      return changeOrder;
+    });
   }
 
   createFieldReport(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const id = makeId('field');
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const approvalStatuses = ['submitted', 'published', 'client_visible', 'approved', 'sent'];
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
-    const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
-    const blockers = normalizeList(payload.blockers);
-    const photos = normalizeList(payload.photos || payload.photoRefs || payload.photo_refs);
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const id = makeId('field');
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const approvalStatuses = ['submitted', 'published', 'client_visible', 'approved', 'sent'];
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
+      const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+      const blockers = normalizeList(payload.blockers);
+      const photos = normalizeList(payload.photos || payload.photoRefs || payload.photo_refs);
 
-    this.db.prepare(`
-      INSERT INTO field_reports (id, job_id, report_date, status, weather, manpower, work_completed, blockers_json, photos_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      payload.reportDate || payload.report_date || nowIso().slice(0, 10),
-      status,
-      payload.weather || null,
-      normalizeNumber(payload.manpower, 0),
-      payload.workCompleted || payload.work_completed || payload.notes || null,
-      toJson(blockers, []),
-      toJson(photos, []),
-      toJson({
-        notes: payload.notes || null,
-        source: payload.source || null,
-        requestedStatus,
-        requiresApproval,
-        clientVisible: normalizeBoolean(payload.clientVisible, false),
-        jobTitle: job.title
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'field_report',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO field_reports (id, job_id, report_date, status, weather, manpower, work_completed, blockers_json, photos_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'field_report_submission',
-        summary: `Approve field report for ${job.title}`,
-        reason: 'Client-visible or submitted field reports require approval before they become official evidence.',
-        data: {
-          reportDate: payload.reportDate || payload.report_date || nowIso().slice(0, 10),
+        payload.reportDate || payload.report_date || nowIso().slice(0, 10),
+        status,
+        payload.weather || null,
+        normalizeNumber(payload.manpower, 0),
+        payload.workCompleted || payload.work_completed || payload.notes || null,
+        toJson(blockers, []),
+        toJson(photos, []),
+        toJson({
+          notes: payload.notes || null,
+          source: payload.source || null,
+          entryKey: payload.entryKey || payload.entry_key || null,
+          entryFingerprint: payload.entryFingerprint || payload.entry_fingerprint || null,
+          workerId: payload.workerId || payload.worker_id || null,
+          workerName: payload.workerName || payload.worker_name || null,
+          safetyStatus: payload.safetyStatus || payload.safety_status || null,
           requestedStatus,
-          blockers,
-          photos
-        }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE field_reports SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+          requiresApproval,
+          clientVisible: normalizeBoolean(payload.clientVisible, false),
+          jobTitle: job.title
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const fieldReport = this.mapFieldReport(this.db.prepare('SELECT * FROM field_reports WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({
-        entityType: 'field_report',
-        entityId: id,
-        jobId,
-        action: 'create_field_report',
-        actor,
-        after: fieldReport,
-        metadata: { approvalId: approval?.id || null }
-      });
-    }
-    return fieldReport;
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'field_report',
+          targetId: id,
+          jobId,
+          approvalType: 'field_report_submission',
+          summary: `Approve field report for ${job.title}`,
+          reason: 'Client-visible or submitted field reports require approval before they become official evidence.',
+          data: {
+            reportDate: payload.reportDate || payload.report_date || nowIso().slice(0, 10),
+            requestedStatus,
+            blockers,
+            photos
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE field_reports SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const fieldReport = this.mapFieldReport(this.db.prepare('SELECT * FROM field_reports WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'field_report',
+          entityId: id,
+          jobId,
+          action: 'create_field_report',
+          actor,
+          after: fieldReport,
+          metadata: { approvalId: approval?.id || null }
+        });
+      }
+      return fieldReport;
+    });
   }
 
   createRfi(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const id = makeId('rfi');
-    const requestedStatus = normalizeStatus(payload.status, 'open');
-    const approvalStatuses = ['answered', 'closed', 'resolved', 'issued', 'sent', 'approved'];
-    const response = payload.response || payload.answer || null;
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || Boolean(response));
-    const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const id = makeId('rfi');
+      const requestedStatus = normalizeStatus(payload.status, 'open');
+      const approvalStatuses = ['answered', 'closed', 'resolved', 'issued', 'sent', 'approved'];
+      const response = payload.response || payload.answer || null;
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || Boolean(response));
+      const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO rfi_records (id, job_id, title, status, question, response, responsible, due_at, answered_at, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.title || payload.subject, 'Field question'),
-      status,
-      payload.question || payload.body || payload.notes || null,
-      response,
-      payload.responsible || payload.assignee || payload.owner || null,
-      payload.dueAt || payload.due_at || null,
-      payload.answeredAt || payload.answered_at || null,
-      toJson({
-        notes: payload.notes || null,
-        source: payload.source || null,
-        requestedStatus,
-        requiresApproval,
-        discipline: payload.discipline || null,
-        jobTitle: job.title
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'rfi_record',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO rfi_records (id, job_id, title, status, question, response, responsible, due_at, answered_at, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'rfi_response',
-        summary: `Approve RFI response for ${job.title}`,
-        reason: 'RFI responses can change scope, quality, schedule, or client expectations and require approval before closure.',
-        data: {
-          title: normalizeText(payload.title || payload.subject, 'Field question'),
+        normalizeText(payload.title || payload.subject, 'Field question'),
+        status,
+        payload.question || payload.body || payload.notes || null,
+        response,
+        payload.responsible || payload.assignee || payload.owner || null,
+        payload.dueAt || payload.due_at || null,
+        payload.answeredAt || payload.answered_at || null,
+        toJson({
+          notes: payload.notes || null,
+          source: payload.source || null,
           requestedStatus,
-          question: payload.question || payload.body || payload.notes || null,
-          response
-        }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE rfi_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+          requiresApproval,
+          discipline: payload.discipline || null,
+          jobTitle: job.title
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const rfi = this.mapRfi(this.db.prepare('SELECT * FROM rfi_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({
-        entityType: 'rfi_record',
-        entityId: id,
-        jobId,
-        action: 'create_rfi',
-        actor,
-        after: rfi,
-        metadata: { approvalId: approval?.id || null }
-      });
-    }
-    return rfi;
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'rfi_record',
+          targetId: id,
+          jobId,
+          approvalType: 'rfi_response',
+          summary: `Approve RFI response for ${job.title}`,
+          reason: 'RFI responses can change scope, quality, schedule, or client expectations and require approval before closure.',
+          data: {
+            title: normalizeText(payload.title || payload.subject, 'Field question'),
+            requestedStatus,
+            question: payload.question || payload.body || payload.notes || null,
+            response
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE rfi_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const rfi = this.mapRfi(this.db.prepare('SELECT * FROM rfi_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'rfi_record',
+          entityId: id,
+          jobId,
+          action: 'create_rfi',
+          actor,
+          after: rfi,
+          metadata: { approvalId: approval?.id || null }
+        });
+      }
+      return rfi;
+    });
   }
 
   createSubmittalRecord(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('submittal');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const approvalStatuses = ['approved', 'accepted', 'issued', 'sent', 'closed', 'client_visible'];
-    const attachments = normalizeList(payload.attachments || payload.documents || payload.files);
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
-    const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('submittal');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const approvalStatuses = ['approved', 'accepted', 'issued', 'sent', 'closed', 'client_visible'];
+      const attachments = normalizeList(payload.attachments || payload.documents || payload.files);
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
+      const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO submittal_records (id, job_id, title, package_name, status, responsible, reviewer, due_at, submitted_at, approved_at, approval_id, attachments_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.title, 'Material submittal package'),
-      payload.packageName || payload.package_name || payload.package || null,
-      status,
-      payload.responsible || payload.assignee || payload.owner || 'Project team',
-      payload.reviewer || 'Robert',
-      payload.dueAt || payload.due_at || futureIsoDate(7),
-      payload.submittedAt || payload.submitted_at || null,
-      payload.approvedAt || payload.approved_at || null,
-      null,
-      toJson(attachments, []),
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        material: payload.material || null,
-        specification: payload.specification || payload.spec || null,
-        clientVisible: normalizeBoolean(payload.clientVisible, false),
-        source: payload.source || null,
-        jobTitle: job.title
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'submittal_record',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO submittal_records (id, job_id, title, package_name, status, responsible, reviewer, due_at, submitted_at, approved_at, approval_id, attachments_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'submittal_approval',
-        summary: `Approve submittal ${normalizeText(payload.title, 'material package')}`,
-        reason: 'Approved or issued submittals can drive procurement, installation, and client-visible commitments. Approval is required before reliance.',
-        data: { requestedStatus, attachments, packageName: payload.packageName || payload.package_name || payload.package || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE submittal_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.title, 'Material submittal package'),
+        payload.packageName || payload.package_name || payload.package || null,
+        status,
+        payload.responsible || payload.assignee || payload.owner || 'Project team',
+        payload.reviewer || 'Robert',
+        payload.dueAt || payload.due_at || futureIsoDate(7),
+        payload.submittedAt || payload.submitted_at || null,
+        payload.approvedAt || payload.approved_at || null,
+        null,
+        toJson(attachments, []),
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          material: payload.material || null,
+          specification: payload.specification || payload.spec || null,
+          clientVisible: normalizeBoolean(payload.clientVisible, false),
+          source: payload.source || null,
+          jobTitle: job.title
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const submittal = this.mapSubmittal(this.db.prepare('SELECT * FROM submittal_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'submittal_record', entityId: id, jobId, action: 'create_submittal', actor, after: submittal });
-    }
-    return { ...submittal, approval };
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'submittal_record',
+          targetId: id,
+          jobId,
+          approvalType: 'submittal_approval',
+          summary: `Approve submittal ${normalizeText(payload.title, 'material package')}`,
+          reason: 'Approved or issued submittals can drive procurement, installation, and client-visible commitments. Approval is required before reliance.',
+          data: { requestedStatus, attachments, packageName: payload.packageName || payload.package_name || payload.package || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE submittal_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const submittal = this.mapSubmittal(this.db.prepare('SELECT * FROM submittal_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'submittal_record', entityId: id, jobId, action: 'create_submittal', actor, after: submittal });
+      }
+      return { ...submittal, approval };
+    });
   }
 
   createClientSelection(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('selection');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'pending_client');
-    const approvalStatuses = ['approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'ordered'];
-    const optionsList = Array.isArray(payload.options) ? payload.options : normalizeList(payload.options);
-    const value = normalizeNumber(payload.value || payload.amount, 0);
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || value >= 1000);
-    const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('selection');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'pending_client');
+      const approvalStatuses = ['approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'ordered'];
+      const optionsList = Array.isArray(payload.options) ? payload.options : normalizeList(payload.options);
+      const value = normalizeNumber(payload.value || payload.amount, 0);
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || value >= 1000);
+      const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO client_selections (id, job_id, title, category, status, client_name, currency, value, due_at, decided_at, approval_id, options_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.title, 'Client selection decision'),
-      normalizeStatus(payload.category, 'selection'),
-      status,
-      payload.clientName || payload.client_name || job.client_name || null,
-      normalizeText(payload.currency, 'EUR').toUpperCase(),
-      value,
-      payload.dueAt || payload.due_at || futureIsoDate(3),
-      payload.decidedAt || payload.decided_at || null,
-      null,
-      toJson(optionsList, []),
-      toJson({
-        requestedStatus,
-        selectedOption: payload.selectedOption || payload.selected_option || null,
-        notes: payload.notes || payload.note || null,
-        clientVisible: normalizeBoolean(payload.clientVisible, true),
-        source: payload.source || null,
-        jobTitle: job.title
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'client_selection',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO client_selections (id, job_id, title, category, status, client_name, currency, value, due_at, decided_at, approval_id, options_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'client_selection_approval',
-        summary: `Approve client selection ${normalizeText(payload.title, 'decision')}`,
-        reason: 'Client selections can affect scope, procurement, price, and commitments. Approval is required before locking or ordering.',
-        data: { requestedStatus, value, selectedOption: payload.selectedOption || payload.selected_option || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE client_selections SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.title, 'Client selection decision'),
+        normalizeStatus(payload.category, 'selection'),
+        status,
+        payload.clientName || payload.client_name || job.client_name || null,
+        normalizeText(payload.currency, 'EUR').toUpperCase(),
+        value,
+        payload.dueAt || payload.due_at || futureIsoDate(3),
+        payload.decidedAt || payload.decided_at || null,
+        null,
+        toJson(optionsList, []),
+        toJson({
+          requestedStatus,
+          selectedOption: payload.selectedOption || payload.selected_option || null,
+          notes: payload.notes || payload.note || null,
+          clientVisible: normalizeBoolean(payload.clientVisible, true),
+          source: payload.source || null,
+          jobTitle: job.title
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const selection = this.mapClientSelection(this.db.prepare('SELECT * FROM client_selections WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'client_selection', entityId: id, jobId, action: 'create_client_selection', actor, after: selection });
-    }
-    return { ...selection, approval };
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'client_selection',
+          targetId: id,
+          jobId,
+          approvalType: 'client_selection_approval',
+          summary: `Approve client selection ${normalizeText(payload.title, 'decision')}`,
+          reason: 'Client selections can affect scope, procurement, price, and commitments. Approval is required before locking or ordering.',
+          data: { requestedStatus, value, selectedOption: payload.selectedOption || payload.selected_option || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE client_selections SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const selection = this.mapClientSelection(this.db.prepare('SELECT * FROM client_selections WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'client_selection', entityId: id, jobId, action: 'create_client_selection', actor, after: selection });
+      }
+      return { ...selection, approval };
+    });
   }
 
   createPermitRecord(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const id = makeId('permit');
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const approvalStatuses = ['active', 'approved', 'issued', 'submitted'];
-    const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
-    const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const id = makeId('permit');
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const approvalStatuses = ['active', 'approved', 'issued', 'submitted'];
+      const requiresApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
+      const status = requiresApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO permit_records (id, job_id, permit_type, title, status, holder, location, issued_at, expires_at, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeStatus(payload.permitType || payload.permit_type, 'site_access'),
-      normalizeText(payload.title, 'Permit review'),
-      status,
-      payload.holder || payload.assignee || 'Project team',
-      payload.location || job.address || job.city || null,
-      payload.issuedAt || payload.issued_at || null,
-      payload.expiresAt || payload.expires_at || payload.expiry || null,
-      toJson({
-        notes: payload.notes || null,
-        source: payload.source || null,
-        requestedStatus,
-        requiresApproval,
-        authority: payload.authority || null,
-        jobTitle: job.title
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'permit_record',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO permit_records (id, job_id, permit_type, title, status, holder, location, issued_at, expires_at, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'permit_activation',
-        summary: `Approve permit ${id} for ${job.title}`,
-        reason: 'Active permits and compliance commitments require approval before field reliance.',
-        data: {
-          permitType: normalizeStatus(payload.permitType || payload.permit_type, 'site_access'),
+        normalizeStatus(payload.permitType || payload.permit_type, 'site_access'),
+        normalizeText(payload.title, 'Permit review'),
+        status,
+        payload.holder || payload.assignee || 'Project team',
+        payload.location || job.address || job.city || null,
+        payload.issuedAt || payload.issued_at || null,
+        payload.expiresAt || payload.expires_at || payload.expiry || null,
+        toJson({
+          notes: payload.notes || null,
+          source: payload.source || null,
           requestedStatus,
-          holder: payload.holder || payload.assignee || 'Project team',
-          location: payload.location || job.address || job.city || null,
-          expiresAt: payload.expiresAt || payload.expires_at || payload.expiry || null
-        }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE permit_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+          requiresApproval,
+          authority: payload.authority || null,
+          jobTitle: job.title
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const permit = this.mapPermit(this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({
-        entityType: 'permit_record',
-        entityId: id,
-        jobId,
-        action: 'create_permit_record',
-        actor,
-        after: permit,
-        metadata: { approvalId: approval?.id || null }
-      });
-    }
-    return permit;
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'permit_record',
+          targetId: id,
+          jobId,
+          approvalType: 'permit_activation',
+          summary: `Approve permit ${id} for ${job.title}`,
+          reason: 'Active permits and compliance commitments require approval before field reliance.',
+          data: {
+            permitType: normalizeStatus(payload.permitType || payload.permit_type, 'site_access'),
+            requestedStatus,
+            holder: payload.holder || payload.assignee || 'Project team',
+            location: payload.location || job.address || job.city || null,
+            expiresAt: payload.expiresAt || payload.expires_at || payload.expiry || null
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE permit_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const permit = this.mapPermit(this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'permit_record',
+          entityId: id,
+          jobId,
+          action: 'create_permit_record',
+          actor,
+          after: permit,
+          metadata: { approvalId: approval?.id || null }
+        });
+      }
+      return permit;
+    });
   }
 
   addTask(jobId, payload = {}, options = {}) {
@@ -3389,6 +5335,27 @@ class ContractorOperatingLedger {
       if (!worker) {
         const error = new Error('No ledger worker is available for assignment');
         error.statusCode = 409;
+        error.code = 'worker_unavailable';
+        throw error;
+      }
+      const workerStatus = normalizeStatus(worker.status, 'available');
+      if (workerStatus === 'retired') {
+        const error = new Error('Retired workers cannot be assigned to new work');
+        error.statusCode = 409;
+        error.code = 'worker_retired';
+        throw error;
+      }
+      const pendingRetirement = this.db.prepare(`
+        SELECT id FROM approvals
+        WHERE target_type = 'worker_retirement' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(worker.id);
+      if (pendingRetirement) {
+        const error = new Error('This worker has a pending retirement decision and cannot receive new assignments');
+        error.statusCode = 409;
+        error.code = 'worker_retirement_pending';
+        error.details = { workerId: worker.id, approvalId: pendingRetirement.id };
         throw error;
       }
 
@@ -3503,8 +5470,139 @@ class ContractorOperatingLedger {
   }
 
   activeAssignmentStatus(status) {
-    return !['released', 'cancelled', 'completed', 'closed', 'rejected', 'declined', 'offline']
-      .includes(normalizeStatus(status, 'planned'));
+    return !ASSIGNMENT_CLOSED_STATUSES.has(normalizeStatus(status, 'planned'));
+  }
+
+  crewEvidenceIdentity(record = {}) {
+    const data = record?.data && typeof record.data === 'object' && !Array.isArray(record.data)
+      ? record.data
+      : fromJson(record?.data_json, {});
+    return {
+      assignmentId: record?.assignmentId || record?.assignment_id || data.assignmentId || data.assignment_id || null,
+      workerId: record?.workerId || record?.worker_id || data.workerId || data.worker_id || null,
+      workerName: normalizeText(
+        record?.workerName || record?.worker_name || data.workerName || data.worker_name,
+        ''
+      ) || null
+    };
+  }
+
+  crewEvidenceIdentityMatches(left = {}, right = {}) {
+    const leftIdentity = this.crewEvidenceIdentity(left);
+    const rightIdentity = this.crewEvidenceIdentity(right);
+    if (leftIdentity.assignmentId && rightIdentity.assignmentId) {
+      return String(leftIdentity.assignmentId) === String(rightIdentity.assignmentId);
+    }
+    if (leftIdentity.workerId && rightIdentity.workerId) {
+      return String(leftIdentity.workerId) === String(rightIdentity.workerId);
+    }
+    if (!leftIdentity.workerName || !rightIdentity.workerName) return false;
+    return leftIdentity.workerName.toLowerCase() === rightIdentity.workerName.toLowerCase();
+  }
+
+  resolveCrewAssignment(jobId, payload = {}) {
+    const rows = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name
+      FROM assignments
+      LEFT JOIN workers ON workers.id = assignments.worker_id
+      WHERE assignments.job_id = ?
+      ORDER BY assignments.created_at DESC
+    `).all(jobId).map(row => this.mapAssignment(row));
+    const assignmentId = payload.assignmentId || payload.assignment_id || null;
+    if (assignmentId) {
+      const assignment = rows.find(candidate => String(candidate.id) === String(assignmentId));
+      if (!assignment) {
+        const error = new Error('Worker assignment not found for this job');
+        error.statusCode = 400;
+        throw error;
+      }
+      return assignment;
+    }
+
+    const activeAssignments = rows.filter(assignment => this.activeAssignmentStatus(assignment.status));
+    const workerId = payload.workerId || payload.worker_id || null;
+    if (workerId) {
+      const assignment = activeAssignments.find(candidate => String(candidate.workerId || '') === String(workerId));
+      if (assignment) return assignment;
+      return null;
+    }
+    const workerName = normalizeText(payload.workerName || payload.worker_name || payload.worker, '');
+    if (workerName && workerName.toLowerCase() !== 'crew member') {
+      const assignment = activeAssignments.find(candidate => (
+        normalizeText(candidate.workerName, '').toLowerCase() === workerName.toLowerCase()
+      ));
+      if (assignment) return assignment;
+      return null;
+    }
+    return activeAssignments[0] || null;
+  }
+
+  resolveSiteAccessOrientation(jobId, accessRecord = {}) {
+    const orientationId = accessRecord.orientationId || accessRecord.orientation_id || null;
+    if (orientationId) {
+      const orientation = this.db.prepare('SELECT * FROM worker_orientations WHERE id = ? AND job_id = ?').get(orientationId, jobId);
+      return orientation && this.crewEvidenceIdentityMatches(accessRecord, orientation) ? orientation : null;
+    }
+    return this.db.prepare(`
+      SELECT * FROM worker_orientations
+      WHERE job_id = ?
+      ORDER BY completed_at DESC, updated_at DESC
+    `).all(jobId).find(orientation => this.crewEvidenceIdentityMatches(accessRecord, orientation)) || null;
+  }
+
+  invalidateAssignmentCrewEvidence(jobId, assignment = {}, options = {}) {
+    const identity = {
+      assignmentId: assignment.id,
+      workerId: assignment.workerId || assignment.worker_id || null,
+      workerName: assignment.workerName || assignment.worker_name || null
+    };
+    const instructions = this.db.prepare('SELECT * FROM worker_instructions WHERE job_id = ?').all(jobId)
+      .filter(record => this.crewEvidenceIdentityMatches(record, identity));
+    const orientations = this.db.prepare('SELECT * FROM worker_orientations WHERE job_id = ?').all(jobId)
+      .filter(record => this.crewEvidenceIdentityMatches(record, identity));
+    const accessLogs = this.db.prepare('SELECT * FROM site_access_logs WHERE job_id = ?').all(jobId)
+      .filter(record => this.crewEvidenceIdentityMatches(record, identity));
+    const timestamp = options.timestamp || nowIso();
+    const actor = options.actor || 'dashboard';
+    const targetIds = [
+      ...instructions.map(record => record.id),
+      ...orientations.map(record => record.id),
+      ...accessLogs.map(record => record.id)
+    ];
+
+    for (const record of instructions) {
+      this.db.prepare(`
+        UPDATE worker_instructions SET status = 'cancelled', updated_at = ?
+        WHERE id = ? AND status NOT IN ('cancelled', 'rejected')
+      `).run(timestamp, record.id);
+    }
+    for (const record of orientations) {
+      this.db.prepare(`
+        UPDATE worker_orientations SET status = 'expired', updated_at = ?
+        WHERE id = ? AND status NOT IN ('expired', 'rejected')
+      `).run(timestamp, record.id);
+    }
+    for (const record of accessLogs) {
+      this.db.prepare(`
+        UPDATE site_access_logs
+        SET status = 'checked_out', orientation_valid = 0, checked_out_at = COALESCE(checked_out_at, ?), updated_at = ?
+        WHERE id = ? AND status NOT IN ('checked_out', 'denied')
+      `).run(timestamp, timestamp, record.id);
+    }
+    for (const targetId of targetIds) {
+      this.db.prepare(`
+        UPDATE approvals
+        SET status = 'rejected', resolved_by = ?, resolved_at = ?, reason = ?, updated_at = ?
+        WHERE target_id = ? AND status = 'pending'
+          AND target_type IN ('worker_instruction', 'worker_orientation', 'site_access_log')
+      `).run(actor, timestamp, 'Crew assignment was released before this evidence approval was resolved.', timestamp, targetId);
+    }
+    return {
+      instructions: instructions.length,
+      orientations: orientations.length,
+      siteAccess: accessLogs.length,
+      approvalTargets: targetIds.length
+    };
   }
 
   assignmentWindowsOverlap(leftStart, leftEnd, rightStart, rightEnd) {
@@ -3531,6 +5629,7 @@ class ContractorOperatingLedger {
       LEFT JOIN workers ON workers.id = assignments.worker_id
       LEFT JOIN jobs ON jobs.id = assignments.job_id
       WHERE assignments.worker_id = ?
+        AND ${this.operationalJobStatusSql('jobs')}
       ORDER BY assignments.created_at ASC
     `).all(workerId);
     return rows
@@ -3558,6 +5657,7 @@ class ContractorOperatingLedger {
       LEFT JOIN jobs ON jobs.id = assignments.job_id
       WHERE assignments.worker_id IS NOT NULL
         AND assignments.status NOT IN ('released', 'cancelled', 'completed', 'closed', 'rejected', 'declined', 'offline')
+        AND (jobs.id IS NULL OR jobs.status NOT IN ('archived', 'pending_archive_approval', 'cancelled', 'canceled', 'rejected', 'deleted', 'void'))
       ORDER BY assignments.created_at ASC
     `).all();
     const conflicts = [];
@@ -3615,15 +5715,19 @@ class ContractorOperatingLedger {
     if (requestedApproval) {
       reasons.push({ type: 'manual_approval_requested', detail: 'The assignment was explicitly submitted for approval.' });
     }
-    if (worker && normalizeStatus(worker.status, 'available') === 'offline') {
-      reasons.push({ type: 'worker_offline', detail: `${worker.name} is currently marked offline.` });
+    const workerStatus = normalizeStatus(worker?.status, 'available');
+    if (worker && workerStatus !== 'available') {
+      reasons.push({
+        type: workerStatus === 'offline' ? 'worker_offline' : 'worker_unavailable',
+        detail: `${worker.name} is currently marked ${workerStatus.replace(/_/g, ' ')}.`
+      });
     }
     return reasons;
   }
 
   releaseAssignment(jobId, assignmentId, payload = {}, options = {}) {
     return this.transaction(() => {
-      this.requireJob(jobId);
+      this.requireJob(jobId, { allowInactive: true });
       const row = this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE assignments.id = ? AND assignments.job_id = ?').get(assignmentId, jobId);
       if (!row) {
         const error = new Error('Assignment not found');
@@ -3655,6 +5759,12 @@ class ContractorOperatingLedger {
         assignmentId,
         jobId
       );
+      const invalidatedCrewEvidence = ['released', 'cancelled'].includes(status)
+        ? this.invalidateAssignmentCrewEvidence(jobId, before, {
+            timestamp,
+            actor: options.actor || payload.actor || 'dashboard'
+          })
+        : { instructions: 0, orientations: 0, siteAccess: 0, approvalTargets: 0 };
       const after = this.mapAssignment(this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE assignments.id = ?').get(assignmentId));
       if (options.audit !== false) {
         this.audit({
@@ -3664,10 +5774,11 @@ class ContractorOperatingLedger {
           action: 'release_assignment',
           actor: options.actor || payload.actor || 'dashboard',
           before,
-          after
+          after,
+          metadata: { invalidatedCrewEvidence }
         });
       }
-      return after;
+      return { ...after, invalidatedCrewEvidence };
     });
   }
 
@@ -3733,6 +5844,7 @@ class ContractorOperatingLedger {
       SELECT tool_reservations.*, jobs.title AS job_title, jobs.status AS job_status
       FROM tool_reservations
       LEFT JOIN jobs ON jobs.id = tool_reservations.job_id
+      WHERE ${this.operationalJobStatusSql('jobs')}
       ORDER BY tool_reservations.created_at ASC
     `).all();
     return rows
@@ -3759,6 +5871,7 @@ class ContractorOperatingLedger {
       FROM tool_reservations
       LEFT JOIN jobs ON jobs.id = tool_reservations.job_id
       WHERE tool_reservations.status NOT IN ('released', 'returned', 'cancelled', 'rejected', 'declined', 'completed', 'closed', 'lost', 'retired')
+        AND (jobs.id IS NULL OR jobs.status NOT IN ('archived', 'pending_archive_approval', 'cancelled', 'canceled', 'rejected', 'deleted', 'void'))
       ORDER BY tool_reservations.created_at ASC
     `).all();
     const conflicts = [];
@@ -3836,6 +5949,56 @@ class ContractorOperatingLedger {
       }
       if (!tool) {
         tool = this.db.prepare('SELECT * FROM tools WHERE lower(name) = lower(?) LIMIT 1').get(toolName);
+      }
+      if (tool) {
+        const toolStatus = normalizeStatus(tool.status, 'available');
+        if (toolStatus === 'retired') {
+          const error = new Error('Retired equipment cannot be reserved for new work');
+          error.statusCode = 409;
+          error.code = 'tool_retired';
+          throw error;
+        }
+        const pendingRetirement = this.db.prepare(`
+          SELECT id FROM approvals
+          WHERE target_type = 'tool_retirement' AND target_id = ? AND status = 'pending'
+          ORDER BY created_at DESC
+          LIMIT 1
+        `).get(tool.id);
+        if (pendingRetirement) {
+          const error = new Error('This equipment has a pending retirement decision and cannot receive new reservations');
+          error.statusCode = 409;
+          error.code = 'tool_retirement_pending';
+          error.details = { toolId: tool.id, approvalId: pendingRetirement.id };
+          throw error;
+        }
+        const inspection = this.assessToolInspection(this.mapTool(tool));
+        if (inspection.blocksReservation) {
+          const codeByStatus = {
+            overdue: 'tool_inspection_overdue',
+            failed: 'tool_inspection_failed',
+            limited: 'tool_inspection_limited',
+            reinspection_required: 'tool_reinspection_required',
+            invalid: 'tool_inspection_invalid',
+            not_recorded: 'tool_inspection_missing'
+          };
+          const error = new Error(`Equipment inspection is ${inspection.status.replace(/_/g, ' ')} and must be resolved before reservation`);
+          error.statusCode = 409;
+          error.code = codeByStatus[inspection.status] || 'tool_inspection_blocked';
+          error.details = {
+            toolId: tool.id,
+            inspectionStatus: inspection.status,
+            inspectionDueAt: inspection.dueAt,
+            lastInspectionId: inspection.latestInspection?.id || null
+          };
+          throw error;
+        }
+        if (toolStatus !== 'available') {
+          const error = new Error(`Equipment marked ${toolStatus.replace(/_/g, ' ')} cannot be reserved until it is available`);
+          error.statusCode = 409;
+          error.code = 'tool_unavailable';
+          error.details = { toolId: tool.id, status: toolStatus };
+          throw error;
+        }
       }
       const requestedStatus = normalizeStatus(payload.status, 'reserved');
       if (['released', 'returned', 'cancelled', 'rejected', 'declined', 'completed', 'closed'].includes(requestedStatus)) {
@@ -3932,7 +6095,8 @@ class ContractorOperatingLedger {
 
   releaseToolReservation(jobId, reservationId, payload = {}, options = {}) {
     return this.transaction(() => {
-      this.requireJob(jobId);
+      this.requireJob(jobId, { allowInactive: true });
+      const actor = options.actor || payload.actor || 'dashboard';
       const row = this.db.prepare('SELECT * FROM tool_reservations WHERE id = ? AND job_id = ?').get(reservationId, jobId);
       if (!row) {
         const error = new Error('Tool reservation not found');
@@ -3957,7 +6121,7 @@ class ContractorOperatingLedger {
         toJson({
           ...data,
           releasedAt: payload.releasedAt || timestamp,
-          releasedBy: payload.releasedBy || payload.actor || options.actor || 'dashboard',
+          releasedBy: actor,
           releaseReason: payload.reason || payload.notes || null
         }),
         timestamp,
@@ -3971,7 +6135,7 @@ class ContractorOperatingLedger {
           entityId: reservationId,
           jobId,
           action: 'release_tool_reservation',
-          actor: options.actor || payload.actor || 'dashboard',
+          actor,
           before,
           after
         });
@@ -4015,6 +6179,118 @@ class ContractorOperatingLedger {
       this.audit({ entityType: 'material_requirement', entityId: id, jobId, action: 'create_material_requirement', actor: options.actor || 'Contractor.AI', after: requirement });
     }
     return requirement;
+  }
+
+  updateMaterialRequirementStatus(jobId, materialRequirementId, payload = {}, options = {}) {
+    this.requireJob(jobId);
+    const allowedStatuses = new Set([
+      'needed',
+      'low_stock',
+      'received',
+      'available',
+      'allocated',
+      'loaded',
+      'used',
+      'cancelled'
+    ]);
+    const evidenceStatuses = new Set(['received', 'available', 'allocated', 'loaded', 'used']);
+    const status = normalizeStatus(payload.status, '');
+    const notes = normalizeText(payload.notes || payload.note, '');
+    const verificationReference = normalizeText(
+      payload.verificationReference || payload.verification_reference || payload.reference,
+      ''
+    );
+    const availableQuantity = normalizeNumber(
+      payload.availableQuantity ?? payload.available_quantity ?? payload.quantity,
+      NaN
+    );
+
+    if (!allowedStatuses.has(status)) {
+      const error = new Error('Unsupported internal material status');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!notes) {
+      const error = new Error('Material status evidence is required');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (evidenceStatuses.has(status) && !verificationReference) {
+      const error = new Error('A material verification reference is required for this status');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (Number.isFinite(availableQuantity) && availableQuantity < 0) {
+      const error = new Error('Available material quantity cannot be negative');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM material_requirements WHERE id = ? AND job_id = ?')
+        .get(materialRequirementId, jobId);
+      if (!row) {
+        const error = new Error('Material requirement not found for this job');
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const before = this.mapMaterialRequirement(row);
+      const timestamp = nowIso();
+      const existingData = fromJson(row.data_json, {});
+      const effectiveQuantity = Number.isFinite(availableQuantity)
+        ? availableQuantity
+        : normalizeNumber(row.quantity, 0);
+      if (evidenceStatuses.has(status) && !(effectiveQuantity > 0)) {
+        const error = new Error('A positive verified material quantity is required for this status');
+        error.statusCode = 400;
+        throw error;
+      }
+      const history = Array.isArray(existingData.statusHistory) ? existingData.statusHistory.slice(-49) : [];
+      const transition = {
+        from: normalizeStatus(row.status, 'needed'),
+        to: status,
+        availableQuantity: effectiveQuantity,
+        location: normalizeText(payload.location || existingData.location, '') || null,
+        verificationReference: verificationReference || null,
+        notes,
+        recordedBy: options.actor || payload.actor || 'dashboard',
+        recordedAt: timestamp,
+        externalCommitments: 0
+      };
+      const data = {
+        ...existingData,
+        availableQuantity: effectiveQuantity,
+        location: transition.location,
+        verificationReference: transition.verificationReference,
+        notes,
+        lastStatusTransition: transition,
+        statusHistory: [...history, transition]
+      };
+
+      this.db.prepare(`
+        UPDATE material_requirements
+        SET status = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(status, toJson(data), timestamp, materialRequirementId, jobId);
+
+      const after = this.mapMaterialRequirement(
+        this.db.prepare('SELECT * FROM material_requirements WHERE id = ?').get(materialRequirementId)
+      );
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'material_requirement',
+          entityId: materialRequirementId,
+          jobId,
+          action: 'record_material_status',
+          actor: options.actor || payload.actor || 'dashboard',
+          before,
+          after,
+          metadata: { status, verificationReference: verificationReference || null, externalCommitments: 0 }
+        });
+      }
+      return after;
+    });
   }
 
   defaultLoadItems(jobId) {
@@ -4160,260 +6436,398 @@ class ContractorOperatingLedger {
   }
 
   createRoutePlan(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('route');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const routeRisk = normalizeStatus(payload.routeRisk || payload.riskLevel || payload.risk_level, 'normal');
-    const needsApproval = payload.requiresApproval === true
-      || ['high', 'critical'].includes(routeRisk)
-      || ['approved', 'committed', 'dispatched'].includes(requestedStatus);
-    const status = needsApproval && ['approved', 'committed', 'dispatched'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-    const origin = payload.origin || payload.start || 'Depot / warehouse';
-    const destination = normalizeText(payload.destination || payload.address || job.address || job.city || job.region, 'Job site');
-    const waypoints = normalizeList(payload.waypoints || payload.stops)
-      .map(item => typeof item === 'string' ? { label: item } : item);
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('route');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const routeRisk = normalizeStatus(payload.routeRisk || payload.riskLevel || payload.risk_level, 'normal');
+      const needsApproval = payload.requiresApproval === true
+        || ['high', 'critical'].includes(routeRisk)
+        || ['approved', 'committed', 'dispatched'].includes(requestedStatus);
+      const status = needsApproval && ['approved', 'committed', 'dispatched'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+      const origin = payload.origin || payload.start || 'Depot / warehouse';
+      const destination = normalizeText(payload.destination || payload.address || job.address || job.city || job.region, 'Job site');
+      const waypoints = normalizeList(payload.waypoints || payload.stops)
+        .map(item => typeof item === 'string' ? { label: item } : item);
 
-    this.db.prepare(`
-      INSERT INTO route_plans (id, job_id, origin, destination, waypoints_json, distance_km, duration_minutes, route_risk, status, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      origin,
-      destination,
-      toJson(waypoints, []),
-      normalizeNumber(payload.distanceKm || payload.distance_km, 0),
-      normalizeNumber(payload.durationMinutes || payload.duration_minutes, 0),
-      routeRisk,
-      status,
-      toJson({
-        notes: payload.notes || payload.note || null,
-        mapProvider: payload.mapProvider || 'manual',
-        accessWindow: payload.accessWindow || payload.access_window || null,
-        parking: payload.parking || null,
-        lowEmissionZone: normalizeBoolean(payload.lowEmissionZone || payload.low_emission_zone, false)
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'route_plan',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO route_plans (id, job_id, origin, destination, waypoints_json, distance_km, duration_minutes, route_risk, status, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'dispatch_route',
-        summary: `Approve dispatch route for ${job.title}`,
-        reason: ['high', 'critical'].includes(routeRisk)
-          ? 'High-risk routing, access, or site logistics need human review before dispatch.'
-          : 'Committed dispatch routing needs approval before it affects the crew or client plan.',
-        data: { routeRisk, destination, requestedStatus }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE route_plans SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        origin,
+        destination,
+        toJson(waypoints, []),
+        normalizeNumber(payload.distanceKm || payload.distance_km, 0),
+        normalizeNumber(payload.durationMinutes || payload.duration_minutes, 0),
+        routeRisk,
+        status,
+        toJson({
+          notes: payload.notes || payload.note || null,
+          mapProvider: payload.mapProvider || 'manual',
+          accessWindow: payload.accessWindow || payload.access_window || null,
+          parking: payload.parking || null,
+          lowEmissionZone: normalizeBoolean(payload.lowEmissionZone || payload.low_emission_zone, false)
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const routePlan = this.mapRoutePlan(this.db.prepare('SELECT * FROM route_plans WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'route_plan', entityId: id, jobId, action: 'create_route_plan', actor, after: routePlan });
-    }
-    return { ...routePlan, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'route_plan',
+          targetId: id,
+          jobId,
+          approvalType: 'dispatch_route',
+          summary: `Approve dispatch route for ${job.title}`,
+          reason: ['high', 'critical'].includes(routeRisk)
+            ? 'High-risk routing, access, or site logistics need human review before dispatch.'
+            : 'Committed dispatch routing needs approval before it affects the crew or client plan.',
+          data: { routeRisk, destination, requestedStatus }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE route_plans SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const routePlan = this.mapRoutePlan(this.db.prepare('SELECT * FROM route_plans WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'route_plan', entityId: id, jobId, action: 'create_route_plan', actor, after: routePlan });
+      }
+      return { ...routePlan, approval };
+    });
   }
 
   createLoadingPlan(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('load');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const { loadItems, checklist, trailerRequired, readiness } = this.buildLoadingPlanPack(job, payload);
-    const needsApproval = payload.requiresApproval === true
-      || ['approved', 'dispatched'].includes(requestedStatus)
-      || normalizeBoolean(payload.rentedVehicle || payload.rented_vehicle, false);
-    const status = needsApproval && ['approved', 'dispatched'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('load');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const { loadItems, checklist, trailerRequired, readiness } = this.buildLoadingPlanPack(job, payload);
+      const needsApproval = payload.requiresApproval === true
+        || ['approved', 'dispatched'].includes(requestedStatus)
+        || normalizeBoolean(payload.rentedVehicle || payload.rented_vehicle, false);
+      const status = needsApproval && ['approved', 'dispatched'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO loading_plans (id, job_id, vehicle, trailer_required, checklist_json, load_items_json, status, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      payload.vehicle || payload.vehicleName || null,
-      trailerRequired ? 1 : 0,
-      toJson(checklist, []),
-      toJson(loadItems, []),
-      status,
-      toJson({
-        ...(payload.data && typeof payload.data === 'object' ? payload.data : {}),
-        notes: payload.notes || payload.note || null,
-        loadOwner: payload.loadOwner || payload.owner || actor,
-        departureAt: payload.departureAt || payload.departure_at || job.scheduled_start || null,
-        rentedVehicle: normalizeBoolean(payload.rentedVehicle || payload.rented_vehicle, false),
-        readiness
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'loading_plan',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO loading_plans (id, job_id, vehicle, trailer_required, checklist_json, load_items_json, status, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'dispatch_loading',
-        summary: `Approve loading plan for ${job.title}`,
-        reason: 'Dispatching or renting vehicles/equipment needs human review before the crew plan is committed.',
-        data: { trailerRequired, vehicle: payload.vehicle || null, requestedStatus }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE loading_plans SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        payload.vehicle || payload.vehicleName || null,
+        trailerRequired ? 1 : 0,
+        toJson(checklist, []),
+        toJson(loadItems, []),
+        status,
+        toJson({
+          ...(payload.data && typeof payload.data === 'object' ? payload.data : {}),
+          notes: payload.notes || payload.note || null,
+          loadOwner: payload.loadOwner || payload.owner || actor,
+          departureAt: payload.departureAt || payload.departure_at || job.scheduled_start || null,
+          rentedVehicle: normalizeBoolean(payload.rentedVehicle || payload.rented_vehicle, false),
+          readiness
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const loadingPlan = this.mapLoadingPlan(this.db.prepare('SELECT * FROM loading_plans WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'loading_plan', entityId: id, jobId, action: 'create_loading_plan', actor, after: loadingPlan });
-    }
-    return { ...loadingPlan, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'loading_plan',
+          targetId: id,
+          jobId,
+          approvalType: 'dispatch_loading',
+          summary: `Approve loading plan for ${job.title}`,
+          reason: 'Dispatching or renting vehicles/equipment needs human review before the crew plan is committed.',
+          data: { trailerRequired, vehicle: payload.vehicle || null, requestedStatus }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE loading_plans SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const loadingPlan = this.mapLoadingPlan(this.db.prepare('SELECT * FROM loading_plans WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'loading_plan', entityId: id, jobId, action: 'create_loading_plan', actor, after: loadingPlan });
+      }
+      return { ...loadingPlan, approval };
+    });
   }
 
   createProcurementOrder(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('procure');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const items = normalizeList(payload.items || payload.procurementItems || payload.materials)
+        .map(item => typeof item === 'string' ? { name: item, quantity: 1, unit: 'unit' } : item);
+      const procurementItems = items.length ? items : this.defaultProcurementItems(jobId);
+      const inferredAmount = procurementItems.reduce((sum, item) => {
+        const quantity = normalizeNumber(item.quantity, 1);
+        const unitCost = normalizeNumber(item.unitCost || item.unit_cost || item.cost || item.amount, 0);
+        return sum + (quantity * unitCost);
+      }, 0);
+      const amount = normalizeNumber(payload.amount || payload.total || payload.estimatedTotal || payload.estimated_total, inferredAmount);
+      const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      const approvalThreshold = normalizeNumber(payload.approvalThreshold || payload.approval_threshold, 250);
+      const commitmentStatus = ['approved', 'ordered', 'submitted', 'sent', 'ready_to_order'].includes(requestedStatus);
+      const needsApproval = payload.requiresApproval === true
+        || commitmentStatus
+        || amount >= approvalThreshold;
+      const status = needsApproval && commitmentStatus ? 'pending_approval' : requestedStatus;
+      const suppliedName = payload.supplier || payload.vendor || procurementItems.find(item => item.supplier)?.supplier || null;
+      const tradePartner = this.resolveTradePartnerForSpend(payload, suppliedName);
+      const supplier = tradePartner?.name || suppliedName;
+      const partnerSnapshot = this.tradePartnerComplianceSnapshot(tradePartner);
+
+      this.db.prepare(`
+        INSERT INTO procurement_orders (id, job_id, supplier, status, currency, amount, required_by, approval_id, items_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        supplier,
+        status,
+        currency,
+        amount,
+        payload.requiredBy || payload.required_by || payload.neededBy || payload.needed_by || job.scheduled_start || null,
+        null,
+        toJson(procurementItems, []),
+        toJson({
+          notes: payload.notes || payload.note || null,
+          purchaseMode: payload.purchaseMode || payload.purchase_mode || 'manual_purchase',
+          orderReference: payload.orderReference || payload.order_reference || null,
+          approvalThreshold,
+          tradePartnerId: tradePartner?.id || null,
+          partnerComplianceRequired: true,
+          partnerComplianceSnapshot: partnerSnapshot
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'procurement_order',
+          targetId: id,
+          jobId,
+          approvalType: 'procurement_spend',
+          summary: `Approve procurement ${id} for ${amount.toFixed(2)} ${currency}`,
+          reason: 'Material spending and purchase orders require approval before order placement or supplier commitment.',
+          data: {
+            requestedStatus,
+            previousStatus: 'draft',
+            amount,
+            currency,
+            supplier,
+            tradePartnerId: tradePartner?.id || null,
+            partnerCompliance: partnerSnapshot
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE procurement_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const procurementOrder = this.mapProcurementOrder(this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'procurement_order', entityId: id, jobId, action: 'create_procurement_order', actor, after: procurementOrder });
+      }
+      return { ...procurementOrder, approval };
+    });
+  }
+
+  requestProcurementApproval(jobId, procurementOrderId, payload = {}, options = {}) {
     const job = this.requireJob(jobId);
     const actor = options.actor || 'Contractor.AI';
-    const id = makeId('procure');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const items = normalizeList(payload.items || payload.procurementItems || payload.materials)
-      .map(item => typeof item === 'string' ? { name: item, quantity: 1, unit: 'unit' } : item);
-    const procurementItems = items.length ? items : this.defaultProcurementItems(jobId);
-    const inferredAmount = procurementItems.reduce((sum, item) => {
-      const quantity = normalizeNumber(item.quantity, 1);
-      const unitCost = normalizeNumber(item.unitCost || item.unit_cost || item.cost || item.amount, 0);
-      return sum + (quantity * unitCost);
-    }, 0);
-    const amount = normalizeNumber(payload.amount || payload.total || payload.estimatedTotal || payload.estimated_total, inferredAmount);
-    const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
-    const approvalThreshold = normalizeNumber(payload.approvalThreshold || payload.approval_threshold, 250);
-    const commitmentStatus = ['approved', 'ordered', 'submitted', 'sent', 'ready_to_order'].includes(requestedStatus);
-    const needsApproval = payload.requiresApproval === true
-      || commitmentStatus
-      || amount >= approvalThreshold;
-    const status = needsApproval && commitmentStatus ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM procurement_orders WHERE id = ? AND job_id = ?').get(procurementOrderId, jobId);
+      if (!row) {
+        const error = new Error('Procurement order not found for this job');
+        error.statusCode = 404;
+        throw error;
+      }
+      const currentStatus = normalizeStatus(row.status, 'draft');
+      if (!['draft', 'pending', 'needs_review', 'pending_approval'].includes(currentStatus)) {
+        const error = new Error('Only a retained procurement draft can be submitted for approval');
+        error.statusCode = 409;
+        throw error;
+      }
 
-    this.db.prepare(`
-      INSERT INTO procurement_orders (id, job_id, supplier, status, currency, amount, required_by, approval_id, items_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      payload.supplier || payload.vendor || procurementItems.find(item => item.supplier)?.supplier || null,
-      status,
-      currency,
-      amount,
-      payload.requiredBy || payload.required_by || payload.neededBy || payload.needed_by || job.scheduled_start || null,
-      null,
-      toJson(procurementItems, []),
-      toJson({
-        notes: payload.notes || payload.note || null,
-        purchaseMode: payload.purchaseMode || payload.purchase_mode || 'manual_purchase',
-        orderReference: payload.orderReference || payload.order_reference || null,
-        approvalThreshold
-      }),
-      timestamp,
-      timestamp
-    );
+      const pending = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'procurement_order' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(procurementOrderId);
+      if (pending) {
+        return {
+          procurementOrder: this.mapProcurementOrder(row),
+          approval: this.mapApproval(pending),
+          approvalRequired: true,
+          reused: true
+        };
+      }
 
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
+      const requestedSupplier = normalizeText(payload.supplier || payload.vendor || row.supplier, '');
+      const existingData = fromJson(row.data_json, {});
+      const tradePartner = this.resolveTradePartnerForSpend({ ...existingData, ...payload }, requestedSupplier);
+      if (!tradePartner) {
+        const error = new Error('Select a retained trade partner before requesting procurement approval');
+        error.statusCode = 400;
+        error.code = 'trade_partner_required';
+        throw error;
+      }
+      const supplier = tradePartner.name;
+      const partnerSnapshot = this.tradePartnerComplianceSnapshot(tradePartner);
+      const amount = normalizeNumber(payload.amount ?? payload.total, row.amount);
+      const requiredBy = payload.requiredBy || payload.required_by || row.required_by;
+      const items = payload.items || payload.materials
+        ? normalizeList(payload.items || payload.materials).map(item => typeof item === 'string' ? { name: item, quantity: 1, unit: 'unit' } : item)
+        : fromJson(row.items_json, []);
+      const notes = normalizeText(payload.notes || payload.note, '');
+      if (!supplier || !(amount > 0) || !requiredBy || !items.length || !notes) {
+        const error = new Error('Supplier, positive amount, required-by date, retained items, and approval evidence are required');
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const timestamp = nowIso();
+      const requestedStatus = 'ready_to_order';
+      const approval = this.createApproval({
         targetType: 'procurement_order',
-        targetId: id,
+        targetId: procurementOrderId,
         jobId,
         approvalType: 'procurement_spend',
-        summary: `Approve procurement ${id} for ${amount.toFixed(2)} ${currency}`,
-        reason: 'Material spending and purchase orders require approval before order placement or supplier commitment.',
-        data: { requestedStatus, amount, currency, supplier: payload.supplier || payload.vendor || null }
+        summary: `Approve procurement ${procurementOrderId} for ${amount.toFixed(2)} ${normalizeText(row.currency, 'EUR').toUpperCase()}`,
+        reason: 'Material spending and supplier commitment require explicit approval before order placement.',
+        data: {
+          requestedStatus,
+          previousStatus: currentStatus === 'pending_approval' ? 'draft' : currentStatus,
+          amount,
+          currency: normalizeText(row.currency, 'EUR').toUpperCase(),
+          supplier,
+          tradePartnerId: tradePartner.id,
+          partnerCompliance: partnerSnapshot,
+          notes
+        }
       }, { actor, audit: false });
-      this.db.prepare('UPDATE procurement_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const procurementOrder = this.mapProcurementOrder(this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'procurement_order', entityId: id, jobId, action: 'create_procurement_order', actor, after: procurementOrder });
-    }
-    return { ...procurementOrder, approval };
+      const nextData = {
+        ...existingData,
+        requestedStatus,
+        tradePartnerId: tradePartner.id,
+        partnerComplianceRequired: true,
+        partnerComplianceSnapshot: partnerSnapshot,
+        approvalRequest: {
+          supplier,
+          amount,
+          requiredBy,
+          notes,
+          requestedBy: actor,
+          requestedAt: timestamp
+        }
+      };
+      this.db.prepare(`
+        UPDATE procurement_orders
+        SET supplier = ?, status = 'pending_approval', amount = ?, required_by = ?, approval_id = ?, items_json = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(supplier, amount, requiredBy, approval.id, toJson(items, []), toJson(nextData), timestamp, procurementOrderId, jobId);
+      const procurementOrder = this.mapProcurementOrder(this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(procurementOrderId));
+      this.audit({
+        entityType: 'procurement_order',
+        entityId: procurementOrderId,
+        jobId,
+        action: 'request_procurement_approval',
+        actor,
+        before: this.mapProcurementOrder(row),
+        after: procurementOrder,
+        metadata: { approvalId: approval.id, externalCommitments: 0, jobTitle: job.title }
+      });
+      return { procurementOrder, approval, approvalRequired: true, reused: false };
+    });
   }
 
   createWorkerInstruction(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('instruction');
-    const timestamp = nowIso();
-    const assignment = payload.assignmentId || payload.assignment_id
-      ? this.db.prepare('SELECT * FROM assignments WHERE id = ? AND job_id = ?').get(payload.assignmentId || payload.assignment_id, jobId)
-      : this.db.prepare('SELECT * FROM assignments WHERE job_id = ? ORDER BY created_at ASC LIMIT 1').get(jobId);
-    const audience = normalizeStatus(payload.audience, 'crew');
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const externalAudience = ['client', 'external', 'subcontractor', 'supplier'].includes(audience);
-    const commitmentStatus = ['approved', 'sent', 'published', 'dispatched'].includes(requestedStatus);
-    const needsApproval = payload.requiresApproval === true || externalAudience || commitmentStatus;
-    const status = needsApproval && commitmentStatus ? 'pending_approval' : requestedStatus;
-    const defaultBody = [
-      `Job: ${job.title}`,
-      `Location: ${job.address || job.city || 'confirm location'}`,
-      `Scope: ${job.description || 'review job scope before departure'}`,
-      'Confirm tools, materials, photos, safety controls, and client access before starting.'
-    ].join('\n');
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('instruction');
+      const timestamp = nowIso();
+      const assignment = this.resolveCrewAssignment(jobId, payload);
+      const audience = normalizeStatus(payload.audience, 'crew');
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const externalAudience = ['client', 'external', 'subcontractor', 'supplier'].includes(audience);
+      const commitmentStatus = ['approved', 'sent', 'published', 'dispatched'].includes(requestedStatus);
+      const needsApproval = payload.requiresApproval === true || externalAudience || commitmentStatus;
+      const status = needsApproval && commitmentStatus ? 'pending_approval' : requestedStatus;
+      const defaultBody = [
+        `Job: ${job.title}`,
+        `Location: ${job.address || job.city || 'confirm location'}`,
+        `Scope: ${job.description || 'review job scope before departure'}`,
+        'Confirm tools, materials, photos, safety controls, and client access before starting.'
+      ].join('\n');
 
-    this.db.prepare(`
-      INSERT INTO worker_instructions (id, job_id, assignment_id, audience, channel, title, body, status, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      assignment?.id || null,
-      audience,
-      normalizeStatus(payload.channel, 'app'),
-      normalizeText(payload.title || payload.subject, `Dispatch instructions: ${job.title}`),
-      payload.body || payload.message || defaultBody,
-      status,
-      toJson({
-        notes: payload.notes || payload.note || null,
-        language: payload.language || 'nl',
-        safetyNotes: payload.safetyNotes || payload.safety_notes || null,
-        arrivalWindow: payload.arrivalWindow || payload.arrival_window || null,
-        workerName: assignment ? fromJson(assignment.data_json).workerName || null : null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'worker_instruction',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO worker_instructions (id, job_id, assignment_id, audience, channel, title, body, status, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: externalAudience ? 'external_instruction' : 'dispatch_instruction',
-        summary: `Approve instruction "${normalizeText(payload.title || payload.subject, job.title)}"`,
-        reason: externalAudience
-          ? 'Instructions for external audiences can create commitments and need approval before publishing.'
-          : 'Published crew instructions need approval before they affect the committed dispatch plan.',
-        data: { audience, requestedStatus, assignmentId: assignment?.id || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE worker_instructions SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        assignment?.id || null,
+        audience,
+        normalizeStatus(payload.channel, 'app'),
+        normalizeText(payload.title || payload.subject, `Dispatch instructions: ${job.title}`),
+        payload.body || payload.message || defaultBody,
+        status,
+        toJson({
+          notes: payload.notes || payload.note || null,
+          language: payload.language || 'nl',
+          safetyNotes: payload.safetyNotes || payload.safety_notes || null,
+          arrivalWindow: payload.arrivalWindow || payload.arrival_window || null,
+          assignmentId: assignment?.id || null,
+          workerId: assignment?.workerId || payload.workerId || payload.worker_id || null,
+          workerName: assignment?.workerName || payload.workerName || payload.worker_name || null
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const instruction = this.mapWorkerInstruction(this.db.prepare('SELECT * FROM worker_instructions WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'worker_instruction', entityId: id, jobId, action: 'create_worker_instruction', actor, after: instruction });
-    }
-    return { ...instruction, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'worker_instruction',
+          targetId: id,
+          jobId,
+          approvalType: externalAudience ? 'external_instruction' : 'dispatch_instruction',
+          summary: `Approve instruction "${normalizeText(payload.title || payload.subject, job.title)}"`,
+          reason: externalAudience
+            ? 'Instructions for external audiences can create commitments and need approval before publishing.'
+            : 'Published crew instructions need approval before they affect the committed dispatch plan.',
+          data: {
+            audience,
+            requestedStatus,
+            assignmentId: assignment?.id || null,
+            workerId: assignment?.workerId || payload.workerId || payload.worker_id || null
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE worker_instructions SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const instruction = this.mapWorkerInstruction(this.db.prepare('SELECT * FROM worker_instructions WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'worker_instruction', entityId: id, jobId, action: 'create_worker_instruction', actor, after: instruction });
+      }
+      return { ...instruction, approval };
+    });
   }
 
   createDispatchPack(jobId, payload = {}, options = {}) {
@@ -4521,16 +6935,15 @@ class ContractorOperatingLedger {
       const skipped = [];
       const approvals = [];
       const plannedStart = payload.plannedStart || payload.planned_start || recommendationBefore.plannedStart || detail.scheduledStart || futureIsoDate(1);
-      const activeAssignment = (detail.assignments || []).find(assignment => this.activeAssignmentStatus(assignment.status));
-      const recommendedWorkerName = recommendationBefore.recommendedWorker?.name
-        || activeAssignment?.workerName
-        || 'Crew member';
+      const activeAssignments = (detail.assignments || []).filter(assignment => this.activeAssignmentStatus(assignment.status));
+      const crewEvidence = this.crewEvidenceReadiness(detail);
       const materialRequirements = detail.materials || [];
       const primaryMaterial = materialRequirements.find(Boolean);
       const shouldPrepareSafety = actionTypes.has('prepare_safety_pack')
         || actionTypes.has('complete_safety_pack')
         || missing.has('safety_pack');
       const shouldPrepareSiteAccess = actionTypes.has('prepare_site_access')
+        || actionTypes.has('complete_site_orientation')
         || actionTypes.has('clear_site_access')
         || missing.has('site_access');
 
@@ -4605,28 +7018,35 @@ class ContractorOperatingLedger {
       }
 
       if (actionTypes.has('draft_worker_instruction') || missing.has('worker_instruction')) {
-        if (hasUsable(detail.workerInstructions)) {
-          addSkipped('worker_instruction', 'active_record_exists');
+        if (!activeAssignments.length) {
+          addSkipped('worker_instruction', 'active_assignment_required');
         } else {
-          const instructionBody = [
-            `Job: ${detail.title}`,
-            `Location: ${detail.address || detail.city || 'confirm location'}`,
-            `Recommended worker: ${recommendedWorkerName}`,
-            `Planned start: ${plannedStart || 'confirm start'}`,
-            `Scope: ${detail.description || 'review job scope before departure'}`,
-            'Before leaving: confirm route, load list, materials, PPE, access gate, and photo evidence plan.',
-            'Do not promise extra work, client timing, or material ordering without Robert approval.'
-          ].join('\n');
-          const instruction = this.createWorkerInstruction(jobId, {
-            assignmentId: activeAssignment?.id || payload.assignmentId || payload.assignment_id || null,
-            audience: 'crew',
-            channel: 'app',
-            status: 'draft',
-            title: `Schedule-prep dispatch brief: ${detail.title}`,
-            body: instructionBody,
-            notes: 'Internal draft generated from the schedule recommendation.'
-          }, { actor, audit: false });
-          addCreated('worker_instruction', instruction);
+          for (const item of crewEvidence.items) {
+            if (item.instruction) {
+              addSkipped('worker_instruction', 'current_assignment_record_exists');
+              continue;
+            }
+            const instructionBody = [
+              `Job: ${detail.title}`,
+              `Location: ${detail.address || detail.city || 'confirm location'}`,
+              `Assigned worker: ${item.workerName}`,
+              `Planned start: ${plannedStart || 'confirm start'}`,
+              `Scope: ${detail.description || 'review job scope before departure'}`,
+              'Before leaving: confirm route, load list, materials, PPE, access gate, and photo evidence plan.',
+              'Do not promise extra work, client timing, or material ordering without Robert approval.'
+            ].join('\n');
+            const instruction = this.createWorkerInstruction(jobId, {
+              assignmentId: item.assignmentId,
+              workerId: item.workerId,
+              audience: 'crew',
+              channel: 'app',
+              status: 'draft',
+              title: `Schedule-prep dispatch brief: ${detail.title}`,
+              body: instructionBody,
+              notes: 'Internal draft generated from the schedule recommendation.'
+            }, { actor, audit: false });
+            addCreated('worker_instruction', instruction);
+          }
         }
       }
 
@@ -4677,35 +7097,46 @@ class ContractorOperatingLedger {
       }
 
       if (shouldPrepareSiteAccess) {
-        let orientation = (detail.orientations || []).find(record => !inactiveStatuses.has(normalizeStatus(record.status, 'scheduled')));
-        if (orientation) {
-          addSkipped('worker_orientation', 'active_record_exists');
+        if (!activeAssignments.length) {
+          addSkipped('worker_orientation', 'active_assignment_required');
+          addSkipped('site_access_log', 'active_assignment_required');
         } else {
-          orientation = this.createWorkerOrientation(jobId, {
-            status: 'scheduled',
-            workerName: recommendedWorkerName,
-            company: 'Internal crew',
-            language: 'nl',
-            dueAt: plannedStart,
-            topics: ['Site rules', 'PPE and VCA controls', 'Emergency contacts', 'Access boundaries'],
-            notes: 'Internal orientation draft. Complete site rules, PPE/VCA controls, emergency contacts, and approval before clearing site access.'
-          }, { actor, audit: false });
-          addCreated('worker_orientation', orientation);
-        }
+          for (const item of crewEvidence.items) {
+            let orientation = item.orientation;
+            if (orientation) {
+              addSkipped('worker_orientation', 'current_assignment_record_exists');
+            } else {
+              orientation = this.createWorkerOrientation(jobId, {
+                assignmentId: item.assignmentId,
+                workerId: item.workerId,
+                status: 'scheduled',
+                workerName: item.workerName,
+                company: 'Internal crew',
+                language: 'nl',
+                dueAt: plannedStart,
+                topics: ['Site rules', 'PPE and VCA controls', 'Emergency contacts', 'Access boundaries'],
+                notes: 'Internal orientation draft. Complete site rules, PPE/VCA controls, emergency contacts, and approval before clearing site access.'
+              }, { actor, audit: false });
+              addCreated('worker_orientation', orientation);
+            }
 
-        if (hasUsable(detail.siteAccessLogs)) {
-          addSkipped('site_access_log', 'active_record_exists');
-        } else {
-          const siteAccess = this.createSiteAccessLog(jobId, {
-            orientationId: orientation?.id || null,
-            workerName: recommendedWorkerName,
-            company: orientation?.company || 'Internal crew',
-            status: 'blocked',
-            orientationValid: false,
-            accessPoint: payload.accessPoint || payload.access_point || 'Main site access',
-            notes: 'Internal access gate. Remains blocked until orientation is completed and site access is approved.'
-          }, { actor, audit: false });
-          addCreated('site_access_log', siteAccess);
+            if (item.siteAccess) {
+              addSkipped('site_access_log', 'current_assignment_record_exists');
+            } else {
+              const siteAccess = this.createSiteAccessLog(jobId, {
+                assignmentId: item.assignmentId,
+                workerId: item.workerId,
+                orientationId: orientation?.id || null,
+                workerName: item.workerName,
+                company: orientation?.company || 'Internal crew',
+                status: 'blocked',
+                orientationValid: false,
+                accessPoint: payload.accessPoint || payload.access_point || 'Main site access',
+                notes: 'Internal access gate. Remains blocked until orientation is completed and site access is approved.'
+              }, { actor, audit: false });
+              addCreated('site_access_log', siteAccess);
+            }
+          }
         }
       }
 
@@ -4864,40 +7295,86 @@ class ContractorOperatingLedger {
   }
 
   addProgressUpdate(jobId, payload = {}, options = {}) {
-    const before = this.requireJob(jobId);
-    const id = makeId('progress');
-    const timestamp = nowIso();
-    const progressPercent = Math.max(0, Math.min(100, normalizeNumber(payload.progressPercent || payload.progress_percent, before.progress_percent || 0)));
-    const status = normalizeStatus(payload.status, before.status || 'note');
-    this.db.prepare(`
-      INSERT INTO progress_updates (id, job_id, status, progress_percent, note, weather, blockers_json, photos_json, created_by, data_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      status,
-      progressPercent,
-      payload.note || payload.notes || null,
-      payload.weather || null,
-      toJson(payload.blockers || [], []),
-      toJson(payload.photos || [], []),
-      payload.createdBy || payload.created_by || options.actor || 'Contractor.AI',
-      toJson({ source: payload.source || 'manual' }),
-      timestamp
-    );
-    const nextJobStatus = ['intake', 'planned', 'scheduled', 'in_progress', 'blocked', 'completed'].includes(status) ? status : before.status;
-    this.db.prepare('UPDATE jobs SET status = ?, phase = ?, progress_percent = ?, updated_at = ? WHERE id = ?')
-      .run(nextJobStatus, nextJobStatus === 'completed' ? 'closeout' : nextJobStatus, progressPercent, timestamp, jobId);
-    const update = this.mapProgress(this.db.prepare('SELECT * FROM progress_updates WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      const after = this.getJobRow(jobId);
-      this.audit({ entityType: 'progress_update', entityId: id, jobId, action: 'record_progress', actor: options.actor || 'Contractor.AI', before: this.mapJob(before), after: { job: this.mapJob(after), update } });
-    }
-    return update;
+    return this.transaction(() => {
+      const before = this.requireJob(jobId);
+      const timestamp = nowIso();
+      const progressPercent = Math.max(0, Math.min(100, normalizeNumber(payload.progressPercent ?? payload.progress_percent, before.progress_percent || 0)));
+      const status = normalizeStatus(payload.status, before.status || 'note');
+      const note = normalizeText(payload.note || payload.notes, '');
+      const weather = normalizeText(payload.weather, '');
+      const blockers = normalizeList(payload.blockers);
+      const photos = normalizeList(payload.photos);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey && !/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        const error = new Error('Progress entry key must contain 8 to 200 safe characters');
+        error.statusCode = 400;
+        error.code = 'progress_entry_key_invalid';
+        throw error;
+      }
+      const entryFingerprint = entryKey
+        ? crypto.createHash('sha256').update(JSON.stringify({ status, progressPercent, note, weather, blockers, photos })).digest('hex')
+        : null;
+
+      if (entryKey) {
+        const existing = this.db.prepare('SELECT * FROM progress_updates WHERE job_id = ? ORDER BY created_at DESC')
+          .all(jobId)
+          .map(row => this.mapProgress(row))
+          .find(update => update.data?.entryKey === entryKey);
+        if (existing) {
+          if (existing.data?.entryFingerprint !== entryFingerprint) {
+            const error = new Error('Progress entry key was already used for different content');
+            error.statusCode = 409;
+            error.code = 'progress_entry_key_reused';
+            throw error;
+          }
+          return { ...existing, replayed: true };
+        }
+      }
+
+      const id = makeId('progress');
+      this.db.prepare(`
+        INSERT INTO progress_updates (id, job_id, status, progress_percent, note, weather, blockers_json, photos_json, created_by, data_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        status,
+        progressPercent,
+        note || null,
+        weather || null,
+        toJson(blockers, []),
+        toJson(photos, []),
+        payload.createdBy || payload.created_by || options.actor || 'Contractor.AI',
+        toJson({
+          source: payload.source || 'manual',
+          entryKey: entryKey || null,
+          entryFingerprint
+        }),
+        timestamp
+      );
+      const nextJobStatus = ['intake', 'planned', 'scheduled', 'in_progress', 'blocked', 'completed'].includes(status) ? status : before.status;
+      this.db.prepare('UPDATE jobs SET status = ?, phase = ?, progress_percent = ?, updated_at = ? WHERE id = ?')
+        .run(nextJobStatus, nextJobStatus === 'completed' ? 'closeout' : nextJobStatus, progressPercent, timestamp, jobId);
+      const update = this.mapProgress(this.db.prepare('SELECT * FROM progress_updates WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        const after = this.getJobRow(jobId);
+        this.audit({
+          entityType: 'progress_update',
+          entityId: id,
+          jobId,
+          action: 'record_progress',
+          actor: options.actor || 'Contractor.AI',
+          before: this.mapJob(before),
+          after: { job: this.mapJob(after), update },
+          metadata: { entryKey: entryKey || null, externalCommitments: 0 }
+        });
+      }
+      return { ...update, replayed: false };
+    });
   }
 
   updateJob(jobId, payload = {}, options = {}) {
-    const before = this.requireJob(jobId);
+    const before = this.requireJob(jobId, { allowInactive: options.allowInactive === true });
     const actor = options.actor || 'Contractor.AI';
     const timestamp = nowIso();
     const currentData = fromJson(before.data_json);
@@ -5075,13 +7552,36 @@ class ContractorOperatingLedger {
 
   updateJobWithApproval(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
-      const before = this.requireJob(jobId);
+      const before = this.requireJob(jobId, { allowInactive: true });
       const actor = options.actor || payload.actor || 'Contractor.AI';
       const patch = this.buildJobUpdatePatch(payload);
       const patchKeys = Object.keys(patch).filter(key => patch[key] !== undefined);
       if (!patchKeys.length) {
         const error = new Error('No supported job update fields were provided');
         error.statusCode = 400;
+        throw error;
+      }
+
+      const currentStatus = normalizeStatus(before.status, 'intake');
+      const requestedStatus = Object.prototype.hasOwnProperty.call(patch, 'status')
+        ? normalizeStatus(patch.status, currentStatus)
+        : currentStatus;
+      const requestedPhase = Object.prototype.hasOwnProperty.call(patch, 'phase')
+        ? normalizeStatus(patch.phase, before.phase || currentStatus)
+        : normalizeStatus(before.phase, currentStatus);
+      if (['archived', 'pending_archive_approval'].includes(requestedStatus) || requestedPhase === 'archived') {
+        const error = new Error('Use the dedicated job archive request so retention safeguards and approval evidence are recorded.');
+        error.statusCode = 400;
+        error.code = 'job_archive_route_required';
+        throw error;
+      }
+      if (
+        ['archived', 'pending_archive_approval'].includes(currentStatus)
+        && (requestedStatus !== currentStatus || requestedPhase !== normalizeStatus(before.phase, currentStatus))
+      ) {
+        const error = new Error('Use the dedicated job restore request so the retained pre-archive state is recovered through approval.');
+        error.statusCode = 400;
+        error.code = 'job_restore_route_required';
         throw error;
       }
 
@@ -5138,59 +7638,328 @@ class ContractorOperatingLedger {
     });
   }
 
+  requestJobArchive(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.requireJob(jobId, { allowInactive: true });
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) {
+        const error = new Error('A specific archive reason of at least 8 characters is required.');
+        error.statusCode = 400;
+        error.code = 'job_archive_reason_required';
+        throw error;
+      }
+
+      const currentStatus = normalizeStatus(before.status, 'intake');
+      if (['archived', 'pending_archive_approval'].includes(currentStatus)) {
+        const error = new Error('This job is already archived. Use the restore workflow to return it to its retained state.');
+        error.statusCode = 409;
+        error.code = 'job_already_archived';
+        throw error;
+      }
+
+      const pending = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE job_id = ? AND status = 'pending'
+        ORDER BY created_at ASC
+      `).all(jobId);
+      const existing = pending.find(row => row.target_type === 'job_archive');
+      if (existing) {
+        return {
+          status: 'pending_approval',
+          requiresApproval: true,
+          replayed: true,
+          externalCommitments: 0,
+          approval: this.mapApproval(existing),
+          job: this.getJobDetail(jobId, { includeAudit: false })
+        };
+      }
+      const blockers = pending.filter(row => !['job_archive', 'job_restore'].includes(row.target_type));
+      if (blockers.length) {
+        const error = new Error(`Resolve ${blockers.length} pending job approval${blockers.length === 1 ? '' : 's'} before requesting archive.`);
+        error.statusCode = 409;
+        error.code = 'job_archive_blocked_by_approvals';
+        error.details = {
+          blockerCount: blockers.length,
+          blockers: blockers.slice(0, 20).map(row => ({ id: row.id, targetType: row.target_type, summary: row.summary }))
+        };
+        throw error;
+      }
+      if (pending.some(row => row.target_type === 'job_restore')) {
+        const error = new Error('A restore decision is already pending for this job.');
+        error.statusCode = 409;
+        error.code = 'job_lifecycle_conflict';
+        throw error;
+      }
+
+      const approvalId = makeId('approval');
+      const requestedAt = nowIso();
+      const activePortalAccess = this.activeClientPortalAccess(jobId);
+      const approval = this.createApproval({
+        id: approvalId,
+        targetType: 'job_archive',
+        targetId: approvalId,
+        jobId,
+        approvalType: 'job_archive',
+        summary: `Archive job: ${before.title}`,
+        reason,
+        data: {
+          operation: 'archive',
+          jobId,
+          jobTitle: before.title,
+          reason,
+          previousStatus: currentStatus,
+          previousPhase: normalizeStatus(before.phase, currentStatus),
+          activePortalAccessCount: activePortalAccess.length,
+          activePortalAccessIds: activePortalAccess.map(access => access.id),
+          requestedAt,
+          requestedBy: actor,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+
+      this.audit({
+        entityType: 'job',
+        entityId: jobId,
+        jobId,
+        action: 'request_job_archive',
+        actor,
+        before: this.mapJob(before),
+        after: { approvalId: approval.id, status: 'pending_approval', reason },
+        metadata: { approvalId: approval.id, externalCommitments: 0 }
+      });
+
+      return {
+        status: 'pending_approval',
+        requiresApproval: true,
+        replayed: false,
+        externalCommitments: 0,
+        approval,
+        job: this.getJobDetail(jobId, { includeAudit: false })
+      };
+    });
+  }
+
+  requestJobRestore(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.requireJob(jobId, { allowInactive: true });
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) {
+        const error = new Error('A specific restore reason of at least 8 characters is required.');
+        error.statusCode = 400;
+        error.code = 'job_restore_reason_required';
+        throw error;
+      }
+
+      const currentStatus = normalizeStatus(before.status, 'intake');
+      if (!['archived', 'pending_archive_approval'].includes(currentStatus)) {
+        const error = new Error('Only an archived job can be restored.');
+        error.statusCode = 409;
+        error.code = 'job_not_archived';
+        throw error;
+      }
+
+      const pending = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE job_id = ? AND status = 'pending'
+        ORDER BY created_at ASC
+      `).all(jobId);
+      const existing = pending.find(row => row.target_type === 'job_restore');
+      if (existing) {
+        return {
+          status: 'pending_approval',
+          requiresApproval: true,
+          replayed: true,
+          externalCommitments: 0,
+          approval: this.mapApproval(existing),
+          job: this.getJobDetail(jobId, { includeAudit: false })
+        };
+      }
+      const blockers = pending.filter(row => !['job_archive', 'job_restore'].includes(row.target_type));
+      if (blockers.length || pending.some(row => row.target_type === 'job_archive')) {
+        const count = blockers.length + (pending.some(row => row.target_type === 'job_archive') ? 1 : 0);
+        const error = new Error(`Resolve ${count} pending job lifecycle decision${count === 1 ? '' : 's'} before requesting restore.`);
+        error.statusCode = 409;
+        error.code = 'job_restore_blocked_by_approvals';
+        error.details = {
+          blockerCount: count,
+          blockers: pending.slice(0, 20).map(row => ({ id: row.id, targetType: row.target_type, summary: row.summary }))
+        };
+        throw error;
+      }
+
+      const jobData = fromJson(before.data_json, {});
+      const archive = jobData.archive && typeof jobData.archive === 'object' && !Array.isArray(jobData.archive)
+        ? jobData.archive
+        : {};
+      const allowedStatuses = new Set(['intake', 'planning', 'planned', 'scheduled', 'in_progress', 'on_hold', 'completed', 'cancelled', 'canceled']);
+      const retainedStatus = normalizeStatus(archive.previousStatus, 'intake');
+      const restoreStatus = allowedStatuses.has(retainedStatus) ? retainedStatus : 'intake';
+      const retainedPhase = normalizeStatus(archive.previousPhase, restoreStatus);
+      const restorePhase = ['archived', 'pending_archive_approval'].includes(retainedPhase) ? restoreStatus : retainedPhase;
+      const approvalId = makeId('approval');
+      const requestedAt = nowIso();
+      const approval = this.createApproval({
+        id: approvalId,
+        targetType: 'job_restore',
+        targetId: approvalId,
+        jobId,
+        approvalType: 'job_restore',
+        summary: `Restore job: ${before.title}`,
+        reason,
+        data: {
+          operation: 'restore',
+          jobId,
+          jobTitle: before.title,
+          reason,
+          restoreStatus,
+          restorePhase,
+          archivedAt: archive.approvedAt || archive.archivedAt || before.updated_at,
+          archiveApprovalId: archive.approvalId || null,
+          requestedAt,
+          requestedBy: actor,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+
+      this.audit({
+        entityType: 'job',
+        entityId: jobId,
+        jobId,
+        action: 'request_job_restore',
+        actor,
+        before: this.mapJob(before),
+        after: { approvalId: approval.id, status: 'pending_approval', restoreStatus, restorePhase, reason },
+        metadata: { approvalId: approval.id, archiveApprovalId: archive.approvalId || null, externalCommitments: 0 }
+      });
+
+      return {
+        status: 'pending_approval',
+        requiresApproval: true,
+        replayed: false,
+        externalCommitments: 0,
+        approval,
+        job: this.getJobDetail(jobId, { includeAudit: false })
+      };
+    });
+  }
+
   addCommunication(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const id = makeId('comm');
-    const actor = options.actor || 'Contractor.AI';
-    const timestamp = nowIso();
-    const direction = normalizeStatus(payload.direction, 'outbound');
-    const status = normalizeStatus(payload.status, direction === 'outbound' ? 'draft' : 'received');
-    const requiresApproval = payload.requiresApproval !== false && direction === 'outbound' && !['approved', 'sent'].includes(status);
-    const communicationData = {
-      ...(payload.data || {}),
-      recipient: payload.recipient || null,
-      expectsReply: normalizeBoolean(payload.expectsReply ?? payload.expects_reply ?? payload.replyRequired ?? payload.reply_required, false),
-      replyBy: payload.replyBy || payload.reply_by || payload.dueAt || payload.due_at || null,
-      followUpFor: payload.followUpFor || payload.follow_up_for || null,
-      followUpSource: payload.followUpSource || payload.follow_up_source || null
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const id = makeId('comm');
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const direction = normalizeStatus(payload.direction, 'outbound');
+      const status = normalizeStatus(payload.status, direction === 'outbound' ? 'draft' : 'received');
+      const requiresApproval = payload.requiresApproval !== false && direction === 'outbound' && !['approved', 'sent'].includes(status);
+      const communicationData = {
+        ...(payload.data || {}),
+        recipient: payload.recipient || null,
+        expectsReply: normalizeBoolean(payload.expectsReply ?? payload.expects_reply ?? payload.replyRequired ?? payload.reply_required, false),
+        replyBy: payload.replyBy || payload.reply_by || payload.dueAt || payload.due_at || null,
+        followUpFor: payload.followUpFor || payload.follow_up_for || null,
+        followUpSource: payload.followUpSource || payload.follow_up_source || null
+      };
+      this.db.prepare(`
+        INSERT INTO communication_records (id, job_id, client_id, channel, direction, subject, body, status, sent_at, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        payload.clientId || payload.client_id || job.client_id,
+        normalizeText(payload.channel, 'portal'),
+        direction,
+        payload.subject || null,
+        payload.body || payload.message || null,
+        status,
+        payload.sentAt || payload.sent_at || null,
+        toJson(communicationData),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (requiresApproval) {
+        approval = this.createApproval({
+          targetType: 'communication',
+          targetId: id,
+          jobId,
+          approvalType: 'external_communication',
+          summary: `Approve ${payload.channel || 'portal'} update before sending`,
+          reason: 'External communication must be approved before it can be sent.',
+          data: { subject: payload.subject || null, channel: payload.channel || 'portal' }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE communication_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const communication = this.mapCommunication(this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'communication', entityId: id, jobId, action: 'create_communication', actor, after: communication });
+      }
+      return { ...communication, approval };
+    });
+  }
+
+  recordCommunicationDelivery(communicationId, payload = {}, options = {}) {
+    const row = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(String(communicationId || ''));
+    if (!row) {
+      const error = new Error('Communication record not found');
+      error.statusCode = 404;
+      throw error;
+    }
+    if (normalizeStatus(row.direction, '') !== 'outbound') {
+      const error = new Error('Only outbound communications can receive a delivery receipt.');
+      error.statusCode = 409;
+      throw error;
+    }
+    const approval = row.approval_id
+      ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id)
+      : null;
+    if (!approval || normalizeStatus(approval.status, '') !== 'approved') {
+      const error = new Error('The communication approval must be resolved before external delivery is recorded.');
+      error.statusCode = 409;
+      error.code = 'communication_approval_required';
+      throw error;
+    }
+
+    const existing = this.mapCommunication(row);
+    if (['sent', 'delivered'].includes(normalizeStatus(existing.status, ''))) return existing;
+
+    const integration = normalizeText(payload.integration, '');
+    if (!integration) {
+      const error = new Error('A verified integration identifier is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const sentAt = payload.sentAt || payload.sent_at || nowIso();
+    const data = {
+      ...(existing.data || {}),
+      deliveryReceipt: {
+        integration,
+        providerMessageId: payload.providerMessageId || payload.provider_message_id || null,
+        receivedAt: nowIso(),
+        receipt: payload.receipt || null
+      }
     };
     this.db.prepare(`
-      INSERT INTO communication_records (id, job_id, client_id, channel, direction, subject, body, status, sent_at, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      payload.clientId || payload.client_id || job.client_id,
-      normalizeText(payload.channel, 'portal'),
-      direction,
-      payload.subject || null,
-      payload.body || payload.message || null,
-      status,
-      payload.sentAt || payload.sent_at || null,
-      toJson(communicationData),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (requiresApproval) {
-      approval = this.createApproval({
-        targetType: 'communication',
-        targetId: id,
-        jobId,
-        approvalType: 'external_communication',
-        summary: `Approve ${payload.channel || 'portal'} update before sending`,
-        reason: 'External communication must be approved before it can be sent.',
-        data: { subject: payload.subject || null, channel: payload.channel || 'portal' }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE communication_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const communication = this.mapCommunication(this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'communication', entityId: id, jobId, action: 'create_communication', actor, after: communication });
-    }
-    return { ...communication, approval };
+      UPDATE communication_records
+      SET status = 'sent', sent_at = ?, data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(sentAt, toJson(data), nowIso(), row.id);
+    const communication = this.mapCommunication(this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(row.id));
+    this.audit({
+      entityType: 'communication',
+      entityId: row.id,
+      jobId: row.job_id,
+      action: 'record_communication_delivery',
+      actor: options.actor || 'verified_integration',
+      before: existing,
+      after: communication,
+      metadata: { integration, providerMessageId: data.deliveryReceipt.providerMessageId }
+    });
+    return communication;
   }
 
   addDocument(jobId, payload = {}, options = {}) {
@@ -5221,8 +7990,30 @@ class ContractorOperatingLedger {
     return document;
   }
 
+  getDocument(documentId) {
+    const row = this.db.prepare('SELECT * FROM documents WHERE id = ?').get(String(documentId || ''));
+    if (!row) {
+      const error = new Error('Document not found');
+      error.statusCode = 404;
+      throw error;
+    }
+    return this.mapDocument(row);
+  }
+
   addTimeLog(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
+    const hours = normalizeNumber(payload.hours, 0);
+    const rate = normalizeNumber(payload.rate || payload.hourlyRate || payload.hourly_rate, 0);
+    if (!(hours > 0 && hours <= 24)) {
+      const error = new Error('Time log hours must be greater than zero and no more than 24');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (rate < 0) {
+      const error = new Error('Time log rate cannot be negative');
+      error.statusCode = 400;
+      throw error;
+    }
     const id = makeId('time');
     const timestamp = nowIso();
     this.db.prepare(`
@@ -5233,12 +8024,19 @@ class ContractorOperatingLedger {
       jobId,
       payload.workerId || payload.worker_id || null,
       payload.workDate || payload.work_date || nowIso().slice(0, 10),
-      normalizeNumber(payload.hours, 0),
+      hours,
       payload.billable === false ? 0 : 1,
-      normalizeNumber(payload.rate || payload.hourlyRate || payload.hourly_rate, 0),
+      rate,
       normalizeStatus(payload.status, 'submitted'),
       payload.notes || null,
-      toJson({ costCode: payload.costCode || payload.cost_code || null }),
+      toJson({
+        costCode: payload.costCode || payload.cost_code || null,
+        workerName: payload.workerName || payload.worker_name || null,
+        verificationReference: payload.verificationReference || payload.verification_reference || payload.reference || null,
+        source: payload.source || null,
+        entryKey: payload.entryKey || payload.entry_key || null,
+        entryFingerprint: payload.entryFingerprint || payload.entry_fingerprint || null
+      }),
       timestamp,
       timestamp
     );
@@ -5249,8 +8047,203 @@ class ContractorOperatingLedger {
     return timeLog;
   }
 
+  recordFieldDailyLog(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const workDate = normalizeText(payload.workDate || payload.work_date, nowIso().slice(0, 10));
+      const parsedWorkDate = Date.parse(`${workDate}T00:00:00.000Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(workDate) || !Number.isFinite(parsedWorkDate)
+        || new Date(parsedWorkDate).toISOString().slice(0, 10) !== workDate) {
+        const error = new Error('Daily site log work date must be a valid calendar date');
+        error.statusCode = 400;
+        error.code = 'daily_log_work_date_invalid';
+        throw error;
+      }
+
+      const hours = normalizeNumber(payload.hours, 0);
+      if (!(hours > 0 && hours <= 24)) {
+        const error = new Error('Daily site log hours must be greater than zero and no more than 24');
+        error.statusCode = 400;
+        error.code = 'daily_log_hours_invalid';
+        throw error;
+      }
+      const workCompleted = normalizeText(payload.workCompleted || payload.work_completed || payload.notes, '');
+      if (workCompleted.length < 3) {
+        const error = new Error('Daily site log completed work must contain at least three characters');
+        error.statusCode = 400;
+        error.code = 'daily_log_work_required';
+        throw error;
+      }
+
+      const manpower = Math.round(normalizeNumber(payload.manpower, 1));
+      if (!(manpower > 0 && manpower <= 500)) {
+        const error = new Error('Daily site log manpower must be between 1 and 500');
+        error.statusCode = 400;
+        error.code = 'daily_log_manpower_invalid';
+        throw error;
+      }
+
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '') || null;
+      const worker = workerId ? this.getWorker(workerId) : null;
+      if (worker?.status === 'retired') {
+        const error = new Error('Retired workers cannot submit new daily site logs');
+        error.statusCode = 409;
+        error.code = 'daily_log_worker_retired';
+        throw error;
+      }
+      const workerName = normalizeText(payload.workerName || payload.worker_name || worker?.name, 'Field worker');
+      const blockers = normalizeList(payload.blockers);
+      const safetyConcern = normalizeBoolean(payload.safetyConcern ?? payload.safety_concern, false)
+        || ['concern', 'unsafe', 'incident'].includes(normalizeStatus(payload.safetyStatus || payload.safety_status, 'clear'));
+      const safetyNotes = normalizeText(payload.safetyNotes || payload.safety_notes, '');
+      if (safetyConcern && safetyNotes.length < 5) {
+        const error = new Error('Describe the safety concern before submitting the daily site log');
+        error.statusCode = 400;
+        error.code = 'daily_log_safety_notes_required';
+        throw error;
+      }
+      const safetyRiskLevel = safetyConcern
+        ? normalizePriority(payload.safetyRiskLevel || payload.safety_risk_level || 'high')
+        : 'normal';
+      const weather = normalizeText(payload.weather, 'clear');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, makeId('daily'));
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        const error = new Error('Daily site log entry key must contain 8 to 200 safe characters');
+        error.statusCode = 400;
+        error.code = 'daily_log_entry_key_invalid';
+        throw error;
+      }
+      const entryFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+        workerId,
+        workDate,
+        hours,
+        manpower,
+        weather,
+        workCompleted,
+        blockers,
+        safetyConcern,
+        safetyRiskLevel,
+        safetyNotes
+      })).digest('hex');
+
+      const existingDetail = this.getJobDetail(jobId);
+      const existingFieldReport = existingDetail.fieldReports.find(report => report.data?.entryKey === entryKey);
+      if (existingFieldReport) {
+        if (existingFieldReport.data?.entryFingerprint !== entryFingerprint) {
+          const error = new Error('Daily site log entry key was already used for different content');
+          error.statusCode = 409;
+          error.code = 'daily_log_entry_key_reused';
+          throw error;
+        }
+        const existingTimeLog = existingDetail.timeLogs.find(log => log.data?.entryKey === entryKey);
+        const existingSafetyCheck = existingDetail.safetyChecks.find(check => check.data?.entryKey === entryKey);
+        if (!existingTimeLog || !existingSafetyCheck) {
+          const error = new Error('Daily site log replay evidence is incomplete and requires operator review');
+          error.statusCode = 409;
+          error.code = 'daily_log_replay_incomplete';
+          throw error;
+        }
+        return {
+          entryKey,
+          jobId: job.id,
+          fieldReport: existingFieldReport,
+          timeLog: existingTimeLog,
+          safetyCheck: existingSafetyCheck,
+          approvals: [existingFieldReport.approvalId, existingSafetyCheck.approvalId].filter(Boolean),
+          externalCommitments: 0,
+          replayed: true
+        };
+      }
+
+      const fieldReport = this.createFieldReport(jobId, {
+        reportDate: workDate,
+        status: 'submitted',
+        requiresApproval: true,
+        source: 'daily_site_log',
+        entryKey,
+        entryFingerprint,
+        workerId,
+        workerName,
+        weather,
+        manpower,
+        workCompleted,
+        blockers,
+        notes: safetyConcern ? `Safety concern recorded: ${safetyNotes}` : 'Daily field safety state recorded as clear.',
+        safetyStatus: safetyConcern ? 'concern' : 'clear'
+      }, { actor, audit: false });
+      const timeLog = this.addTimeLog(jobId, {
+        workerId,
+        workerName,
+        workDate,
+        hours,
+        rate: normalizeNumber(payload.rate || payload.hourlyRate || payload.hourly_rate || worker?.hourlyRate, 0),
+        billable: payload.billable !== false,
+        status: 'submitted',
+        costCode: payload.costCode || payload.cost_code || 'labor',
+        source: 'daily_site_log',
+        entryKey,
+        entryFingerprint,
+        notes: workCompleted
+      }, { actor, audit: false });
+      const safetyCheck = this.addSafetyCheck(jobId, {
+        checkType: 'daily_site_safety',
+        title: `Daily safety check: ${workDate}`,
+        status: safetyConcern ? 'pending_review' : 'recorded',
+        riskLevel: safetyRiskLevel,
+        requiresApproval: safetyConcern,
+        assignee: workerName,
+        notes: safetyConcern ? safetyNotes : 'No safety concern reported in the daily site log.',
+        hazards: safetyConcern ? normalizeList(payload.hazards || safetyNotes) : [],
+        source: 'daily_site_log',
+        entryKey,
+        entryFingerprint,
+        workDate
+      }, { actor, audit: false });
+
+      this.audit({
+        entityType: 'job',
+        entityId: jobId,
+        jobId,
+        action: 'record_field_daily_log',
+        actor,
+        after: {
+          entryKey,
+          workDate,
+          workerId,
+          workerName,
+          fieldReportId: fieldReport.id,
+          fieldReportApprovalId: fieldReport.approvalId || null,
+          timeLogId: timeLog.id,
+          safetyCheckId: safetyCheck.id,
+          safetyApprovalId: safetyCheck.approval?.id || null,
+          safetyConcern,
+          externalCommitments: 0
+        }
+      });
+
+      return {
+        entryKey,
+        jobId: job.id,
+        fieldReport,
+        timeLog,
+        safetyCheck,
+        approvals: [fieldReport.approvalId, safetyCheck.approval?.id].filter(Boolean),
+        externalCommitments: 0,
+        replayed: false
+      };
+    });
+  }
+
   addExpense(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
+    const amount = normalizeNumber(payload.amount, 0);
+    const status = normalizeStatus(payload.status, 'submitted');
+    if (!(amount > 0) && status !== 'draft') {
+      const error = new Error('Expense amount must be greater than zero');
+      error.statusCode = 400;
+      throw error;
+    }
     const id = makeId('expense');
     const timestamp = nowIso();
     this.db.prepare(`
@@ -5260,11 +8253,11 @@ class ContractorOperatingLedger {
       id,
       jobId,
       normalizeText(payload.category, 'general'),
-      normalizeNumber(payload.amount, 0),
+      amount,
       normalizeText(payload.currency, 'EUR').toUpperCase(),
       payload.vendor || null,
       payload.receiptRef || payload.receipt_ref || null,
-      normalizeStatus(payload.status, 'submitted'),
+      status,
       payload.notes || null,
       toJson({ costCode: payload.costCode || payload.cost_code || null }),
       timestamp,
@@ -5277,48 +8270,86 @@ class ContractorOperatingLedger {
     return expense;
   }
 
-  createInvoice(jobId, payload = {}, options = {}) {
+  recordJobCosts(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
-    const quote = payload.quoteId || payload.quote_id
-      ? this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(payload.quoteId || payload.quote_id, jobId)
-      : this.db.prepare("SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(jobId);
-    const amount = normalizeNumber(payload.amount, quote?.subtotal || 0);
-    const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, quote?.tax_amount || amount * 0.21);
-    const total = normalizeNumber(payload.total, quote?.total || amount + taxAmount);
-    const id = makeId('invoice');
-    const timestamp = nowIso();
-    this.db.prepare(`
-      INSERT INTO invoices (id, job_id, quote_id, status, currency, amount, tax_amount, total, due_at, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      quote?.id || null,
-      normalizeStatus(payload.status, 'draft'),
-      normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase(),
-      amount,
-      taxAmount,
-      total,
-      payload.dueAt || payload.due_at || null,
-      toJson({ peppolReady: payload.peppolReady === true, notes: payload.notes || null }),
-      timestamp,
-      timestamp
-    );
-    const approval = this.createApproval({
-      targetType: 'invoice',
-      targetId: id,
-      jobId,
-      approvalType: 'invoice_issue',
-      summary: `Approve invoice ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase()}`,
-      reason: 'Invoices and Peppol/UBL submissions require approval before issue.',
-      data: { total, quoteId: quote?.id || null }
-    }, { actor: options.actor || 'Contractor.AI', audit: false });
-    this.db.prepare('UPDATE invoices SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    const invoice = this.mapInvoice(this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'invoice', entityId: id, jobId, action: 'create_invoice', actor: options.actor || 'Contractor.AI', after: invoice });
+    const actor = options.actor || payload.actor || 'Contractor.AI';
+    const timePayload = payload.timeLog || payload.time || {};
+    const expensePayload = payload.expense || {};
+    const hasTime = normalizeNumber(timePayload.hours, 0) > 0;
+    const hasExpense = normalizeNumber(expensePayload.amount, 0) > 0;
+    if (!hasTime && !hasExpense) {
+      const error = new Error('Record at least one positive time or expense amount');
+      error.statusCode = 400;
+      throw error;
     }
-    return invoice;
+
+    return this.transaction(() => {
+      const timeLog = hasTime ? this.addTimeLog(jobId, timePayload, { actor, audit: false }) : null;
+      const expense = hasExpense ? this.addExpense(jobId, expensePayload, { actor, audit: false }) : null;
+      const result = { timeLog, expense };
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'job',
+          entityId: jobId,
+          jobId,
+          action: 'record_finance_costs',
+          actor,
+          after: {
+            timeLogId: timeLog?.id || null,
+            expenseId: expense?.id || null,
+            hours: timeLog?.hours || 0,
+            expenseAmount: expense?.amount || 0
+          }
+        });
+      }
+      return result;
+    });
+  }
+
+  createInvoice(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const quote = payload.quoteId || payload.quote_id
+        ? this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(payload.quoteId || payload.quote_id, jobId)
+        : this.db.prepare("SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(jobId);
+      const amount = normalizeNumber(payload.amount, quote?.subtotal || 0);
+      const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, quote?.tax_amount || amount * 0.21);
+      const total = normalizeNumber(payload.total, quote?.total || amount + taxAmount);
+      const id = makeId('invoice');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO invoices (id, job_id, quote_id, status, currency, amount, tax_amount, total, due_at, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        quote?.id || null,
+        normalizeStatus(payload.status, 'draft'),
+        normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase(),
+        amount,
+        taxAmount,
+        total,
+        payload.dueAt || payload.due_at || null,
+        toJson({ peppolReady: payload.peppolReady === true, notes: payload.notes || null }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'invoice',
+        targetId: id,
+        jobId,
+        approvalType: 'invoice_issue',
+        summary: `Approve invoice ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase()}`,
+        reason: 'Invoices and Peppol/UBL submissions require approval before issue.',
+        data: { total, quoteId: quote?.id || null }
+      }, { actor: options.actor || 'Contractor.AI', audit: false });
+      this.db.prepare('UPDATE invoices SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const invoice = this.mapInvoice(this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'invoice', entityId: id, jobId, action: 'create_invoice', actor: options.actor || 'Contractor.AI', after: invoice });
+      }
+      return invoice;
+    });
   }
 
   rankedLearningItems(rows = [], keySelector, valueBuilder, max = 8) {
@@ -5338,13 +8369,13 @@ class ContractorOperatingLedger {
 
   learningJobTypesNeedingRefresh(limit = 10) {
     return this.db.prepare(`
-      SELECT jobs.job_type AS job_type, COUNT(jobs.id) AS sample_count, MAX(jobs.updated_at) AS latest_job_update, profiles.updated_at AS profile_updated_at
+      SELECT jobs.job_type AS job_type, COUNT(jobs.id) AS sample_count, MAX(jobs.updated_at) AS latest_job_update, MAX(profiles.updated_at) AS profile_updated_at
       FROM jobs
       LEFT JOIN job_learning_profiles profiles ON profiles.job_type = jobs.job_type
       WHERE jobs.status IN ('completed', 'closed')
       GROUP BY jobs.job_type
-      HAVING sample_count > 0
-        AND (profile_updated_at IS NULL OR latest_job_update > profile_updated_at)
+      HAVING COUNT(jobs.id) > 0
+        AND (MAX(profiles.updated_at) IS NULL OR MAX(jobs.updated_at) > MAX(profiles.updated_at))
       ORDER BY latest_job_update DESC
       LIMIT ?
     `).all(safeLimit(limit, 10, 50));
@@ -5593,1144 +8624,1620 @@ class ContractorOperatingLedger {
   }
 
   addQualityCheck(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('quality');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'pending_review');
-    const result = normalizeStatus(payload.result, requestedStatus === 'passed' ? 'passed' : 'pending');
-    const needsApproval = payload.requiresApproval === true
-      || ['passed', 'approved'].includes(requestedStatus)
-      || ['passed', 'approved'].includes(result)
-      || normalizeNumber(payload.defectsOpen, 0) > 0;
-    const status = needsApproval && ['passed', 'approved'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-    const defects = Array.isArray(payload.defects)
-      ? payload.defects
-      : normalizeNumber(payload.defectsOpen, 0) > 0
-        ? [{ title: 'Open defect review', count: normalizeNumber(payload.defectsOpen, 0) }]
-        : [];
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('quality');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'pending_review');
+      const result = normalizeStatus(payload.result, requestedStatus === 'passed' ? 'passed' : 'pending');
+      const needsApproval = payload.requiresApproval === true
+        || ['passed', 'approved'].includes(requestedStatus)
+        || ['passed', 'approved'].includes(result)
+        || normalizeNumber(payload.defectsOpen, 0) > 0;
+      const status = needsApproval && ['passed', 'approved'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+      const defects = Array.isArray(payload.defects)
+        ? payload.defects
+        : normalizeNumber(payload.defectsOpen, 0) > 0
+          ? [{ title: 'Open defect review', count: normalizeNumber(payload.defectsOpen, 0) }]
+          : [];
 
-    this.db.prepare(`
-      INSERT INTO quality_checks (id, job_id, check_type, title, status, result, inspector, checked_at, defects_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.checkType || payload.check_type, 'final_quality'),
-      normalizeText(payload.title, 'Final quality review'),
-      status,
-      result,
-      payload.inspector || payload.owner || actor,
-      payload.checkedAt || payload.checked_at || null,
-      toJson(defects, []),
-      toJson({
-        notes: payload.notes || payload.note || null,
-        defectsOpen: normalizeNumber(payload.defectsOpen, defects.length),
-        wkbEvidence: payload.wkbEvidence === true,
-        photos: payload.photos || []
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'quality_check',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO quality_checks (id, job_id, check_type, title, status, result, inspector, checked_at, defects_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'quality_signoff',
-        summary: `Approve quality sign-off for ${normalizeText(payload.title, 'final quality review')}`,
-        reason: defects.length
-          ? 'Quality check has open defects and needs human review before client-impacting closeout.'
-          : 'Quality sign-off needs human approval before the job can be treated as accepted.',
-        data: { result, defects }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE quality_checks SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.checkType || payload.check_type, 'final_quality'),
+        normalizeText(payload.title, 'Final quality review'),
+        status,
+        result,
+        payload.inspector || payload.owner || actor,
+        payload.checkedAt || payload.checked_at || null,
+        toJson(defects, []),
+        toJson({
+          notes: payload.notes || payload.note || null,
+          defectsOpen: normalizeNumber(payload.defectsOpen, defects.length),
+          wkbEvidence: payload.wkbEvidence === true,
+          photos: payload.photos || []
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const qualityCheck = this.mapQualityCheck(this.db.prepare('SELECT * FROM quality_checks WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'quality_check', entityId: id, jobId, action: 'record_quality_check', actor, after: qualityCheck });
-    }
-    return { ...qualityCheck, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'quality_check',
+          targetId: id,
+          jobId,
+          approvalType: 'quality_signoff',
+          summary: `Approve quality sign-off for ${normalizeText(payload.title, 'final quality review')}`,
+          reason: defects.length
+            ? 'Quality check has open defects and needs human review before client-impacting closeout.'
+            : 'Quality sign-off needs human approval before the job can be treated as accepted.',
+          data: { result, defects }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE quality_checks SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const qualityCheck = this.mapQualityCheck(this.db.prepare('SELECT * FROM quality_checks WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'quality_check', entityId: id, jobId, action: 'record_quality_check', actor, after: qualityCheck });
+      }
+      return { ...qualityCheck, approval };
+    });
   }
 
   addSafetyCheck(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('safety');
-    const timestamp = nowIso();
-    const riskLevel = normalizeText(payload.riskLevel || payload.risk_level, 'normal').toLowerCase();
-    const requestedStatus = normalizeStatus(payload.status, riskLevel === 'high' ? 'pending_review' : 'open');
-    const needsApproval = payload.requiresApproval === true
-      || ['high', 'critical'].includes(riskLevel)
-      || ['approved', 'closed', 'completed'].includes(requestedStatus);
-    const status = needsApproval && ['approved', 'closed', 'completed'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO safety_checks (id, job_id, check_type, title, status, risk_level, assignee, due_at, completed_at, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.checkType || payload.check_type, 'site_safety'),
-      normalizeText(payload.title, 'Site safety check'),
-      status,
-      riskLevel,
-      payload.assignee || payload.owner || actor,
-      payload.dueAt || payload.due_at || futureIsoDate(1),
-      payload.completedAt || payload.completed_at || null,
-      toJson({
-        notes: payload.notes || payload.note || null,
-        hazards: payload.hazards || [],
-        vcaRequired: payload.vcaRequired !== false
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'safety_check',
-        targetId: id,
-        jobId,
-        approvalType: 'safety_signoff',
-        summary: `Review safety check ${normalizeText(payload.title, 'site safety check')}`,
-        reason: ['high', 'critical'].includes(riskLevel)
-          ? 'High-risk safety items require explicit human review before work continues or closes.'
-          : 'Safety sign-off needs human approval before closeout.',
-        data: { riskLevel, hazards: payload.hazards || [] }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE safety_checks SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const safetyCheck = this.mapSafetyCheck(this.db.prepare('SELECT * FROM safety_checks WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'safety_check', entityId: id, jobId, action: 'record_safety_check', actor, after: safetyCheck });
-    }
-    return { ...safetyCheck, approval };
-  }
-
-  createInspectionRecord(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('inspection');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'scheduled');
-    const result = normalizeStatus(payload.result, 'pending');
-    const defects = normalizeList(payload.defects || payload.defectList || payload.defect_list);
-    const needsApproval = payload.requiresApproval === true
-      || payload.clientVisible === true
-      || ['completed', 'passed', 'failed', 'approved', 'closed'].includes(requestedStatus)
-      || ['passed', 'failed', 'approved', 'rejected'].includes(result)
-      || defects.length > 0;
-    const status = needsApproval
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO inspection_records (id, job_id, inspection_type, title, status, result, inspector, scheduled_at, completed_at, defects_json, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.inspectionType || payload.inspection_type, 'site_inspection'),
-      normalizeText(payload.title, 'Site inspection'),
-      status,
-      result,
-      payload.inspector || payload.owner || actor,
-      payload.scheduledAt || payload.scheduled_at || null,
-      payload.completedAt || payload.completed_at || null,
-      toJson(defects, []),
-      null,
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        checklist: normalizeList(payload.checklist),
-        photos: normalizeList(payload.photos),
-        wkbEvidence: payload.wkbEvidence === true,
-        clientVisible: payload.clientVisible === true
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'inspection_record',
-        targetId: id,
-        jobId,
-        approvalType: 'inspection_signoff',
-        summary: `Approve inspection ${normalizeText(payload.title, 'site inspection')}`,
-        reason: defects.length
-          ? 'Inspection has defect evidence and needs human review before closeout or client reliance.'
-          : 'Completed or client-visible inspection evidence requires approval before it becomes an accepted record.',
-        data: { requestedStatus, result, defects }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE inspection_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const inspection = this.mapInspection(this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'inspection_record', entityId: id, jobId, action: 'record_inspection', actor, after: inspection });
-    }
-    return { ...inspection, approval };
-  }
-
-  createObservationRecord(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('observation');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'open');
-    const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'medium');
-    const needsApproval = payload.requiresApproval === true
-      || payload.clientVisible === true
-      || ['critical', 'high'].includes(severity)
-      || ['closed', 'resolved', 'approved', 'client_visible'].includes(requestedStatus);
-    const status = needsApproval && ['closed', 'resolved', 'approved', 'client_visible'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO observation_records (id, job_id, category, title, status, severity, responsible, due_at, closed_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeStatus(payload.category, 'quality'),
-      normalizeText(payload.title, 'Field observation'),
-      status,
-      severity,
-      payload.responsible || payload.owner || actor,
-      payload.dueAt || payload.due_at || futureIsoDate(2),
-      payload.closedAt || payload.closed_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        correctiveAction: payload.correctiveAction || payload.corrective_action || null,
-        photos: normalizeList(payload.photos),
-        clientVisible: payload.clientVisible === true
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'observation_record',
-        targetId: id,
-        jobId,
-        approvalType: 'observation_review',
-        summary: `Review observation ${normalizeText(payload.title, 'field observation')}`,
-        reason: ['critical', 'high'].includes(severity)
-          ? 'High-severity safety or quality observations require human review before work continues or closes.'
-          : 'Closing or exposing observations can affect client expectations and requires approval.',
-        data: { requestedStatus, severity }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE observation_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const observation = this.mapObservation(this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'observation_record', entityId: id, jobId, action: 'record_observation', actor, after: observation });
-    }
-    return { ...observation, approval };
-  }
-
-  createIncidentRecord(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('incident');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'reported');
-    const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'high');
-    const needsApproval = payload.requiresApproval === true
-      || ['critical', 'high'].includes(severity)
-      || ['closed', 'resolved', 'approved', 'reportable', 'escalated'].includes(requestedStatus);
-    const status = needsApproval && ['closed', 'resolved', 'approved', 'reportable', 'escalated'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO incident_records (id, job_id, incident_type, title, status, severity, reported_by, occurred_at, resolved_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeStatus(payload.incidentType || payload.incident_type, 'near_miss'),
-      normalizeText(payload.title, 'Safety incident'),
-      status,
-      severity,
-      payload.reportedBy || payload.reported_by || actor,
-      payload.occurredAt || payload.occurred_at || timestamp,
-      payload.resolvedAt || payload.resolved_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        description: payload.description || payload.notes || null,
-        immediateAction: payload.immediateAction || payload.immediate_action || null,
-        correctiveAction: payload.correctiveAction || payload.corrective_action || null,
-        witnesses: normalizeList(payload.witnesses),
-        photos: normalizeList(payload.photos),
-        reportable: payload.reportable === true
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'incident_record',
-        targetId: id,
-        jobId,
-        approvalType: 'incident_review',
-        summary: `Review incident ${normalizeText(payload.title, 'safety incident')}`,
-        reason: ['critical', 'high'].includes(severity)
-          ? 'High-severity incidents require explicit human review and an audit trail before work continues or closes.'
-          : 'Incident escalation or closure requires approval before the record is treated as resolved.',
-        data: { requestedStatus, severity, reportable: payload.reportable === true }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE incident_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const incident = this.mapIncident(this.db.prepare('SELECT * FROM incident_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'incident_record', entityId: id, jobId, action: 'record_incident', actor, after: incident });
-    }
-    return { ...incident, approval };
-  }
-
-  createSafetyMeeting(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('safety_talk');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'scheduled');
-    const attendees = normalizeList(payload.attendees);
-    const topics = normalizeList(payload.topics);
-    const needsApproval = payload.requiresApproval === true
-      || payload.clientVisible === true
-      || ['completed', 'approved', 'client_visible'].includes(requestedStatus);
-    const status = needsApproval && ['completed', 'approved', 'client_visible'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO safety_meetings (id, job_id, meeting_type, title, status, facilitator, scheduled_at, completed_at, attendees_json, topics_json, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeStatus(payload.meetingType || payload.meeting_type, 'toolbox_talk'),
-      normalizeText(payload.title, 'Toolbox talk'),
-      status,
-      payload.facilitator || payload.owner || actor,
-      payload.scheduledAt || payload.scheduled_at || futureIsoDate(1),
-      payload.completedAt || payload.completed_at || null,
-      toJson(attendees, []),
-      toJson(topics, []),
-      null,
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        vcaRelevant: payload.vcaRelevant !== false,
-        clientVisible: payload.clientVisible === true
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'safety_meeting',
-        targetId: id,
-        jobId,
-        approvalType: 'safety_meeting_signoff',
-        summary: `Approve safety talk ${normalizeText(payload.title, 'toolbox talk')}`,
-        reason: 'Completed safety meeting evidence can affect VCA/Wkb compliance records and requires approval before sign-off.',
-        data: { requestedStatus, attendees, topics }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE safety_meetings SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const meeting = this.mapSafetyMeeting(this.db.prepare('SELECT * FROM safety_meetings WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'safety_meeting', entityId: id, jobId, action: 'record_safety_meeting', actor, after: meeting });
-    }
-    return { ...meeting, approval };
-  }
-
-  createWorkerOrientation(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('orientation');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'scheduled');
-    const completionStatuses = ['completed', 'approved', 'cleared', 'valid'];
-    const needsApproval = normalizeBoolean(
-      payload.requiresApproval,
-      completionStatuses.includes(requestedStatus) || normalizeBoolean(payload.grantsAccess || payload.grants_access, false)
-    );
-    const status = needsApproval && completionStatuses.includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO worker_orientations (id, job_id, worker_name, company, status, language, due_at, completed_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.workerName || payload.worker_name || payload.worker, 'Crew member'),
-      normalizeText(payload.company, 'Internal crew'),
-      status,
-      normalizeText(payload.language, 'nl'),
-      payload.dueAt || payload.due_at || futureIsoDate(1),
-      payload.completedAt || payload.completed_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        topics: normalizeList(payload.topics),
-        documents: normalizeList(payload.documents),
-        notes: payload.notes || payload.note || null,
-        validUntil: payload.validUntil || payload.valid_until || null,
-        grantsAccess: normalizeBoolean(payload.grantsAccess || payload.grants_access, completionStatuses.includes(requestedStatus))
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'worker_orientation',
-        targetId: id,
-        jobId,
-        approvalType: 'worker_orientation_completion',
-        summary: `Approve orientation for ${normalizeText(payload.workerName || payload.worker_name || payload.worker, 'crew member')}`,
-        reason: 'Completed worker orientation affects site-access eligibility and VCA/Wkb evidence. Approval is required before the record can grant access.',
-        data: { requestedStatus, workerName: payload.workerName || payload.worker_name || payload.worker || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE worker_orientations SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const orientation = this.mapWorkerOrientation(this.db.prepare('SELECT * FROM worker_orientations WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'worker_orientation', entityId: id, jobId, action: 'record_worker_orientation', actor, after: orientation });
-    }
-    return { ...orientation, approval };
-  }
-
-  createJhaRecord(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('jha');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const riskLevel = normalizePriority(payload.riskLevel || payload.risk_level || payload.severity);
-    const hazards = normalizeList(payload.hazards);
-    const controls = normalizeList(payload.controls || payload.mitigations);
-    const approvalStatuses = ['approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible'];
-    const needsApproval = normalizeBoolean(
-      payload.requiresApproval,
-      approvalStatuses.includes(requestedStatus) || ['high', 'critical'].includes(riskLevel)
-    );
-    const status = needsApproval && approvalStatuses.includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO jha_records (id, job_id, title, status, risk_level, assignee, due_at, approved_at, hazards_json, controls_json, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.title, 'Job hazard analysis'),
-      status,
-      riskLevel,
-      payload.assignee || payload.owner || actor,
-      payload.dueAt || payload.due_at || futureIsoDate(1),
-      payload.approvedAt || payload.approved_at || null,
-      toJson(hazards, []),
-      toJson(controls, []),
-      null,
-      toJson({
-        requestedStatus,
-        workMethod: payload.workMethod || payload.work_method || null,
-        ppe: normalizeList(payload.ppe),
-        notes: payload.notes || payload.note || null,
-        stopWorkTriggers: normalizeList(payload.stopWorkTriggers || payload.stop_work_triggers)
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'jha_record',
-        targetId: id,
-        jobId,
-        approvalType: 'jha_approval',
-        summary: `Approve JHA ${normalizeText(payload.title, 'job hazard analysis')}`,
-        reason: ['high', 'critical'].includes(riskLevel)
-          ? 'High-risk hazard analyses require human review before field reliance.'
-          : 'Approved JHAs affect worker instructions, safety controls, and compliance records.',
-        data: { requestedStatus, riskLevel, hazards, controls }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE jha_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const jha = this.mapJha(this.db.prepare('SELECT * FROM jha_records WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'jha_record', entityId: id, jobId, action: 'record_jha', actor, after: jha });
-    }
-    return { ...jha, approval };
-  }
-
-  createSdsSheet(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('sds');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'missing');
-    const approvalStatuses = ['current', 'approved', 'accepted', 'active'];
-    const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
-    const status = needsApproval && approvalStatuses.includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
-
-    this.db.prepare(`
-      INSERT INTO sds_sheets (id, job_id, material, supplier, status, expires_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.material || payload.title || payload.name, 'Site material'),
-      payload.supplier || null,
-      status,
-      payload.expiresAt || payload.expires_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        documentRef: payload.documentRef || payload.document_ref || payload.file || null,
-        hazardClass: payload.hazardClass || payload.hazard_class || null,
-        storage: payload.storage || null,
-        notes: payload.notes || payload.note || null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'sds_sheet',
-        targetId: id,
-        jobId,
-        approvalType: 'sds_current_review',
-        summary: `Approve SDS for ${normalizeText(payload.material || payload.title || payload.name, 'site material')}`,
-        reason: 'Marking an SDS sheet current affects hazardous-material handling and site compliance. Approval is required before relying on it.',
-        data: { requestedStatus, material: payload.material || payload.title || payload.name || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE sds_sheets SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
-
-    const sdsSheet = this.mapSdsSheet(this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'sds_sheet', entityId: id, jobId, action: 'record_sds_sheet', actor, after: sdsSheet });
-    }
-    return { ...sdsSheet, approval };
-  }
-
-  createSiteAccessLog(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('site_access');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'blocked');
-    const workerName = normalizeText(payload.workerName || payload.worker_name || payload.worker, 'Crew member');
-    const orientationId = payload.orientationId || payload.orientation_id || null;
-    const orientation = orientationId
-      ? this.db.prepare('SELECT * FROM worker_orientations WHERE id = ? AND job_id = ?').get(orientationId, jobId)
-      : this.db.prepare(`
-        SELECT * FROM worker_orientations
-        WHERE job_id = ?
-          AND (LOWER(worker_name) = LOWER(?) OR ? = 'Crew member')
-        ORDER BY completed_at DESC, created_at DESC
-        LIMIT 1
-      `).get(jobId, workerName, workerName);
-    const orientationValid = normalizeBoolean(
-      payload.orientationValid || payload.orientation_valid,
-      Boolean(orientation && ['completed', 'approved', 'cleared', 'valid'].includes(orientation.status))
-    );
-    const accessStatuses = ['checked_in', 'cleared', 'approved', 'granted'];
-    const checkedOut = requestedStatus === 'checked_out';
-    const needsApproval = orientationValid && normalizeBoolean(
-      payload.requiresApproval,
-      accessStatuses.includes(requestedStatus) || normalizeBoolean(payload.grantsAccess || payload.grants_access, false)
-    );
-    const status = !orientationValid && accessStatuses.includes(requestedStatus)
-      ? 'blocked'
-      : needsApproval && accessStatuses.includes(requestedStatus)
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('safety');
+      const timestamp = nowIso();
+      const riskLevel = normalizeText(payload.riskLevel || payload.risk_level, 'normal').toLowerCase();
+      const requestedStatus = normalizeStatus(payload.status, riskLevel === 'high' ? 'pending_review' : 'open');
+      const needsApproval = payload.requiresApproval === true
+        || ['high', 'critical'].includes(riskLevel)
+        || ['approved', 'closed', 'completed'].includes(requestedStatus);
+      const status = needsApproval && ['approved', 'closed', 'completed'].includes(requestedStatus)
         ? 'pending_approval'
         : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO site_access_logs (id, job_id, orientation_id, worker_name, company, status, orientation_valid, checked_in_at, checked_out_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      orientation?.id || orientationId || null,
-      workerName,
-      normalizeText(payload.company, orientation?.company || 'Internal crew'),
-      status,
-      orientationValid ? 1 : 0,
-      payload.checkedInAt || payload.checked_in_at || (requestedStatus === 'checked_in' && !needsApproval && orientationValid ? timestamp : null),
-      payload.checkedOutAt || payload.checked_out_at || (checkedOut ? timestamp : null),
-      null,
-      toJson({
-        requestedStatus,
-        accessPoint: payload.accessPoint || payload.access_point || null,
-        location: payload.location || null,
-        blockedReason: !orientationValid ? (payload.blockedReason || payload.blocked_reason || 'Valid orientation is required before site access.') : null,
-        notes: payload.notes || payload.note || null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'site_access_log',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO safety_checks (id, job_id, check_type, title, status, risk_level, assignee, due_at, completed_at, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'site_access_clearance',
-        summary: `Approve site access for ${workerName}`,
-        reason: 'Clearing site access lets a worker enter the jobsite and depends on valid orientation evidence. Approval is required before access is relied on.',
-        data: { requestedStatus, workerName, orientationId: orientation?.id || orientationId || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE site_access_logs SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.checkType || payload.check_type, 'site_safety'),
+        normalizeText(payload.title, 'Site safety check'),
+        status,
+        riskLevel,
+        payload.assignee || payload.owner || actor,
+        payload.dueAt || payload.due_at || futureIsoDate(1),
+        payload.completedAt || payload.completed_at || null,
+        toJson({
+          notes: payload.notes || payload.note || null,
+          hazards: payload.hazards || [],
+          vcaRequired: payload.vcaRequired !== false,
+          source: payload.source || null,
+          entryKey: payload.entryKey || payload.entry_key || null,
+          entryFingerprint: payload.entryFingerprint || payload.entry_fingerprint || null,
+          workDate: payload.workDate || payload.work_date || null
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const siteAccess = this.mapSiteAccessLog(this.db.prepare('SELECT * FROM site_access_logs WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'site_access_log', entityId: id, jobId, action: 'record_site_access', actor, after: siteAccess });
-    }
-    return { ...siteAccess, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'safety_check',
+          targetId: id,
+          jobId,
+          approvalType: 'safety_signoff',
+          summary: `Review safety check ${normalizeText(payload.title, 'site safety check')}`,
+          reason: ['high', 'critical'].includes(riskLevel)
+            ? 'High-risk safety items require explicit human review before work continues or closes.'
+            : 'Safety sign-off needs human approval before closeout.',
+          data: { riskLevel, hazards: payload.hazards || [] }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE safety_checks SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const safetyCheck = this.mapSafetyCheck(this.db.prepare('SELECT * FROM safety_checks WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'safety_check', entityId: id, jobId, action: 'record_safety_check', actor, after: safetyCheck });
+      }
+      return { ...safetyCheck, approval };
+    });
+  }
+
+  createInspectionRecord(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('inspection');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'scheduled');
+      const result = normalizeStatus(payload.result, 'pending');
+      const defects = normalizeList(payload.defects || payload.defectList || payload.defect_list);
+      const needsApproval = payload.requiresApproval === true
+        || payload.clientVisible === true
+        || ['completed', 'passed', 'failed', 'approved', 'closed'].includes(requestedStatus)
+        || ['passed', 'failed', 'approved', 'rejected'].includes(result)
+        || defects.length > 0;
+      const status = needsApproval
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO inspection_records (id, job_id, inspection_type, title, status, result, inspector, scheduled_at, completed_at, defects_json, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeText(payload.inspectionType || payload.inspection_type, 'site_inspection'),
+        normalizeText(payload.title, 'Site inspection'),
+        status,
+        result,
+        payload.inspector || payload.owner || actor,
+        payload.scheduledAt || payload.scheduled_at || null,
+        payload.completedAt || payload.completed_at || null,
+        toJson(defects, []),
+        null,
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          checklist: normalizeList(payload.checklist),
+          photos: normalizeList(payload.photos),
+          wkbEvidence: payload.wkbEvidence === true,
+          clientVisible: payload.clientVisible === true
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'inspection_record',
+          targetId: id,
+          jobId,
+          approvalType: 'inspection_signoff',
+          summary: `Approve inspection ${normalizeText(payload.title, 'site inspection')}`,
+          reason: defects.length
+            ? 'Inspection has defect evidence and needs human review before closeout or client reliance.'
+            : 'Completed or client-visible inspection evidence requires approval before it becomes an accepted record.',
+          data: { requestedStatus, result, defects }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE inspection_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const inspection = this.mapInspection(this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'inspection_record', entityId: id, jobId, action: 'record_inspection', actor, after: inspection });
+      }
+      return { ...inspection, approval };
+    });
+  }
+
+  createObservationRecord(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('observation');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'open');
+      const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'medium');
+      const needsApproval = payload.requiresApproval === true
+        || payload.clientVisible === true
+        || ['critical', 'high'].includes(severity)
+        || ['closed', 'resolved', 'approved', 'client_visible'].includes(requestedStatus);
+      const status = needsApproval && ['closed', 'resolved', 'approved', 'client_visible'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO observation_records (id, job_id, category, title, status, severity, responsible, due_at, closed_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeStatus(payload.category, 'quality'),
+        normalizeText(payload.title, 'Field observation'),
+        status,
+        severity,
+        payload.responsible || payload.owner || actor,
+        payload.dueAt || payload.due_at || futureIsoDate(2),
+        payload.closedAt || payload.closed_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          correctiveAction: payload.correctiveAction || payload.corrective_action || null,
+          photos: normalizeList(payload.photos),
+          clientVisible: payload.clientVisible === true
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'observation_record',
+          targetId: id,
+          jobId,
+          approvalType: 'observation_review',
+          summary: `Review observation ${normalizeText(payload.title, 'field observation')}`,
+          reason: ['critical', 'high'].includes(severity)
+            ? 'High-severity safety or quality observations require human review before work continues or closes.'
+            : 'Closing or exposing observations can affect client expectations and requires approval.',
+          data: { requestedStatus, severity }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE observation_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const observation = this.mapObservation(this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'observation_record', entityId: id, jobId, action: 'record_observation', actor, after: observation });
+      }
+      return { ...observation, approval };
+    });
+  }
+
+  createIncidentRecord(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('incident');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'reported');
+      const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'high');
+      const needsApproval = payload.requiresApproval === true
+        || ['critical', 'high'].includes(severity)
+        || ['closed', 'resolved', 'approved', 'reportable', 'escalated'].includes(requestedStatus);
+      const status = needsApproval && ['closed', 'resolved', 'approved', 'reportable', 'escalated'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO incident_records (id, job_id, incident_type, title, status, severity, reported_by, occurred_at, resolved_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeStatus(payload.incidentType || payload.incident_type, 'near_miss'),
+        normalizeText(payload.title, 'Safety incident'),
+        status,
+        severity,
+        payload.reportedBy || payload.reported_by || actor,
+        payload.occurredAt || payload.occurred_at || timestamp,
+        payload.resolvedAt || payload.resolved_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          description: payload.description || payload.notes || null,
+          immediateAction: payload.immediateAction || payload.immediate_action || null,
+          correctiveAction: payload.correctiveAction || payload.corrective_action || null,
+          witnesses: normalizeList(payload.witnesses),
+          photos: normalizeList(payload.photos),
+          reportable: payload.reportable === true
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'incident_record',
+          targetId: id,
+          jobId,
+          approvalType: 'incident_review',
+          summary: `Review incident ${normalizeText(payload.title, 'safety incident')}`,
+          reason: ['critical', 'high'].includes(severity)
+            ? 'High-severity incidents require explicit human review and an audit trail before work continues or closes.'
+            : 'Incident escalation or closure requires approval before the record is treated as resolved.',
+          data: { requestedStatus, severity, reportable: payload.reportable === true }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE incident_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const incident = this.mapIncident(this.db.prepare('SELECT * FROM incident_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'incident_record', entityId: id, jobId, action: 'record_incident', actor, after: incident });
+      }
+      return { ...incident, approval };
+    });
+  }
+
+  createSafetyMeeting(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('safety_talk');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'scheduled');
+      const attendees = normalizeList(payload.attendees);
+      const topics = normalizeList(payload.topics);
+      const needsApproval = payload.requiresApproval === true
+        || payload.clientVisible === true
+        || ['completed', 'approved', 'client_visible'].includes(requestedStatus);
+      const status = needsApproval && ['completed', 'approved', 'client_visible'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO safety_meetings (id, job_id, meeting_type, title, status, facilitator, scheduled_at, completed_at, attendees_json, topics_json, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeStatus(payload.meetingType || payload.meeting_type, 'toolbox_talk'),
+        normalizeText(payload.title, 'Toolbox talk'),
+        status,
+        payload.facilitator || payload.owner || actor,
+        payload.scheduledAt || payload.scheduled_at || futureIsoDate(1),
+        payload.completedAt || payload.completed_at || null,
+        toJson(attendees, []),
+        toJson(topics, []),
+        null,
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          vcaRelevant: payload.vcaRelevant !== false,
+          clientVisible: payload.clientVisible === true
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'safety_meeting',
+          targetId: id,
+          jobId,
+          approvalType: 'safety_meeting_signoff',
+          summary: `Approve safety talk ${normalizeText(payload.title, 'toolbox talk')}`,
+          reason: 'Completed safety meeting evidence can affect VCA/Wkb compliance records and requires approval before sign-off.',
+          data: { requestedStatus, attendees, topics }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE safety_meetings SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const meeting = this.mapSafetyMeeting(this.db.prepare('SELECT * FROM safety_meetings WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'safety_meeting', entityId: id, jobId, action: 'record_safety_meeting', actor, after: meeting });
+      }
+      return { ...meeting, approval };
+    });
+  }
+
+  createWorkerOrientation(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('orientation');
+      const timestamp = nowIso();
+      const assignment = this.resolveCrewAssignment(jobId, payload);
+      const workerId = assignment?.workerId || payload.workerId || payload.worker_id || null;
+      const workerName = normalizeText(
+        assignment?.workerName || payload.workerName || payload.worker_name || payload.worker,
+        'Crew member'
+      );
+      const requestedStatus = normalizeStatus(payload.status, 'scheduled');
+      const completionStatuses = ['completed', 'approved', 'cleared', 'valid'];
+      const needsApproval = normalizeBoolean(
+        payload.requiresApproval,
+        completionStatuses.includes(requestedStatus) || normalizeBoolean(payload.grantsAccess || payload.grants_access, false)
+      );
+      const status = needsApproval && completionStatuses.includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO worker_orientations (id, job_id, worker_name, company, status, language, due_at, completed_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        workerName,
+        normalizeText(payload.company, 'Internal crew'),
+        status,
+        normalizeText(payload.language, 'nl'),
+        payload.dueAt || payload.due_at || futureIsoDate(1),
+        payload.completedAt || payload.completed_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          assignmentId: assignment?.id || null,
+          workerId,
+          topics: normalizeList(payload.topics),
+          documents: normalizeList(payload.documents),
+          notes: payload.notes || payload.note || null,
+          source: payload.source || null,
+          verificationReference: payload.verificationReference || payload.verification_reference || null,
+          validUntil: payload.validUntil || payload.valid_until || null,
+          grantsAccess: normalizeBoolean(payload.grantsAccess || payload.grants_access, completionStatuses.includes(requestedStatus))
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'worker_orientation',
+          targetId: id,
+          jobId,
+          approvalType: 'worker_orientation_completion',
+          summary: `Approve orientation for ${workerName}`,
+          reason: 'Completed worker orientation affects site-access eligibility and VCA/Wkb evidence. Approval is required before the record can grant access.',
+          data: { requestedStatus, workerName, workerId, assignmentId: assignment?.id || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE worker_orientations SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const orientation = this.mapWorkerOrientation(this.db.prepare('SELECT * FROM worker_orientations WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'worker_orientation', entityId: id, jobId, action: 'record_worker_orientation', actor, after: orientation });
+      }
+      return { ...orientation, approval };
+    });
+  }
+
+  createJhaRecord(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('jha');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const riskLevel = normalizePriority(payload.riskLevel || payload.risk_level || payload.severity);
+      const hazards = normalizeList(payload.hazards);
+      const controls = normalizeList(payload.controls || payload.mitigations);
+      const approvalStatuses = ['approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible'];
+      const needsApproval = normalizeBoolean(
+        payload.requiresApproval,
+        approvalStatuses.includes(requestedStatus) || ['high', 'critical'].includes(riskLevel)
+      );
+      const status = needsApproval && approvalStatuses.includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO jha_records (id, job_id, title, status, risk_level, assignee, due_at, approved_at, hazards_json, controls_json, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeText(payload.title, 'Job hazard analysis'),
+        status,
+        riskLevel,
+        payload.assignee || payload.owner || actor,
+        payload.dueAt || payload.due_at || futureIsoDate(1),
+        payload.approvedAt || payload.approved_at || null,
+        toJson(hazards, []),
+        toJson(controls, []),
+        null,
+        toJson({
+          requestedStatus,
+          workMethod: payload.workMethod || payload.work_method || null,
+          ppe: normalizeList(payload.ppe),
+          notes: payload.notes || payload.note || null,
+          stopWorkTriggers: normalizeList(payload.stopWorkTriggers || payload.stop_work_triggers)
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'jha_record',
+          targetId: id,
+          jobId,
+          approvalType: 'jha_approval',
+          summary: `Approve JHA ${normalizeText(payload.title, 'job hazard analysis')}`,
+          reason: ['high', 'critical'].includes(riskLevel)
+            ? 'High-risk hazard analyses require human review before field reliance.'
+            : 'Approved JHAs affect worker instructions, safety controls, and compliance records.',
+          data: { requestedStatus, riskLevel, hazards, controls }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE jha_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const jha = this.mapJha(this.db.prepare('SELECT * FROM jha_records WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'jha_record', entityId: id, jobId, action: 'record_jha', actor, after: jha });
+      }
+      return { ...jha, approval };
+    });
+  }
+
+  createSdsSheet(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('sds');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'missing');
+      const approvalStatuses = ['current', 'approved', 'accepted', 'active'];
+      const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
+      const status = needsApproval && approvalStatuses.includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO sds_sheets (id, job_id, material, supplier, status, expires_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeText(payload.material || payload.title || payload.name, 'Site material'),
+        payload.supplier || null,
+        status,
+        payload.expiresAt || payload.expires_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          documentRef: payload.documentRef || payload.document_ref || payload.file || null,
+          hazardClass: payload.hazardClass || payload.hazard_class || null,
+          storage: payload.storage || null,
+          notes: payload.notes || payload.note || null
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'sds_sheet',
+          targetId: id,
+          jobId,
+          approvalType: 'sds_current_review',
+          summary: `Approve SDS for ${normalizeText(payload.material || payload.title || payload.name, 'site material')}`,
+          reason: 'Marking an SDS sheet current affects hazardous-material handling and site compliance. Approval is required before relying on it.',
+          data: { requestedStatus, material: payload.material || payload.title || payload.name || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE sds_sheets SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const sdsSheet = this.mapSdsSheet(this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'sds_sheet', entityId: id, jobId, action: 'record_sds_sheet', actor, after: sdsSheet });
+      }
+      return { ...sdsSheet, approval };
+    });
+  }
+
+  prepareFieldAssurancePack(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const detail = this.getJobDetail(jobId, { includeAudit: false });
+      const retainedRecord = (records, excluded = []) => records.find(record => (
+        !excluded.includes(normalizeStatus(record.status, 'open'))
+      )) || null;
+      const scheduledAt = payload.scheduledAt || payload.scheduled_at || detail.scheduledStart || futureIsoDate(1);
+      const dueAt = payload.dueAt || payload.due_at || detail.scheduledStart || futureIsoDate(1);
+      const assignedWorker = (detail.assignments || []).find(assignment => this.activeAssignmentStatus(assignment.status));
+      const crewEvidence = this.crewEvidenceReadiness(detail);
+      const assignedCrewEvidence = crewEvidence.items.find(item => item.assignmentId === assignedWorker?.id) || crewEvidence.items[0] || null;
+
+      const existingMeeting = retainedRecord(detail.safetyMeetings || [], ['cancelled', 'canceled', 'rejected']);
+      const existingJha = retainedRecord(detail.jhas || [], ['cancelled', 'canceled', 'rejected', 'expired']);
+      const existingSds = retainedRecord(detail.sdsSheets || [], ['cancelled', 'canceled', 'rejected', 'expired']);
+      const existingOrientation = assignedCrewEvidence?.orientation
+        || (!assignedWorker ? retainedRecord(detail.orientations || [], ['cancelled', 'canceled', 'rejected', 'expired']) : null);
+
+      const safetyMeeting = existingMeeting || this.createSafetyMeeting(jobId, {
+        title: `${detail.title} pre-task safety talk`,
+        meetingType: 'pre_task_talk',
+        status: 'scheduled',
+        scheduledAt,
+        facilitator: payload.facilitator || actor,
+        topics: normalizeList(payload.topics).length
+          ? normalizeList(payload.topics)
+          : ['Scope and access', 'Task hazards and stop-work triggers', 'PPE and emergency controls'],
+        notes: 'Internal safety briefing draft. Completion and publication require retained evidence and approval where applicable.'
+      }, { actor, audit: false });
+      const jha = existingJha || this.createJhaRecord(jobId, {
+        title: `${detail.title} job hazard analysis`,
+        status: 'draft',
+        riskLevel: detail.riskLevel || 'medium',
+        dueAt,
+        assignee: payload.assignee || assignedWorker?.workerName || actor,
+        hazards: normalizeList(payload.hazards).length
+          ? normalizeList(payload.hazards)
+          : ['Site access and public interface', 'Task-specific equipment and material hazards', 'Changing field conditions'],
+        controls: normalizeList(payload.controls).length
+          ? normalizeList(payload.controls)
+          : ['Confirm controls before work starts', 'Use required PPE and isolation', 'Stop work and record changed conditions'],
+        ppe: normalizeList(payload.ppe).length
+          ? normalizeList(payload.ppe)
+          : ['Safety shoes', 'Gloves', 'Eye protection'],
+        notes: 'Internal JHA draft. It does not authorize field reliance until required approvals are resolved.'
+      }, { actor, audit: false });
+      const sdsSheet = existingSds || this.createSdsSheet(jobId, {
+        material: payload.material || `${detail.jobType || 'Job'} material register`,
+        status: 'requested',
+        supplier: payload.supplier || null,
+        notes: 'Internal SDS request placeholder. Current supplier evidence must be attached and approved before hazardous-material reliance.'
+      }, { actor, audit: false });
+      const orientation = existingOrientation || this.createWorkerOrientation(jobId, {
+        assignmentId: assignedWorker?.id || null,
+        workerId: assignedWorker?.workerId || null,
+        workerName: payload.workerName || payload.worker_name || assignedWorker?.workerName || 'Assigned crew',
+        company: payload.company || 'Internal crew',
+        status: 'scheduled',
+        dueAt,
+        language: payload.language || 'nl',
+        topics: ['Site rules', 'Emergency arrangements', 'Access restrictions', 'Task-specific controls'],
+        grantsAccess: false,
+        notes: 'Internal orientation plan. This record does not grant site access.'
+      }, { actor, audit: false });
+
+      const reused = {
+        safetyMeeting: Boolean(existingMeeting),
+        jha: Boolean(existingJha),
+        sdsSheet: Boolean(existingSds),
+        orientation: Boolean(existingOrientation)
+      };
+      this.audit({
+        entityType: 'job',
+        entityId: jobId,
+        jobId,
+        action: 'prepare_field_assurance_pack',
+        actor,
+        after: {
+          safetyMeetingId: safetyMeeting.id,
+          jhaId: jha.id,
+          sdsSheetId: sdsSheet.id,
+          orientationId: orientation.id,
+          reused,
+          externalCommitments: 0
+        },
+        metadata: { source: 'field_assurance_workspace' }
+      });
+
+      return {
+        safetyMeeting,
+        jha,
+        sdsSheet,
+        orientation,
+        reused,
+        approvalRequired: Boolean(safetyMeeting.approvalId || jha.approvalId || sdsSheet.approvalId || orientation.approvalId),
+        externalCommitments: 0,
+        job: this.getJobDetail(jobId, { includeAudit: true })
+      };
+    });
+  }
+
+  createSiteAccessLog(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('site_access');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'blocked');
+      const assignment = this.resolveCrewAssignment(jobId, payload);
+      const orientationId = payload.orientationId || payload.orientation_id || null;
+      let orientation = orientationId
+        ? this.db.prepare('SELECT * FROM worker_orientations WHERE id = ? AND job_id = ?').get(orientationId, jobId)
+        : null;
+      if (orientationId && !orientation) {
+        const error = new Error('Worker orientation not found for this job');
+        error.statusCode = 400;
+        throw error;
+      }
+      const assignmentIdentity = assignment ? {
+        assignmentId: assignment.id,
+        workerId: assignment.workerId,
+        workerName: assignment.workerName
+      } : null;
+      if (orientation && assignmentIdentity && !this.crewEvidenceIdentityMatches(orientation, assignmentIdentity)) {
+        const error = new Error('Worker orientation belongs to a different crew assignment');
+        error.statusCode = 409;
+        throw error;
+      }
+      if (!orientation) {
+        const orientationRows = this.db.prepare(`
+          SELECT * FROM worker_orientations
+          WHERE job_id = ?
+          ORDER BY completed_at DESC, created_at DESC
+        `).all(jobId);
+        orientation = assignmentIdentity
+          ? orientationRows.find(record => this.crewEvidenceIdentityMatches(record, assignmentIdentity)) || null
+          : orientationRows.find(record => (
+              normalizeText(record.worker_name, '').toLowerCase()
+              === normalizeText(payload.workerName || payload.worker_name || payload.worker, '').toLowerCase()
+            )) || null;
+      }
+      const orientationIdentity = this.crewEvidenceIdentity(orientation || {});
+      const workerId = assignment?.workerId || orientationIdentity.workerId || payload.workerId || payload.worker_id || null;
+      const assignmentId = assignment?.id || orientationIdentity.assignmentId || null;
+      const workerName = normalizeText(
+        assignment?.workerName || orientation?.worker_name || payload.workerName || payload.worker_name || payload.worker,
+        'Crew member'
+      );
+      const orientationValid = normalizeBoolean(
+        payload.orientationValid || payload.orientation_valid,
+        Boolean(orientation && ['completed', 'approved', 'cleared', 'valid'].includes(orientation.status))
+      );
+      const accessStatuses = ['checked_in', 'cleared', 'approved', 'granted'];
+      const checkedOut = requestedStatus === 'checked_out';
+      const needsApproval = orientationValid && normalizeBoolean(
+        payload.requiresApproval,
+        accessStatuses.includes(requestedStatus) || normalizeBoolean(payload.grantsAccess || payload.grants_access, false)
+      );
+      const status = !orientationValid && accessStatuses.includes(requestedStatus)
+        ? 'blocked'
+        : needsApproval && accessStatuses.includes(requestedStatus)
+          ? 'pending_approval'
+          : requestedStatus;
+
+      this.db.prepare(`
+        INSERT INTO site_access_logs (id, job_id, orientation_id, worker_name, company, status, orientation_valid, checked_in_at, checked_out_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        orientation?.id || orientationId || null,
+        workerName,
+        normalizeText(payload.company, orientation?.company || 'Internal crew'),
+        status,
+        orientationValid ? 1 : 0,
+        payload.checkedInAt || payload.checked_in_at || (requestedStatus === 'checked_in' && !needsApproval && orientationValid ? timestamp : null),
+        payload.checkedOutAt || payload.checked_out_at || (checkedOut ? timestamp : null),
+        null,
+        toJson({
+          requestedStatus,
+          assignmentId,
+          workerId,
+          accessPoint: payload.accessPoint || payload.access_point || null,
+          location: payload.location || null,
+          blockedReason: !orientationValid ? (payload.blockedReason || payload.blocked_reason || 'Valid orientation is required before site access.') : null,
+          notes: payload.notes || payload.note || null,
+          source: payload.source || null
+        }),
+        timestamp,
+        timestamp
+      );
+
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'site_access_log',
+          targetId: id,
+          jobId,
+          approvalType: 'site_access_clearance',
+          summary: `Approve site access for ${workerName}`,
+          reason: 'Clearing site access lets a worker enter the jobsite and depends on valid orientation evidence. Approval is required before access is relied on.',
+          data: {
+            requestedStatus,
+            workerName,
+            workerId,
+            assignmentId,
+            orientationId: orientation?.id || orientationId || null
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE site_access_logs SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const siteAccess = this.mapSiteAccessLog(this.db.prepare('SELECT * FROM site_access_logs WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'site_access_log', entityId: id, jobId, action: 'record_site_access', actor, after: siteAccess });
+      }
+      return { ...siteAccess, approval };
+    });
   }
 
   recordPayment(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const invoice = payload.invoiceId || payload.invoice_id
-      ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(payload.invoiceId || payload.invoice_id, jobId)
-      : this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
-    const id = makeId('payment');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, invoice?.status === 'approved' ? 'awaiting_payment' : 'awaiting_invoice_approval');
-    const needsApproval = payload.requiresApproval === true || ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus);
-    const status = needsApproval ? 'pending_confirmation' : requestedStatus;
-    const amount = normalizeNumber(payload.amount, invoice?.total || 0);
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const invoice = payload.invoiceId || payload.invoice_id
+        ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(payload.invoiceId || payload.invoice_id, jobId)
+        : this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
+      const id = makeId('payment');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, invoice?.status === 'approved' ? 'awaiting_payment' : 'awaiting_invoice_approval');
+      const needsApproval = payload.requiresApproval === true || ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus);
+      const status = needsApproval ? 'pending_confirmation' : requestedStatus;
+      const amount = normalizeNumber(payload.amount, invoice?.total || 0);
+      const reference = normalizeText(payload.reference || payload.paymentReference || payload.payment_reference, '');
+      if (!(amount > 0)) {
+        const error = new Error('Payment amount must be greater than zero');
+        error.statusCode = 400;
+        throw error;
+      }
+      if (needsApproval && !reference) {
+        const error = new Error('Payment confirmation requires a retained payment reference');
+        error.statusCode = 400;
+        throw error;
+      }
 
-    this.db.prepare(`
-      INSERT INTO payments (id, job_id, invoice_id, status, currency, amount, due_at, paid_at, method, reference, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      invoice?.id || payload.invoiceId || payload.invoice_id || null,
-      status,
-      normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase(),
-      amount,
-      payload.dueAt || payload.due_at || invoice?.due_at || futureIsoDate(14),
-      payload.paidAt || payload.paid_at || null,
-      payload.method || null,
-      payload.reference || payload.paymentReference || payload.payment_reference || null,
-      toJson({
-        notes: payload.notes || null,
-        followUpChannel: payload.followUpChannel || 'portal',
-        reminderSentAt: payload.reminderSentAt || null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'payment',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO payments (id, job_id, invoice_id, status, currency, amount, due_at, paid_at, method, reference, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'payment_confirmation',
-        summary: `Confirm payment status ${requestedStatus} for ${amount.toFixed(2)} ${normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase()}`,
-        reason: 'Payment state changes affect financial records and require human confirmation.',
-        data: { requestedStatus, amount, invoiceId: invoice?.id || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE payments SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        invoice?.id || payload.invoiceId || payload.invoice_id || null,
+        status,
+        normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase(),
+        amount,
+        payload.dueAt || payload.due_at || invoice?.due_at || futureIsoDate(14),
+        payload.paidAt || payload.paid_at || null,
+        payload.method || null,
+        reference || null,
+        toJson({
+          notes: payload.notes || null,
+          followUpChannel: payload.followUpChannel || 'portal',
+          reminderSentAt: payload.reminderSentAt || null,
+          nextFollowUpAt: payload.nextFollowUpAt || payload.next_follow_up_at || payload.dueAt || payload.due_at || invoice?.due_at || null,
+          followUpHistory: [],
+          externalDelivery: false,
+          requestedStatus
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const payment = this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'payment', entityId: id, jobId, action: 'record_payment_followup', actor, after: payment });
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'payment',
+          targetId: id,
+          jobId,
+          approvalType: 'payment_confirmation',
+          summary: `Confirm payment status ${requestedStatus} for ${amount.toFixed(2)} ${normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase()}`,
+          reason: 'Payment state changes affect financial records and require human confirmation.',
+          data: { requestedStatus, amount, invoiceId: invoice?.id || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE payments SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const payment = this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'payment', entityId: id, jobId, action: 'record_payment_followup', actor, after: payment });
+      }
+      return { ...payment, approval };
+    });
+  }
+
+  recordPaymentFollowUp(jobId, paymentId, payload = {}, options = {}) {
+    this.requireJob(jobId);
+    const actor = options.actor || payload.actor || 'Contractor.AI';
+    const requestedStatus = normalizeStatus(payload.status || payload.outcome, 'follow_up_recorded');
+    const allowedStatuses = new Set(['follow_up_recorded', 'awaiting_payment', 'disputed', 'paid', 'received', 'settled', 'written_off']);
+    if (!allowedStatuses.has(requestedStatus)) {
+      const error = new Error('Unsupported payment follow-up outcome');
+      error.statusCode = 400;
+      throw error;
     }
-    return { ...payment, approval };
+    const notes = normalizeText(payload.notes || payload.note, '');
+    if (!notes) {
+      const error = new Error('Payment follow-up notes are required');
+      error.statusCode = 400;
+      throw error;
+    }
+    const confirmation = ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus);
+    const reference = normalizeText(payload.reference || payload.paymentReference || payload.payment_reference, '');
+    if (confirmation && !reference) {
+      const error = new Error('Payment confirmation requires a retained payment reference');
+      error.statusCode = 400;
+      throw error;
+    }
+    const timestamp = nowIso();
+    const nextFollowUpAt = payload.nextFollowUpAt || payload.next_follow_up_at || payload.dueAt || payload.due_at || futureIsoDate(7);
+
+    return this.transaction(() => {
+      let row = paymentId
+        ? this.db.prepare('SELECT * FROM payments WHERE id = ? AND job_id = ?').get(paymentId, jobId)
+        : this.db.prepare(`
+          SELECT * FROM payments
+          WHERE job_id = ? AND status NOT IN ('paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void', 'written_off')
+          ORDER BY due_at ASC, created_at DESC
+          LIMIT 1
+        `).get(jobId);
+
+      if (!row) {
+        const created = this.recordPayment(jobId, {
+          invoiceId: payload.invoiceId || payload.invoice_id || null,
+          status: confirmation ? requestedStatus : 'awaiting_payment',
+          amount: payload.amount,
+          dueAt: nextFollowUpAt,
+          paidAt: payload.paidAt || payload.paid_at || null,
+          method: payload.method || null,
+          reference: reference || null,
+          notes,
+          followUpChannel: payload.followUpChannel || payload.follow_up_channel || 'internal',
+          reminderSentAt: null,
+          nextFollowUpAt
+        }, { actor, audit: false });
+        row = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(created.id);
+        const initialData = fromJson(row.data_json, {});
+        const followUpHistory = [{
+          recordedAt: timestamp,
+          actor,
+          outcome: requestedStatus,
+          notes,
+          channel: payload.followUpChannel || payload.follow_up_channel || 'internal',
+          reference: reference || null,
+          externalDelivery: false
+        }];
+        this.db.prepare('UPDATE payments SET data_json = ?, updated_at = ? WHERE id = ?')
+          .run(toJson({ ...initialData, followUpRecordedAt: timestamp, nextFollowUpAt, followUpHistory, externalDelivery: false }), timestamp, row.id);
+        const payment = this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(row.id));
+        if (options.audit !== false) {
+          this.audit({ entityType: 'payment', entityId: row.id, jobId, action: 'record_payment_followup', actor, after: payment });
+        }
+        return { ...payment, approval: created.approval || null, created: true, reused: false };
+      }
+
+      if (['paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void', 'written_off'].includes(normalizeStatus(row.status, ''))) {
+        const error = new Error('Closed payment records cannot receive another follow-up');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const pendingApproval = row.approval_id
+        ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND status = 'pending'").get(row.approval_id)
+        : null;
+      if (pendingApproval) {
+        return {
+          ...this.mapPayment(row),
+          approval: this.mapApproval(pendingApproval),
+          created: false,
+          reused: true
+        };
+      }
+
+      const data = fromJson(row.data_json, {});
+      const followUpHistory = Array.isArray(data.followUpHistory) ? data.followUpHistory.slice(-19) : [];
+      followUpHistory.push({
+        recordedAt: timestamp,
+        actor,
+        outcome: requestedStatus,
+        notes,
+        channel: payload.followUpChannel || payload.follow_up_channel || 'internal',
+        reference: reference || null,
+        externalDelivery: false
+      });
+      const nextData = {
+        ...data,
+        notes,
+        followUpChannel: payload.followUpChannel || payload.follow_up_channel || data.followUpChannel || 'internal',
+        followUpRecordedAt: timestamp,
+        nextFollowUpAt,
+        followUpHistory,
+        externalDelivery: false,
+        ...(confirmation ? { requestedStatus } : {})
+      };
+
+      let approval = null;
+      let status = requestedStatus === 'follow_up_recorded' ? row.status : requestedStatus;
+      if (confirmation) {
+        status = 'pending_confirmation';
+        approval = this.createApproval({
+          targetType: 'payment',
+          targetId: row.id,
+          jobId,
+          approvalType: 'payment_confirmation',
+          summary: `Confirm payment status ${requestedStatus} for ${normalizeNumber(row.amount, 0).toFixed(2)} ${row.currency}`,
+          reason: 'Payment state changes affect financial records and require human confirmation.',
+          data: { requestedStatus, amount: normalizeNumber(row.amount, 0), invoiceId: row.invoice_id || null, reference }
+        }, { actor, audit: false });
+      }
+
+      this.db.prepare(`
+        UPDATE payments
+        SET status = ?, due_at = ?, method = ?, reference = ?, approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(
+        status,
+        confirmation ? row.due_at : nextFollowUpAt,
+        payload.method || row.method,
+        reference || row.reference,
+        approval?.id || row.approval_id,
+        toJson(nextData),
+        timestamp,
+        row.id,
+        jobId
+      );
+
+      const payment = this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(row.id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'payment', entityId: row.id, jobId, action: confirmation ? 'request_payment_confirmation' : 'record_payment_followup', actor, before: this.mapPayment(row), after: payment });
+      }
+      return { ...payment, approval, created: false, reused: false };
+    });
   }
 
   createBudgetLine(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('budget');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const budgetAmount = normalizeNumber(payload.budgetAmount || payload.budget_amount || payload.amount, 0);
-    const committedAmount = normalizeNumber(payload.committedAmount || payload.committed_amount, 0);
-    const actualAmount = normalizeNumber(payload.actualAmount || payload.actual_amount, 0);
-    const forecastAmount = normalizeNumber(payload.forecastAmount || payload.forecast_amount, budgetAmount || committedAmount + actualAmount);
-    const overBudget = budgetAmount > 0 && forecastAmount > budgetAmount * 1.05;
-    const needsApproval = payload.requiresApproval === true
-      || ['approved', 'locked', 'baseline'].includes(requestedStatus)
-      || overBudget;
-    const status = needsApproval && ['approved', 'locked', 'baseline'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('budget');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const budgetAmount = normalizeNumber(payload.budgetAmount || payload.budget_amount || payload.amount, 0);
+      const committedAmount = normalizeNumber(payload.committedAmount || payload.committed_amount, 0);
+      const actualAmount = normalizeNumber(payload.actualAmount || payload.actual_amount, 0);
+      const forecastAmount = normalizeNumber(payload.forecastAmount || payload.forecast_amount, budgetAmount || committedAmount + actualAmount);
+      if (!(budgetAmount > 0)) {
+        const error = new Error('Budget amount must be greater than zero');
+        error.statusCode = 400;
+        throw error;
+      }
+      const overBudget = budgetAmount > 0 && forecastAmount > budgetAmount * 1.05;
+      const needsApproval = payload.requiresApproval === true
+        || ['approved', 'locked', 'baseline'].includes(requestedStatus)
+        || overBudget;
+      const status = needsApproval && ['approved', 'locked', 'baseline'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO budget_lines (id, job_id, cost_code, description, category, status, currency, budget_amount, committed_amount, actual_amount, forecast_amount, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.costCode || payload.cost_code, '00-000'),
-      normalizeText(payload.description || payload.title, 'Job budget line'),
-      normalizeStatus(payload.category, 'general'),
-      status,
-      normalizeText(payload.currency, 'EUR').toUpperCase(),
-      budgetAmount,
-      committedAmount,
-      actualAmount,
-      forecastAmount,
-      null,
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        overBudget
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'budget_line',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO budget_lines (id, job_id, cost_code, description, category, status, currency, budget_amount, committed_amount, actual_amount, forecast_amount, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'budget_control',
-        summary: `Approve budget line ${normalizeText(payload.costCode || payload.cost_code, '00-000')}`,
-        reason: overBudget
-          ? 'Forecast exceeds the approved budget tolerance and needs human review.'
-          : 'Budget baselines and locked cost controls affect finance reporting and require approval.',
-        data: { requestedStatus, budgetAmount, committedAmount, actualAmount, forecastAmount, overBudget }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE budget_lines SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.costCode || payload.cost_code, '00-000'),
+        normalizeText(payload.description || payload.title, 'Job budget line'),
+        normalizeStatus(payload.category, 'general'),
+        status,
+        normalizeText(payload.currency, 'EUR').toUpperCase(),
+        budgetAmount,
+        committedAmount,
+        actualAmount,
+        forecastAmount,
+        null,
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          overBudget
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const budgetLine = this.mapBudgetLine(this.db.prepare('SELECT * FROM budget_lines WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'budget_line', entityId: id, jobId, action: 'create_budget_line', actor, after: budgetLine });
-    }
-    return { ...budgetLine, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'budget_line',
+          targetId: id,
+          jobId,
+          approvalType: 'budget_control',
+          summary: `Approve budget line ${normalizeText(payload.costCode || payload.cost_code, '00-000')}`,
+          reason: overBudget
+            ? 'Forecast exceeds the approved budget tolerance and needs human review.'
+            : 'Budget baselines and locked cost controls affect finance reporting and require approval.',
+          data: { requestedStatus, budgetAmount, committedAmount, actualAmount, forecastAmount, overBudget }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE budget_lines SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const budgetLine = this.mapBudgetLine(this.db.prepare('SELECT * FROM budget_lines WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'budget_line', entityId: id, jobId, action: 'create_budget_line', actor, after: budgetLine });
+      }
+      return { ...budgetLine, approval };
+    });
   }
 
   createPurchaseOrder(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('po');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const items = normalizeList(payload.items || payload.lineItems || payload.line_items || payload.materials)
-      .map(item => typeof item === 'string' ? { name: item, quantity: 1, unit: 'unit' } : item);
-    const amount = normalizeNumber(payload.amount || payload.total, items.reduce((sum, item) => {
-      const quantity = normalizeNumber(item.quantity, 1);
-      const unitCost = normalizeNumber(item.unitCost || item.unit_cost || item.cost || item.amount, 0);
-      return sum + (quantity * unitCost);
-    }, 0));
-    const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
-    const approvalThreshold = normalizeNumber(payload.approvalThreshold || payload.approval_threshold, 250);
-    const commitmentStatus = ['approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued'].includes(requestedStatus);
-    const needsApproval = payload.requiresApproval === true || commitmentStatus || amount >= approvalThreshold;
-    const status = needsApproval && commitmentStatus ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('po');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const items = normalizeList(payload.items || payload.lineItems || payload.line_items || payload.materials)
+        .map(item => typeof item === 'string' ? { name: item, quantity: 1, unit: 'unit' } : item);
+      const amount = normalizeNumber(payload.amount || payload.total, items.reduce((sum, item) => {
+        const quantity = normalizeNumber(item.quantity, 1);
+        const unitCost = normalizeNumber(item.unitCost || item.unit_cost || item.cost || item.amount, 0);
+        return sum + (quantity * unitCost);
+      }, 0));
+      const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      const approvalThreshold = normalizeNumber(payload.approvalThreshold || payload.approval_threshold, 250);
+      const commitmentStatus = ['approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued'].includes(requestedStatus);
+      const needsApproval = payload.requiresApproval === true || commitmentStatus || amount >= approvalThreshold;
+      const status = needsApproval && commitmentStatus ? 'pending_approval' : requestedStatus;
+      const suppliedName = payload.supplier || payload.vendor || null;
+      const tradePartner = this.resolveTradePartnerForSpend(payload, suppliedName);
+      const supplier = tradePartner?.name || suppliedName;
+      const partnerSnapshot = this.tradePartnerComplianceSnapshot(tradePartner);
 
-    this.db.prepare(`
-      INSERT INTO purchase_orders (id, job_id, budget_line_id, supplier, status, currency, amount, required_by, approval_id, items_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      payload.budgetLineId || payload.budget_line_id || null,
-      payload.supplier || payload.vendor || null,
-      status,
-      currency,
-      amount,
-      payload.requiredBy || payload.required_by || payload.neededBy || payload.needed_by || null,
-      null,
-      toJson(items, []),
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        orderReference: payload.orderReference || payload.order_reference || null,
-        approvalThreshold,
-        procurementOrderId: payload.procurementOrderId || payload.procurement_order_id || null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'purchase_order',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO purchase_orders (id, job_id, budget_line_id, supplier, status, currency, amount, required_by, approval_id, items_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'purchase_commitment',
-        summary: `Approve purchase order ${id} for ${amount.toFixed(2)} ${currency}`,
-        reason: 'Purchase orders can commit Robert to supplier spend and require approval before ordering or sending.',
-        data: { requestedStatus, amount, currency, supplier: payload.supplier || payload.vendor || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE purchase_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        payload.budgetLineId || payload.budget_line_id || null,
+        supplier,
+        status,
+        currency,
+        amount,
+        payload.requiredBy || payload.required_by || payload.neededBy || payload.needed_by || null,
+        null,
+        toJson(items, []),
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          orderReference: payload.orderReference || payload.order_reference || null,
+          approvalThreshold,
+          procurementOrderId: payload.procurementOrderId || payload.procurement_order_id || null,
+          tradePartnerId: tradePartner?.id || null,
+          partnerComplianceRequired: true,
+          partnerComplianceSnapshot: partnerSnapshot
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const purchaseOrder = this.mapPurchaseOrder(this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'purchase_order', entityId: id, jobId, action: 'create_purchase_order', actor, after: purchaseOrder });
-    }
-    return { ...purchaseOrder, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'purchase_order',
+          targetId: id,
+          jobId,
+          approvalType: 'purchase_commitment',
+          summary: `Approve purchase order ${id} for ${amount.toFixed(2)} ${currency}`,
+          reason: 'Purchase orders can commit Robert to supplier spend and require approval before ordering or sending.',
+          data: {
+            requestedStatus,
+            amount,
+            currency,
+            supplier,
+            tradePartnerId: tradePartner?.id || null,
+            partnerCompliance: partnerSnapshot
+          }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE purchase_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const purchaseOrder = this.mapPurchaseOrder(this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'purchase_order', entityId: id, jobId, action: 'create_purchase_order', actor, after: purchaseOrder });
+      }
+      return { ...purchaseOrder, approval };
+    });
   }
 
   createDrawRequest(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const invoice = payload.invoiceId || payload.invoice_id
-      ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(payload.invoiceId || payload.invoice_id, jobId)
-      : this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
-    const id = makeId('draw');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const requestedAmount = normalizeNumber(payload.requestedAmount || payload.requested_amount || payload.amount, invoice?.total || 0);
-    const approvedAmount = normalizeNumber(payload.approvedAmount || payload.approved_amount, requestedStatus === 'approved' ? requestedAmount : 0);
-    const currency = normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase();
-    const needsApproval = payload.requiresApproval === true
-      || ['submitted', 'approved', 'approved_for_funding', 'funded', 'sent'].includes(requestedStatus)
-      || requestedAmount > 0;
-    const status = needsApproval && requestedStatus !== 'draft' ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const invoice = payload.invoiceId || payload.invoice_id
+        ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(payload.invoiceId || payload.invoice_id, jobId)
+        : this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
+      const id = makeId('draw');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const requestedAmount = normalizeNumber(payload.requestedAmount || payload.requested_amount || payload.amount, invoice?.total || 0);
+      const approvedAmount = normalizeNumber(payload.approvedAmount || payload.approved_amount, requestedStatus === 'approved' ? requestedAmount : 0);
+      const currency = normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase();
+      if (!(requestedAmount > 0)) {
+        const error = new Error('Draw request amount must be greater than zero');
+        error.statusCode = 400;
+        throw error;
+      }
+      const needsApproval = payload.requiresApproval === true
+        || ['submitted', 'approved', 'approved_for_funding', 'funded', 'sent'].includes(requestedStatus)
+        || requestedAmount > 0;
+      const status = needsApproval && requestedStatus !== 'draft' ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO draw_requests (id, job_id, invoice_id, title, status, currency, requested_amount, approved_amount, due_at, funded_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      invoice?.id || payload.invoiceId || payload.invoice_id || null,
-      normalizeText(payload.title, `Draw request for ${invoice?.id || 'job finance'}`),
-      status,
-      currency,
-      requestedAmount,
-      approvedAmount,
-      payload.dueAt || payload.due_at || futureIsoDate(7),
-      payload.fundedAt || payload.funded_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        percentComplete: normalizeNumber(payload.percentComplete || payload.percent_complete, 0),
-        retainagePercent: normalizeNumber(payload.retainagePercent || payload.retainage_percent, 0)
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'draw_request',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO draw_requests (id, job_id, invoice_id, title, status, currency, requested_amount, approved_amount, due_at, funded_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'draw_request_submission',
-        summary: `Approve draw request ${id} for ${requestedAmount.toFixed(2)} ${currency}`,
-        reason: 'Draw requests affect funding, invoicing, and client/payment expectations and require approval before submission or funding.',
-        data: { requestedStatus, requestedAmount, approvedAmount, invoiceId: invoice?.id || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE draw_requests SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        invoice?.id || payload.invoiceId || payload.invoice_id || null,
+        normalizeText(payload.title, `Draw request for ${invoice?.id || 'job finance'}`),
+        status,
+        currency,
+        requestedAmount,
+        approvedAmount,
+        payload.dueAt || payload.due_at || futureIsoDate(7),
+        payload.fundedAt || payload.funded_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          percentComplete: normalizeNumber(payload.percentComplete || payload.percent_complete, 0),
+          retainagePercent: normalizeNumber(payload.retainagePercent || payload.retainage_percent, 0)
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const drawRequest = this.mapDrawRequest(this.db.prepare('SELECT * FROM draw_requests WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'draw_request', entityId: id, jobId, action: 'create_draw_request', actor, after: drawRequest });
-    }
-    return { ...drawRequest, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'draw_request',
+          targetId: id,
+          jobId,
+          approvalType: 'draw_request_submission',
+          summary: `Approve draw request ${id} for ${requestedAmount.toFixed(2)} ${currency}`,
+          reason: 'Draw requests affect funding, invoicing, and client/payment expectations and require approval before submission or funding.',
+          data: { requestedStatus, requestedAmount, approvedAmount, invoiceId: invoice?.id || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE draw_requests SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const drawRequest = this.mapDrawRequest(this.db.prepare('SELECT * FROM draw_requests WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'draw_request', entityId: id, jobId, action: 'create_draw_request', actor, after: drawRequest });
+      }
+      return { ...drawRequest, approval };
+    });
   }
 
   createLienWaiver(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const payment = payload.paymentId || payload.payment_id
-      ? this.db.prepare('SELECT * FROM payments WHERE id = ? AND job_id = ?').get(payload.paymentId || payload.payment_id, jobId)
-      : this.db.prepare('SELECT * FROM payments WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
-    const id = makeId('waiver');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'requested');
-    const waiverType = normalizeStatus(payload.waiverType || payload.waiver_type, 'conditional');
-    const amount = normalizeNumber(payload.amount, payment?.amount || 0);
-    const currency = normalizeText(payload.currency || payment?.currency, 'EUR').toUpperCase();
-    const needsApproval = payload.requiresApproval === true
-      || waiverType === 'unconditional'
-      || ['received', 'approved', 'released', 'waived'].includes(requestedStatus);
-    const status = needsApproval && ['received', 'approved', 'released', 'waived'].includes(requestedStatus)
-      ? 'pending_approval'
-      : requestedStatus;
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const payment = payload.paymentId || payload.payment_id
+        ? this.db.prepare('SELECT * FROM payments WHERE id = ? AND job_id = ?').get(payload.paymentId || payload.payment_id, jobId)
+        : this.db.prepare('SELECT * FROM payments WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
+      const id = makeId('waiver');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'requested');
+      const waiverType = normalizeStatus(payload.waiverType || payload.waiver_type, 'conditional');
+      const amount = normalizeNumber(payload.amount, payment?.amount || 0);
+      const currency = normalizeText(payload.currency || payment?.currency, 'EUR').toUpperCase();
+      const documentRef = normalizeText(payload.documentRef || payload.document_ref, '');
+      if (!(amount > 0)) {
+        const error = new Error('Lien waiver amount must be greater than zero');
+        error.statusCode = 400;
+        throw error;
+      }
+      if (['received', 'approved', 'released', 'waived'].includes(requestedStatus) && !documentRef) {
+        const error = new Error('Lien waiver evidence reference is required for received or released status');
+        error.statusCode = 400;
+        throw error;
+      }
+      const needsApproval = payload.requiresApproval === true
+        || waiverType === 'unconditional'
+        || ['received', 'approved', 'released', 'waived'].includes(requestedStatus);
+      const status = needsApproval && ['received', 'approved', 'released', 'waived'].includes(requestedStatus)
+        ? 'pending_approval'
+        : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO lien_waivers (id, job_id, payment_id, supplier, waiver_type, status, currency, amount, due_at, received_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      payment?.id || payload.paymentId || payload.payment_id || null,
-      payload.supplier || payload.vendor || fromJson(payment?.data_json, {}).vendor || null,
-      waiverType,
-      status,
-      currency,
-      amount,
-      payload.dueAt || payload.due_at || payment?.due_at || futureIsoDate(7),
-      payload.receivedAt || payload.received_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        documentRef: payload.documentRef || payload.document_ref || null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'lien_waiver',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO lien_waivers (id, job_id, payment_id, supplier, waiver_type, status, currency, amount, due_at, received_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'lien_waiver_release',
-        summary: `Approve lien waiver ${id}`,
-        reason: 'Lien waivers and payment-release evidence affect financial risk and require human review before release or acceptance.',
-        data: { requestedStatus, waiverType, amount, paymentId: payment?.id || null }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE lien_waivers SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        payment?.id || payload.paymentId || payload.payment_id || null,
+        payload.supplier || payload.vendor || fromJson(payment?.data_json, {}).vendor || null,
+        waiverType,
+        status,
+        currency,
+        amount,
+        payload.dueAt || payload.due_at || payment?.due_at || futureIsoDate(7),
+        payload.receivedAt || payload.received_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          documentRef: documentRef || null
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const lienWaiver = this.mapLienWaiver(this.db.prepare('SELECT * FROM lien_waivers WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'lien_waiver', entityId: id, jobId, action: 'create_lien_waiver', actor, after: lienWaiver });
-    }
-    return { ...lienWaiver, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'lien_waiver',
+          targetId: id,
+          jobId,
+          approvalType: 'lien_waiver_release',
+          summary: `Approve lien waiver ${id}`,
+          reason: 'Lien waivers and payment-release evidence affect financial risk and require human review before release or acceptance.',
+          data: { requestedStatus, waiverType, amount, paymentId: payment?.id || null }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE lien_waivers SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const lienWaiver = this.mapLienWaiver(this.db.prepare('SELECT * FROM lien_waivers WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'lien_waiver', entityId: id, jobId, action: 'create_lien_waiver', actor, after: lienWaiver });
+      }
+      return { ...lienWaiver, approval };
+    });
   }
 
   createFinanceHandoff(jobId, payload = {}, options = {}) {
-    const detail = this.getJobDetail(jobId, { includeAudit: false });
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('handoff');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'draft');
-    const packageType = normalizeStatus(payload.packageType || payload.package_type, 'job_finance');
-    const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
-    const amount = normalizeNumber(payload.amount, [
-      ...(detail.invoices || []),
-      ...(detail.payments || []),
-      ...(detail.purchaseOrders || [])
-    ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0));
-    const payloadPackage = {
-      job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
-      budgetLines: detail.budgetLines || [],
-      purchaseOrders: detail.purchaseOrders || [],
-      expenses: detail.expenses || [],
-      invoices: detail.invoices || [],
-      payments: detail.payments || [],
-      drawRequests: detail.drawRequests || [],
-      lienWaivers: detail.lienWaivers || []
-    };
-    const needsApproval = payload.requiresApproval === true
-      || ['ready', 'approved', 'submitted', 'sent', 'exported'].includes(requestedStatus)
-      || payload.submit === true;
-    const status = needsApproval && requestedStatus !== 'draft' ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const detail = this.getJobDetail(jobId, { includeAudit: false });
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('handoff');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+      const packageType = normalizeStatus(payload.packageType || payload.package_type, 'job_finance');
+      const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      const amount = normalizeNumber(payload.amount, [
+        ...(detail.invoices || []),
+        ...(detail.payments || []),
+        ...(detail.purchaseOrders || [])
+      ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0));
+      const payloadPackage = {
+        job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
+        budgetLines: detail.budgetLines || [],
+        purchaseOrders: detail.purchaseOrders || [],
+        expenses: detail.expenses || [],
+        invoices: detail.invoices || [],
+        payments: detail.payments || [],
+        drawRequests: detail.drawRequests || [],
+        lienWaivers: detail.lienWaivers || []
+      };
+      const needsApproval = payload.requiresApproval === true
+        || ['ready', 'approved', 'submitted', 'sent', 'exported'].includes(requestedStatus)
+        || payload.submit === true;
+      const status = needsApproval && requestedStatus !== 'draft' ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO finance_handoffs (id, job_id, target_system, package_type, status, currency, amount, approval_id, payload_json, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.targetSystem || payload.target_system, 'FAB'),
-      packageType,
-      status,
-      currency,
-      amount,
-      null,
-      toJson(payload.package || payloadPackage),
-      toJson({
-        requestedStatus,
-        notes: payload.notes || payload.note || null,
-        exportFormat: payload.exportFormat || payload.export_format || 'json'
-      }),
-      timestamp,
-      timestamp
-    );
+      this.db.prepare(`
+        INSERT INTO finance_handoffs (id, job_id, target_system, package_type, status, currency, amount, approval_id, payload_json, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        normalizeText(payload.targetSystem || payload.target_system, 'FAB'),
+        packageType,
+        status,
+        currency,
+        amount,
+        null,
+        toJson(payload.package || payloadPackage),
+        toJson({
+          requestedStatus,
+          notes: payload.notes || payload.note || null,
+          exportFormat: payload.exportFormat || payload.export_format || 'json'
+        }),
+        timestamp,
+        timestamp
+      );
 
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'finance_handoff',
+          targetId: id,
+          jobId,
+          approvalType: 'finance_handoff',
+          summary: `Approve finance handoff ${id} to ${normalizeText(payload.targetSystem || payload.target_system, 'FAB')}`,
+          reason: 'Finance handoff packages can expose client/job financial data and require approval before export or submission.',
+          data: { requestedStatus, amount, packageType }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE finance_handoffs SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const handoff = this.mapFinanceHandoff(this.db.prepare('SELECT * FROM finance_handoffs WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'finance_handoff', entityId: id, jobId, action: 'create_finance_handoff', actor, after: handoff });
+      }
+      return { ...handoff, approval };
+    });
+  }
+
+  prepareFinanceHandoff(jobId, payload = {}, options = {}) {
+    this.requireJob(jobId);
+    const actor = options.actor || payload.actor || 'Contractor.AI';
+
+    return this.transaction(() => {
+      const existing = this.db.prepare(`
+        SELECT * FROM finance_handoffs
+        WHERE job_id = ? AND status IN ('draft', 'ready', 'pending_approval')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(jobId);
+
+      if (!existing) {
+        const created = this.createFinanceHandoff(jobId, {
+          ...payload,
+          status: 'approved',
+          requiresApproval: true
+        }, { actor, audit: false });
+        if (options.audit !== false) {
+          this.audit({ entityType: 'finance_handoff', entityId: created.id, jobId, action: 'prepare_finance_handoff', actor, after: created });
+        }
+        return { ...created, created: true, reused: false };
+      }
+
+      const pendingApproval = existing.approval_id
+        ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND status = 'pending'").get(existing.approval_id)
+        : null;
+      if (pendingApproval) {
+        return {
+          ...this.mapFinanceHandoff(existing),
+          approval: this.mapApproval(pendingApproval),
+          created: false,
+          reused: true
+        };
+      }
+
+      const detail = this.getJobDetail(jobId, { includeAudit: false });
+      const timestamp = nowIso();
+      const targetSystem = normalizeText(payload.targetSystem || payload.target_system, existing.target_system || 'FAB');
+      const packageType = normalizeStatus(payload.packageType || payload.package_type, existing.package_type || 'job_finance');
+      const exportFormat = payload.exportFormat || payload.export_format || fromJson(existing.data_json, {}).exportFormat || 'json';
+      const packagePayload = {
+        job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
+        budgetLines: detail.budgetLines || [],
+        purchaseOrders: detail.purchaseOrders || [],
+        expenses: detail.expenses || [],
+        invoices: detail.invoices || [],
+        payments: detail.payments || [],
+        drawRequests: detail.drawRequests || [],
+        lienWaivers: detail.lienWaivers || []
+      };
+      const amount = [
+        ...packagePayload.invoices,
+        ...packagePayload.payments,
+        ...packagePayload.purchaseOrders
+      ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0);
+      const approval = this.createApproval({
         targetType: 'finance_handoff',
-        targetId: id,
+        targetId: existing.id,
         jobId,
         approvalType: 'finance_handoff',
-        summary: `Approve finance handoff ${id} to ${normalizeText(payload.targetSystem || payload.target_system, 'FAB')}`,
+        summary: `Approve finance handoff ${existing.id} to ${targetSystem}`,
         reason: 'Finance handoff packages can expose client/job financial data and require approval before export or submission.',
-        data: { requestedStatus, amount, packageType }
+        data: { requestedStatus: 'approved', amount, packageType }
       }, { actor, audit: false });
-      this.db.prepare('UPDATE finance_handoffs SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+      const data = {
+        ...fromJson(existing.data_json, {}),
+        requestedStatus: 'approved',
+        notes: payload.notes || payload.note || fromJson(existing.data_json, {}).notes || null,
+        exportFormat,
+        externalDelivery: false
+      };
+      this.db.prepare(`
+        UPDATE finance_handoffs
+        SET target_system = ?, package_type = ?, status = 'pending_approval', amount = ?, approval_id = ?, payload_json = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(targetSystem, packageType, amount, approval.id, toJson(packagePayload), toJson(data), timestamp, existing.id, jobId);
 
-    const handoff = this.mapFinanceHandoff(this.db.prepare('SELECT * FROM finance_handoffs WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'finance_handoff', entityId: id, jobId, action: 'create_finance_handoff', actor, after: handoff });
-    }
-    return { ...handoff, approval };
+      const handoff = this.mapFinanceHandoff(this.db.prepare('SELECT * FROM finance_handoffs WHERE id = ?').get(existing.id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'finance_handoff', entityId: existing.id, jobId, action: 'prepare_finance_handoff', actor, before: this.mapFinanceHandoff(existing), after: handoff });
+      }
+      return { ...handoff, approval, created: false, reused: false };
+    });
   }
 
   createPunchItem(jobId, payload = {}, options = {}) {
-    this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('punch');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'open');
-    const severity = normalizePriority(payload.severity || payload.priority);
-    const approvalStatuses = ['closed', 'resolved', 'accepted', 'verified', 'client_visible'];
-    const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
-    const status = needsApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('punch');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'open');
+      const severity = normalizePriority(payload.severity || payload.priority);
+      const approvalStatuses = ['closed', 'resolved', 'accepted', 'verified', 'client_visible'];
+      const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
+      const status = needsApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO punch_items (id, job_id, title, status, severity, assignee, due_at, closed_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.title, 'Punch item'),
-      status,
-      severity,
-      payload.assignee || payload.owner || actor,
-      payload.dueAt || payload.due_at || futureIsoDate(3),
-      payload.closedAt || payload.closed_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        description: payload.description || payload.notes || null,
-        location: payload.location || null,
-        photos: normalizeList(payload.photos),
-        clientVisible: normalizeBoolean(payload.clientVisible, false)
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'punch_item',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO punch_items (id, job_id, title, status, severity, assignee, due_at, closed_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'punch_item_closeout',
-        summary: `Approve punch item ${normalizeText(payload.title, 'closeout')}`,
-        reason: 'Closing or client-publishing punch items can affect final acceptance and requires human review.',
-        data: { requestedStatus, severity }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE punch_items SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.title, 'Punch item'),
+        status,
+        severity,
+        payload.assignee || payload.owner || actor,
+        payload.dueAt || payload.due_at || futureIsoDate(3),
+        payload.closedAt || payload.closed_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          description: payload.description || payload.notes || null,
+          location: payload.location || null,
+          photos: normalizeList(payload.photos),
+          clientVisible: normalizeBoolean(payload.clientVisible, false)
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const punchItem = this.mapPunchItem(this.db.prepare('SELECT * FROM punch_items WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'punch_item', entityId: id, jobId, action: 'create_punch_item', actor, after: punchItem });
-    }
-    return { ...punchItem, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'punch_item',
+          targetId: id,
+          jobId,
+          approvalType: 'punch_item_closeout',
+          summary: `Approve punch item ${normalizeText(payload.title, 'closeout')}`,
+          reason: 'Closing or client-publishing punch items can affect final acceptance and requires human review.',
+          data: { requestedStatus, severity }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE punch_items SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const punchItem = this.mapPunchItem(this.db.prepare('SELECT * FROM punch_items WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'punch_item', entityId: id, jobId, action: 'create_punch_item', actor, after: punchItem });
+      }
+      return { ...punchItem, approval };
+    });
   }
 
   createWarrantyClaim(jobId, payload = {}, options = {}) {
-    const job = this.requireJob(jobId);
-    const actor = options.actor || 'Contractor.AI';
-    const id = makeId('warranty');
-    const timestamp = nowIso();
-    const requestedStatus = normalizeStatus(payload.status, 'open');
-    const severity = normalizePriority(payload.severity || payload.priority);
-    const approvalStatuses = ['closed', 'resolved', 'accepted', 'rejected', 'client_visible'];
-    const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
-    const status = needsApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const id = makeId('warranty');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'open');
+      const severity = normalizePriority(payload.severity || payload.priority);
+      const approvalStatuses = ['closed', 'resolved', 'accepted', 'rejected', 'client_visible'];
+      const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
+      const status = needsApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
-    this.db.prepare(`
-      INSERT INTO warranty_claims (id, job_id, title, status, client_name, severity, due_at, resolved_at, approval_id, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      jobId,
-      normalizeText(payload.title, 'Warranty claim'),
-      status,
-      payload.clientName || payload.client_name || job.client_name || null,
-      severity,
-      payload.dueAt || payload.due_at || futureIsoDate(7),
-      payload.resolvedAt || payload.resolved_at || null,
-      null,
-      toJson({
-        requestedStatus,
-        issue: payload.issue || payload.description || payload.notes || null,
-        resolution: payload.resolution || null,
-        photos: normalizeList(payload.photos),
-        warrantyType: payload.warrantyType || payload.warranty_type || 'workmanship',
-        source: payload.source || null
-      }),
-      timestamp,
-      timestamp
-    );
-
-    let approval = null;
-    if (needsApproval) {
-      approval = this.createApproval({
-        targetType: 'warranty_claim',
-        targetId: id,
+      this.db.prepare(`
+        INSERT INTO warranty_claims (id, job_id, title, status, client_name, severity, due_at, resolved_at, approval_id, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
         jobId,
-        approvalType: 'warranty_claim_resolution',
-        summary: `Approve warranty claim ${normalizeText(payload.title, 'resolution')}`,
-        reason: 'Warranty claim resolution can affect service obligations, client expectations, and aftercare records. Approval is required before closure or rejection.',
-        data: { requestedStatus, severity, warrantyType: payload.warrantyType || payload.warranty_type || 'workmanship' }
-      }, { actor, audit: false });
-      this.db.prepare('UPDATE warranty_claims SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-    }
+        normalizeText(payload.title, 'Warranty claim'),
+        status,
+        payload.clientName || payload.client_name || job.client_name || null,
+        severity,
+        payload.dueAt || payload.due_at || futureIsoDate(7),
+        payload.resolvedAt || payload.resolved_at || null,
+        null,
+        toJson({
+          requestedStatus,
+          issue: payload.issue || payload.description || payload.notes || null,
+          resolution: payload.resolution || null,
+          photos: normalizeList(payload.photos),
+          warrantyType: payload.warrantyType || payload.warranty_type || 'workmanship',
+          source: payload.source || null
+        }),
+        timestamp,
+        timestamp
+      );
 
-    const warrantyClaim = this.mapWarrantyClaim(this.db.prepare('SELECT * FROM warranty_claims WHERE id = ?').get(id));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'warranty_claim', entityId: id, jobId, action: 'create_warranty_claim', actor, after: warrantyClaim });
-    }
-    return { ...warrantyClaim, approval };
+      let approval = null;
+      if (needsApproval) {
+        approval = this.createApproval({
+          targetType: 'warranty_claim',
+          targetId: id,
+          jobId,
+          approvalType: 'warranty_claim_resolution',
+          summary: `Approve warranty claim ${normalizeText(payload.title, 'resolution')}`,
+          reason: 'Warranty claim resolution can affect service obligations, client expectations, and aftercare records. Approval is required before closure or rejection.',
+          data: { requestedStatus, severity, warrantyType: payload.warrantyType || payload.warranty_type || 'workmanship' }
+        }, { actor, audit: false });
+        this.db.prepare('UPDATE warranty_claims SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      }
+
+      const warrantyClaim = this.mapWarrantyClaim(this.db.prepare('SELECT * FROM warranty_claims WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'warranty_claim', entityId: id, jobId, action: 'create_warranty_claim', actor, after: warrantyClaim });
+      }
+      return { ...warrantyClaim, approval };
+    });
   }
 
   addAftercareItem(jobId, payload = {}, options = {}) {
@@ -6771,6 +10278,543 @@ class ContractorOperatingLedger {
     const actor = options.actor || 'Contractor.AI';
     const normalizedType = normalizeStatus(recordType, '');
     const config = {
+      task: {
+        table: 'job_tasks',
+        targetType: null,
+        entityType: 'task',
+        map: row => this.mapTask(row),
+        label: 'task',
+        allowedStatuses: new Set(['open', 'in_progress', 'blocked', 'completed', 'cancelled']),
+        approvalStatuses: new Set(),
+        terminalStatuses: new Set(['completed', 'cancelled']),
+        validate(row, requestedStatus) {
+          if (['blocked', 'completed', 'cancelled'].includes(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error(`Task ${requestedStatus} evidence is required`);
+            error.statusCode = 400;
+            error.code = 'task_transition_evidence_required';
+            throw error;
+          }
+        },
+        update(row, next) {
+          const completed = next.data.requestedStatus === 'completed';
+          return {
+            status: next.status,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            description: payload.description !== undefined ? normalizeText(payload.description, '') || null : row.description,
+            priority: normalizePriority(payload.priority || row.priority),
+            assigneeId: payload.assigneeId !== undefined || payload.assignee_id !== undefined
+              ? (payload.assigneeId || payload.assignee_id || null)
+              : row.assignee_id,
+            dueAt: payload.dueAt !== undefined || payload.due_at !== undefined
+              ? (payload.dueAt || payload.due_at || null)
+              : row.due_at,
+            completedAt: completed ? next.closedAt : null
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE job_tasks
+            SET title = ?, description = ?, status = ?, priority = ?, assignee_id = ?, due_at = ?, completed_at = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(
+            values.title,
+            values.description,
+            values.status,
+            values.priority,
+            values.assigneeId,
+            values.dueAt,
+            values.completedAt,
+            toJson(values.data),
+            timestamp,
+            recordId,
+            jobId
+          );
+        }
+      },
+      rfi: {
+        table: 'rfi_records',
+        targetType: 'rfi_record',
+        map: row => this.mapRfi(row),
+        label: 'RFI',
+        allowedStatuses: new Set(['open', 'in_progress', 'answered', 'resolved', 'closed']),
+        approvalStatuses: new Set(['answered', 'resolved', 'closed']),
+        terminalStatuses: new Set(['answered', 'resolved', 'closed']),
+        validate(row, requestedStatus) {
+          const response = payload.response || payload.answer || payload.resolution || payload.notes || payload.note || row.response;
+          if (this.terminalStatuses.has(requestedStatus) && !normalizeText(response, '')) {
+            const error = new Error('RFI response evidence is required before resolution');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            response: payload.response || payload.answer || payload.resolution || payload.notes || payload.note || row.response,
+            responsible: payload.responsible || payload.owner || payload.assignee || row.responsible,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            answeredAt: next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE rfi_records
+            SET title = ?, status = ?, response = ?, responsible = ?, due_at = ?, answered_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.response, values.responsible, values.dueAt, values.answeredAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      submittal: {
+        table: 'submittal_records',
+        targetType: 'submittal_record',
+        map: row => this.mapSubmittal(row),
+        label: 'submittal',
+        allowedStatuses: new Set(['draft', 'submitted', 'pending_review', 'revise_resubmit', 'approved', 'rejected', 'closed']),
+        approvalStatuses: new Set(['approved', 'rejected', 'closed']),
+        terminalStatuses: new Set(['approved', 'rejected', 'closed']),
+        update(row, next) {
+          const requestedStatus = next.data.requestedStatus;
+          const submittedStatuses = new Set(['submitted', 'pending_review', 'revise_resubmit', 'approved', 'rejected', 'closed']);
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            packageName: payload.packageName || payload.package_name || row.package_name,
+            responsible: payload.responsible || payload.owner || payload.assignee || row.responsible,
+            reviewer: payload.reviewer || row.reviewer,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            submittedAt: payload.submittedAt || payload.submitted_at || row.submitted_at || (submittedStatuses.has(requestedStatus) ? next.closedAt : null),
+            approvedAt: payload.approvedAt || payload.approved_at || row.approved_at || (['approved', 'closed'].includes(requestedStatus) ? next.closedAt : null),
+            attachments: payload.attachments || payload.documents || payload.files
+              ? normalizeList(payload.attachments || payload.documents || payload.files)
+              : fromJson(row.attachments_json, [])
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE submittal_records
+            SET title = ?, package_name = ?, status = ?, responsible = ?, reviewer = ?, due_at = ?, submitted_at = ?, approved_at = ?, approval_id = ?, attachments_json = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.packageName, values.status, values.responsible, values.reviewer, values.dueAt, values.submittedAt, values.approvedAt, values.approvalId, toJson(values.attachments, []), toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      document: {
+        table: 'documents',
+        targetType: 'document',
+        map: row => this.mapDocument(row),
+        label: 'document review',
+        allowedStatuses: new Set(['stored', 'draft', 'needs_review', 'needs_update', 'approved', 'rejected', 'expired', 'archived']),
+        approvalStatuses: new Set(['approved']),
+        terminalStatuses: new Set(['approved', 'rejected', 'archived']),
+        validate(row, requestedStatus) {
+          if (requestedStatus !== 'approved') return;
+          const reference = payload.verificationReference || payload.verification_reference || payload.reference;
+          if (!normalizeText(reference, '') || !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Document review reference and evidence are required before approval');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          const existingData = fromJson(row.data_json, {});
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: {
+              ...next.data,
+              tags: normalizeList(existingData.tags),
+              analysis: existingData.analysis || null,
+              verificationReference: payload.verificationReference || payload.verification_reference || payload.reference || existingData.verificationReference || null,
+              reviewedBy: payload.reviewedBy || payload.reviewed_by || actor
+            },
+            type: normalizeStatus(payload.documentType || payload.document_type, row.type),
+            title: normalizeText(payload.title, row.title)
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE documents
+            SET type = ?, title = ?, status = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.type, values.title, values.status, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      permit: {
+        table: 'permit_records',
+        targetType: 'permit_record',
+        map: row => this.mapPermit(row),
+        label: 'permit',
+        allowedStatuses: new Set(['draft', 'pending', 'needs_renewal', 'submitted', 'active', 'approved', 'expired', 'closed']),
+        approvalStatuses: new Set(['submitted', 'active', 'approved']),
+        terminalStatuses: new Set(['active', 'approved', 'expired', 'closed']),
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            permitType: normalizeStatus(payload.permitType || payload.permit_type, row.permit_type),
+            title: normalizeText(payload.title, row.title),
+            holder: payload.holder || payload.owner || row.holder,
+            location: payload.location || row.location,
+            issuedAt: payload.issuedAt || payload.issued_at || row.issued_at || (['submitted', 'active', 'approved'].includes(next.data.requestedStatus) ? next.closedAt : null),
+            expiresAt: payload.expiresAt || payload.expires_at || payload.expiry || row.expires_at
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE permit_records
+            SET permit_type = ?, title = ?, status = ?, holder = ?, location = ?, issued_at = ?, expires_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.permitType, values.title, values.status, values.holder, values.location, values.issuedAt, values.expiresAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      inspection: {
+        table: 'inspection_records',
+        targetType: 'inspection_record',
+        map: row => this.mapInspection(row),
+        label: 'inspection',
+        allowedStatuses: new Set(['scheduled', 'in_progress', 'pending_review', 'failed', 'passed', 'completed', 'closed']),
+        approvalStatuses: new Set(['failed', 'passed', 'completed', 'closed']),
+        terminalStatuses: new Set(['failed', 'passed', 'completed', 'closed']),
+        update(row, next) {
+          const requestedStatus = next.data.requestedStatus;
+          const result = payload.result || (requestedStatus === 'passed' ? 'passed' : requestedStatus === 'failed' ? 'failed' : row.result);
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            inspectionType: normalizeStatus(payload.inspectionType || payload.inspection_type, row.inspection_type),
+            title: normalizeText(payload.title, row.title),
+            result: normalizeStatus(result, 'pending'),
+            inspector: payload.inspector || payload.owner || row.inspector,
+            scheduledAt: payload.scheduledAt || payload.scheduled_at || row.scheduled_at,
+            completedAt: payload.completedAt || payload.completed_at || row.completed_at || next.closedAt,
+            defects: payload.defects || payload.defectList || payload.defect_list
+              ? normalizeList(payload.defects || payload.defectList || payload.defect_list)
+              : fromJson(row.defects_json, [])
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE inspection_records
+            SET inspection_type = ?, title = ?, status = ?, result = ?, inspector = ?, scheduled_at = ?, completed_at = ?, defects_json = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.inspectionType, values.title, values.status, values.result, values.inspector, values.scheduledAt, values.completedAt, toJson(values.defects, []), values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      safety_meeting: {
+        table: 'safety_meetings',
+        targetType: 'safety_meeting',
+        map: row => this.mapSafetyMeeting(row),
+        label: 'safety meeting',
+        allowedStatuses: new Set(['scheduled', 'in_progress', 'completed', 'approved', 'client_visible', 'cancelled']),
+        approvalStatuses: new Set(['completed', 'approved', 'client_visible']),
+        terminalStatuses: new Set(['completed', 'approved', 'client_visible', 'cancelled']),
+        validate(row, requestedStatus) {
+          if (this.approvalStatuses.has(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Safety meeting evidence is required before sign-off');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            meetingType: normalizeStatus(payload.meetingType || payload.meeting_type, row.meeting_type),
+            title: normalizeText(payload.title, row.title),
+            facilitator: payload.facilitator || payload.owner || row.facilitator,
+            scheduledAt: payload.scheduledAt || payload.scheduled_at || row.scheduled_at,
+            completedAt: payload.completedAt || payload.completed_at || row.completed_at || next.closedAt,
+            attendees: payload.attendees ? normalizeList(payload.attendees) : fromJson(row.attendees_json, []),
+            topics: payload.topics ? normalizeList(payload.topics) : fromJson(row.topics_json, [])
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE safety_meetings
+            SET meeting_type = ?, title = ?, status = ?, facilitator = ?, scheduled_at = ?, completed_at = ?, attendees_json = ?, topics_json = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.meetingType, values.title, values.status, values.facilitator, values.scheduledAt, values.completedAt, toJson(values.attendees, []), toJson(values.topics, []), values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      worker_instruction: {
+        table: 'worker_instructions',
+        targetType: 'worker_instruction',
+        map: row => this.mapWorkerInstruction(row),
+        label: 'worker instruction',
+        allowedStatuses: new Set(['draft', 'in_review', 'published', 'approved', 'sent', 'dispatched', 'cancelled', 'rejected']),
+        approvalStatuses: new Set(['published', 'approved', 'sent', 'dispatched']),
+        terminalStatuses: new Set(['published', 'approved', 'sent', 'dispatched', 'cancelled', 'rejected']),
+        validate(row, requestedStatus) {
+          if (this.approvalStatuses.has(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Worker instruction review evidence is required before publication approval');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: {
+              ...next.data,
+              reviewedBy: payload.reviewedBy || payload.reviewed_by || actor,
+              deliveryConfirmed: false
+            },
+            title: normalizeText(payload.title, row.title),
+            body: payload.body !== undefined ? normalizeText(payload.body, '') : row.body
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE worker_instructions
+            SET title = ?, body = ?, status = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.body, values.status, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      orientation: {
+        table: 'worker_orientations',
+        targetType: 'worker_orientation',
+        map: row => this.mapWorkerOrientation(row),
+        label: 'worker orientation',
+        allowedStatuses: new Set(['scheduled', 'in_progress', 'completed', 'approved', 'cleared', 'valid', 'expired', 'rejected']),
+        approvalStatuses: new Set(['completed', 'approved', 'cleared', 'valid']),
+        terminalStatuses: new Set(['completed', 'approved', 'cleared', 'valid', 'expired', 'rejected']),
+        validate(row, requestedStatus) {
+          if (this.approvalStatuses.has(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Orientation completion evidence is required before clearance');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: {
+              ...next.data,
+              verificationReference: payload.verificationReference || payload.verification_reference || fromJson(row.data_json, {}).verificationReference || null,
+              grantsAccess: false
+            },
+            workerName: normalizeText(payload.workerName || payload.worker_name, row.worker_name || 'Crew member'),
+            company: normalizeText(payload.company, row.company || 'Internal crew'),
+            language: normalizeText(payload.language, row.language || 'nl'),
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            completedAt: payload.completedAt || payload.completed_at || row.completed_at || next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE worker_orientations
+            SET worker_name = ?, company = ?, status = ?, language = ?, due_at = ?, completed_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.workerName, values.company, values.status, values.language, values.dueAt, values.completedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      jha: {
+        table: 'jha_records',
+        targetType: 'jha_record',
+        map: row => this.mapJha(row),
+        label: 'JHA',
+        allowedStatuses: new Set(['draft', 'in_review', 'approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible']),
+        approvalStatuses: new Set(['approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible']),
+        terminalStatuses: new Set(['approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible']),
+        validate(row, requestedStatus) {
+          const hazards = payload.hazards ? normalizeList(payload.hazards) : fromJson(row.hazards_json, []);
+          const controls = payload.controls ? normalizeList(payload.controls) : fromJson(row.controls_json, []);
+          if (this.approvalStatuses.has(requestedStatus) && (!hazards.length || !controls.length || !normalizeText(payload.notes || payload.note, ''))) {
+            const error = new Error('JHA hazards, controls, and review evidence are required before approval');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            title: normalizeText(payload.title, row.title),
+            riskLevel: normalizePriority(payload.riskLevel || payload.risk_level || row.risk_level),
+            assignee: payload.assignee || payload.owner || row.assignee,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            approvedAt: payload.approvedAt || payload.approved_at || row.approved_at || next.closedAt,
+            hazards: payload.hazards ? normalizeList(payload.hazards) : fromJson(row.hazards_json, []),
+            controls: payload.controls ? normalizeList(payload.controls) : fromJson(row.controls_json, [])
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE jha_records
+            SET title = ?, status = ?, risk_level = ?, assignee = ?, due_at = ?, approved_at = ?, hazards_json = ?, controls_json = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.status, values.riskLevel, values.assignee, values.dueAt, values.approvedAt, toJson(values.hazards, []), toJson(values.controls, []), values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      sds: {
+        table: 'sds_sheets',
+        targetType: 'sds_sheet',
+        map: row => this.mapSdsSheet(row),
+        label: 'SDS sheet',
+        allowedStatuses: new Set(['missing', 'requested', 'pending_review', 'current', 'approved', 'accepted', 'active', 'expired']),
+        approvalStatuses: new Set(['current', 'approved', 'accepted', 'active']),
+        terminalStatuses: new Set(['current', 'approved', 'accepted', 'active', 'expired']),
+        validate(row, requestedStatus) {
+          const existingData = fromJson(row.data_json, {});
+          const documentRef = payload.documentRef || payload.document_ref || normalizeList(payload.evidence)[0] || existingData.documentRef;
+          if (this.approvalStatuses.has(requestedStatus) && (!normalizeText(documentRef, '') || !normalizeText(payload.notes || payload.note, ''))) {
+            const error = new Error('SDS document reference and review evidence are required before current status');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          const existingData = fromJson(row.data_json, {});
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: {
+              ...next.data,
+              documentRef: payload.documentRef || payload.document_ref || normalizeList(payload.evidence)[0] || existingData.documentRef || null,
+              hazardClass: payload.hazardClass || payload.hazard_class || existingData.hazardClass || null,
+              storage: payload.storage || existingData.storage || null
+            },
+            material: normalizeText(payload.material || payload.title || payload.name, row.material),
+            supplier: payload.supplier || row.supplier,
+            expiresAt: payload.expiresAt || payload.expires_at || row.expires_at
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE sds_sheets
+            SET material = ?, supplier = ?, status = ?, expires_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.material, values.supplier, values.status, values.expiresAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      site_access: {
+        table: 'site_access_logs',
+        targetType: 'site_access_log',
+        map: row => this.mapSiteAccessLog(row),
+        label: 'site access',
+        allowedStatuses: new Set(['requested', 'blocked', 'pending_approval', 'cleared', 'approved', 'granted', 'checked_in', 'checked_out', 'denied']),
+        approvalStatuses: new Set(['cleared', 'approved', 'granted', 'checked_in']),
+        terminalStatuses: new Set(['checked_out', 'denied']),
+        validate: (row, requestedStatus) => {
+          if (!['cleared', 'approved', 'granted', 'checked_in'].includes(requestedStatus)) return;
+          const orientation = this.resolveSiteAccessOrientation(jobId, row);
+          if (!orientation || !['completed', 'approved', 'cleared', 'valid'].includes(normalizeStatus(orientation.status, 'scheduled'))) {
+            const error = new Error('Completed orientation approval is required before site access clearance');
+            error.statusCode = 409;
+            throw error;
+          }
+        },
+        update: (row, next) => {
+          const orientation = this.resolveSiteAccessOrientation(jobId, row);
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: next.data,
+            orientationId: orientation?.id || row.orientation_id,
+            workerName: normalizeText(payload.workerName || payload.worker_name, row.worker_name || orientation?.worker_name || 'Crew member'),
+            company: normalizeText(payload.company, row.company || orientation?.company || 'Internal crew'),
+            orientationValid: Boolean(orientation && ['completed', 'approved', 'cleared', 'valid'].includes(normalizeStatus(orientation.status, 'scheduled'))),
+            checkedInAt: payload.checkedInAt || payload.checked_in_at || row.checked_in_at,
+            checkedOutAt: payload.checkedOutAt || payload.checked_out_at || row.checked_out_at || (next.data.requestedStatus === 'checked_out' ? next.closedAt : null)
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE site_access_logs
+            SET orientation_id = ?, worker_name = ?, company = ?, status = ?, orientation_valid = ?, checked_in_at = ?, checked_out_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.orientationId, values.workerName, values.company, values.status, values.orientationValid ? 1 : 0, values.checkedInAt, values.checkedOutAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      quality_check: {
+        table: 'quality_checks',
+        targetType: 'quality_check',
+        map: row => this.mapQualityCheck(row),
+        label: 'quality check',
+        allowedStatuses: new Set(['pending_review', 'in_progress', 'passed', 'approved', 'rejected', 'closed']),
+        approvalStatuses: new Set(['passed', 'approved', 'closed']),
+        terminalStatuses: new Set(['passed', 'approved', 'rejected', 'closed']),
+        validate(row, requestedStatus) {
+          const defects = payload.defects !== undefined ? normalizeList(payload.defects) : fromJson(row.defects_json, []);
+          if (this.approvalStatuses.has(requestedStatus) && (defects.length || !normalizeText(payload.notes || payload.note, ''))) {
+            const error = new Error('Quality defects must be explicitly cleared with sign-off evidence');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          const defects = payload.defects !== undefined ? normalizeList(payload.defects) : fromJson(row.defects_json, []);
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: { ...next.data, defectsOpen: defects.length },
+            checkType: normalizeStatus(payload.checkType || payload.check_type, row.check_type),
+            title: normalizeText(payload.title, row.title),
+            result: normalizeStatus(payload.result || (['passed', 'approved', 'closed'].includes(next.data.requestedStatus) ? 'passed' : row.result), 'pending'),
+            inspector: payload.inspector || payload.owner || row.inspector,
+            checkedAt: payload.checkedAt || payload.checked_at || row.checked_at || next.closedAt,
+            defects
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE quality_checks
+            SET check_type = ?, title = ?, status = ?, result = ?, inspector = ?, checked_at = ?, defects_json = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.checkType, values.title, values.status, values.result, values.inspector, values.checkedAt, toJson(values.defects, []), values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      safety_check: {
+        table: 'safety_checks',
+        targetType: 'safety_check',
+        map: row => this.mapSafetyCheck(row),
+        label: 'safety check',
+        allowedStatuses: new Set(['open', 'pending_review', 'in_progress', 'completed', 'approved', 'closed']),
+        approvalStatuses: new Set(['completed', 'approved', 'closed']),
+        terminalStatuses: new Set(['completed', 'approved', 'closed']),
+        validate(row, requestedStatus) {
+          if (this.approvalStatuses.has(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Safety check evidence is required before sign-off');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: {
+              ...next.data,
+              hazards: payload.hazards ? normalizeList(payload.hazards) : normalizeList(fromJson(row.data_json, {}).hazards)
+            },
+            checkType: normalizeStatus(payload.checkType || payload.check_type, row.check_type),
+            title: normalizeText(payload.title, row.title),
+            riskLevel: normalizeStatus(payload.riskLevel || payload.risk_level, row.risk_level),
+            assignee: payload.assignee || payload.owner || row.assignee,
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            completedAt: payload.completedAt || payload.completed_at || row.completed_at || next.closedAt
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE safety_checks
+            SET check_type = ?, title = ?, status = ?, risk_level = ?, assignee = ?, due_at = ?, completed_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.checkType, values.title, values.status, values.riskLevel, values.assignee, values.dueAt, values.completedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
       observation: {
         table: 'observation_records',
         targetType: 'observation_record',
@@ -6823,6 +10867,63 @@ class ContractorOperatingLedger {
             SET title = ?, status = ?, resolved_at = ?, approval_id = ?, data_json = ?, updated_at = ?
             WHERE id = ? AND job_id = ?
           `).run(values.title, values.status, values.resolvedAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+        }
+      },
+      selection: {
+        table: 'client_selections',
+        targetType: 'client_selection',
+        map: row => this.mapClientSelection(row),
+        label: 'client selection',
+        allowedStatuses: new Set(['pending_client', 'client_confirmed', 'selected', 'accepted', 'approved', 'locked', 'cancelled', 'rejected']),
+        approvalStatuses: new Set(['client_confirmed', 'selected', 'accepted', 'approved', 'locked']),
+        terminalStatuses: new Set(['client_confirmed', 'selected', 'accepted', 'approved', 'locked', 'cancelled', 'rejected']),
+        validate(row, requestedStatus) {
+          if (!this.approvalStatuses.has(requestedStatus)) return;
+          const selectedOption = normalizeText(payload.selectedOption || payload.selected_option, '');
+          const verificationReference = normalizeText(
+            payload.verificationReference || payload.verification_reference || payload.reference,
+            ''
+          );
+          const options = fromJson(row.options_json, []);
+          if (!selectedOption || !verificationReference || !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Selected option, client confirmation reference, and decision evidence are required');
+            error.statusCode = 400;
+            throw error;
+          }
+          if (options.length && !options.some(option => String(option).trim() === selectedOption)) {
+            const error = new Error('Selected option must match a retained client-selection option');
+            error.statusCode = 400;
+            throw error;
+          }
+        },
+        update(row, next) {
+          const existingData = fromJson(row.data_json, {});
+          return {
+            status: next.status,
+            approvalId: next.approvalId,
+            data: {
+              ...next.data,
+              selectedOption: payload.selectedOption || payload.selected_option || existingData.selectedOption || null,
+              verificationReference: payload.verificationReference || payload.verification_reference || payload.reference || existingData.verificationReference || null,
+              clientConfirmed: normalizeBoolean(payload.clientConfirmed ?? payload.client_confirmed, true),
+              source: payload.source || existingData.source || 'operator_confirmation'
+            },
+            title: normalizeText(payload.title, row.title),
+            category: normalizeStatus(payload.category, row.category),
+            clientName: payload.clientName || payload.client_name || row.client_name,
+            currency: normalizeText(payload.currency, row.currency || 'EUR').toUpperCase(),
+            value: normalizeNumber(payload.value ?? payload.amount, row.value),
+            dueAt: payload.dueAt || payload.due_at || row.due_at,
+            decidedAt: payload.decidedAt || payload.decided_at || row.decided_at || next.closedAt,
+            options: fromJson(row.options_json, [])
+          };
+        },
+        save(recordId, values, timestamp) {
+          this.db.prepare(`
+            UPDATE client_selections
+            SET title = ?, category = ?, status = ?, client_name = ?, currency = ?, value = ?, due_at = ?, decided_at = ?, approval_id = ?, options_json = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND job_id = ?
+          `).run(values.title, values.category, values.status, values.clientName, values.currency, values.value, values.dueAt, values.decidedAt, values.approvalId, toJson(values.options, []), toJson(values.data), timestamp, recordId, jobId);
         }
       },
       punch_item: {
@@ -6927,18 +11028,21 @@ class ContractorOperatingLedger {
         error.statusCode = 400;
         throw error;
       }
+      if (config.validate) config.validate.call(config, row, requestedStatus);
 
       const before = config.map(row);
       const timestamp = nowIso();
       const highRiskTransition = config.approvalForHighRisk === true
         && ['high', 'critical'].includes(normalizePriority(row.severity));
-      const needsApproval = normalizeBoolean(
-        payload.requiresApproval,
-        config.approvalStatuses.has(requestedStatus) || highRiskTransition
+      const needsApproval = Boolean(config.targetType) && (
+        config.approvalStatuses.has(requestedStatus)
+        || highRiskTransition
+        || normalizeBoolean(payload.requiresApproval, false)
       );
       const existingData = fromJson(row.data_json, {});
       const transition = {
         requestedStatus,
+        previousStatus: normalizeStatus(row.status, 'open'),
         note: payload.notes || payload.note || null,
         correctiveAction: payload.correctiveAction || payload.corrective_action || null,
         resolution: payload.resolution || null,
@@ -7003,7 +11107,7 @@ class ContractorOperatingLedger {
       const afterRow = this.db.prepare(`SELECT * FROM ${config.table} WHERE id = ?`).get(recordId);
       const record = config.map(afterRow);
       this.audit({
-        entityType: config.targetType || 'aftercare_item',
+        entityType: config.entityType || config.targetType || 'aftercare_item',
         entityId: recordId,
         jobId,
         action: `transition_${normalizedType}`,
@@ -7155,6 +11259,7 @@ class ContractorOperatingLedger {
     return this.transaction(() => {
       const actor = options.actor || payload.actor || 'Contractor.AI';
       const job = this.requireJob(jobId);
+      const detail = this.getJobDetail(jobId, { includeAudit: false });
       let completion = null;
       if (payload.markCompleted !== false && job.status !== 'completed') {
         completion = this.updateJobWithApproval(jobId, {
@@ -7164,7 +11269,8 @@ class ContractorOperatingLedger {
         }, { actor });
       }
 
-      const quality = this.addQualityCheck(jobId, {
+      const existingQuality = detail.qualityChecks?.[0] || null;
+      const quality = existingQuality || this.addQualityCheck(jobId, {
         title: payload.qualityTitle || `Final quality review: ${job.title}`,
         status: payload.qualityStatus || 'pending_review',
         result: payload.qualityResult || 'pending',
@@ -7172,21 +11278,27 @@ class ContractorOperatingLedger {
         defectsOpen: payload.defectsOpen || 0,
         notes: payload.qualityNotes || 'Confirm workmanship, client-visible defects, photos, and Wkb evidence before final acceptance.'
       }, { actor, audit: false });
-      const safety = this.addSafetyCheck(jobId, {
-        title: payload.safetyTitle || `Final safety closeout: ${job.title}`,
+      const safetyTitle = payload.safetyTitle || `Final safety closeout: ${job.title}`;
+      const existingSafety = (detail.safetyChecks || []).find(check =>
+        String(check.title || '').toLowerCase() === safetyTitle.toLowerCase()
+      ) || null;
+      const safety = existingSafety || this.addSafetyCheck(jobId, {
+        title: safetyTitle,
         status: payload.safetyStatus || 'open',
         riskLevel: payload.riskLevel || 'normal',
         dueAt: payload.safetyDueAt || futureIsoDate(1),
         notes: payload.safetyNotes || 'Confirm site is safe, tools are removed, and access is restored.'
       }, { actor, audit: false });
-      const aftercare = this.addAftercareItem(jobId, {
+      const existingAftercare = detail.aftercare?.[0] || null;
+      const aftercare = existingAftercare || this.addAftercareItem(jobId, {
         title: payload.aftercareTitle || `Aftercare follow-up: ${job.title}`,
         dueAt: payload.aftercareDueAt || futureIsoDate(7),
         notes: payload.aftercareNotes || 'Check client satisfaction, warranty issues, maintenance opportunity, and review request.'
       }, { actor, audit: false });
 
-      const invoice = this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId)
-        ? this.mapInvoice(this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId))
+      const existingInvoice = detail.invoices?.[0] || null;
+      const invoice = existingInvoice
+        ? existingInvoice
         : this.createInvoice(jobId, {
           amount: normalizeNumber(payload.amount, job.contract_value || job.estimated_cost || 0),
           taxAmount: normalizeNumber(payload.taxAmount || payload.tax_amount, normalizeNumber(payload.amount, job.contract_value || job.estimated_cost || 0) * 0.21),
@@ -7194,14 +11306,20 @@ class ContractorOperatingLedger {
           dueAt: payload.invoiceDueAt || futureIsoDate(14),
           notes: 'Created from job closeout package.'
         }, { actor, audit: false });
-      const payment = this.recordPayment(jobId, {
+      const existingPayment = (detail.payments || []).find(record => record.invoiceId === invoice.id) || null;
+      const payment = existingPayment || this.recordPayment(jobId, {
         invoiceId: invoice.id,
         amount: invoice.total,
         dueAt: payload.paymentDueAt || invoice.dueAt || futureIsoDate(14),
         status: invoice.status === 'approved' ? 'awaiting_payment' : 'awaiting_invoice_approval',
         notes: 'Payment follow-up created from closeout package.'
       }, { actor, audit: false });
-      const communication = this.addCommunication(jobId, {
+      const existingCommunication = (detail.communications || []).find(message => {
+        const content = `${message.subject || ''} ${message.body || ''}`.toLowerCase();
+        return normalizeStatus(message.direction, '') === 'outbound'
+          && (content.includes('closeout') || content.includes('completion') || content.includes('aftercare') || content.includes('handover'));
+      }) || null;
+      const communication = existingCommunication || this.addCommunication(jobId, {
         channel: payload.channel || 'portal',
         direction: 'outbound',
         subject: payload.subject || `Closeout and next steps: ${job.title}`,
@@ -7212,7 +11330,9 @@ class ContractorOperatingLedger {
 
       let recurringPlan = null;
       if (payload.createRecurringPlan === true) {
-        recurringPlan = this.createRecurringPlan(jobId, {
+        recurringPlan = (detail.recurringPlans || []).find(plan =>
+          !['cancelled', 'canceled', 'inactive', 'closed'].includes(normalizeStatus(plan.status, 'draft'))
+        ) || this.createRecurringPlan(jobId, {
           service: payload.recurringService || job.job_type,
           intervalRule: payload.intervalRule || 'monthly',
           nextDueAt: payload.nextDueAt || futureIsoDate(30),
@@ -7229,7 +11349,16 @@ class ContractorOperatingLedger {
         invoice,
         payment,
         communication,
-        recurringPlan
+        recurringPlan,
+        reused: {
+          quality: Boolean(existingQuality),
+          safety: Boolean(existingSafety),
+          aftercare: Boolean(existingAftercare),
+          invoice: Boolean(existingInvoice),
+          payment: Boolean(existingPayment),
+          communication: Boolean(existingCommunication),
+          recurringPlan: Boolean(payload.createRecurringPlan && recurringPlan && detail.recurringPlans?.some(plan => plan.id === recurringPlan.id))
+        }
       };
       this.audit({
         entityType: 'job',
@@ -7245,7 +11374,8 @@ class ContractorOperatingLedger {
           paymentId: payment.id,
           communicationId: communication.id,
           completionApprovalId: completion?.approval?.id || null,
-          recurringPlanId: recurringPlan?.id || null
+          recurringPlanId: recurringPlan?.id || null,
+          reused: packageSummary.reused
         }
       });
       return packageSummary;
@@ -7366,6 +11496,7 @@ class ContractorOperatingLedger {
   workerScheduleCandidates(job = {}, plannedStart = null, plannedEnd = null, jobId = null) {
     const jobText = normalizeText(`${job.title || ''} ${job.jobType || ''} ${job.description || ''} ${job.city || ''} ${job.region || ''}`, '').toLowerCase();
     const jobTerms = new Set(jobText.split(/[^a-z0-9]+/i).filter(term => term.length >= 4));
+    const unavailableStatuses = new Set(['offline', 'on_leave', 'on_hold', 'inactive', 'unavailable', 'blocked', 'sick', 'retired']);
     return this.listWorkers({ limit: 250 })
       .filter(worker => normalizeStatus(worker.status, '') !== 'retired')
       .map(worker => {
@@ -7405,7 +11536,7 @@ class ContractorOperatingLedger {
           score: Math.max(0, Math.round(score)),
           matchedSkills,
           conflicts,
-          available: !conflicts.length && !['offline', 'retired'].includes(status)
+          available: !conflicts.length && !unavailableStatuses.has(status)
         };
       })
       .sort((left, right) => right.score - left.score || left.worker.name.localeCompare(right.worker.name));
@@ -7437,7 +11568,370 @@ class ContractorOperatingLedger {
     return conflicts;
   }
 
-  scheduleDispatchReadiness(detail = {}, { hasWorker = false } = {}) {
+  workerAssignmentReadiness(assignments = [], { jobId = null, plannedStart = null, plannedEnd = null } = {}) {
+    const activeAssignments = (assignments || []).filter(assignment => this.activeAssignmentStatus(assignment.status));
+    const unavailableStatuses = new Set(['offline', 'on_leave', 'on_hold', 'inactive', 'unavailable', 'blocked', 'sick', 'retired']);
+    const warningStatuses = new Set(['busy', 'traveling']);
+    const items = [];
+    const blockers = [];
+    const warnings = [];
+    const nextActions = [];
+
+    for (const assignment of activeAssignments) {
+      const assignmentName = assignment.workerName || assignment.workerId || 'Assigned crew member';
+      if (!assignment.workerId) {
+        const blocker = {
+          type: 'worker_record_missing',
+          severity: 'high',
+          assignmentId: assignment.id,
+          workerId: null,
+          workerName: assignmentName,
+          message: `${assignmentName} has no canonical worker record for live readiness checks.`
+        };
+        blockers.push(blocker);
+        items.push({ assignmentId: assignment.id, workerId: null, workerName: assignmentName, status: 'missing_record', blocked: true });
+        continue;
+      }
+
+      const row = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(assignment.workerId);
+      if (!row) {
+        const blocker = {
+          type: 'worker_record_missing',
+          severity: 'high',
+          assignmentId: assignment.id,
+          workerId: assignment.workerId,
+          workerName: assignmentName,
+          message: `${assignmentName} no longer resolves to a retained worker record.`
+        };
+        blockers.push(blocker);
+        items.push({ assignmentId: assignment.id, workerId: assignment.workerId, workerName: assignmentName, status: 'missing_record', blocked: true });
+        continue;
+      }
+
+      const worker = this.mapWorker(row);
+      const workerStatus = normalizeStatus(worker.status, 'available');
+      const pendingRetirement = this.db.prepare(`
+        SELECT id FROM approvals
+        WHERE target_type = 'worker_retirement' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(worker.id);
+      const conflicts = this.findAssignmentConflicts({
+        workerId: worker.id,
+        scheduledStart: plannedStart || assignment.scheduledStart,
+        scheduledEnd: plannedEnd || assignment.scheduledEnd,
+        excludeAssignmentId: assignment.id
+      }).filter(conflict => String(conflict.jobId) !== String(jobId || assignment.jobId));
+
+      let blocker = null;
+      if (pendingRetirement) {
+        blocker = {
+          type: 'worker_retirement_pending',
+          severity: 'high',
+          message: `${worker.name} has a pending retirement decision and cannot be treated as dispatch-ready.`,
+          approvalId: pendingRetirement.id
+        };
+      } else if (unavailableStatuses.has(workerStatus)) {
+        blocker = {
+          type: 'worker_unavailable',
+          severity: 'high',
+          message: `${worker.name} is marked ${workerStatus.replace(/_/g, ' ')} and blocks dispatch.`,
+          workerStatus
+        };
+      } else if (conflicts.length) {
+        blocker = {
+          type: 'worker_conflict',
+          severity: 'high',
+          message: `${worker.name} has ${conflicts.length} conflicting assignment(s) in the dispatch window.`,
+          conflicts
+        };
+      }
+
+      if (blocker) {
+        const enrichedBlocker = {
+          ...blocker,
+          assignmentId: assignment.id,
+          workerId: worker.id,
+          workerName: worker.name
+        };
+        blockers.push(enrichedBlocker);
+        items.push({
+          assignmentId: assignment.id,
+          workerId: worker.id,
+          workerName: worker.name,
+          workerStatus,
+          status: blocker.type,
+          conflicts: conflicts.length,
+          blocked: true
+        });
+      } else {
+        if (warningStatuses.has(workerStatus)) {
+          warnings.push(`${worker.name} is marked ${workerStatus}; confirm the retained assignment matches the dispatch window.`);
+        }
+        items.push({
+          assignmentId: assignment.id,
+          workerId: worker.id,
+          workerName: worker.name,
+          workerStatus,
+          status: warningStatuses.has(workerStatus) ? 'review' : 'ready',
+          conflicts: 0,
+          blocked: false
+        });
+      }
+    }
+
+    for (const blocker of blockers.slice(0, 3)) {
+      nextActions.push({
+        type: 'review_workforce_readiness',
+        assignmentId: blocker.assignmentId,
+        workerId: blocker.workerId,
+        workerName: blocker.workerName,
+        message: blocker.message,
+        requiresApproval: false
+      });
+    }
+
+    return {
+      status: blockers.length ? 'blocked' : warnings.length ? 'review' : activeAssignments.length ? 'ready' : 'missing',
+      assignments: activeAssignments.length,
+      blocked: blockers.length,
+      warnings: warnings.length,
+      conflicts: blockers.filter(blocker => blocker.type === 'worker_conflict').length,
+      items,
+      blockers,
+      warningMessages: warnings,
+      nextActions
+    };
+  }
+
+  crewEvidenceReadiness(detail = {}) {
+    const activeAssignments = (detail.assignments || []).filter(assignment => this.activeAssignmentStatus(assignment.status));
+    const inactiveStatuses = new Set(['cancelled', 'canceled', 'rejected', 'declined', 'void', 'deleted', 'expired', 'denied', 'checked_out']);
+    const readyInstructionStatuses = new Set(['approved', 'sent', 'published', 'dispatched']);
+    const readyOrientationStatuses = new Set(['completed', 'approved', 'cleared', 'valid']);
+    const readyAccessStatuses = new Set(['cleared', 'approved', 'granted', 'checked_in']);
+    const nameCounts = new Map();
+    for (const assignment of activeAssignments) {
+      const name = normalizeText(assignment.workerName, '').toLowerCase();
+      if (name) nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+    }
+
+    const activeRecords = records => (records || []).filter(record => (
+      !inactiveStatuses.has(normalizeStatus(record?.status, 'draft'))
+    ));
+    const allInstructions = detail.workerInstructions || [];
+    const allOrientations = detail.orientations || [];
+    const allSiteAccessLogs = detail.siteAccessLogs || [];
+    const instructions = activeRecords(allInstructions);
+    const orientations = activeRecords(allOrientations);
+    const siteAccessLogs = activeRecords(allSiteAccessLogs);
+    const matchesAssignment = (record, assignment) => {
+      const identity = this.crewEvidenceIdentity(record);
+      if (identity.assignmentId) return String(identity.assignmentId) === String(assignment.id);
+      if (identity.workerId) return Boolean(assignment.workerId) && String(identity.workerId) === String(assignment.workerId);
+      const assignmentName = normalizeText(assignment.workerName, '').toLowerCase();
+      return Boolean(identity.workerName)
+        && Boolean(assignmentName)
+        && identity.workerName.toLowerCase() === assignmentName
+        && nameCounts.get(assignmentName) === 1;
+    };
+    const latest = records => [...records].sort((left, right) => (
+      Date.parse(right.updatedAt || right.createdAt || 0) - Date.parse(left.updatedAt || left.createdAt || 0)
+    ))[0] || null;
+    const orientationIsReady = orientation => {
+      if (!orientation || !readyOrientationStatuses.has(normalizeStatus(orientation.status, 'scheduled'))) return false;
+      const validUntil = orientation.data?.validUntil || null;
+      return !validUntil || !Number.isFinite(Date.parse(validUntil)) || Date.parse(validUntil) >= Date.now();
+    };
+    const accessIsReady = (access, orientationReady) => Boolean(
+      access
+      && orientationReady
+      && access.orientationValid !== false
+      && readyAccessStatuses.has(normalizeStatus(access.status, 'requested'))
+    );
+
+    const items = activeAssignments.map(assignment => {
+      const matchedInstructions = instructions.filter(record => matchesAssignment(record, assignment));
+      const matchedOrientations = orientations.filter(record => matchesAssignment(record, assignment));
+      const matchedAccessLogs = siteAccessLogs.filter(record => matchesAssignment(record, assignment));
+      const instruction = latest(matchedInstructions);
+      const orientation = latest(matchedOrientations);
+      const siteAccess = latest(matchedAccessLogs);
+      const instructionReady = Boolean(instruction && readyInstructionStatuses.has(normalizeStatus(instruction.status, 'draft')));
+      const orientationReady = orientationIsReady(orientation);
+      const siteAccessReady = accessIsReady(siteAccess, orientationReady);
+      return {
+        assignmentId: assignment.id,
+        workerId: assignment.workerId || null,
+        workerName: assignment.workerName || 'Assigned crew member',
+        instruction,
+        instructionReady,
+        instructionStatus: instructionReady ? 'ready' : instruction ? normalizeStatus(instruction.status, 'draft') : 'missing',
+        orientation,
+        orientationReady,
+        orientationStatus: orientationReady ? 'ready' : orientation ? normalizeStatus(orientation.status, 'scheduled') : 'missing',
+        siteAccess,
+        siteAccessReady,
+        siteAccessStatus: siteAccessReady ? 'ready' : siteAccess ? normalizeStatus(siteAccess.status, 'requested') : 'missing'
+      };
+    });
+    const uniqueRecords = (records, key) => {
+      const seen = new Set();
+      return records.filter(record => {
+        if (!record || seen.has(record[key])) return false;
+        seen.add(record[key]);
+        return true;
+      });
+    };
+    const currentInstructions = uniqueRecords(items.map(item => item.instruction).filter(Boolean), 'id');
+    const currentOrientations = uniqueRecords(items.map(item => item.orientation).filter(Boolean), 'id');
+    const currentSiteAccessLogs = uniqueRecords(items.map(item => item.siteAccess).filter(Boolean), 'id');
+    const recordIsCurrent = record => activeAssignments.some(assignment => matchesAssignment(record, assignment));
+
+    return {
+      assignments: activeAssignments,
+      items,
+      currentInstructions,
+      currentOrientations,
+      currentSiteAccessLogs,
+      instructionsReady: activeAssignments.length > 0 && items.every(item => item.instructionReady),
+      orientationsReady: activeAssignments.length > 0 && items.every(item => item.orientationReady),
+      siteAccessReady: activeAssignments.length > 0 && items.every(item => item.siteAccessReady),
+      missingInstructions: items.filter(item => !item.instruction).length,
+      draftInstructions: items.filter(item => item.instruction && !item.instructionReady).length,
+      missingOrientations: items.filter(item => !item.orientation).length,
+      openOrientations: items.filter(item => item.orientation && !item.orientationReady).length,
+      missingSiteAccess: items.filter(item => !item.siteAccess).length,
+      blockedSiteAccess: items.filter(item => item.siteAccess && !item.siteAccessReady).length,
+      staleRecords: {
+        instructions: allInstructions.filter(record => !recordIsCurrent(record)).length,
+        orientations: allOrientations.filter(record => !recordIsCurrent(record)).length,
+        siteAccess: allSiteAccessLogs.filter(record => !recordIsCurrent(record)).length
+      }
+    };
+  }
+
+  toolReservationReadiness(reservations = []) {
+    const activeReservations = (reservations || []).filter(reservation => (
+      !TOOL_RESERVATION_CLOSED_STATUSES.has(normalizeStatus(reservation.status, 'reserved'))
+    ));
+    const items = [];
+    const blockers = [];
+    const warnings = [];
+    const nextActions = [];
+    for (const reservation of activeReservations) {
+      if (!reservation.toolId) {
+        const blocker = {
+          type: 'tool_record_missing',
+          severity: 'high',
+          reservationId: reservation.id,
+          toolId: null,
+          toolName: reservation.toolName || 'Unregistered equipment',
+          message: `${reservation.toolName || 'Reserved equipment'} has no canonical equipment record for live readiness checks.`
+        };
+        blockers.push(blocker);
+        items.push({ reservationId: reservation.id, toolId: null, toolName: blocker.toolName, status: 'missing_record', blocked: true });
+        continue;
+      }
+      const row = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(reservation.toolId);
+      if (!row) {
+        const blocker = {
+          type: 'tool_record_missing',
+          severity: 'high',
+          reservationId: reservation.id,
+          toolId: reservation.toolId,
+          toolName: reservation.toolName || reservation.toolId,
+          message: `${reservation.toolName || 'Reserved equipment'} no longer resolves to a retained equipment record.`
+        };
+        blockers.push(blocker);
+        items.push({ reservationId: reservation.id, toolId: reservation.toolId, toolName: blocker.toolName, status: 'missing_record', blocked: true });
+        continue;
+      }
+      const tool = this.mapTool(row);
+      const inspection = this.assessToolInspection(tool);
+      const pendingRetirement = this.db.prepare(`
+        SELECT id FROM approvals
+        WHERE target_type = 'tool_retirement' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(tool.id);
+      let blocker = null;
+      if (pendingRetirement) {
+        blocker = {
+          type: 'tool_retirement_pending',
+          severity: 'high',
+          message: `${tool.name} has a pending retirement decision and cannot be treated as dispatch-ready.`,
+          approvalId: pendingRetirement.id
+        };
+      } else if (inspection.blocksReservation) {
+        blocker = {
+          type: 'tool_inspection_readiness',
+          severity: 'high',
+          message: `${tool.name} inspection is ${inspection.status.replace(/_/g, ' ')} and blocks dispatch.`,
+          inspectionStatus: inspection.status,
+          inspectionDueAt: inspection.dueAt
+        };
+      } else if (!['available', 'in_use', 'reserved'].includes(normalizeStatus(tool.status, 'available'))) {
+        blocker = {
+          type: 'tool_unavailable',
+          severity: 'high',
+          message: `${tool.name} is marked ${normalizeStatus(tool.status, 'available').replace(/_/g, ' ')} and blocks dispatch.`,
+          toolStatus: tool.status
+        };
+      }
+      if (blocker) {
+        const enrichedBlocker = {
+          ...blocker,
+          reservationId: reservation.id,
+          toolId: tool.id,
+          toolName: tool.name
+        };
+        blockers.push(enrichedBlocker);
+        items.push({
+          reservationId: reservation.id,
+          toolId: tool.id,
+          toolName: tool.name,
+          status: blocker.type,
+          inspectionStatus: inspection.status,
+          blocked: true
+        });
+      } else {
+        if (inspection.status === 'due_soon') {
+          warnings.push(`${tool.name} inspection is due ${inspection.dueAt || 'soon'}; confirm it remains current for the field window.`);
+        }
+        items.push({
+          reservationId: reservation.id,
+          toolId: tool.id,
+          toolName: tool.name,
+          status: inspection.status === 'due_soon' ? 'due_soon' : 'ready',
+          inspectionStatus: inspection.status,
+          blocked: false
+        });
+      }
+    }
+    for (const blocker of blockers.slice(0, 3)) {
+      nextActions.push({
+        type: 'review_equipment_readiness',
+        toolId: blocker.toolId,
+        toolName: blocker.toolName,
+        reservationId: blocker.reservationId,
+        message: blocker.message,
+        requiresApproval: false
+      });
+    }
+    return {
+      status: blockers.length ? 'blocked' : warnings.length ? 'due_soon' : activeReservations.length ? 'ready' : 'missing',
+      reservations: activeReservations.length,
+      blocked: blockers.length,
+      warnings: warnings.length,
+      items,
+      blockers,
+      warningMessages: warnings,
+      nextActions
+    };
+  }
+
+  scheduleDispatchReadiness(detail = {}, { hasWorker = false, jobId = null, plannedStart = null, plannedEnd = null } = {}) {
     const activeStatuses = new Set(['open', 'draft', 'pending', 'pending_approval', 'needs_review', 'review', 'blocked', 'missing', 'overdue', 'expired', 'rejected', 'revise_resubmit']);
     const closedStatuses = new Set(['approved', 'completed', 'closed', 'cancelled', 'current', 'passed', 'resolved', 'submitted', 'received', 'funded', 'paid', 'cleared', 'checked_in', 'ready', 'ordered']);
     const statusOf = (record, fallback = 'open') => normalizeStatus(record?.status, fallback);
@@ -7446,30 +11940,91 @@ class ContractorOperatingLedger {
       return activeStatuses.has(status) || !closedStatuses.has(status);
     };
 
-    const pendingApprovals = (detail.approvals || []).filter(approval => statusOf(approval, 'pending') === 'pending');
+    const crewEvidence = this.crewEvidenceReadiness(detail);
+    const currentCrewApprovalTargets = new Map([
+      ['assignment', new Set(crewEvidence.assignments.map(record => String(record.id)))],
+      ['worker_assignment', new Set(crewEvidence.assignments.map(record => String(record.id)))],
+      ['worker_instruction', new Set(crewEvidence.currentInstructions.map(record => String(record.id)))],
+      ['worker_orientation', new Set(crewEvidence.currentOrientations.map(record => String(record.id)))],
+      ['site_access_log', new Set(crewEvidence.currentSiteAccessLogs.map(record => String(record.id)))]
+    ]);
+    const pendingApprovals = (detail.approvals || []).filter(approval => {
+      if (statusOf(approval, 'pending') !== 'pending') return false;
+      const scopedTargets = currentCrewApprovalTargets.get(normalizeStatus(approval.targetType, ''));
+      return !scopedTargets || scopedTargets.has(String(approval.targetId || ''));
+    });
+    const hasPendingApproval = (targetType, targetId) => pendingApprovals.some(approval => (
+      normalizeStatus(approval.targetType, '') === targetType && String(approval.targetId || '') === String(targetId || '')
+    ));
     const procurementOrders = detail.procurementOrders || [];
     const purchaseOrders = detail.purchaseOrders || [];
     const materialRequirements = detail.materials || [];
-    const pendingProcurement = procurementOrders.filter(order => ['draft', 'pending_approval', 'ready_to_order', 'needs_review'].includes(statusOf(order, 'draft')));
-    const committedProcurement = procurementOrders.filter(order => ['approved', 'ordered', 'submitted', 'sent', 'received'].includes(statusOf(order, 'draft')));
-    const procurementMissing = materialRequirements.length > 0 && !procurementOrders.length && !purchaseOrders.length;
-
-    const blockedAccess = (detail.siteAccessLogs || []).filter(access => {
-      const status = statusOf(access, 'requested');
-      return ['blocked', 'rejected', 'expired', 'pending_approval', 'requested'].includes(status) || access.orientationValid === false;
+    const materialReadyStatuses = new Set(['available', 'received', 'allocated', 'loaded', 'used', 'delivered']);
+    const unresolvedMaterialRequirements = materialRequirements.filter(material => !materialReadyStatuses.has(statusOf(material, 'needed')));
+    const pendingProcurementStatuses = new Set(['draft', 'pending', 'pending_approval', 'ready_to_order', 'needs_review', 'approved', 'ordered', 'submitted', 'sent']);
+    const pendingProcurement = unresolvedMaterialRequirements.length
+      ? procurementOrders.filter(order => pendingProcurementStatuses.has(statusOf(order, 'draft')))
+      : [];
+    const pendingPurchaseOrders = unresolvedMaterialRequirements.length
+      ? purchaseOrders.filter(order => pendingProcurementStatuses.has(statusOf(order, 'draft')))
+      : [];
+    const committedProcurement = procurementOrders.filter(order => statusOf(order, 'draft') === 'received');
+    const committedPurchaseOrders = purchaseOrders.filter(order => statusOf(order, 'draft') === 'received');
+    const procurementMissing = unresolvedMaterialRequirements.length > 0 && !procurementOrders.length && !purchaseOrders.length;
+    const procurementDraft = pendingProcurement.find(order => (
+      ['draft', 'pending', 'needs_review'].includes(statusOf(order, 'draft'))
+      && !hasPendingApproval('procurement_order', order.id)
+    )) || null;
+    const procurementMaterial = unresolvedMaterialRequirements[0] || null;
+    const workforceReadiness = this.workerAssignmentReadiness(detail.assignments || [], {
+      jobId: jobId || detail.id,
+      plannedStart,
+      plannedEnd
     });
+    const toolReadiness = this.toolReservationReadiness(detail.tools || []);
+    const accessGaps = crewEvidence.items.filter(item => !item.siteAccessReady);
+    const blockedAccess = accessGaps.filter(item => item.siteAccess).map(item => item.siteAccess);
+    const missingAccessItems = accessGaps.filter(item => !item.siteAccess);
     const siteAccessStatus = blockedAccess.length
       ? 'blocked'
-      : (detail.siteAccessLogs || []).length
-        ? 'ready'
-        : hasWorker
+      : missingAccessItems.length || (hasWorker && !crewEvidence.items.length)
           ? 'missing'
-          : 'not_required';
+          : crewEvidence.items.length
+            ? 'ready'
+            : 'not_required';
+    const primaryAccessGap = accessGaps[0] || null;
+    const primaryBlockedAccess = primaryAccessGap?.siteAccess || null;
+    const linkedOrientation = primaryAccessGap?.orientation || null;
+    const orientationReady = primaryAccessGap?.orientationReady === true;
+    let accessControlRecord = null;
+    if (primaryAccessGap) {
+      if (linkedOrientation && !orientationReady && statusOf(linkedOrientation, 'scheduled') !== 'pending_approval') {
+        accessControlRecord = {
+          recordType: 'orientation',
+          recordId: linkedOrientation.id,
+          recordTitle: normalizeText(linkedOrientation.workerName, 'Crew orientation'),
+          recordStatus: statusOf(linkedOrientation, 'scheduled'),
+          targetStatus: 'completed',
+          actionLabel: 'Complete site orientation',
+          record: linkedOrientation
+        };
+      } else if (primaryBlockedAccess && orientationReady && statusOf(primaryBlockedAccess, 'requested') !== 'pending_approval') {
+        accessControlRecord = {
+          recordType: 'site_access',
+          recordId: primaryBlockedAccess.id,
+          recordTitle: normalizeText(primaryBlockedAccess.workerName, 'Site access'),
+          recordStatus: statusOf(primaryBlockedAccess, 'requested'),
+          targetStatus: 'cleared',
+          actionLabel: 'Clear site access',
+          record: primaryBlockedAccess
+        };
+      }
+    }
 
     const safetyRecords = [
       ...(detail.safetyChecks || []),
       ...(detail.safetyMeetings || []),
-      ...(detail.orientations || []),
+      ...crewEvidence.currentOrientations,
       ...(detail.jhas || []),
       ...(detail.sdsSheets || [])
     ];
@@ -7478,10 +12033,23 @@ class ContractorOperatingLedger {
       const severity = normalizeStatus(observation.severity || observation.riskLevel, 'medium');
       return isActive(observation) && ['high', 'critical', 'medium'].includes(severity);
     });
-    const openSafetyRecords = safetyRecords.filter(record => {
-      const status = statusOf(record, 'open');
-      return ['open', 'draft', 'scheduled', 'pending_approval', 'missing', 'expired', 'overdue', 'needs_review'].includes(status);
-    });
+    const safetyReviewStatuses = new Set(['open', 'draft', 'scheduled', 'pending_approval', 'missing', 'expired', 'overdue', 'needs_review', 'requested']);
+    const safetyControlCandidates = [
+      ...openIncidents.map(record => ({ recordType: 'incident', recordId: record.id, recordTitle: normalizeText(record.title, 'Incident'), recordStatus: statusOf(record, 'reported'), targetStatus: 'resolved', actionLabel: 'Resolve incident', record })),
+      ...openObservations.map(record => ({ recordType: 'observation', recordId: record.id, recordTitle: normalizeText(record.title, 'Safety observation'), recordStatus: statusOf(record), targetStatus: 'resolved', actionLabel: 'Resolve safety observation', record })),
+      ...(detail.safetyChecks || []).filter(record => safetyReviewStatuses.has(statusOf(record))).map(record => ({ recordType: 'safety_check', recordId: record.id, recordTitle: normalizeText(record.title, 'Safety check'), recordStatus: statusOf(record), targetStatus: 'completed', actionLabel: 'Complete safety check', record })),
+      ...(detail.jhas || []).filter(record => safetyReviewStatuses.has(statusOf(record))).map(record => ({ recordType: 'jha', recordId: record.id, recordTitle: normalizeText(record.title, 'JHA'), recordStatus: statusOf(record), targetStatus: 'approved', actionLabel: 'Approve JHA', record })),
+      ...(detail.sdsSheets || []).filter(record => safetyReviewStatuses.has(statusOf(record))).map(record => ({ recordType: 'sds', recordId: record.id, recordTitle: normalizeText(record.material, 'SDS'), recordStatus: statusOf(record), targetStatus: 'current', actionLabel: 'Approve SDS', record })),
+      ...(detail.safetyMeetings || []).filter(record => safetyReviewStatuses.has(statusOf(record))).map(record => ({ recordType: 'safety_meeting', recordId: record.id, recordTitle: normalizeText(record.title, 'Safety talk'), recordStatus: statusOf(record), targetStatus: 'completed', actionLabel: 'Complete safety talk', record })),
+      ...crewEvidence.currentOrientations.filter(record => safetyReviewStatuses.has(statusOf(record))).map(record => ({ recordType: 'orientation', recordId: record.id, recordTitle: normalizeText(record.workerName, 'Crew orientation'), recordStatus: statusOf(record), targetStatus: 'completed', actionLabel: 'Complete crew orientation', record }))
+    ];
+    const openSafetyRecords = safetyControlCandidates
+      .filter(candidate => !['incident', 'observation'].includes(candidate.recordType))
+      .map(candidate => candidate.record);
+    const actionableSafetyRecord = safetyControlCandidates.find(candidate => (
+      candidate.recordStatus !== 'pending_approval'
+      && candidate.recordId !== accessControlRecord?.recordId
+    )) || null;
     const safetyStatus = openIncidents.length || openObservations.length || openSafetyRecords.length
       ? 'review'
       : safetyRecords.length || (detail.inspections || []).length
@@ -7490,13 +12058,57 @@ class ContractorOperatingLedger {
           ? 'missing'
           : 'not_required';
 
-    const openDesignRecords = [
-      ...(detail.rfis || []).filter(isActive),
-      ...(detail.submittals || []).filter(isActive),
-      ...(detail.clientSelections || []).filter(isActive),
-      ...(detail.permits || []).filter(isActive),
-      ...(detail.documents || []).filter(document => ['needs_update', 'draft', 'pending_approval', 'expired'].includes(statusOf(document, 'current')))
+    const designRecordCandidates = [
+      ...(detail.rfis || []).filter(record => !['answered', 'resolved', 'closed'].includes(statusOf(record))).map(record => ({
+        recordType: 'rfi',
+        recordId: record.id,
+        recordTitle: normalizeText(record.title, 'RFI'),
+        recordStatus: statusOf(record),
+        targetStatus: 'answered',
+        actionLabel: 'Answer RFI',
+        record
+      })),
+      ...(detail.permits || []).filter(record => !['submitted', 'active', 'approved', 'closed'].includes(statusOf(record))).map(record => ({
+        recordType: 'permit',
+        recordId: record.id,
+        recordTitle: normalizeText(record.title, 'Permit review'),
+        recordStatus: statusOf(record),
+        targetStatus: 'submitted',
+        actionLabel: 'Submit permit review',
+        record
+      })),
+      ...(detail.documents || [])
+        .filter(document => ['needs_review', 'needs_update', 'draft', 'pending_approval', 'expired'].includes(statusOf(document, 'current')))
+        .map(record => ({
+          recordType: 'document',
+          recordId: record.id,
+          recordTitle: normalizeText(record.title, 'Document review'),
+          recordStatus: statusOf(record),
+          targetStatus: 'approved',
+          actionLabel: 'Approve document review',
+          record
+        })),
+      ...(detail.submittals || []).filter(record => !['approved', 'rejected', 'closed'].includes(statusOf(record))).map(record => ({
+        recordType: 'submittal',
+        recordId: record.id,
+        recordTitle: normalizeText(record.title, 'Submittal'),
+        recordStatus: statusOf(record),
+        targetStatus: 'approved',
+        actionLabel: 'Approve submittal',
+        record
+      })),
+      ...(detail.clientSelections || []).filter(record => !['client_confirmed', 'selected', 'accepted', 'approved', 'locked', 'cancelled', 'rejected'].includes(statusOf(record))).map(record => ({
+        recordType: 'selection',
+        recordId: record.id,
+        recordTitle: normalizeText(record.title, 'Client selection'),
+        recordStatus: statusOf(record),
+        targetStatus: 'selected',
+        actionLabel: 'Record client selection',
+        record
+      }))
     ];
+    const openDesignRecords = designRecordCandidates;
+    const actionableDesignRecord = designRecordCandidates.find(record => record.recordStatus !== 'pending_approval') || null;
     const designEvidenceCount = (detail.rfis || []).length
       + (detail.submittals || []).length
       + (detail.clientSelections || []).length
@@ -7507,20 +12119,43 @@ class ContractorOperatingLedger {
     const readiness = {
       approvals: { status: pendingApprovals.length ? 'approval' : 'ready', pending: pendingApprovals.length },
       procurement: {
-        status: procurementMissing ? 'missing' : pendingProcurement.length ? 'approval' : committedProcurement.length || purchaseOrders.length ? 'ready' : 'not_required',
+        status: procurementMissing
+          ? 'missing'
+          : pendingProcurement.length || pendingPurchaseOrders.length
+            ? 'approval'
+            : unresolvedMaterialRequirements.length === 0 || committedProcurement.length || committedPurchaseOrders.length
+              ? (materialRequirements.length ? 'ready' : 'not_required')
+              : 'not_required',
         requirements: materialRequirements.length,
-        pendingOrders: pendingProcurement.length,
-        committedOrders: committedProcurement.length,
+        unresolvedRequirements: unresolvedMaterialRequirements.length,
+        pendingOrders: pendingProcurement.length + pendingPurchaseOrders.length,
+        committedOrders: committedProcurement.length + committedPurchaseOrders.length,
         purchaseOrders: purchaseOrders.length
       },
-      siteAccess: { status: siteAccessStatus, blocked: blockedAccess.length, records: (detail.siteAccessLogs || []).length },
+      siteAccess: {
+        status: siteAccessStatus,
+        required: crewEvidence.items.length,
+        blocked: blockedAccess.length,
+        missing: missingAccessItems.length,
+        records: crewEvidence.currentSiteAccessLogs.length,
+        staleRecords: crewEvidence.staleRecords.siteAccess
+      },
+      crewEvidence: {
+        assignments: crewEvidence.items.length,
+        instructionsReady: crewEvidence.items.filter(item => item.instructionReady).length,
+        orientationsReady: crewEvidence.items.filter(item => item.orientationReady).length,
+        siteAccessReady: crewEvidence.items.filter(item => item.siteAccessReady).length,
+        staleRecords: crewEvidence.staleRecords
+      },
       safety: {
         status: safetyStatus,
         openSafetyRecords: openSafetyRecords.length,
         incidents: openIncidents.length,
         observations: openObservations.length
       },
-      design: { status: designStatus, openRecords: openDesignRecords.length, evidenceRecords: designEvidenceCount }
+      design: { status: designStatus, openRecords: openDesignRecords.length, evidenceRecords: designEvidenceCount },
+      workforce: workforceReadiness,
+      tools: toolReadiness
     };
 
     const missing = [];
@@ -7528,29 +12163,86 @@ class ContractorOperatingLedger {
     const blockers = [];
     const nextActions = [];
 
+    if (workforceReadiness.blockers.length) {
+      blockers.push(...workforceReadiness.blockers);
+      nextActions.push(...workforceReadiness.nextActions);
+    }
+    if (workforceReadiness.warningMessages.length) {
+      warnings.push(...workforceReadiness.warningMessages);
+    }
     if (pendingApprovals.length) {
       blockers.push({ type: 'approval_gate', severity: 'medium', message: `${pendingApprovals.length} pending approval(s) should be resolved before schedule commitment.` });
       nextActions.push({ type: 'review_pending_approvals', message: 'Review pending approvals before committing the schedule.', requiresApproval: true });
+    }
+    if (toolReadiness.blockers.length) {
+      blockers.push(...toolReadiness.blockers);
+      nextActions.push(...toolReadiness.nextActions);
+    }
+    if (toolReadiness.warningMessages.length) {
+      warnings.push(...toolReadiness.warningMessages);
     }
     if (procurementMissing) {
       missing.push('procurement_plan');
       warnings.push('Material requirements exist without a procurement order or purchase order.');
       nextActions.push({ type: 'plan_procurement', message: 'Create procurement or purchase-order plan for required materials.', requiresApproval: false });
-    } else if (pendingProcurement.length) {
-      blockers.push({ type: 'procurement_gate', severity: 'medium', message: `${pendingProcurement.length} procurement order(s) still need approval or ordering.` });
-      nextActions.push({ type: 'review_procurement', message: 'Resolve procurement approvals or ordering before dispatch.', requiresApproval: true });
+    } else if (pendingProcurement.length || pendingPurchaseOrders.length) {
+      const pendingOrderCount = pendingProcurement.length + pendingPurchaseOrders.length;
+      blockers.push({ type: 'procurement_gate', severity: 'medium', message: `${pendingOrderCount} procurement order(s) still need approval or verified material availability.` });
+      if (procurementDraft) {
+        nextActions.push({
+          type: 'review_procurement',
+          message: `Request approval for the retained ${procurementDraft.supplier || 'supplier'} procurement draft.`,
+          requiresApproval: true,
+          recordType: 'procurement_order',
+          recordId: procurementDraft.id,
+          recordTitle: procurementDraft.supplier || 'Procurement draft',
+          recordStatus: statusOf(procurementDraft, 'draft'),
+          actionLabel: 'Request procurement approval',
+          record: procurementDraft
+        });
+      } else if (procurementMaterial && !pendingProcurement.some(order => statusOf(order, 'draft') === 'pending_approval')) {
+        nextActions.push({
+          type: 'confirm_material_availability',
+          message: `Confirm retained availability for ${procurementMaterial.name || 'required material'}.`,
+          requiresApproval: false,
+          recordType: 'material_requirement',
+          recordId: procurementMaterial.id,
+          recordTitle: procurementMaterial.name || 'Required material',
+          recordStatus: statusOf(procurementMaterial, 'needed'),
+          actionLabel: 'Confirm material availability',
+          record: procurementMaterial
+        });
+      }
     }
     if (blockedAccess.length) {
       blockers.push({ type: 'site_access_blocked', severity: 'high', message: `${blockedAccess.length} site-access record(s) block or require clearance.` });
-      nextActions.push({ type: 'clear_site_access', message: 'Clear site access, orientation, and entry requirements before dispatch.', requiresApproval: true });
-    } else if (siteAccessStatus === 'missing') {
+      if (accessControlRecord) {
+        nextActions.push({
+          type: accessControlRecord.recordType === 'orientation' ? 'complete_site_orientation' : 'clear_site_access',
+          message: `${accessControlRecord.actionLabel}: ${accessControlRecord.recordTitle}.`,
+          requiresApproval: true,
+          ...accessControlRecord
+        });
+      } else if (!linkedOrientation) {
+        missing.push('site_access');
+        nextActions.push({ type: 'prepare_site_access', message: 'Prepare assignment-scoped orientation evidence before clearing this access gate.', requiresApproval: false });
+      }
+    }
+    if (siteAccessStatus === 'missing' || missingAccessItems.length) {
       missing.push('site_access');
       warnings.push('No site-access or orientation clearance is recorded for the assigned/recommended crew.');
       nextActions.push({ type: 'prepare_site_access', message: 'Prepare site-access and orientation clearance for the crew.', requiresApproval: false });
     }
     if (safetyStatus === 'review') {
       blockers.push({ type: 'safety_readiness', severity: openIncidents.length ? 'high' : 'medium', message: 'Safety, JHA, SDS, observation, or incident records need review before dispatch.' });
-      nextActions.push({ type: 'complete_safety_pack', message: 'Complete safety/JHA/SDS readiness before dispatch.', requiresApproval: true });
+      if (actionableSafetyRecord) {
+        nextActions.push({
+          type: 'complete_safety_pack',
+          message: `${actionableSafetyRecord.actionLabel}: ${actionableSafetyRecord.recordTitle}.`,
+          requiresApproval: true,
+          ...actionableSafetyRecord
+        });
+      }
     } else if (safetyStatus === 'missing') {
       missing.push('safety_pack');
       warnings.push('No safety readiness evidence is recorded for this crewed job.');
@@ -7558,7 +12250,14 @@ class ContractorOperatingLedger {
     }
     if (designStatus === 'review') {
       blockers.push({ type: 'design_readiness', severity: 'medium', message: `${openDesignRecords.length} RFI, submittal, selection, permit, or document record(s) need review.` });
-      nextActions.push({ type: 'resolve_design_documents', message: 'Resolve open RFIs, submittals, selections, permits, or document revisions before dispatch.', requiresApproval: false });
+      if (actionableDesignRecord) {
+        nextActions.push({
+          type: 'resolve_design_documents',
+          message: `${actionableDesignRecord.actionLabel}: ${actionableDesignRecord.recordTitle}.`,
+          requiresApproval: true,
+          ...actionableDesignRecord
+        });
+      }
     }
 
     return { readiness, missing, warnings, blockers, nextActions };
@@ -7573,15 +12272,24 @@ class ContractorOperatingLedger {
     const workerCandidates = this.workerScheduleCandidates(job, plannedStart, plannedEnd, jobId);
     const assignedCandidate = workerCandidates.find(candidate => assignedWorkerIds.has(candidate.worker.id));
     const bestAvailableCandidate = workerCandidates.find(candidate => candidate.available && candidate.score >= 40);
-    const recommendedWorker = assignedCandidate || bestAvailableCandidate || null;
+    const recommendedWorker = assignedCandidate?.available
+      ? assignedCandidate
+      : bestAvailableCandidate || assignedCandidate || null;
     const toolConflicts = this.scheduleToolConflicts(jobId, detail, plannedStart, plannedEnd);
     const latestWeather = detail.weather[0] || null;
     const isOutdoor = /garden|pav|roof|fence|outside|outdoor|painting|clean/i.test(`${job.jobType} ${job.title} ${job.description}`);
     const weatherRisk = latestWeather && normalizeNumber(latestWeather.precipitationPercent, 0) >= 60;
     const routeReady = (detail.routePlans || []).some(item => !['cancelled', 'rejected', 'declined'].includes(normalizeStatus(item.status, 'draft')));
     const loadingReady = (detail.loadingPlans || []).some(item => !['cancelled', 'rejected', 'declined'].includes(normalizeStatus(item.status, 'draft')));
-    const instructionsReady = (detail.workerInstructions || []).some(item => !['cancelled', 'rejected', 'declined'].includes(normalizeStatus(item.status, 'draft')));
-    const dispatchReadiness = this.scheduleDispatchReadiness(detail, { hasWorker: Boolean(activeAssignments.length || recommendedWorker) });
+    const crewEvidence = this.crewEvidenceReadiness(detail);
+    const instructionGap = crewEvidence.items.find(item => !item.instructionReady) || null;
+    const instructionsReady = crewEvidence.instructionsReady;
+    const dispatchReadiness = this.scheduleDispatchReadiness(detail, {
+      hasWorker: Boolean(activeAssignments.length || recommendedWorker),
+      jobId,
+      plannedStart,
+      plannedEnd
+    });
     const missing = [];
     const warnings = [];
     const blockers = [];
@@ -7619,9 +12327,6 @@ class ContractorOperatingLedger {
       warnings.push(latestWeather.recommendation);
       blockers.push({ type: 'weather_risk', severity: 'medium', message: latestWeather.recommendation });
     }
-    if (recommendedWorker?.conflicts?.length) {
-      blockers.push({ type: 'worker_conflict', severity: 'high', message: `${recommendedWorker.worker.name} has ${recommendedWorker.conflicts.length} conflicting assignment(s).` });
-    }
     missing.push(...dispatchReadiness.missing.filter(item => !missing.includes(item)));
     warnings.push(...dispatchReadiness.warnings);
     blockers.push(...dispatchReadiness.blockers);
@@ -7638,6 +12343,8 @@ class ContractorOperatingLedger {
       ].includes(blocker.type));
     const recommendedStatus = blockers.some(blocker => ['planned_start_missing', 'worker_assignment_missing'].includes(blocker.type))
       ? 'needs_planning'
+      : blockers.some(blocker => ['worker_record_missing', 'worker_retirement_pending', 'worker_unavailable', 'worker_conflict', 'tool_record_missing', 'tool_retirement_pending', 'tool_inspection_readiness', 'tool_unavailable'].includes(blocker.type))
+        ? 'blocked'
       : requiresApproval
         ? 'needs_approval'
         : missing.length || warnings.length
@@ -7662,8 +12369,29 @@ class ContractorOperatingLedger {
     if ((detail.tools.length || detail.materials.length) && !loadingReady) {
       nextActions.push({ type: 'create_loading_plan', message: 'Create loading checklist from reserved tools and materials.', requiresApproval: false });
     }
-    if ((activeAssignments.length || recommendedWorker) && !instructionsReady) {
-      nextActions.push({ type: 'draft_worker_instruction', message: 'Draft worker instructions before dispatch.', requiresApproval: false });
+    if (activeAssignments.length && !instructionsReady) {
+      if (instructionGap?.instruction && normalizeStatus(instructionGap.instruction.status, 'draft') !== 'pending_approval') {
+        nextActions.push({
+          type: 'review_worker_instruction',
+          message: `Request publication approval for ${instructionGap.workerName}'s retained crew instructions.`,
+          requiresApproval: true,
+          recordType: 'worker_instruction',
+          recordId: instructionGap.instruction.id,
+          recordTitle: instructionGap.instruction.title,
+          recordStatus: normalizeStatus(instructionGap.instruction.status, 'draft'),
+          targetStatus: 'published',
+          actionLabel: 'Request instruction approval',
+          record: instructionGap.instruction
+        });
+      } else if (!instructionGap?.instruction) {
+        nextActions.push({
+          type: 'draft_worker_instruction',
+          assignmentId: instructionGap?.assignmentId || activeAssignments[0]?.id || null,
+          workerId: instructionGap?.workerId || activeAssignments[0]?.workerId || null,
+          message: `Draft worker instructions for ${instructionGap?.workerName || 'the assigned crew'} before dispatch.`,
+          requiresApproval: false
+        });
+      }
     }
     nextActions.push(...dispatchReadiness.nextActions);
     if (requiresApproval) {
@@ -7690,7 +12418,14 @@ class ContractorOperatingLedger {
           : { status: isOutdoor ? 'missing' : 'not_required' },
         route: { status: routeReady ? 'ready' : 'missing' },
         loading: { status: loadingReady ? 'ready' : (detail.tools.length || detail.materials.length) ? 'missing' : 'not_required' },
-        instructions: { status: instructionsReady ? 'ready' : (activeAssignments.length || recommendedWorker) ? 'missing' : 'not_required' },
+        instructions: {
+          status: instructionsReady ? 'ready' : activeAssignments.length ? (instructionGap?.instruction ? 'review' : 'missing') : recommendedWorker ? 'assignment_required' : 'not_required',
+          required: crewEvidence.items.length,
+          ready: crewEvidence.items.filter(item => item.instructionReady).length,
+          drafts: crewEvidence.draftInstructions,
+          missing: crewEvidence.missingInstructions,
+          staleRecords: crewEvidence.staleRecords.instructions
+        },
         ...dispatchReadiness.readiness
       },
       recommendedWorker: recommendedWorker ? {
@@ -7724,15 +12459,20 @@ class ContractorOperatingLedger {
 
   createApproval(payload = {}, options = {}) {
     const id = normalizeText(payload.id || payload.approvalId || payload.approval_id, '') || makeId('approval');
+    const targetType = normalizeText(payload.targetType || payload.target_type, 'record');
+    const jobId = payload.jobId || payload.job_id || null;
+    if (jobId && !['job_archive', 'job_restore'].includes(targetType) && options.allowInactive !== true) {
+      this.requireJob(jobId);
+    }
     const timestamp = nowIso();
     this.db.prepare(`
       INSERT INTO approvals (id, target_type, target_id, job_id, approval_type, status, requested_by, summary, reason, data_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
-      normalizeText(payload.targetType || payload.target_type, 'record'),
+      targetType,
       normalizeText(payload.targetId || payload.target_id, ''),
-      payload.jobId || payload.job_id || null,
+      jobId,
       normalizeText(payload.approvalType || payload.approval_type, 'approval'),
       normalizeStatus(payload.status, 'pending'),
       payload.requestedBy || payload.requested_by || options.actor || 'Contractor.AI',
@@ -7749,6 +12489,287 @@ class ContractorOperatingLedger {
     return approval;
   }
 
+  restoreRejectedLifecycleTarget(approvalRow, resolutionStatus, options = {}) {
+    const targets = {
+      rfi_record: { table: 'rfi_records', fallbackStatus: 'open' },
+      submittal_record: { table: 'submittal_records', fallbackStatus: 'pending_review' },
+      document: { table: 'documents', fallbackStatus: 'needs_review' },
+      permit_record: { table: 'permit_records', fallbackStatus: 'pending' },
+      inspection_record: { table: 'inspection_records', fallbackStatus: 'pending_review' },
+      safety_meeting: { table: 'safety_meetings', fallbackStatus: 'scheduled' },
+      worker_instruction: { table: 'worker_instructions', fallbackStatus: 'draft' },
+      worker_orientation: { table: 'worker_orientations', fallbackStatus: 'scheduled' },
+      jha_record: { table: 'jha_records', fallbackStatus: 'draft' },
+      sds_sheet: { table: 'sds_sheets', fallbackStatus: 'draft' },
+      site_access_log: { table: 'site_access_logs', fallbackStatus: 'requested' },
+      quality_check: { table: 'quality_checks', fallbackStatus: 'pending' },
+      safety_check: { table: 'safety_checks', fallbackStatus: 'pending' },
+      observation_record: { table: 'observation_records', fallbackStatus: 'open' },
+      incident_record: { table: 'incident_records', fallbackStatus: 'under_review' },
+      client_selection: { table: 'client_selections', fallbackStatus: 'pending_client' },
+      punch_item: { table: 'punch_items', fallbackStatus: 'open' },
+      warranty_claim: { table: 'warranty_claims', fallbackStatus: 'open' }
+    };
+    const target = targets[normalizeStatus(approvalRow?.target_type, '')];
+    if (!target || !approvalRow?.target_id) return null;
+
+    const row = this.db.prepare(`SELECT status, data_json FROM ${target.table} WHERE id = ?`).get(approvalRow.target_id);
+    if (!row) return null;
+    const timestamp = options.timestamp || nowIso();
+    const approvalData = fromJson(approvalRow.data_json, {});
+    const data = fromJson(row.data_json, {});
+    const transition = approvalData.transition || data.lifecycleTransition || {};
+    const retainedStatus = normalizeStatus(transition.previousStatus, target.fallbackStatus);
+    const restoredStatus = retainedStatus === 'pending_approval' ? target.fallbackStatus : retainedStatus;
+    const nextData = {
+      ...data,
+      lifecycleTransition: {
+        ...(data.lifecycleTransition || transition),
+        approvalResolution: resolutionStatus,
+        approvalResolvedAt: timestamp,
+        approvalResolutionReason: options.reason || null
+      }
+    };
+    this.db.prepare(`
+      UPDATE ${target.table}
+      SET status = ?, approval_id = NULL, data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(restoredStatus, toJson(nextData), timestamp, approvalRow.target_id);
+    this.audit({
+      entityType: approvalRow.target_type,
+      entityId: approvalRow.target_id,
+      jobId: approvalRow.job_id || null,
+      action: `restore_${resolutionStatus}_lifecycle_transition`,
+      actor: options.actor || 'approval',
+      before: { status: row.status, approvalId: approvalRow.id },
+      after: { status: restoredStatus, approvalId: null },
+      metadata: { approvalId: approvalRow.id, requestedStatus: approvalData.requestedStatus || transition.requestedStatus || null }
+    });
+    return { status: restoredStatus };
+  }
+
+  restoreRejectedProcurementTarget(approvalRow, resolutionStatus, options = {}) {
+    if (normalizeStatus(approvalRow?.target_type, '') !== 'procurement_order' || !approvalRow?.target_id) return null;
+    const row = this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(approvalRow.target_id);
+    if (!row) return null;
+    const timestamp = options.timestamp || nowIso();
+    const approvalData = fromJson(approvalRow.data_json, {});
+    const currentData = fromJson(row.data_json, {});
+    const previousStatus = normalizeStatus(approvalData.previousStatus, 'draft');
+    const restoredStatus = previousStatus === 'pending_approval' ? 'draft' : previousStatus;
+    const nextData = {
+      ...currentData,
+      approvalResolution: {
+        status: resolutionStatus,
+        approvalId: approvalRow.id,
+        resolvedAt: timestamp,
+        reason: options.reason || null
+      }
+    };
+    this.db.prepare(`
+      UPDATE procurement_orders
+      SET status = ?, approval_id = NULL, data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(restoredStatus, toJson(nextData), timestamp, approvalRow.target_id);
+    this.audit({
+      entityType: 'procurement_order',
+      entityId: approvalRow.target_id,
+      jobId: approvalRow.job_id || row.job_id || null,
+      action: `restore_${resolutionStatus}_procurement_approval`,
+      actor: options.actor || 'approval',
+      before: this.mapProcurementOrder(row),
+      after: this.mapProcurementOrder(this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(approvalRow.target_id)),
+      metadata: { approvalId: approvalRow.id, externalCommitments: 0 }
+    });
+    return { status: restoredStatus };
+  }
+
+  applyJobArchiveApproval(approval) {
+    if (!approval) return null;
+    const approvalData = fromJson(approval.data_json, {});
+    const jobId = approval.job_id || approvalData.jobId;
+    if (!jobId) return null;
+    const before = this.requireJob(jobId, { allowInactive: true });
+    const currentData = fromJson(before.data_json, {});
+    const history = Array.isArray(currentData.archiveHistory) ? currentData.archiveHistory : [];
+    const priorEvent = history.find(event => event?.operation === 'archive' && event?.approvalId === approval.id);
+    if (priorEvent && normalizeStatus(before.status, '') === 'archived') {
+      return this.getJobDetail(jobId, { includeAudit: false });
+    }
+
+    const currentStatus = normalizeStatus(before.status, 'intake');
+    const currentPhase = normalizeStatus(before.phase, currentStatus);
+    if (['archived', 'pending_archive_approval'].includes(currentStatus)) {
+      const error = new Error('The job was archived through another lifecycle decision.');
+      error.statusCode = 409;
+      error.code = 'job_archive_state_conflict';
+      throw error;
+    }
+    if (
+      normalizeStatus(approvalData.previousStatus, currentStatus) !== currentStatus
+      || normalizeStatus(approvalData.previousPhase, currentPhase) !== currentPhase
+    ) {
+      const error = new Error('The job lifecycle changed after this archive request. Reject it and submit a new archive decision from the current state.');
+      error.statusCode = 409;
+      error.code = 'job_archive_state_changed';
+      throw error;
+    }
+
+    const blockers = this.db.prepare(`
+      SELECT id, target_type, summary FROM approvals
+      WHERE job_id = ? AND status = 'pending'
+      ORDER BY created_at ASC
+    `).all(jobId);
+    if (blockers.length) {
+      const error = new Error(`Resolve ${blockers.length} newer pending job approval${blockers.length === 1 ? '' : 's'} before approving archive.`);
+      error.statusCode = 409;
+      error.code = 'job_archive_blocked_by_approvals';
+      error.details = { blockerCount: blockers.length, blockers };
+      throw error;
+    }
+
+    const timestamp = nowIso();
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const revokedPortalAccess = this.activeClientPortalAccess(jobId).map(access => this.revokeClientPortalAccess(access.id, {
+      actor,
+      reason: `Job archived through approval ${approval.id}. A new portal link requires approval after restore.`
+    }));
+    const archive = {
+      active: true,
+      previousStatus: currentStatus,
+      previousPhase: currentPhase,
+      requestedAt: approvalData.requestedAt || approval.created_at,
+      approvedAt: timestamp,
+      archivedAt: timestamp,
+      requestedBy: approvalData.requestedBy || approval.requested_by || null,
+      approvedBy: actor,
+      approvalId: approval.id,
+      reason: approvalData.reason || approval.reason || null,
+      revokedPortalAccessIds: revokedPortalAccess.map(access => access.id)
+    };
+    const archiveHistory = [
+      ...history,
+      {
+        operation: 'archive',
+        approvalId: approval.id,
+        at: timestamp,
+        actor,
+        reason: archive.reason,
+        previousStatus: currentStatus,
+        previousPhase: currentPhase,
+        revokedPortalAccessIds: archive.revokedPortalAccessIds
+      }
+    ];
+    const after = this.updateJob(jobId, {
+      status: 'archived',
+      phase: 'archived',
+      approvalState: 'archive_approved',
+      data: { archive, archiveHistory }
+    }, { actor, audit: false });
+    this.audit({
+      entityType: 'job',
+      entityId: jobId,
+      jobId,
+      action: 'apply_job_archive',
+      actor,
+      before: this.mapJob(before),
+      after: this.mapJob(this.getJobRow(jobId)),
+      metadata: {
+        approvalId: approval.id,
+        externalCommitments: 0,
+        retainedRecords: true,
+        revokedPortalAccessIds: archive.revokedPortalAccessIds
+      }
+    });
+    return after;
+  }
+
+  applyJobRestoreApproval(approval) {
+    if (!approval) return null;
+    const approvalData = fromJson(approval.data_json, {});
+    const jobId = approval.job_id || approvalData.jobId;
+    if (!jobId) return null;
+    const before = this.requireJob(jobId, { allowInactive: true });
+    const currentData = fromJson(before.data_json, {});
+    const history = Array.isArray(currentData.archiveHistory) ? currentData.archiveHistory : [];
+    const priorEvent = history.find(event => event?.operation === 'restore' && event?.approvalId === approval.id);
+    if (priorEvent && !['archived', 'pending_archive_approval'].includes(normalizeStatus(before.status, ''))) {
+      return this.getJobDetail(jobId, { includeAudit: false });
+    }
+    if (!['archived', 'pending_archive_approval'].includes(normalizeStatus(before.status, ''))) {
+      const error = new Error('The job is no longer archived, so this restore decision cannot be applied.');
+      error.statusCode = 409;
+      error.code = 'job_restore_state_conflict';
+      throw error;
+    }
+
+    const blockers = this.db.prepare(`
+      SELECT id, target_type, summary FROM approvals
+      WHERE job_id = ? AND status = 'pending'
+      ORDER BY created_at ASC
+    `).all(jobId);
+    if (blockers.length) {
+      const error = new Error(`Resolve ${blockers.length} newer pending job approval${blockers.length === 1 ? '' : 's'} before approving restore.`);
+      error.statusCode = 409;
+      error.code = 'job_restore_blocked_by_approvals';
+      error.details = { blockerCount: blockers.length, blockers };
+      throw error;
+    }
+
+    const allowedStatuses = new Set(['intake', 'planning', 'planned', 'scheduled', 'in_progress', 'on_hold', 'completed', 'cancelled', 'canceled']);
+    const retainedStatus = normalizeStatus(approvalData.restoreStatus, 'intake');
+    const restoreStatus = allowedStatuses.has(retainedStatus) ? retainedStatus : 'intake';
+    const retainedPhase = normalizeStatus(approvalData.restorePhase, restoreStatus);
+    const restorePhase = ['archived', 'pending_archive_approval'].includes(retainedPhase) ? restoreStatus : retainedPhase;
+    const timestamp = nowIso();
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const archive = currentData.archive && typeof currentData.archive === 'object' && !Array.isArray(currentData.archive)
+      ? currentData.archive
+      : {};
+    const restoredArchive = {
+      ...archive,
+      active: false,
+      restoredAt: timestamp,
+      restoredBy: actor,
+      restoreApprovalId: approval.id,
+      restoreReason: approvalData.reason || approval.reason || null
+    };
+    const archiveHistory = [
+      ...history,
+      {
+        operation: 'restore',
+        approvalId: approval.id,
+        at: timestamp,
+        actor,
+        reason: restoredArchive.restoreReason,
+        restoredStatus: restoreStatus,
+        restoredPhase: restorePhase
+      }
+    ];
+    const after = this.updateJob(jobId, {
+      status: restoreStatus,
+      phase: restorePhase,
+      approvalState: 'restore_approved',
+      data: { archive: restoredArchive, archiveHistory }
+    }, { actor, audit: false, allowInactive: true });
+    this.audit({
+      entityType: 'job',
+      entityId: jobId,
+      jobId,
+      action: 'apply_job_restore',
+      actor,
+      before: this.mapJob(before),
+      after: this.mapJob(this.getJobRow(jobId)),
+      metadata: {
+        approvalId: approval.id,
+        archiveApprovalId: restoredArchive.approvalId || null,
+        externalCommitments: 0,
+        retainedRecords: true
+      }
+    });
+    return after;
+  }
+
   resolveApproval(approvalId, payload = {}, options = {}) {
     return this.transaction(() => {
       const before = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -7763,6 +12784,9 @@ class ContractorOperatingLedger {
         error.statusCode = 400;
         throw error;
       }
+      if (status === 'approved' && before.job_id && !['job_archive', 'job_restore'].includes(before.target_type)) {
+        this.requireJob(before.job_id);
+      }
       const timestamp = nowIso();
       this.db.prepare(`
         UPDATE approvals
@@ -7772,6 +12796,18 @@ class ContractorOperatingLedger {
 
       if (status === 'approved') {
         this.applyApprovalTarget(before.target_type, before.target_id);
+      } else if (String(before.approval_type || '').endsWith('_lifecycle_transition')) {
+        this.restoreRejectedLifecycleTarget(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
+      } else if (before.target_type === 'procurement_order') {
+        this.restoreRejectedProcurementTarget(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'client_portal_access') {
         this.db.prepare(`
           UPDATE client_portal_access
@@ -7863,6 +12899,12 @@ class ContractorOperatingLedger {
           }
         });
       }
+    } else if (targetType === 'job_archive') {
+      const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
+      this.applyJobArchiveApproval(approval);
+    } else if (targetType === 'job_restore') {
+      const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
+      this.applyJobRestoreApproval(approval);
     } else if (targetType === 'job_update') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -7939,7 +12981,7 @@ class ContractorOperatingLedger {
     } else if (targetType === 'submittal_record') {
       const submittal = this.db.prepare('SELECT data_json FROM submittal_records WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(submittal?.data_json, {}).requestedStatus, 'approved');
-      const approvedStatus = ['approved', 'accepted', 'issued', 'sent', 'closed', 'client_visible'].includes(requestedStatus)
+      const approvedStatus = ['approved', 'accepted', 'issued', 'sent', 'closed', 'client_visible', 'rejected'].includes(requestedStatus)
         ? requestedStatus
         : 'approved';
       this.db.prepare(`
@@ -7950,6 +12992,54 @@ class ContractorOperatingLedger {
           updated_at = ?
         WHERE id = ?
       `).run(approvedStatus, approvedStatus, timestamp, approvedStatus, timestamp, timestamp, targetId);
+    } else if (targetType === 'client_selection_response') {
+      const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
+      const response = fromJson(approval?.data_json, {});
+      const selectionRow = response.selectionId
+        ? this.db.prepare('SELECT * FROM client_selections WHERE id = ? AND job_id = ?').get(response.selectionId, approval?.job_id)
+        : null;
+      if (approval && selectionRow && ['accepted', 'changes_requested'].includes(response.decision)) {
+        const before = this.mapClientSelection(selectionRow);
+        const currentData = fromJson(selectionRow.data_json, {});
+        const nextStatus = response.decision === 'accepted' ? 'client_confirmed' : 'changes_requested';
+        const nextData = {
+          ...currentData,
+          requestedStatus: nextStatus,
+          selectedOption: response.decision === 'accepted' ? response.selectedOption || null : currentData.selectedOption || null,
+          clientResponse: {
+            responseId: response.responseId,
+            decision: response.decision,
+            selectedOption: response.selectedOption || null,
+            note: response.note || null,
+            submittedAt: response.submittedAt || approval.created_at,
+            reviewedAt: timestamp,
+            reviewedBy: approval.resolved_by || 'approval',
+            approvalId: approval.id,
+            status: 'approved'
+          }
+        };
+        this.db.prepare(`
+          UPDATE client_selections
+          SET status = ?, decided_at = COALESCE(decided_at, ?), approval_id = ?, data_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(nextStatus, timestamp, approval.id, toJson(nextData), timestamp, selectionRow.id);
+        const after = this.mapClientSelection(this.db.prepare('SELECT * FROM client_selections WHERE id = ?').get(selectionRow.id));
+        this.audit({
+          entityType: 'client_selection',
+          entityId: selectionRow.id,
+          jobId: selectionRow.job_id,
+          action: 'apply_client_selection_response',
+          actor: approval.resolved_by || 'approval',
+          before,
+          after,
+          metadata: {
+            approvalId: approval.id,
+            responseId: response.responseId,
+            decision: response.decision,
+            externalCommitments: 0
+          }
+        });
+      }
     } else if (targetType === 'client_selection') {
       const selection = this.db.prepare('SELECT data_json FROM client_selections WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(selection?.data_json, {}).requestedStatus, 'approved');
@@ -8006,6 +13096,20 @@ class ContractorOperatingLedger {
     } else if (targetType === 'worker_retirement') {
       const before = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(targetId);
       if (before) {
+        const assignmentScope = this.workerAssignmentScope(targetId);
+        const activeAssignments = assignmentScope.operational;
+        if (activeAssignments.length) {
+          const error = new Error(`Release or reassign ${activeAssignments.length} active assignment${activeAssignments.length === 1 ? '' : 's'} before approving worker retirement.`);
+          error.statusCode = 409;
+          error.code = 'worker_retirement_active_assignments';
+          error.details = {
+            workerId: targetId,
+            activeAssignmentCount: activeAssignments.length,
+            dormantAssignmentCount: assignmentScope.dormant.length,
+            activeAssignments
+          };
+          throw error;
+        }
         const approval = this.db.prepare(`
           SELECT * FROM approvals
           WHERE target_type = 'worker_retirement'
@@ -8014,31 +13118,119 @@ class ContractorOperatingLedger {
           ORDER BY COALESCE(resolved_at, updated_at, created_at) DESC
           LIMIT 1
         `).get(targetId);
+        const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+        const beforeWorker = {
+          ...this.mapWorker(before),
+          activeAssignmentCount: 0,
+          dormantAssignmentCount: assignmentScope.dormant.length,
+          retainedAssignmentCount: assignmentScope.retained.length
+        };
+        const releasedDormantAssignments = assignmentScope.dormant.map(assignment => this.releaseAssignment(
+          assignment.jobId,
+          assignment.id,
+          {
+            status: 'released',
+            reason: `Released from inactive job because worker retirement approval ${approval?.id || 'approved'} was applied.`,
+            actor
+          },
+          { actor }
+        ));
         const data = fromJson(before.data_json, {});
         const afterData = {
           ...data,
           retiredAt: timestamp,
-          retirementApprovalId: approval?.id || data.retirementApprovalId || null
+          retirementApprovalId: approval?.id || data.retirementApprovalId || null,
+          releasedDormantAssignmentIds: releasedDormantAssignments.map(assignment => assignment.id)
         };
         this.db.prepare("UPDATE workers SET status = 'retired', data_json = ?, updated_at = ? WHERE id = ?")
           .run(toJson(afterData), timestamp, targetId);
-        const after = this.mapWorker(this.db.prepare('SELECT * FROM workers WHERE id = ?').get(targetId));
+        const after = this.getWorker(targetId);
         this.audit({
           entityType: 'worker',
           entityId: targetId,
           action: 'apply_worker_retirement',
-          actor: approval?.resolved_by || approval?.requested_by || 'approval',
-          before: this.mapWorker(before),
+          actor,
+          before: beforeWorker,
           after,
-          metadata: { approvalId: approval?.id || null }
+          metadata: {
+            approvalId: approval?.id || null,
+            releasedDormantAssignmentIds: releasedDormantAssignments.map(assignment => assignment.id),
+            externalCommitments: 0
+          }
         });
       }
     } else if (targetType === 'tool_retirement') {
       const before = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(targetId);
       if (before) {
+        const reservationScope = this.toolReservationScope(targetId);
+        const activeReservations = reservationScope.operational;
+        if (activeReservations.length) {
+          const error = new Error(`Release or reassign ${activeReservations.length} active equipment reservation${activeReservations.length === 1 ? '' : 's'} before approving retirement.`);
+          error.statusCode = 409;
+          error.code = 'tool_retirement_active_reservations';
+          error.details = {
+            toolId: targetId,
+            activeReservationCount: activeReservations.length,
+            dormantReservationCount: reservationScope.dormant.length,
+            activeReservations
+          };
+          throw error;
+        }
         const approval = this.db.prepare(`
           SELECT * FROM approvals
           WHERE target_type = 'tool_retirement'
+            AND target_id = ?
+            AND status = 'approved'
+          ORDER BY COALESCE(resolved_at, updated_at, created_at) DESC
+          LIMIT 1
+        `).get(targetId);
+        const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+        const beforeTool = {
+          ...this.mapTool(before),
+          activeReservationCount: 0,
+          dormantReservationCount: reservationScope.dormant.length,
+          retainedReservationCount: reservationScope.retained.length
+        };
+        const releasedDormantReservations = reservationScope.dormant.map(reservation => this.releaseToolReservation(
+          reservation.jobId,
+          reservation.id,
+          {
+            status: 'released',
+            reason: `Released from inactive job because equipment retirement approval ${approval?.id || 'approved'} was applied.`,
+            actor
+          },
+          { actor }
+        ));
+        const data = fromJson(before.data_json, {});
+        const afterData = {
+          ...data,
+          retiredAt: timestamp,
+          retirementApprovalId: approval?.id || data.retirementApprovalId || null,
+          releasedDormantReservationIds: releasedDormantReservations.map(reservation => reservation.id)
+        };
+        this.db.prepare("UPDATE tools SET status = 'retired', data_json = ?, updated_at = ? WHERE id = ?")
+          .run(toJson(afterData), timestamp, targetId);
+        const after = this.mapTool(this.db.prepare('SELECT * FROM tools WHERE id = ?').get(targetId));
+        this.audit({
+          entityType: 'tool',
+          entityId: targetId,
+          action: 'apply_tool_retirement',
+          actor,
+          before: beforeTool,
+          after,
+          metadata: {
+            approvalId: approval?.id || null,
+            releasedDormantReservationIds: releasedDormantReservations.map(reservation => reservation.id),
+            externalCommitments: 0
+          }
+        });
+      }
+    } else if (targetType === 'trade_partner_retirement') {
+      const before = this.db.prepare('SELECT * FROM trade_partners WHERE id = ?').get(targetId);
+      if (before) {
+        const approval = this.db.prepare(`
+          SELECT * FROM approvals
+          WHERE target_type = 'trade_partner_retirement'
             AND target_id = ?
             AND status = 'approved'
           ORDER BY COALESCE(resolved_at, updated_at, created_at) DESC
@@ -8050,17 +13242,17 @@ class ContractorOperatingLedger {
           retiredAt: timestamp,
           retirementApprovalId: approval?.id || data.retirementApprovalId || null
         };
-        this.db.prepare("UPDATE tools SET status = 'retired', data_json = ?, updated_at = ? WHERE id = ?")
+        this.db.prepare("UPDATE trade_partners SET status = 'retired', data_json = ?, updated_at = ? WHERE id = ?")
           .run(toJson(afterData), timestamp, targetId);
-        const after = this.mapTool(this.db.prepare('SELECT * FROM tools WHERE id = ?').get(targetId));
+        const after = this.getTradePartner(targetId);
         this.audit({
-          entityType: 'tool',
+          entityType: 'trade_partner',
           entityId: targetId,
-          action: 'apply_tool_retirement',
+          action: 'apply_trade_partner_retirement',
           actor: approval?.resolved_by || approval?.requested_by || 'approval',
-          before: this.mapTool(before),
+          before: this.mapTradePartner(before),
           after,
-          metadata: { approvalId: approval?.id || null }
+          metadata: { approvalId: approval?.id || null, externalCommitments: 0 }
         });
       }
     } else if (targetType === 'invoice') {
@@ -8172,22 +13364,46 @@ class ContractorOperatingLedger {
       this.db.prepare('UPDATE warranty_claims SET status = ?, resolved_at = COALESCE(resolved_at, ?), updated_at = ? WHERE id = ?')
         .run(approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'payment') {
-      this.db.prepare("UPDATE payments SET status = 'received', paid_at = COALESCE(paid_at, ?), updated_at = ? WHERE id = ?")
-        .run(timestamp, timestamp, targetId);
+      const payment = this.db.prepare('SELECT data_json FROM payments WHERE id = ?').get(targetId);
+      const requestedStatus = normalizeStatus(fromJson(payment?.data_json, {}).requestedStatus, 'received');
+      const approvedStatus = ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus)
+        ? requestedStatus
+        : 'received';
+      this.db.prepare(`
+        UPDATE payments
+        SET status = ?,
+          paid_at = CASE WHEN ? IN ('paid', 'received', 'settled') THEN COALESCE(paid_at, ?) ELSE paid_at END,
+          updated_at = ?
+        WHERE id = ?
+      `).run(approvedStatus, approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'budget_line') {
       const budgetLine = this.db.prepare('SELECT data_json FROM budget_lines WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(budgetLine?.data_json, {}).requestedStatus, 'approved');
       const approvedStatus = ['approved', 'locked', 'baseline'].includes(requestedStatus) ? requestedStatus : 'approved';
       this.db.prepare('UPDATE budget_lines SET status = ?, updated_at = ? WHERE id = ?').run(approvedStatus, timestamp, targetId);
     } else if (targetType === 'purchase_order') {
-      const purchaseOrder = this.db.prepare('SELECT data_json FROM purchase_orders WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(purchaseOrder?.data_json, {}).requestedStatus, 'ready_to_order');
+      const purchaseOrder = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(targetId);
+      const partner = this.assertTradePartnerReadyForCommitment(purchaseOrder, 'purchase order');
+      const purchaseOrderData = fromJson(purchaseOrder?.data_json, {});
+      const requestedStatus = normalizeStatus(purchaseOrderData.requestedStatus, 'ready_to_order');
       const approvedStatus = ['ordered', 'sent', 'submitted', 'issued'].includes(requestedStatus)
         ? 'ready_to_order'
         : ['approved', 'ready_to_order'].includes(requestedStatus)
           ? requestedStatus
           : 'approved';
-      this.db.prepare('UPDATE purchase_orders SET status = ?, updated_at = ? WHERE id = ?').run(approvedStatus, timestamp, targetId);
+      this.db.prepare('UPDATE purchase_orders SET supplier = ?, status = ?, data_json = ?, updated_at = ? WHERE id = ?').run(
+        partner.name,
+        approvedStatus,
+        toJson({
+          ...purchaseOrderData,
+          tradePartnerId: partner.id,
+          partnerComplianceRequired: true,
+          partnerComplianceSnapshot: this.tradePartnerComplianceSnapshot(partner),
+          approvedAt: timestamp
+        }),
+        timestamp,
+        targetId
+      );
     } else if (targetType === 'draw_request') {
       const drawRequest = this.db.prepare('SELECT data_json, requested_amount FROM draw_requests WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(drawRequest?.data_json, {}).requestedStatus, 'approved');
@@ -8225,16 +13441,30 @@ class ContractorOperatingLedger {
     } else if (targetType === 'loading_plan') {
       this.db.prepare("UPDATE loading_plans SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'procurement_order') {
+      const procurementOrder = this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(targetId);
+      const partner = this.assertTradePartnerReadyForCommitment(procurementOrder, 'procurement order');
+      const procurementData = fromJson(procurementOrder?.data_json, {});
       this.db.prepare(`
         UPDATE procurement_orders
-        SET status = CASE
+        SET supplier = ?, status = CASE
           WHEN status = 'pending_approval' THEN 'ready_to_order'
           WHEN status = 'draft' THEN 'approved'
           ELSE status
         END,
-        updated_at = ?
+        data_json = ?, updated_at = ?
         WHERE id = ?
-      `).run(timestamp, targetId);
+      `).run(
+        partner.name,
+        toJson({
+          ...procurementData,
+          tradePartnerId: partner.id,
+          partnerComplianceRequired: true,
+          partnerComplianceSnapshot: this.tradePartnerComplianceSnapshot(partner),
+          approvedAt: timestamp
+        }),
+        timestamp,
+        targetId
+      );
     } else if (targetType === 'worker_instruction') {
       this.db.prepare("UPDATE worker_instructions SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     }
@@ -8430,8 +13660,14 @@ class ContractorOperatingLedger {
   }
 
   listClientPortalAccess(jobId) {
-    this.requireJob(jobId);
+    this.requireJob(jobId, { allowInactive: true });
     return this.db.prepare('SELECT * FROM client_portal_access WHERE job_id = ? ORDER BY created_at DESC')
+      .all(jobId)
+      .map(row => this.mapClientPortalAccess(row));
+  }
+
+  activeClientPortalAccess(jobId) {
+    return this.db.prepare("SELECT * FROM client_portal_access WHERE job_id = ? AND status = 'active' ORDER BY created_at ASC")
       .all(jobId)
       .map(row => this.mapClientPortalAccess(row));
   }
@@ -8442,11 +13678,22 @@ class ContractorOperatingLedger {
       if (!beforeRow) throw this.portalAccessError();
       const before = this.mapClientPortalAccess(beforeRow);
       const timestamp = nowIso();
+      const reason = normalizeText(options.reason, '');
+      const data = {
+        ...(before.data || {}),
+        ...(reason ? {
+          revocation: {
+            reason,
+            revokedAt: timestamp,
+            revokedBy: options.actor || 'Contractor.AI'
+          }
+        } : {})
+      };
       this.db.prepare(`
         UPDATE client_portal_access
-        SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+        SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?), data_json = ?, updated_at = ?
         WHERE id = ?
-      `).run(timestamp, timestamp, accessId);
+      `).run(timestamp, toJson(data), timestamp, accessId);
       const after = this.mapClientPortalAccess(this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(accessId));
       this.audit({
         entityType: 'client_portal_access',
@@ -8455,7 +13702,8 @@ class ContractorOperatingLedger {
         action: 'revoke_client_portal_access',
         actor: options.actor || 'Contractor.AI',
         before,
-        after
+        after,
+        metadata: { reason: reason || null, externalCommitments: 0 }
       });
       return after;
     });
@@ -8478,6 +13726,15 @@ class ContractorOperatingLedger {
       throw this.portalAccessError();
     }
 
+    const job = this.getJobRow(row.job_id);
+    if (!job || !this.jobAllowsOperations(job.status)) {
+      this.revokeClientPortalAccess(row.id, {
+        actor: 'inactive_job_portal_guard',
+        reason: `Portal access closed because the retained job is ${normalizeStatus(job?.status, 'unavailable')}.`
+      });
+      throw this.portalAccessError();
+    }
+
     this.db.prepare('UPDATE client_portal_access SET last_accessed_at = ?, updated_at = ? WHERE id = ?')
       .run(nowIso(), nowIso(), row.id);
     const detail = this.getJobDetail(row.job_id, { includeAudit: false });
@@ -8489,6 +13746,63 @@ class ContractorOperatingLedger {
       .filter(item => item.data?.clientVisible === true)
       .slice(0, 20)
       .map(item => ({ id: item.id, title: item.title, type: item.type, status: item.status, createdAt: item.createdAt }));
+    const selectionResponseApprovals = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE job_id = ? AND target_type = 'client_selection_response'
+      ORDER BY created_at DESC
+    `).all(row.job_id);
+    const latestSelectionResponse = new Map();
+    for (const approvalRow of selectionResponseApprovals) {
+      const approval = this.mapApproval(approvalRow);
+      const selectionId = approval.data?.selectionId;
+      if (selectionId && !latestSelectionResponse.has(selectionId)) latestSelectionResponse.set(selectionId, approval);
+    }
+    const responseOpenStatuses = new Set(['open', 'pending', 'pending_client', 'awaiting_client', 'changes_requested']);
+    const clientVisibleSelections = detail.clientSelections
+      .filter(item => item.data?.clientVisible !== false)
+      .slice(0, 10)
+      .map(item => {
+        const responseApproval = latestSelectionResponse.get(item.id) || null;
+        const recordedResponse = item.data?.clientResponse || null;
+        const response = responseApproval
+          ? {
+              status: responseApproval.status === 'pending'
+                ? 'pending_review'
+                : responseApproval.status === 'approved'
+                  ? 'recorded'
+                  : `review_${responseApproval.status}`,
+              decision: responseApproval.data?.decision || null,
+              selectedOption: responseApproval.data?.selectedOption || null,
+              note: responseApproval.data?.note || null,
+              submittedAt: responseApproval.data?.submittedAt || responseApproval.createdAt,
+              reviewedAt: responseApproval.resolvedAt || null
+            }
+          : recordedResponse
+            ? {
+                status: 'recorded',
+                decision: recordedResponse.decision || null,
+                selectedOption: recordedResponse.selectedOption || null,
+                note: recordedResponse.note || null,
+                submittedAt: recordedResponse.submittedAt || null,
+                reviewedAt: recordedResponse.reviewedAt || null
+              }
+            : null;
+        const pendingResponse = responseApproval?.status === 'pending';
+        return {
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          dueAt: item.dueAt,
+          decidedAt: item.decidedAt,
+          options: (Array.isArray(item.options) ? item.options : [])
+            .map(option => typeof option === 'string' ? option : option?.value || option?.label || '')
+            .map(option => String(option).trim())
+            .filter(Boolean),
+          selectedOption: item.data?.selectedOption || recordedResponse?.selectedOption || null,
+          responseAllowed: responseOpenStatuses.has(normalizeStatus(item.status, '')) && !pendingResponse,
+          response
+        };
+      });
 
     return {
       portal: {
@@ -8508,7 +13822,7 @@ class ContractorOperatingLedger {
         scheduledEnd: detail.scheduledEnd,
         targetCompletion: detail.targetCompletion,
         siteVisits: detail.siteVisits.slice(0, 10).map(item => ({ visitType: item.visitType, status: item.status, scheduledAt: item.scheduledAt })),
-        selections: detail.clientSelections.slice(0, 10).map(item => ({ title: item.title, status: item.status, dueAt: item.dueAt, decidedAt: item.decidedAt })),
+        selections: clientVisibleSelections,
         updates: clientVisibleMessages,
         documents: clientVisibleDocuments
       }
@@ -8537,6 +13851,149 @@ class ContractorOperatingLedger {
     return { communication, portal: snapshot.portal };
   }
 
+  submitClientPortalSelectionResponse(portalToken, selectionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const snapshot = this.getClientPortalSnapshot(portalToken);
+      const selectionRow = this.db.prepare('SELECT * FROM client_selections WHERE id = ? AND job_id = ?')
+        .get(selectionId, snapshot.job.id);
+      if (!selectionRow || fromJson(selectionRow.data_json, {}).clientVisible === false) throw this.portalAccessError();
+
+      const portalSelection = snapshot.job.selections.find(item => item.id === selectionId);
+      if (!portalSelection) throw this.portalAccessError();
+
+      const requestedDecision = normalizeStatus(payload.decision || payload.response, '');
+      const decision = ['accept', 'accepted', 'approve', 'approved', 'confirm', 'confirmed'].includes(requestedDecision)
+        ? 'accepted'
+        : ['request_change', 'request_changes', 'changes_requested', 'change', 'revise'].includes(requestedDecision)
+          ? 'changes_requested'
+          : null;
+      if (!decision) {
+        const error = new Error('Selection response must accept the selection or request a change');
+        error.statusCode = 400;
+        error.code = 'invalid_selection_response';
+        throw error;
+      }
+
+      const responseId = normalizeText(payload.responseId || payload.response_id, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(responseId)) {
+        const error = new Error('Selection responseId must contain 8 to 200 safe characters');
+        error.statusCode = 400;
+        error.code = 'invalid_selection_response_id';
+        throw error;
+      }
+      const note = String(payload.note || payload.notes || '').trim().slice(0, 2000);
+      if (decision === 'changes_requested' && !note) {
+        const error = new Error('Describe the requested change before submitting this response');
+        error.statusCode = 400;
+        error.code = 'selection_change_note_required';
+        throw error;
+      }
+
+      const optionsList = fromJson(selectionRow.options_json, []);
+      const optionValues = (Array.isArray(optionsList) ? optionsList : [])
+        .map(option => typeof option === 'string' ? option : option?.value || option?.label || '')
+        .map(option => String(option).trim())
+        .filter(Boolean);
+      const selectedOption = String(payload.selectedOption || payload.selected_option || '').trim().slice(0, 240);
+      if (decision === 'accepted' && optionValues.length && !optionValues.includes(selectedOption)) {
+        const error = new Error('Choose one of the published selection options before accepting');
+        error.statusCode = 400;
+        error.code = 'invalid_selection_option';
+        throw error;
+      }
+
+      const pendingResponses = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE job_id = ? AND target_type = 'client_selection_response' AND status = 'pending'
+        ORDER BY created_at DESC
+      `).all(snapshot.job.id).map(row => this.mapApproval(row))
+        .filter(approval => approval.data?.selectionId === selectionId);
+      const replay = pendingResponses.find(approval => approval.data?.responseId === responseId);
+      if (replay) {
+        const replayMatches = replay.data?.decision === decision
+          && (replay.data?.selectedOption || '') === (decision === 'accepted' ? selectedOption : '')
+          && (replay.data?.note || '') === note;
+        if (!replayMatches) {
+          const error = new Error('This selection responseId was already used for a different response');
+          error.statusCode = 409;
+          error.code = 'selection_response_id_reused';
+          throw error;
+        }
+        return {
+          selection: this.mapClientSelection(selectionRow),
+          approval: replay,
+          response: { ...replay.data, status: 'pending_review' },
+          portal: snapshot.portal,
+          replayed: true
+        };
+      }
+      if (pendingResponses.length) {
+        const error = new Error('This selection response is already awaiting internal review');
+        error.statusCode = 409;
+        error.code = 'selection_response_pending_review';
+        throw error;
+      }
+      if (!portalSelection.responseAllowed) {
+        const error = new Error('This selection is not open for a client response');
+        error.statusCode = 409;
+        error.code = 'selection_response_closed';
+        throw error;
+      }
+
+      const submittedAt = nowIso();
+      const approvalId = makeId('approval');
+      const responseData = {
+        responseId,
+        selectionId,
+        selectionTitle: selectionRow.title,
+        decision,
+        requestedStatus: decision === 'accepted' ? 'client_confirmed' : 'changes_requested',
+        selectedOption: decision === 'accepted' ? selectedOption || null : null,
+        note: note || null,
+        submittedAt,
+        portalAccessId: snapshot.portal.accessId,
+        externalCommitments: 0
+      };
+      const approval = this.createApproval({
+        id: approvalId,
+        targetType: 'client_selection_response',
+        targetId: approvalId,
+        jobId: snapshot.job.id,
+        approvalType: 'client_selection_response',
+        requestedBy: options.actor || 'client_portal',
+        summary: decision === 'accepted'
+          ? `Review client selection response: ${selectionRow.title} - ${selectedOption || 'accepted'}`
+          : `Review requested selection change: ${selectionRow.title}`,
+        reason: 'A client portal response is evidence of client intent, but an internal approver must verify scope, price, and procurement impact before the selection state changes.',
+        data: responseData
+      }, { actor: options.actor || 'client_portal', audit: false });
+      const selection = this.mapClientSelection(selectionRow);
+      this.audit({
+        entityType: 'client_selection',
+        entityId: selectionId,
+        jobId: snapshot.job.id,
+        action: 'submit_client_selection_response',
+        actor: options.actor || 'client_portal',
+        before: selection,
+        after: { ...selection, clientResponseStatus: 'pending_review' },
+        metadata: {
+          approvalId: approval.id,
+          responseId,
+          decision,
+          portalAccessId: snapshot.portal.accessId,
+          externalCommitments: 0
+        }
+      });
+      return {
+        selection,
+        approval,
+        response: { ...responseData, status: 'pending_review' },
+        portal: snapshot.portal,
+        replayed: false
+      };
+    });
+  }
+
   classifyDispatchReadiness(recommendation = {}) {
     const blockers = Array.isArray(recommendation.blockers) ? recommendation.blockers : [];
     const missing = Array.isArray(recommendation.missing) ? recommendation.missing : [];
@@ -8544,8 +14001,15 @@ class ContractorOperatingLedger {
     const hardBlockerTypes = new Set([
       'planned_start_missing',
       'worker_assignment_missing',
+      'worker_record_missing',
+      'worker_retirement_pending',
+      'worker_unavailable',
       'worker_conflict',
       'tool_conflict',
+      'tool_record_missing',
+      'tool_retirement_pending',
+      'tool_inspection_readiness',
+      'tool_unavailable',
       'site_access_blocked',
       'safety_readiness'
     ]);
@@ -8590,7 +14054,14 @@ class ContractorOperatingLedger {
       siteAccessBlockers: 0,
       weatherRisks: 0,
       toolConflicts: 0,
-      workerConflicts: 0
+      workerConflicts: 0,
+      workerReadinessBlockers: 0,
+      missingWorkerRecords: 0,
+      unavailableWorkers: 0,
+      retirementPendingWorkers: 0,
+      toolReadinessBlockers: 0,
+      unregisteredTools: 0,
+      inspectionToolBlockers: 0
     };
     for (const row of rows) {
       const status = normalizeStatus(row.readinessStatus, 'needs_plan');
@@ -8613,6 +14084,18 @@ class ContractorOperatingLedger {
       if ((row.blockers || []).some(blocker => blocker.type === 'weather_risk')) summary.weatherRisks += 1;
       summary.toolConflicts += normalizeNumber(row.counts?.toolConflicts, 0);
       summary.workerConflicts += normalizeNumber(row.counts?.workerConflicts, 0);
+      summary.workerReadinessBlockers += normalizeNumber(row.counts?.workerReadinessBlockers, 0);
+      summary.missingWorkerRecords += (row.blockers || [])
+        .filter(blocker => blocker.type === 'worker_record_missing').length;
+      summary.unavailableWorkers += (row.blockers || [])
+        .filter(blocker => blocker.type === 'worker_unavailable').length;
+      summary.retirementPendingWorkers += (row.blockers || [])
+        .filter(blocker => blocker.type === 'worker_retirement_pending').length;
+      summary.toolReadinessBlockers += normalizeNumber(row.counts?.toolReadinessBlockers, 0);
+      summary.unregisteredTools += (row.blockers || [])
+        .filter(blocker => blocker.type === 'tool_record_missing').length;
+      summary.inspectionToolBlockers += (row.blockers || [])
+        .filter(blocker => blocker.type === 'tool_inspection_readiness').length;
     }
     return summary;
   }
@@ -8623,7 +14106,7 @@ class ContractorOperatingLedger {
     const limit = safeLimit(filters.limit, 100, 500);
     const includeClosed = filters.includeClosed === true || filters.include_closed === true || filters.includeClosed === 'true' || filters.include_closed === 'true';
     const closedStatuses = new Set(['completed', 'cancelled', 'canceled', 'rejected', 'closed', 'archived']);
-    const rows = this.listJobs({ limit: 500 })
+    const rows = this.listJobs({ includeArchived: includeClosed, limit: 500 })
       .filter(job => includeClosed || !closedStatuses.has(normalizeStatus(job.status, 'open')))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
@@ -8634,6 +14117,10 @@ class ContractorOperatingLedger {
         const missing = [...new Set(Array.isArray(recommendation.missing) ? recommendation.missing : [])];
         const warnings = [...new Set(Array.isArray(recommendation.warnings) ? recommendation.warnings : [])];
         const nextActions = Array.isArray(recommendation.nextActions) ? recommendation.nextActions : [];
+        const surfacedNextActions = [
+          ...nextActions.filter(action => action.recordType && action.recordId),
+          ...nextActions.filter(action => !(action.recordType && action.recordId))
+        ];
         const readinessStatus = this.classifyDispatchReadiness({ ...recommendation, blockers, missing, warnings });
         return {
           jobId: job.id,
@@ -8657,7 +14144,7 @@ class ContractorOperatingLedger {
           readiness: recommendation.readiness || {},
           recommendedWorker: recommendation.recommendedWorker,
           nextAction: recommendation.nextAction,
-          nextActions: nextActions.slice(0, 8),
+          nextActions: surfacedNextActions.slice(0, 8),
           blockers,
           missing,
           warnings,
@@ -8677,9 +14164,14 @@ class ContractorOperatingLedger {
               + (detail.jhas || []).length
               + (detail.sdsSheets || []).length,
             siteAccessRecords: (detail.siteAccessLogs || []).length,
+            designOpenRecords: normalizeNumber(recommendation.readiness?.design?.openRecords, 0),
             pendingApprovals: pendingApprovals.length,
             toolConflicts: (recommendation.toolConflicts || []).length,
-            workerConflicts: recommendation.recommendedWorker?.conflicts?.length || 0
+            workerConflicts: normalizeNumber(recommendation.readiness?.workforce?.conflicts, 0),
+            workerReadinessBlockers: normalizeNumber(recommendation.readiness?.workforce?.blocked, 0),
+            workerReadinessWarnings: normalizeNumber(recommendation.readiness?.workforce?.warnings, 0),
+            toolReadinessBlockers: normalizeNumber(recommendation.readiness?.tools?.blocked, 0),
+            toolReadinessWarnings: normalizeNumber(recommendation.readiness?.tools?.warnings, 0)
           }
         };
       });
@@ -8766,8 +14258,12 @@ class ContractorOperatingLedger {
       openLienWaivers: 0,
       contractValue: 0,
       quoteValue: 0,
+      quotedNetValue: 0,
       invoiceValue: 0,
+      invoicedNetValue: 0,
+      invoiceDraftAmount: 0,
       uninvoicedValue: 0,
+      uninvoicedNetValue: 0,
       unpaidValue: 0,
       receivedValue: 0,
       expenseValue: 0,
@@ -8798,8 +14294,12 @@ class ContractorOperatingLedger {
       const money = row.money || {};
       summary.contractValue += normalizeNumber(money.contractValue, 0);
       summary.quoteValue += normalizeNumber(money.quoteValue, 0);
+      summary.quotedNetValue += normalizeNumber(money.quotedNetValue, 0);
       summary.invoiceValue += normalizeNumber(money.invoiceValue, 0);
+      summary.invoicedNetValue += normalizeNumber(money.invoicedNetValue, 0);
+      summary.invoiceDraftAmount += normalizeNumber(money.invoiceDraftAmount, 0);
       summary.uninvoicedValue += normalizeNumber(money.uninvoicedValue, 0);
+      summary.uninvoicedNetValue += normalizeNumber(money.uninvoicedNetValue, 0);
       summary.unpaidValue += normalizeNumber(money.unpaidValue, 0);
       summary.receivedValue += normalizeNumber(money.receivedValue, 0);
       summary.expenseValue += normalizeNumber(money.expenseValue, 0);
@@ -8829,10 +14329,10 @@ class ContractorOperatingLedger {
     const completedStatuses = new Set(['completed', 'closed', 'accepted']);
     const activeJobStatuses = new Set(['scheduled', 'in_progress', 'active', 'approved', 'completed', 'closed', 'accepted']);
     const activeInvoiceStatuses = ['paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void'];
-    const activePaymentClosedStatuses = ['paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void'];
+    const activePaymentClosedStatuses = ['paid', 'received', 'settled', 'written_off', 'cancelled', 'canceled', 'rejected', 'void'];
     const activeHandoffClosedStatuses = ['exported', 'sent', 'cancelled', 'canceled', 'rejected', 'void'];
 
-    const rows = this.listJobs({ limit: 500 })
+    const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
@@ -8847,6 +14347,10 @@ class ContractorOperatingLedger {
         const issueableInvoices = activeInvoices.filter(invoice => ['approved', 'sent', 'submitted'].includes(normalizeStatus(invoice.status, 'draft')));
         const openPayments = (detail.payments || []).filter(payment => this.financeRecordOpen(payment.status, activePaymentClosedStatuses));
         const dueOrOverduePayments = openPayments.filter(payment => this.financeDueOrOverdue(payment.dueAt));
+        const paymentsDueForFollowUp = openPayments.filter(payment => {
+          const paymentData = payment.data || {};
+          return this.financeDueOrOverdue(paymentData.nextFollowUpAt || payment.dueAt);
+        });
         const receivedPayments = (detail.payments || []).filter(payment => ['paid', 'received', 'settled'].includes(normalizeStatus(payment.status, '')));
         const activeBudgetLines = (detail.budgetLines || []).filter(line => this.financeRecordOpen(line.status));
         const openPurchaseOrders = (detail.purchaseOrders || []).filter(order => this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received']));
@@ -8858,11 +14362,16 @@ class ContractorOperatingLedger {
         const billableHours = timeLogs.reduce((sum, log) => sum + (log.billable === false ? 0 : normalizeNumber(log.hours, 0)), 0);
         const billableLaborValue = timeLogs.reduce((sum, log) => sum + (log.billable === false ? 0 : normalizeNumber(log.hours, 0) * normalizeNumber(log.rate, 0)), 0);
         const expenseValue = expenses.reduce((sum, expense) => sum + normalizeNumber(expense.amount, 0), 0);
-        const quoteValue = (detail.quotes || [])
-          .filter(quote => this.financeRecordOpen(quote.status, ['cancelled', 'canceled', 'rejected', 'expired', 'void']))
+        const validQuotes = (detail.quotes || [])
+          .filter(quote => this.financeRecordOpen(quote.status, ['cancelled', 'canceled', 'rejected', 'expired', 'void']));
+        const latestQuote = validQuotes[0] || null;
+        const quoteValue = validQuotes
           .reduce((sum, quote) => sum + normalizeNumber(quote.total, 0), 0);
+        const quotedNetValue = normalizeNumber(latestQuote?.subtotal, 0);
+        const quotedGrossValue = normalizeNumber(latestQuote?.total, quotedNetValue);
         const contractValue = normalizeNumber(detail.contractValue, normalizeNumber(detail.estimatedCost, 0));
         const invoiceValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
+        const invoicedNetValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.amount, 0), 0);
         const receivedValue = receivedPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const openPaymentValue = openPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const purchaseOrderValue = openPurchaseOrders.reduce((sum, order) => sum + normalizeNumber(order.amount, 0), 0);
@@ -8870,7 +14379,9 @@ class ContractorOperatingLedger {
         const financeHandoffValue = activeHandoffs.reduce((sum, handoff) => sum + normalizeNumber(handoff.amount, 0), 0);
         const budgetForecastValue = activeBudgetLines.reduce((sum, line) => sum + normalizeNumber(line.forecastAmount, 0), 0);
         const budgetActualValue = activeBudgetLines.reduce((sum, line) => sum + normalizeNumber(line.actualAmount, 0), 0);
-        const revenueBasis = Math.max(contractValue, quoteValue, invoiceValue);
+        const netRevenueBasis = Math.max(contractValue, quotedNetValue, invoicedNetValue);
+        const grossRevenueBasis = Math.max(contractValue, quotedGrossValue, invoiceValue);
+        const invoiceDraftAmount = Math.max(0, Math.max(contractValue, quotedNetValue) - invoicedNetValue);
         const progressedForFinance = completedStatuses.has(jobStatus) || normalizeNumber(detail.progressPercent, 0) >= 85;
         const startedForCosting = activeJobStatuses.has(jobStatus) && (normalizeNumber(detail.progressPercent, 0) >= 25 || completedStatuses.has(jobStatus));
         const hasFinancialActivity = activeInvoices.length
@@ -8883,13 +14394,16 @@ class ContractorOperatingLedger {
           || openDrawRequests.length
           || openLienWaivers.length;
         const missingCosts = startedForCosting && !expenses.length && !timeLogs.length && budgetActualValue <= 0;
-        const missingBudget = activeJobStatuses.has(jobStatus) && revenueBasis >= 1000 && !activeBudgetLines.length;
-        const invoiceReady = progressedForFinance && (invoiceValue <= 0 || revenueBasis > invoiceValue + 1);
-        const paymentFollowUp = openPayments.length > 0
-          || dueOrOverduePayments.length > 0
-          || (issueableInvoices.length > 0 && Math.max(0, invoiceValue - receivedValue) > 1);
+        const missingBudget = activeJobStatuses.has(jobStatus) && netRevenueBasis >= 1000 && !activeBudgetLines.length;
+        const invoiceReady = progressedForFinance && invoiceDraftAmount > 1;
+        const untrackedReceivable = issueableInvoices.length > 0
+          && openPayments.length === 0
+          && Math.max(0, invoiceValue - receivedValue) > 1;
+        const paymentFollowUp = paymentsDueForFollowUp.length > 0 || untrackedReceivable;
         const handoffMissing = hasFinancialActivity && !activeHandoffs.length;
-        const handoffReady = handoffMissing || activeHandoffs.some(handoff => ['draft', 'ready'].includes(normalizeStatus(handoff.status, 'draft')));
+        const handoffReady = !missingCosts
+          && !missingBudget
+          && (handoffMissing || activeHandoffs.some(handoff => ['draft', 'ready'].includes(normalizeStatus(handoff.status, 'draft'))));
         const approvalRequired = financeApprovals.length > 0
           || activeInvoices.some(invoice => invoice.approvalId && ['draft', 'submitted', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')))
           || openPayments.some(payment => payment.approvalId && ['pending_confirmation', 'pending_approval'].includes(normalizeStatus(payment.status, '')))
@@ -8909,14 +14423,20 @@ class ContractorOperatingLedger {
         };
         const financeStatus = this.classifyFinanceReadiness(flags);
         const nextActions = [];
-        if (approvalRequired) nextActions.push({ type: 'review_finance_approval', label: 'Review finance approval gates', requiresApproval: false });
-        if (paymentFollowUp) nextActions.push({ type: 'record_payment_follow_up', label: 'Record payment follow-up or confirmation', requiresApproval: ['received', 'paid', 'settled'].some(status => openPayments.some(payment => normalizeStatus(payment.status, '') === status)) });
+        if (approvalRequired) nextActions.push({ type: 'review_finance_approval', label: 'Review finance approval gates', approvalId: financeApprovals[0]?.id || null, requiresApproval: false });
+        if (paymentFollowUp) nextActions.push({
+          type: 'record_payment_follow_up',
+          label: 'Record payment follow-up or confirmation',
+          paymentId: paymentsDueForFollowUp[0]?.id || openPayments[0]?.id || null,
+          invoiceId: issueableInvoices[0]?.id || null,
+          requiresApproval: false
+        });
         if (invoiceReady) nextActions.push({ type: 'draft_invoice', label: 'Draft invoice or Peppol/UBL package', requiresApproval: true });
-        if (handoffReady) nextActions.push({ type: 'prepare_finance_handoff', label: 'Prepare FAB/bookkeeping handoff package', requiresApproval: true });
         if (missingCosts) nextActions.push({ type: 'record_time_expense', label: 'Record time logs and job expenses', requiresApproval: false });
         if (missingBudget) nextActions.push({ type: 'create_budget_line', label: 'Create budget and forecast control', requiresApproval: true });
-        if (issueableInvoices.length && !openDrawRequests.length && invoiceValue >= 1000) nextActions.push({ type: 'create_draw_request', label: 'Prepare progress draw request', requiresApproval: true });
-        if (openPayments.some(payment => normalizeNumber(payment.amount, 0) >= 1000) && !openLienWaivers.length) nextActions.push({ type: 'request_lien_waiver', label: 'Request lien waiver before payment closeout', requiresApproval: true });
+        if (issueableInvoices.length && !openDrawRequests.length && invoiceValue >= 1000) nextActions.push({ type: 'create_draw_request', label: 'Prepare progress draw request', invoiceId: issueableInvoices[0].id, requiresApproval: true });
+        if (openPayments.some(payment => normalizeNumber(payment.amount, 0) >= 1000) && !openLienWaivers.length) nextActions.push({ type: 'request_lien_waiver', label: 'Prepare lien waiver request before payment closeout', paymentId: openPayments.find(payment => normalizeNumber(payment.amount, 0) >= 1000)?.id || null, requiresApproval: false });
+        if (handoffReady) nextActions.push({ type: 'prepare_finance_handoff', label: 'Prepare FAB/bookkeeping handoff package', handoffId: activeHandoffs[0]?.id || null, requiresApproval: true });
         const primaryAction = nextActions[0]?.label || 'Finance records are stable.';
 
         return {
@@ -8936,7 +14456,7 @@ class ContractorOperatingLedger {
           progressPercent: detail.progressPercent,
           financeStatus,
           nextAction: primaryAction,
-          nextActions: nextActions.slice(0, 8),
+          nextActions,
           flags,
           counts: {
             timeLogs: timeLogs.length,
@@ -8958,8 +14478,13 @@ class ContractorOperatingLedger {
           money: {
             contractValue,
             quoteValue,
+            quotedNetValue,
+            quotedGrossValue,
             invoiceValue,
-            uninvoicedValue: Math.max(0, revenueBasis - invoiceValue),
+            invoicedNetValue,
+            invoiceDraftAmount,
+            uninvoicedValue: Math.max(0, grossRevenueBasis - invoiceValue),
+            uninvoicedNetValue: invoiceDraftAmount,
             unpaidValue: Math.max(openPaymentValue, Math.max(0, invoiceValue - receivedValue)),
             receivedValue,
             expenseValue,
@@ -8969,15 +14494,18 @@ class ContractorOperatingLedger {
             financeHandoffValue,
             budgetForecastValue,
             budgetActualValue,
-            projectedMargin: revenueBasis - expenseValue - billableLaborValue - purchaseOrderValue
+            projectedMargin: netRevenueBasis - expenseValue - billableLaborValue - purchaseOrderValue
           },
           latest: {
             invoice: validInvoices[0] || null,
             payment: openPayments[0] || receivedPayments[0] || null,
+            budgetLine: activeBudgetLines[0] || null,
             purchaseOrder: openPurchaseOrders[0] || null,
             drawRequest: openDrawRequests[0] || null,
             lienWaiver: openLienWaivers[0] || null,
-            financeHandoff: activeHandoffs[0] || null
+            financeHandoff: activeHandoffs[0] || null,
+            timeLog: timeLogs[0] || null,
+            expense: expenses[0] || null
           }
         };
       });
@@ -9102,7 +14630,7 @@ class ContractorOperatingLedger {
     const closedStatuses = ['cancelled', 'canceled', 'rejected', 'void', 'closed'];
     const completedStatuses = new Set(['completed', 'closed', 'accepted']);
 
-    const rows = this.listJobs({ limit: 500 })
+    const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
@@ -9177,10 +14705,10 @@ class ContractorOperatingLedger {
         };
         const clientStatus = this.classifyClientSuccessReadiness(flags);
         const nextActions = [];
-        if (approvalRequired) nextActions.push({ type: 'review_client_approval', label: 'Review client-facing approval gates', requiresApproval: false });
-        if (overdueSelections.length) nextActions.push({ type: 'selection_follow_up', label: 'Draft client selection reminder', requiresApproval: true });
-        if (overdueReplies.length || waitingReplies.length) nextActions.push({ type: 'client_reply_follow_up', label: 'Draft client reply follow-up', requiresApproval: true });
-        if (pendingSelections.length && !overdueSelections.length) nextActions.push({ type: 'review_client_selection', label: 'Review pending client selection', requiresApproval: false });
+        if (approvalRequired) nextActions.push({ type: 'review_client_approval', label: 'Review client-facing approval gates', approvalId: pendingApprovals[0]?.id || null, requiresApproval: false });
+        if (overdueSelections.length) nextActions.push({ type: 'selection_follow_up', label: 'Draft client selection reminder', selectionId: overdueSelections[0].id, requiresApproval: true });
+        if (overdueReplies.length || waitingReplies.length) nextActions.push({ type: 'client_reply_follow_up', label: 'Draft client reply follow-up', communicationId: (overdueReplies[0] || waitingReplies[0])?.id || null, requiresApproval: true });
+        if (pendingSelections.length) nextActions.push({ type: 'review_client_selection', label: 'Record the retained client selection decision', selectionId: pendingSelections[0].id, requiresApproval: true });
         if (closeoutMissing) nextActions.push({ type: 'prepare_closeout', label: 'Create closeout pack and client handover draft', requiresApproval: true });
         if (openPunchItems.length) nextActions.push({
           type: 'resolve_punch_item',
@@ -9312,7 +14840,7 @@ class ContractorOperatingLedger {
 
   classifyWorkforceReadiness(flags = {}) {
     if (flags.approvalRequired) return 'approval_required';
-    if (flags.workerConflict) return 'worker_conflict';
+    if (flags.workerConflict || flags.offlineAssigned) return 'worker_conflict';
     if (flags.needsAssignment) return 'needs_assignment';
     if (flags.needsInstruction) return 'needs_instruction';
     if (flags.siteAccess) return 'site_access';
@@ -9350,7 +14878,7 @@ class ContractorOperatingLedger {
     for (const row of rows) {
       const flags = row.flags || {};
       if (flags.approvalRequired) summary.approvalRequired += 1;
-      if (flags.workerConflict) summary.workerConflicts += 1;
+      if (flags.workerConflict || flags.offlineAssigned) summary.workerConflicts += 1;
       if (flags.needsAssignment) summary.needsAssignment += 1;
       if (flags.needsInstruction) summary.needsInstruction += 1;
       if (flags.siteAccess) summary.siteAccess += 1;
@@ -9395,10 +14923,10 @@ class ContractorOperatingLedger {
     const readyInstructionStatuses = new Set(['approved', 'sent', 'published', 'dispatched']);
     const crewJobStatuses = new Set(['planned', 'scheduled', 'confirmed', 'approved', 'active', 'in_progress']);
     const workStartedStatuses = new Set(['active', 'in_progress', 'completed', 'closed', 'accepted']);
-    const offlineWorkerStatuses = new Set(['offline', 'inactive', 'unavailable', 'blocked', 'sick']);
+    const offlineWorkerStatuses = new Set(['offline', 'on_leave', 'on_hold', 'inactive', 'unavailable', 'blocked', 'sick', 'retired']);
     const workersById = new Map(this.listWorkers({ includeInactive: true }).map(worker => [worker.id, worker]));
 
-    const rows = this.listJobs({ limit: 500 })
+    const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
@@ -9406,11 +14934,21 @@ class ContractorOperatingLedger {
         const progressPercent = normalizeNumber(detail.progressPercent, 0);
         const scheduledForCrew = crewJobStatuses.has(jobStatus) || Boolean(detail.scheduledStart || detail.targetCompletion);
         const timeExpected = workStartedStatuses.has(jobStatus) || progressPercent >= 50;
-        const pendingApprovals = (detail.approvals || []).filter(approval =>
-          normalizeStatus(approval.status, 'pending') === 'pending'
-          && workforceTargetTypes.has(normalizeStatus(approval.targetType, ''))
-        );
         const activeAssignments = (detail.assignments || []).filter(assignment => this.activeAssignmentStatus(assignment.status));
+        const crewEvidence = this.crewEvidenceReadiness(detail);
+        const currentApprovalTargets = new Map([
+          ['assignment', new Set(activeAssignments.map(record => String(record.id)))],
+          ['worker_assignment', new Set(activeAssignments.map(record => String(record.id)))],
+          ['worker_instruction', new Set(crewEvidence.currentInstructions.map(record => String(record.id)))],
+          ['worker_orientation', new Set(crewEvidence.currentOrientations.map(record => String(record.id)))],
+          ['site_access_log', new Set(crewEvidence.currentSiteAccessLogs.map(record => String(record.id)))]
+        ]);
+        const pendingApprovals = (detail.approvals || []).filter(approval => {
+          const targetType = normalizeStatus(approval.targetType, '');
+          if (normalizeStatus(approval.status, 'pending') !== 'pending' || !workforceTargetTypes.has(targetType)) return false;
+          const scopedTargets = currentApprovalTargets.get(targetType);
+          return !scopedTargets || scopedTargets.has(String(approval.targetId || ''));
+        });
         const pendingAssignments = activeAssignments.filter(assignment =>
           ['pending_approval', 'pending', 'planned', 'scheduled'].includes(normalizeStatus(assignment.status, 'planned'))
         );
@@ -9427,27 +14965,23 @@ class ContractorOperatingLedger {
         });
         const offlineAssignments = activeAssignments.filter(assignment => {
           const worker = assignment.workerId ? workersById.get(assignment.workerId) : null;
-          return offlineWorkerStatuses.has(normalizeStatus(worker?.status || assignment.status, 'available'));
+          return !worker || offlineWorkerStatuses.has(normalizeStatus(worker.status, 'available'));
         });
-        const activeInstructions = (detail.workerInstructions || []).filter(instruction =>
-          this.financeRecordOpen(instruction.status, closedStatuses)
-        );
+        const activeInstructions = crewEvidence.currentInstructions.filter(instruction => this.financeRecordOpen(instruction.status, closedStatuses));
         const publishedInstructions = activeInstructions.filter(instruction =>
           readyInstructionStatuses.has(normalizeStatus(instruction.status, 'draft'))
         );
         const draftInstructions = activeInstructions.filter(instruction =>
           !readyInstructionStatuses.has(normalizeStatus(instruction.status, 'draft'))
         );
-        const orientations = (detail.orientations || []).filter(orientation =>
+        const orientations = crewEvidence.currentOrientations.filter(orientation =>
           this.financeRecordOpen(orientation.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed'])
         );
         const openOrientations = orientations.filter(orientation =>
           !['completed', 'approved', 'cleared', 'valid'].includes(normalizeStatus(orientation.status, 'scheduled'))
         );
         const dueOrientations = openOrientations.filter(orientation => this.financeDueOrOverdue(orientation.dueAt));
-        const blockedSiteAccess = (detail.siteAccessLogs || []).filter(access =>
-          normalizeStatus(access.status, '') === 'blocked' || access.orientationValid === false
-        );
+        const blockedSiteAccess = crewEvidence.items.filter(item => item.siteAccess && !item.siteAccessReady).map(item => item.siteAccess);
         const timeLogs = (detail.timeLogs || []).filter(log =>
           this.financeRecordOpen(log.status, ['cancelled', 'canceled', 'rejected', 'void'])
         );
@@ -9456,9 +14990,9 @@ class ContractorOperatingLedger {
         const needsAssignment = scheduledForCrew && activeAssignments.length === 0;
         const needsInstruction = (scheduledForCrew || activeAssignments.length > 0)
           && activeAssignments.length > 0
-          && publishedInstructions.length === 0;
+          && !crewEvidence.instructionsReady;
         const siteAccess = activeAssignments.length > 0
-          && (orientations.length === 0 || dueOrientations.length > 0 || blockedSiteAccess.length > 0);
+          && (!crewEvidence.orientationsReady || !crewEvidence.siteAccessReady);
         const timeMissing = timeExpected && timeLogs.length === 0;
         const approvalRequired = pendingApprovals.length > 0
           || activeAssignments.some(assignment => assignment.approvalId && normalizeStatus(assignment.status, '') === 'pending_approval')
@@ -9477,14 +15011,67 @@ class ContractorOperatingLedger {
           blockedSiteAccess: blockedSiteAccess.length > 0
         };
         const workforceStatus = this.classifyWorkforceReadiness(flags);
+        const instructionGap = crewEvidence.items.find(item => !item.instructionReady) || null;
+        const siteAccessGap = crewEvidence.items.find(item => !item.siteAccessReady) || null;
         const nextActions = [];
-        if (approvalRequired) nextActions.push({ type: 'review_worker_approval', label: 'Review crew approval gates', requiresApproval: false });
-        if (workerConflicts.length) nextActions.push({ type: 'resolve_worker_conflict', label: 'Resolve double-booked worker assignment', requiresApproval: false });
-        if (offlineAssignments.length) nextActions.push({ type: 'resolve_worker_conflict', label: 'Replace unavailable worker assignment', requiresApproval: false });
+        if (approvalRequired) nextActions.push({ type: 'review_worker_approval', label: 'Review crew approval gates', approvalId: pendingApprovals[0]?.id || null, requiresApproval: false });
+        if (workerConflicts.length) nextActions.push({ type: 'resolve_worker_conflict', label: 'Resolve double-booked worker assignment', assignmentId: activeAssignments[0]?.id || null, workerId: activeAssignments[0]?.workerId || null, requiresApproval: false });
+        if (offlineAssignments.length) nextActions.push({ type: 'resolve_worker_conflict', label: 'Replace unavailable worker assignment', assignmentId: offlineAssignments[0]?.id || null, workerId: offlineAssignments[0]?.workerId || null, requiresApproval: false });
         if (needsAssignment) nextActions.push({ type: 'assign_worker', label: 'Assign an available worker or subcontractor', requiresApproval: false });
-        if (needsInstruction) nextActions.push({ type: 'draft_worker_instruction', label: draftInstructions.length ? 'Review and publish crew instructions' : 'Draft crew instructions', requiresApproval: true });
-        if (siteAccess) nextActions.push({ type: 'complete_worker_orientation', label: dueOrientations.length ? 'Complete due worker orientation' : 'Prepare site access and orientation evidence', requiresApproval: true });
-        if (timeMissing) nextActions.push({ type: 'record_time_log', label: 'Record worker time for costing and payroll evidence', requiresApproval: false });
+        if (needsInstruction && instructionGap?.instruction) nextActions.push({
+          type: 'publish_worker_instruction',
+          label: 'Review and request instruction approval',
+          instructionId: instructionGap.instruction.id,
+          recordType: 'worker_instruction',
+          recordId: instructionGap.instruction.id,
+          record: instructionGap.instruction,
+          targetStatus: 'published',
+          assignmentId: instructionGap.assignmentId,
+          workerId: instructionGap.workerId,
+          workerName: instructionGap.workerName,
+          requiresApproval: true
+        });
+        if (needsInstruction && !instructionGap?.instruction) nextActions.push({
+          type: 'draft_worker_instruction',
+          label: 'Draft crew instructions',
+          assignmentId: instructionGap?.assignmentId || activeAssignments[0]?.id || null,
+          workerId: instructionGap?.workerId || activeAssignments[0]?.workerId || null,
+          workerName: instructionGap?.workerName || activeAssignments[0]?.workerName || null,
+          requiresApproval: false
+        });
+        if (siteAccess && siteAccessGap && !siteAccessGap.orientationReady) nextActions.push({
+          type: 'complete_worker_orientation',
+          label: siteAccessGap.orientation ? 'Complete worker orientation' : 'Prepare worker orientation evidence',
+          orientationId: siteAccessGap.orientation?.id || null,
+          assignmentId: siteAccessGap.assignmentId,
+          workerId: siteAccessGap.workerId,
+          workerName: siteAccessGap.workerName,
+          company: siteAccessGap.orientation?.company || null,
+          requiresApproval: true
+        });
+        if (siteAccess && siteAccessGap?.orientationReady && !siteAccessGap.siteAccess) nextActions.push({
+          type: 'prepare_site_access',
+          label: 'Prepare site-access gate',
+          orientationId: siteAccessGap.orientation?.id || null,
+          assignmentId: siteAccessGap.assignmentId,
+          workerId: siteAccessGap.workerId,
+          workerName: siteAccessGap.workerName,
+          requiresApproval: false
+        });
+        if (siteAccess && siteAccessGap?.orientationReady && siteAccessGap.siteAccess && normalizeStatus(siteAccessGap.siteAccess.status, 'requested') !== 'pending_approval') nextActions.push({
+          type: 'clear_site_access',
+          label: 'Request site-access clearance',
+          siteAccessId: siteAccessGap.siteAccess.id,
+          recordType: 'site_access',
+          recordId: siteAccessGap.siteAccess.id,
+          record: siteAccessGap.siteAccess,
+          targetStatus: 'cleared',
+          assignmentId: siteAccessGap.assignmentId,
+          workerId: siteAccessGap.workerId,
+          workerName: siteAccessGap.workerName,
+          requiresApproval: true
+        });
+        if (timeMissing) nextActions.push({ type: 'record_time_log', label: 'Record worker time for costing and payroll evidence', assignmentId: activeAssignments[0]?.id || null, workerId: activeAssignments[0]?.workerId || null, workerName: activeAssignments[0]?.workerName || null, requiresApproval: false });
 
         return {
           jobId: detail.id,
@@ -9520,15 +15107,25 @@ class ContractorOperatingLedger {
             openOrientations: openOrientations.length,
             dueOrientations: dueOrientations.length,
             blockedSiteAccess: blockedSiteAccess.length,
-            siteAccessRecords: (detail.siteAccessLogs || []).length,
+            missingOrientations: crewEvidence.missingOrientations,
+            missingSiteAccess: crewEvidence.missingSiteAccess,
+            siteAccessRecords: crewEvidence.currentSiteAccessLogs.length,
+            staleCrewEvidence: crewEvidence.staleRecords.instructions + crewEvidence.staleRecords.orientations + crewEvidence.staleRecords.siteAccess,
             timeLogs: timeLogs.length,
             billableHours
+          },
+          crewEvidence: {
+            instructionsReady: crewEvidence.items.filter(item => item.instructionReady).length,
+            orientationsReady: crewEvidence.items.filter(item => item.orientationReady).length,
+            siteAccessReady: crewEvidence.items.filter(item => item.siteAccessReady).length,
+            required: crewEvidence.items.length,
+            staleRecords: crewEvidence.staleRecords
           },
           latest: {
             assignment: activeAssignments[0] || null,
             instruction: activeInstructions[0] || null,
             orientation: orientations[0] || null,
-            siteAccess: (detail.siteAccessLogs || [])[0] || null,
+            siteAccess: crewEvidence.currentSiteAccessLogs[0] || null,
             timeLog: timeLogs[0] || null
           },
           conflicts: workerConflicts.slice(0, 8),
@@ -9590,6 +15187,7 @@ class ContractorOperatingLedger {
   }
 
   classifyInventoryReadiness(flags = {}) {
+    if (flags.supplierComplianceBlocked) return 'supplier_compliance';
     if (flags.approvalRequired) return 'approval_required';
     if (flags.toolConflict) return 'tool_conflict';
     if (flags.procurementNeeded) return 'procurement_needed';
@@ -9603,6 +15201,7 @@ class ContractorOperatingLedger {
       total: rows.length,
       matching,
       approvalRequired: 0,
+      supplierComplianceBlocked: 0,
       toolConflicts: 0,
       procurementNeeded: 0,
       loadingMissing: 0,
@@ -9625,10 +15224,12 @@ class ContractorOperatingLedger {
       pendingLoadingApprovals: 0,
       loadingExternalCommitments: 0,
       procurementValue: 0,
-      materialCost: 0
+      materialCost: 0,
+      partnerComplianceBlocks: 0
     };
     for (const row of rows) {
       const flags = row.flags || {};
+      if (flags.supplierComplianceBlocked) summary.supplierComplianceBlocked += 1;
       if (flags.approvalRequired) summary.approvalRequired += 1;
       if (flags.toolConflict) summary.toolConflicts += 1;
       if (flags.procurementNeeded) summary.procurementNeeded += 1;
@@ -9653,6 +15254,7 @@ class ContractorOperatingLedger {
       summary.loadingExternalCommitments += normalizeNumber(row.loadingReadiness?.externalCommitments, 0);
       summary.procurementValue += normalizeNumber(row.money?.procurementValue, 0);
       summary.materialCost += normalizeNumber(row.money?.materialCost, 0);
+      summary.partnerComplianceBlocks += normalizeNumber(row.counts?.partnerComplianceBlocks, 0);
     }
     return summary;
   }
@@ -9676,7 +15278,7 @@ class ContractorOperatingLedger {
     const procurementCommittedStatuses = new Set(['approved', 'ordered', 'sent', 'received']);
     const inventoryJobStatuses = new Set(['planned', 'scheduled', 'confirmed', 'approved', 'active', 'in_progress']);
 
-    const rows = this.listJobs({ limit: 500 })
+    const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
@@ -9721,6 +15323,12 @@ class ContractorOperatingLedger {
         const purchaseOrders = (detail.purchaseOrders || []).filter(order =>
           this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received'])
         );
+        const partnerReadiness = [...procurementOrders, ...purchaseOrders].map(order => ({
+          orderId: order.id,
+          recordType: detail.procurementOrders?.some(candidate => candidate.id === order.id) ? 'procurement_order' : 'purchase_order',
+          ...this.tradePartnerReadinessForSpend(order)
+        }));
+        const partnerComplianceBlocks = partnerReadiness.filter(item => item.compliance.compliant !== true);
         const activeLoadingPlans = (detail.loadingPlans || []).filter(plan =>
           this.financeRecordOpen(plan.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed'])
         );
@@ -9737,6 +15345,7 @@ class ContractorOperatingLedger {
           || purchaseOrders.some(order => order.approvalId && ['pending_approval', 'ready_to_order'].includes(normalizeStatus(order.status, '')))
           || activeLoadingPlans.some(plan => plan.approvalId && normalizeStatus(plan.status, '') === 'pending_approval');
         const flags = {
+          supplierComplianceBlocked: partnerComplianceBlocks.length > 0,
           approvalRequired,
           toolConflict: toolConflicts.length > 0,
           procurementNeeded,
@@ -9748,11 +15357,22 @@ class ContractorOperatingLedger {
         };
         const inventoryStatus = this.classifyInventoryReadiness(flags);
         const nextActions = [];
-        if (approvalRequired) nextActions.push({ type: 'review_inventory_approval', label: 'Review inventory or procurement approval gates', requiresApproval: false });
-        if (toolConflicts.length) nextActions.push({ type: 'resolve_tool_conflict', label: 'Resolve overlapping tool reservation', requiresApproval: false });
-        if (procurementNeeded) nextActions.push({ type: 'create_procurement_order', label: 'Create procurement order for required materials', requiresApproval: true });
-        if (loadingMissing) nextActions.push({ type: 'prepare_loading_plan', label: 'Create loading checklist from tools and materials', requiresApproval: false });
-        if (materialNeeded && !procurementNeeded) nextActions.push({ type: 'review_material_status', label: 'Confirm material availability and supplier status', requiresApproval: false });
+        if (partnerComplianceBlocks.length) nextActions.push({
+          type: 'review_trade_partner',
+          label: 'Verify trade partner before purchasing approval',
+          tradePartnerId: partnerComplianceBlocks[0].partner?.id || null,
+          supplier: partnerComplianceBlocks[0].supplier || null,
+          recordType: partnerComplianceBlocks[0].recordType,
+          recordId: partnerComplianceBlocks[0].orderId,
+          blockers: partnerComplianceBlocks[0].compliance.blockers,
+          requiresApproval: false,
+          blocked: true
+        });
+        if (approvalRequired) nextActions.push({ type: 'review_inventory_approval', label: 'Review inventory or procurement approval gates', approvalId: pendingApprovals[0]?.id || null, requiresApproval: false });
+        if (toolConflicts.length) nextActions.push({ type: 'resolve_tool_conflict', label: 'Resolve overlapping tool reservation', reservationId: activeTools[0]?.id || null, toolId: activeTools[0]?.toolId || null, requiresApproval: false });
+        if (procurementNeeded) nextActions.push({ type: 'create_procurement_order', label: 'Create procurement order for required materials', materialRequirementIds: openMaterials.map(material => material.id), requiresApproval: true });
+        if (loadingMissing) nextActions.push({ type: 'prepare_loading_plan', label: 'Create loading checklist from tools and materials', materialRequirementIds: activeMaterials.map(material => material.id), reservationIds: activeTools.map(tool => tool.id), requiresApproval: false });
+        if (materialNeeded && !procurementNeeded) nextActions.push({ type: 'review_material_status', label: 'Confirm material availability and supplier status', materialRequirementId: (dueMaterials[0] || openMaterials[0])?.id || null, requiresApproval: false });
 
         const materialCost = activeMaterials.reduce((sum, material) => {
           return sum + normalizeNumber(material.cost, 0) * Math.max(1, normalizeNumber(material.quantity, 1));
@@ -9792,6 +15412,7 @@ class ContractorOperatingLedger {
             pendingProcurement: pendingProcurement.length,
             committedProcurement: committedProcurement.length,
             purchaseOrders: purchaseOrders.length,
+            partnerComplianceBlocks: partnerComplianceBlocks.length,
             loadingPlans: activeLoadingPlans.length,
             loadingItems: normalizeNumber(loadingReadiness?.itemCounts?.total, 0),
             loadingToolItems: normalizeNumber(loadingReadiness?.itemCounts?.tools, 0),
@@ -9806,6 +15427,7 @@ class ContractorOperatingLedger {
             material: openMaterials[0] || activeMaterials[0] || null,
             procurementOrder: pendingProcurement[0] || procurementOrders[0] || null,
             purchaseOrder: purchaseOrders[0] || null,
+            tradePartner: partnerReadiness.find(item => item.partner)?.partner || null,
             loadingPlan: activeLoadingPlan
           },
           loadingReadiness,
@@ -9818,6 +15440,7 @@ class ContractorOperatingLedger {
     const matchesMode = row => {
       if (mode === 'all') return true;
       if (mode === 'approval' || mode === 'approval_required') return row.flags?.approvalRequired === true;
+      if (mode === 'supplier' || mode === 'supplier_compliance') return row.flags?.supplierComplianceBlocked === true;
       if (mode === 'conflict' || mode === 'tool_conflict') return row.flags?.toolConflict === true;
       if (mode === 'procurement' || mode === 'procurement_needed') return row.flags?.procurementNeeded === true || row.flags?.pendingProcurement === true;
       if (mode === 'loading' || mode === 'loading_missing') return row.flags?.loadingMissing === true;
@@ -9828,12 +15451,13 @@ class ContractorOperatingLedger {
     const matchesSearch = row => !search || JSON.stringify(row).toLowerCase().includes(search);
     const filtered = rows.filter(row => matchesMode(row) && matchesSearch(row));
     const statusRank = {
-      approval_required: 0,
-      tool_conflict: 1,
-      procurement_needed: 2,
-      loading_missing: 3,
-      material_needed: 4,
-      stable: 5
+      supplier_compliance: 0,
+      approval_required: 1,
+      tool_conflict: 2,
+      procurement_needed: 3,
+      loading_missing: 4,
+      material_needed: 5,
+      stable: 6
     };
     const priorityScore = priority => {
       const rank = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -9963,7 +15587,7 @@ class ContractorOperatingLedger {
     const statusOfRecord = (record, fallback = 'open') => normalizeStatus(record?.status, fallback);
     const severityOf = record => normalizeStatus(record?.severity || record?.riskLevel || record?.risk_level, 'medium');
 
-    const rows = this.listJobs({ limit: 500 })
+    const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
@@ -10063,29 +15687,97 @@ class ContractorOperatingLedger {
         };
         const fieldStatus = this.classifyFieldAssuranceReadiness(flags);
         const nextActions = [];
-        if (flags.approvalRequired) nextActions.push({ type: 'review_field_approval', label: 'Review field assurance approval gates', requiresApproval: false });
+        if (flags.approvalRequired) nextActions.push({
+          type: 'review_field_approval',
+          label: 'Review field assurance approval gates',
+          approvalId: pendingApprovals[0]?.id || null,
+          requiresApproval: false
+        });
         if (openIncidents.length) nextActions.push({
           type: 'resolve_incident',
           label: 'Resolve open incident before work proceeds',
           incidentId: openIncidents[0].id,
           requiresApproval: true
         });
-        if (siteAccessBlocks.length) nextActions.push({ type: 'clear_site_access', label: 'Clear site access and orientation blockers', requiresApproval: true });
+        if (siteAccessBlocks.length) nextActions.push({
+          type: 'clear_site_access',
+          label: 'Clear site access and orientation blockers',
+          siteAccessId: siteAccessBlocks[0].id,
+          requiresApproval: true
+        });
         if (safetyGap) nextActions.push({ type: 'prepare_safety_pack', label: 'Prepare JHA, SDS, safety talk, and access evidence', requiresApproval: false });
-        if (jhas.length) nextActions.push({ type: 'review_jha', label: 'Review JHA and work method controls', requiresApproval: true });
-        if (sdsSheets.length) nextActions.push({ type: 'request_sds', label: 'Request or approve current SDS evidence', requiresApproval: true });
-        if (openRfis.length) nextActions.push({ type: 'review_rfi', label: 'Resolve open RFI before field reliance', requiresApproval: true });
-        if (submittalReviews.length) nextActions.push({ type: 'review_submittal', label: 'Review submittal package before procurement or install', requiresApproval: true });
-        if (permitReviews.length || expiringPermits.length) nextActions.push({ type: 'review_permit', label: 'Resolve permit or compliance expiry risk', requiresApproval: true });
-        if (inspectionReviews.length) nextActions.push({ type: 'review_inspection', label: 'Review inspection defects and sign-off', requiresApproval: true });
+        if (jhas.length) nextActions.push({
+          type: 'review_jha',
+          label: 'Review JHA and work method controls',
+          jhaId: jhas[0].id,
+          requiresApproval: true
+        });
+        if (sdsSheets.length) nextActions.push({
+          type: 'request_sds',
+          label: 'Request or approve current SDS evidence',
+          sdsSheetId: sdsSheets[0].id,
+          requiresApproval: true
+        });
+        if (safetyMeetings.length) nextActions.push({
+          type: 'complete_safety_meeting',
+          label: 'Record toolbox talk completion evidence',
+          safetyMeetingId: safetyMeetings[0].id,
+          requiresApproval: true
+        });
+        if (orientations.length) nextActions.push({
+          type: 'complete_orientation',
+          label: 'Record crew orientation completion evidence',
+          orientationId: orientations[0].id,
+          requiresApproval: true
+        });
+        if (openRfis.length) nextActions.push({
+          type: 'review_rfi',
+          label: 'Resolve open RFI before field reliance',
+          rfiId: openRfis[0].id,
+          requiresApproval: true
+        });
+        if (submittalReviews.length) nextActions.push({
+          type: 'review_submittal',
+          label: 'Review submittal package before procurement or install',
+          submittalId: submittalReviews[0].id,
+          requiresApproval: true
+        });
+        if (permitReviews.length || expiringPermits.length) nextActions.push({
+          type: 'review_permit',
+          label: 'Resolve permit or compliance expiry risk',
+          permitId: (permitReviews[0] || expiringPermits[0]).id,
+          requiresApproval: true
+        });
+        if (documentReviews.length) nextActions.push({
+          type: 'review_document',
+          label: 'Review retained document before field reliance',
+          documentId: documentReviews[0].id,
+          requiresApproval: true
+        });
+        if (inspectionReviews.length) nextActions.push({
+          type: 'review_inspection',
+          label: 'Review inspection defects and sign-off',
+          inspectionId: inspectionReviews[0].id,
+          requiresApproval: true
+        });
         if (openObservations.length) nextActions.push({
           type: 'resolve_observation',
           label: 'Close safety or quality observation',
           observationId: openObservations[0].id,
           requiresApproval: true
         });
-        if (qualityOpen.length) nextActions.push({ type: 'complete_quality_review', label: 'Complete quality review and defect decision', requiresApproval: true });
-        if (safetyOpen.length && !openIncidents.length) nextActions.push({ type: 'complete_safety_check', label: 'Complete safety check and hazard decision', requiresApproval: true });
+        if (qualityOpen.length) nextActions.push({
+          type: 'complete_quality_review',
+          label: 'Complete quality review and defect decision',
+          qualityCheckId: qualityOpen[0].id,
+          requiresApproval: true
+        });
+        if (safetyOpen.length && !openIncidents.length) nextActions.push({
+          type: 'complete_safety_check',
+          label: 'Complete safety check and hazard decision',
+          safetyCheckId: safetyOpen[0].id,
+          requiresApproval: true
+        });
         if (punchOpen.length) nextActions.push({
           type: 'resolve_punch_item',
           label: 'Resolve punch item before acceptance',
@@ -10109,7 +15801,7 @@ class ContractorOperatingLedger {
           progressPercent: detail.progressPercent,
           fieldStatus,
           nextAction: nextActions[0]?.label || 'Field assurance workflow is stable.',
-          nextActions: nextActions.slice(0, 8),
+          nextActions,
           flags,
           counts: {
             pendingApprovals: pendingApprovals.length,
@@ -10150,10 +15842,14 @@ class ContractorOperatingLedger {
             inspection: inspectionReviews[0] || null,
             observation: openObservations[0] || null,
             incident: openIncidents[0] || null,
+            safetyMeeting: safetyMeetings[0] || null,
+            orientation: orientations[0] || null,
             jha: jhas[0] || null,
             sdsSheet: sdsSheets[0] || null,
+            siteAccess: siteAccessBlocks[0] || null,
             qualityCheck: qualityOpen[0] || null,
             safetyCheck: safetyOpen[0] || null,
+            punchItem: punchOpen[0] || null,
             document: documentReviews[0] || (detail.documents || [])[0] || null
           }
         };
@@ -10274,7 +15970,7 @@ class ContractorOperatingLedger {
 
   countCapabilityRequirement(requirement = {}) {
     if (!requirement.table) return 0;
-    return this.count(requirement.table);
+    return this.countActiveRecords(requirement.table);
   }
 
   countOpenCapabilityRequirement(requirement = {}) {
@@ -10320,10 +16016,18 @@ class ContractorOperatingLedger {
       aftercare_items: 'status',
       recurring_plans: 'status'
     }[requirement.table];
-    if (!statusColumn) return this.countCapabilityRequirement(requirement);
+    if (!statusColumn) {
+      return requirement.table === 'audit_events' ? 0 : this.countCapabilityRequirement(requirement);
+    }
     const closed = Array.from(LEDGER_CLOSED_STATUSES);
     const placeholders = closed.map(() => '?').join(',');
-    return Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${requirement.table} WHERE ${statusColumn} NOT IN (${placeholders})`).get(...closed).count || 0);
+    const scope = this.activeRecordScope(requirement.table);
+    return Number(this.db.prepare(`
+      SELECT COUNT(DISTINCT records.id) AS count
+      FROM ${scope.from}
+      WHERE ${scope.condition}
+        AND records.${statusColumn} NOT IN (${placeholders})
+    `).get(...closed).count || 0);
   }
 
   describeCapabilityRequirement(requirement = {}, jobDetail = null) {
@@ -11006,70 +16710,79 @@ class ContractorOperatingLedger {
   dashboardSummary() {
     const toolReservationConflicts = this.detectToolReservationConflicts(100);
     const assignmentConflicts = this.detectAssignmentConflicts(100);
+    const tradePartnerSummary = this.summarizeTradePartners();
+    const activeCount = (table, condition = '1 = 1', params = []) => this.countActiveRecords(table, condition, params);
+    const activeSum = (table, column, condition = '1 = 1', params = []) => this.sumActiveRecords(table, column, condition, params);
     const metrics = {
       clients: this.count('clients'),
+      tradePartners: tradePartnerSummary.total,
+      activeTradePartners: tradePartnerSummary.active,
+      verifiedTradePartners: tradePartnerSummary.verified,
+      expiringTradePartners: tradePartnerSummary.expiring,
+      tradePartnerComplianceActions: tradePartnerSummary.actionRequired,
       jobs: this.count('jobs'),
-      openJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status NOT IN ('completed', 'cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval')").get().count || 0),
-      completedJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'completed'").get().count || 0),
+      openJobs: activeCount('jobs', "records.status <> 'completed'"),
+      completedJobs: activeCount('jobs', "records.status = 'completed'"),
       archivedJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'archived'").get().count || 0),
-      pendingArchiveJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'pending_archive_approval'").get().count || 0),
+      pendingArchiveJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND target_type = 'job_archive'").get().count || 0),
+      pendingRestoreJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND target_type = 'job_restore'").get().count || 0),
       pendingApprovals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending'").get().count || 0),
-      approvedQuotes: Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'approved'").get().count || 0),
-      siteVisits: this.count('site_visits'),
-      pendingSiteVisits: Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_visits WHERE status IN ('draft', 'scheduled', 'pending_approval')").get().count || 0),
-      changeOrders: this.count('change_orders'),
-      pendingChangeOrders: Number(this.db.prepare("SELECT COUNT(*) AS count FROM change_orders WHERE status IN ('draft', 'pending_approval', 'submitted', 'sent')").get().count || 0),
-      fieldReports: this.count('field_reports'),
-      openRfis: Number(this.db.prepare("SELECT COUNT(*) AS count FROM rfi_records WHERE status IN ('open', 'pending', 'pending_approval')").get().count || 0),
-      submittals: this.count('submittal_records'),
-      openSubmittals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM submittal_records WHERE status NOT IN ('approved', 'accepted', 'closed', 'cancelled', 'rejected')").get().count || 0),
-      clientSelections: this.count('client_selections'),
-      pendingClientSelections: Number(this.db.prepare("SELECT COUNT(*) AS count FROM client_selections WHERE status NOT IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'cancelled', 'rejected')").get().count || 0),
-      permitRecords: this.count('permit_records'),
-      expiringPermits: Number(this.db.prepare("SELECT COUNT(*) AS count FROM permit_records WHERE status NOT IN ('closed', 'expired', 'cancelled', 'rejected') AND expires_at IS NOT NULL AND expires_at <= ?").get(futureIsoDate(7)).count || 0),
-      inspections: this.count('inspection_records'),
-      openObservations: Number(this.db.prepare("SELECT COUNT(*) AS count FROM observation_records WHERE status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')").get().count || 0),
-      openIncidents: Number(this.db.prepare("SELECT COUNT(*) AS count FROM incident_records WHERE status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')").get().count || 0),
-      safetyMeetings: this.count('safety_meetings'),
-      orientations: this.count('worker_orientations'),
-      jhas: this.count('jha_records'),
-      sdsSheets: this.count('sds_sheets'),
-      siteAccessLogs: this.count('site_access_logs'),
-      blockedSiteAccess: Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_access_logs WHERE status = 'blocked' OR orientation_valid = 0").get().count || 0),
-      openMobilizationApprovals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND approval_type IN ('worker_orientation_completion', 'jha_approval', 'sds_current_review', 'site_access_clearance')").get().count || 0),
-      budgetLines: this.count('budget_lines'),
-      purchaseOrders: this.count('purchase_orders'),
-      drawRequests: this.count('draw_requests'),
-      lienWaivers: this.count('lien_waivers'),
-      financeHandoffs: this.count('finance_handoffs'),
-      openFinanceApprovals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND approval_type IN ('budget_control', 'purchase_commitment', 'draw_request_submission', 'lien_waiver_release', 'finance_handoff')").get().count || 0),
-      draftInvoices: Number(this.db.prepare("SELECT COUNT(*) AS count FROM invoices WHERE status IN ('draft', 'submitted')").get().count || 0),
-      qualityChecks: this.count('quality_checks'),
-      safetyChecks: this.count('safety_checks'),
-      paymentFollowUps: Number(this.db.prepare("SELECT COUNT(*) AS count FROM payments WHERE status NOT IN ('paid', 'received', 'cancelled')").get().count || 0),
-      openAftercare: Number(this.db.prepare("SELECT COUNT(*) AS count FROM aftercare_items WHERE status NOT IN ('completed', 'cancelled', 'closed')").get().count || 0),
-      punchItems: this.count('punch_items'),
-      openPunchItems: Number(this.db.prepare("SELECT COUNT(*) AS count FROM punch_items WHERE status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')").get().count || 0),
-      warrantyClaims: this.count('warranty_claims'),
-      openWarrantyClaims: Number(this.db.prepare("SELECT COUNT(*) AS count FROM warranty_claims WHERE status NOT IN ('closed', 'resolved', 'accepted', 'rejected', 'cancelled')").get().count || 0),
-      activeRecurringPlans: Number(this.db.prepare("SELECT COUNT(*) AS count FROM recurring_plans WHERE status = 'active'").get().count || 0),
-      routePlans: this.count('route_plans'),
-      loadingPlans: this.count('loading_plans'),
-      procurementOrders: this.count('procurement_orders'),
-      workerInstructions: this.count('worker_instructions'),
-      communications: this.count('communication_records'),
-      communicationDrafts: Number(this.db.prepare("SELECT COUNT(*) AS count FROM communication_records WHERE direction = 'outbound' AND status IN ('draft', 'pending_approval')").get().count || 0),
-      communicationsWaitingReply: Number(this.db.prepare("SELECT COUNT(*) AS count FROM communication_records WHERE direction = 'outbound' AND status IN ('sent', 'delivered', 'awaiting_client', 'client_reply_required') AND data_json LIKE '%\"expectsReply\":true%'").get().count || 0),
-      communicationApprovals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND target_type = 'communication'").get().count || 0),
-      assignments: this.count('assignments'),
-      pendingAssignments: Number(this.db.prepare("SELECT COUNT(*) AS count FROM assignments WHERE status = 'pending_approval'").get().count || 0),
+      approvedQuotes: activeCount('quotes', "records.status = 'approved'"),
+      siteVisits: activeCount('site_visits'),
+      pendingSiteVisits: activeCount('site_visits', "records.status IN ('draft', 'scheduled', 'pending_approval')"),
+      changeOrders: activeCount('change_orders'),
+      pendingChangeOrders: activeCount('change_orders', "records.status IN ('draft', 'pending_approval', 'submitted', 'sent')"),
+      fieldReports: activeCount('field_reports'),
+      openRfis: activeCount('rfi_records', "records.status IN ('open', 'pending', 'pending_approval')"),
+      submittals: activeCount('submittal_records'),
+      openSubmittals: activeCount('submittal_records', "records.status NOT IN ('approved', 'accepted', 'closed', 'cancelled', 'rejected')"),
+      clientSelections: activeCount('client_selections'),
+      pendingClientSelections: activeCount('client_selections', "records.status NOT IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'cancelled', 'rejected')"),
+      permitRecords: activeCount('permit_records'),
+      expiringPermits: activeCount('permit_records', "records.status NOT IN ('closed', 'expired', 'cancelled', 'rejected') AND records.expires_at IS NOT NULL AND records.expires_at <= ?", [futureIsoDate(7)]),
+      inspections: activeCount('inspection_records'),
+      openObservations: activeCount('observation_records', "records.status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')"),
+      openIncidents: activeCount('incident_records', "records.status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')"),
+      safetyMeetings: activeCount('safety_meetings'),
+      orientations: activeCount('worker_orientations'),
+      jhas: activeCount('jha_records'),
+      sdsSheets: activeCount('sds_sheets'),
+      siteAccessLogs: activeCount('site_access_logs'),
+      blockedSiteAccess: activeCount('site_access_logs', "records.status = 'blocked' OR records.orientation_valid = 0"),
+      openMobilizationApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('worker_orientation_completion', 'jha_approval', 'sds_current_review', 'site_access_clearance')"),
+      budgetLines: activeCount('budget_lines'),
+      purchaseOrders: activeCount('purchase_orders'),
+      drawRequests: activeCount('draw_requests'),
+      lienWaivers: activeCount('lien_waivers'),
+      financeHandoffs: activeCount('finance_handoffs'),
+      openFinanceApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('budget_control', 'purchase_commitment', 'draw_request_submission', 'lien_waiver_release', 'finance_handoff')"),
+      draftInvoices: activeCount('invoices', "records.status IN ('draft', 'submitted')"),
+      qualityChecks: activeCount('quality_checks'),
+      safetyChecks: activeCount('safety_checks'),
+      paymentFollowUps: activeCount('payments', "records.status NOT IN ('paid', 'received', 'cancelled')"),
+      openAftercare: activeCount('aftercare_items', "records.status NOT IN ('completed', 'cancelled', 'closed')"),
+      punchItems: activeCount('punch_items'),
+      openPunchItems: activeCount('punch_items', "records.status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')"),
+      warrantyClaims: activeCount('warranty_claims'),
+      openWarrantyClaims: activeCount('warranty_claims', "records.status NOT IN ('closed', 'resolved', 'accepted', 'rejected', 'cancelled')"),
+      activeRecurringPlans: activeCount('recurring_plans', "records.status = 'active'"),
+      routePlans: activeCount('route_plans'),
+      loadingPlans: activeCount('loading_plans'),
+      procurementOrders: activeCount('procurement_orders'),
+      workerInstructions: activeCount('worker_instructions'),
+      communications: activeCount('communication_records'),
+      communicationDrafts: activeCount('communication_records', "records.direction = 'outbound' AND records.status IN ('draft', 'pending_approval')"),
+      communicationsWaitingReply: activeCount('communication_records', "records.direction = 'outbound' AND records.status IN ('sent', 'delivered', 'awaiting_client', 'client_reply_required') AND records.data_json LIKE '%\"expectsReply\":true%'"),
+      communicationApprovals: activeCount('approvals', "records.status = 'pending' AND records.target_type = 'communication'"),
+      assignments: activeCount('assignments'),
+      pendingAssignments: activeCount('assignments', "records.status = 'pending_approval'"),
       assignmentConflicts: assignmentConflicts.length,
-      toolReservations: this.count('tool_reservations'),
-      pendingToolReservations: Number(this.db.prepare("SELECT COUNT(*) AS count FROM tool_reservations WHERE status = 'pending_approval'").get().count || 0),
+      toolReservations: activeCount('tool_reservations'),
+      pendingToolReservations: activeCount('tool_reservations', "records.status = 'pending_approval'"),
       toolReservationConflicts: toolReservationConflicts.length,
-      weatherAssessments: this.count('schedule_weather'),
-      weatherRisks: Number(this.db.prepare("SELECT COUNT(*) AS count FROM schedule_weather WHERE precipitation_percent >= 60 OR condition IN ('rain_risk', 'wind_risk', 'storm_risk', 'visibility_risk')").get().count || 0),
-      openClientHandoverApprovals: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending' AND approval_type IN ('submittal_approval', 'client_selection_approval', 'punch_item_closeout', 'warranty_claim_resolution')").get().count || 0),
+      weatherAssessments: activeCount('schedule_weather'),
+      weatherRisks: activeCount('schedule_weather', "records.precipitation_percent >= 60 OR records.condition IN ('rain_risk', 'wind_risk', 'storm_risk', 'visibility_risk')"),
+      openClientHandoverApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('submittal_approval', 'client_selection_approval', 'punch_item_closeout', 'warranty_claim_resolution')"),
       dispatchReadyJobs: Number(this.db.prepare(`
         SELECT COUNT(DISTINCT jobs.id) AS count
         FROM jobs
@@ -11078,59 +16791,68 @@ class ContractorOperatingLedger {
           AND EXISTS (SELECT 1 FROM loading_plans WHERE loading_plans.job_id = jobs.id AND loading_plans.status NOT IN ('cancelled', 'rejected'))
           AND EXISTS (SELECT 1 FROM worker_instructions WHERE worker_instructions.job_id = jobs.id AND worker_instructions.status NOT IN ('cancelled', 'rejected'))
       `).get().count || 0),
-      storedDocuments: this.count('documents'),
+      storedDocuments: activeCount('documents'),
       learningProfiles: this.count('job_learning_profiles'),
       auditEvents: this.count('audit_events')
     };
-    const money = this.db.prepare(`
+    const pipelineMoney = this.db.prepare(`
       SELECT
-        COALESCE(SUM(estimated_cost), 0) AS estimatedPipeline,
-        COALESCE(SUM(contract_value), 0) AS contractValue,
-        COALESCE((SELECT SUM(total) FROM quotes), 0) AS quotedValue,
-        COALESCE((SELECT SUM(total) FROM change_orders WHERE status NOT IN ('cancelled', 'rejected')), 0) AS changeOrderValue,
-        COALESCE((SELECT SUM(total) FROM invoices), 0) AS invoicedValue,
-        COALESCE((SELECT SUM(amount) FROM payments WHERE status NOT IN ('paid', 'received', 'cancelled')), 0) AS paymentFollowUpValue,
-        COALESCE((SELECT SUM(amount) FROM procurement_orders WHERE status NOT IN ('cancelled', 'rejected')), 0) AS procurementValue,
-        COALESCE((SELECT SUM(budget_amount) FROM budget_lines WHERE status NOT IN ('cancelled', 'rejected')), 0) AS budgetValue,
-        COALESCE((SELECT SUM(amount) FROM purchase_orders WHERE status NOT IN ('cancelled', 'rejected')), 0) AS purchaseOrderValue,
-        COALESCE((SELECT SUM(requested_amount) FROM draw_requests WHERE status NOT IN ('cancelled', 'rejected')), 0) AS drawRequestValue,
-        COALESCE((SELECT SUM(amount) FROM finance_handoffs WHERE status NOT IN ('cancelled', 'rejected')), 0) AS financeHandoffValue
-      FROM jobs
+        COALESCE(SUM(records.estimated_cost), 0) AS estimatedPipeline,
+        COALESCE(SUM(records.contract_value), 0) AS contractValue
+      FROM jobs AS records
+      WHERE ${this.operationalJobStatusSql('records')} AND records.status <> 'completed'
     `).get();
+    const money = {
+      estimatedPipeline: pipelineMoney.estimatedPipeline,
+      contractValue: pipelineMoney.contractValue,
+      quotedValue: activeSum('quotes', 'total'),
+      changeOrderValue: activeSum('change_orders', 'total', "records.status NOT IN ('cancelled', 'rejected')"),
+      invoicedValue: activeSum('invoices', 'total'),
+      paymentFollowUpValue: activeSum('payments', 'amount', "records.status NOT IN ('paid', 'received', 'cancelled')"),
+      procurementValue: activeSum('procurement_orders', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
+      budgetValue: activeSum('budget_lines', 'budget_amount', "records.status NOT IN ('cancelled', 'rejected')"),
+      purchaseOrderValue: activeSum('purchase_orders', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
+      drawRequestValue: activeSum('draw_requests', 'requested_amount', "records.status NOT IN ('cancelled', 'rejected')"),
+      financeHandoffValue: activeSum('finance_handoffs', 'amount', "records.status NOT IN ('cancelled', 'rejected')")
+    };
     const workload = this.db.prepare(`
+      WITH active_jobs AS (
+        SELECT id FROM jobs
+        WHERE ${this.operationalJobStatusSql('jobs')}
+      )
       SELECT
-        COALESCE((SELECT COUNT(*) FROM job_tasks WHERE status NOT IN ('completed', 'cancelled')), 0) AS openTasks,
-        COALESCE((SELECT COUNT(*) FROM assignments WHERE status IN ('planned', 'scheduled', 'active', 'in_progress')), 0) AS activeAssignments,
-        COALESCE((SELECT COUNT(*) FROM assignments WHERE status = 'pending_approval'), 0) AS pendingAssignments,
-        COALESCE((SELECT COUNT(*) FROM tool_reservations WHERE status IN ('reserved', 'in_use')), 0) AS reservedTools,
-        COALESCE((SELECT COUNT(*) FROM tool_reservations WHERE status = 'pending_approval'), 0) AS pendingToolReservations,
-        COALESCE((SELECT COUNT(*) FROM material_requirements WHERE status IN ('needed', 'ordered', 'low_stock')), 0) AS materialNeeds,
-        COALESCE((SELECT COUNT(*) FROM site_visits WHERE status IN ('draft', 'scheduled', 'pending_approval')), 0) AS siteVisitDrafts,
-        COALESCE((SELECT COUNT(*) FROM change_orders WHERE status IN ('draft', 'pending_approval', 'submitted', 'sent')), 0) AS changeOrderDrafts,
-        COALESCE((SELECT COUNT(*) FROM field_reports WHERE status IN ('draft', 'pending_approval')), 0) AS fieldReportDrafts,
-        COALESCE((SELECT COUNT(*) FROM rfi_records WHERE status IN ('open', 'pending', 'pending_approval')), 0) AS rfiOpen,
-        COALESCE((SELECT COUNT(*) FROM submittal_records WHERE status IN ('draft', 'submitted', 'pending_review', 'pending_approval', 'revise_resubmit')), 0) AS submittalQueue,
-        COALESCE((SELECT COUNT(*) FROM client_selections WHERE status IN ('open', 'pending_client', 'pending_approval', 'overdue')), 0) AS selectionQueue,
-        COALESCE((SELECT COUNT(*) FROM permit_records WHERE status IN ('draft', 'pending', 'pending_approval', 'needs_renewal')), 0) AS permitReviews,
-        COALESCE((SELECT COUNT(*) FROM inspection_records WHERE status IN ('scheduled', 'pending_approval', 'failed')), 0) AS inspectionReviews,
-        COALESCE((SELECT COUNT(*) FROM observation_records WHERE status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')), 0) AS observationQueue,
-        COALESCE((SELECT COUNT(*) FROM incident_records WHERE status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')), 0) AS incidentQueue,
-        COALESCE((SELECT COUNT(*) FROM safety_meetings WHERE status IN ('draft', 'scheduled', 'pending_approval')), 0) AS safetyTalks,
-        COALESCE((SELECT COUNT(*) FROM worker_orientations WHERE status IN ('draft', 'scheduled', 'pending_approval', 'expired')), 0) AS orientationQueue,
-        COALESCE((SELECT COUNT(*) FROM jha_records WHERE status IN ('draft', 'submitted', 'pending_approval')), 0) AS jhaQueue,
-        COALESCE((SELECT COUNT(*) FROM sds_sheets WHERE status IN ('missing', 'requested', 'pending_approval', 'expired')), 0) AS sdsQueue,
-        COALESCE((SELECT COUNT(*) FROM site_access_logs WHERE status IN ('blocked', 'requested', 'pending_approval') OR orientation_valid = 0), 0) AS siteAccessQueue,
-        COALESCE((SELECT COUNT(*) FROM budget_lines WHERE status IN ('draft', 'pending_approval') OR forecast_amount > budget_amount), 0) AS budgetReviews,
-        COALESCE((SELECT COUNT(*) FROM purchase_orders WHERE status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS purchaseOrderQueue,
-        COALESCE((SELECT COUNT(*) FROM draw_requests WHERE status IN ('draft', 'pending_approval', 'approved_for_funding')), 0) AS drawQueue,
-        COALESCE((SELECT COUNT(*) FROM lien_waivers WHERE status IN ('requested', 'pending_approval')), 0) AS lienWaiverQueue,
-        COALESCE((SELECT COUNT(*) FROM finance_handoffs WHERE status IN ('draft', 'pending_approval', 'ready_to_export')), 0) AS financeHandoffQueue,
-        COALESCE((SELECT COUNT(*) FROM route_plans WHERE status IN ('draft', 'pending_approval')), 0) AS routeDrafts,
-        COALESCE((SELECT COUNT(*) FROM loading_plans WHERE status IN ('draft', 'pending_approval')), 0) AS loadingDrafts,
-        COALESCE((SELECT COUNT(*) FROM procurement_orders WHERE status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS procurementDrafts,
-        COALESCE((SELECT COUNT(*) FROM worker_instructions WHERE status IN ('draft', 'pending_approval')), 0) AS instructionDrafts,
-        COALESCE((SELECT COUNT(*) FROM punch_items WHERE status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')), 0) AS punchQueue,
-        COALESCE((SELECT COUNT(*) FROM warranty_claims WHERE status NOT IN ('closed', 'resolved', 'accepted', 'rejected', 'cancelled')), 0) AS warrantyQueue
+        COALESCE((SELECT COUNT(*) FROM job_tasks records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('completed', 'cancelled')), 0) AS openTasks,
+        COALESCE((SELECT COUNT(*) FROM assignments records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('planned', 'scheduled', 'active', 'in_progress')), 0) AS activeAssignments,
+        COALESCE((SELECT COUNT(*) FROM assignments records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval'), 0) AS pendingAssignments,
+        COALESCE((SELECT COUNT(*) FROM tool_reservations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('reserved', 'in_use')), 0) AS reservedTools,
+        COALESCE((SELECT COUNT(*) FROM tool_reservations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval'), 0) AS pendingToolReservations,
+        COALESCE((SELECT COUNT(*) FROM material_requirements records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('needed', 'ordered', 'low_stock')), 0) AS materialNeeds,
+        COALESCE((SELECT COUNT(*) FROM site_visits records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'scheduled', 'pending_approval')), 0) AS siteVisitDrafts,
+        COALESCE((SELECT COUNT(*) FROM change_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'submitted', 'sent')), 0) AS changeOrderDrafts,
+        COALESCE((SELECT COUNT(*) FROM field_reports records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS fieldReportDrafts,
+        COALESCE((SELECT COUNT(*) FROM rfi_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('open', 'pending', 'pending_approval')), 0) AS rfiOpen,
+        COALESCE((SELECT COUNT(*) FROM submittal_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'submitted', 'pending_review', 'pending_approval', 'revise_resubmit')), 0) AS submittalQueue,
+        COALESCE((SELECT COUNT(*) FROM client_selections records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('open', 'pending_client', 'pending_approval', 'overdue')), 0) AS selectionQueue,
+        COALESCE((SELECT COUNT(*) FROM permit_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending', 'pending_approval', 'needs_renewal')), 0) AS permitReviews,
+        COALESCE((SELECT COUNT(*) FROM inspection_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('scheduled', 'pending_approval', 'failed')), 0) AS inspectionReviews,
+        COALESCE((SELECT COUNT(*) FROM observation_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')), 0) AS observationQueue,
+        COALESCE((SELECT COUNT(*) FROM incident_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')), 0) AS incidentQueue,
+        COALESCE((SELECT COUNT(*) FROM safety_meetings records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'scheduled', 'pending_approval')), 0) AS safetyTalks,
+        COALESCE((SELECT COUNT(*) FROM worker_orientations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'scheduled', 'pending_approval', 'expired')), 0) AS orientationQueue,
+        COALESCE((SELECT COUNT(*) FROM jha_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'submitted', 'pending_approval')), 0) AS jhaQueue,
+        COALESCE((SELECT COUNT(*) FROM sds_sheets records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('missing', 'requested', 'pending_approval', 'expired')), 0) AS sdsQueue,
+        COALESCE((SELECT COUNT(*) FROM site_access_logs records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('blocked', 'requested', 'pending_approval') OR records.orientation_valid = 0), 0) AS siteAccessQueue,
+        COALESCE((SELECT COUNT(*) FROM budget_lines records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval') OR records.forecast_amount > records.budget_amount), 0) AS budgetReviews,
+        COALESCE((SELECT COUNT(*) FROM purchase_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS purchaseOrderQueue,
+        COALESCE((SELECT COUNT(*) FROM draw_requests records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'approved_for_funding')), 0) AS drawQueue,
+        COALESCE((SELECT COUNT(*) FROM lien_waivers records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('requested', 'pending_approval')), 0) AS lienWaiverQueue,
+        COALESCE((SELECT COUNT(*) FROM finance_handoffs records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_export')), 0) AS financeHandoffQueue,
+        COALESCE((SELECT COUNT(*) FROM route_plans records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS routeDrafts,
+        COALESCE((SELECT COUNT(*) FROM loading_plans records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS loadingDrafts,
+        COALESCE((SELECT COUNT(*) FROM procurement_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS procurementDrafts,
+        COALESCE((SELECT COUNT(*) FROM worker_instructions records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS instructionDrafts,
+        COALESCE((SELECT COUNT(*) FROM punch_items records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')), 0) AS punchQueue,
+        COALESCE((SELECT COUNT(*) FROM warranty_claims records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'accepted', 'rejected', 'cancelled')), 0) AS warrantyQueue
     `).get();
     const nextActions = this.nextActions();
     const capabilityMap = this.ledgerCapabilityCoverage();
@@ -11197,11 +16919,15 @@ class ContractorOperatingLedger {
 
   nextActions() {
     const actions = [];
+    const actionableJobIds = new Set(this.db.prepare(`
+      SELECT id FROM jobs
+      WHERE status NOT IN ('cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
+    `).all().map(row => row.id));
     const jobsWithoutAssignment = this.db.prepare(`
       SELECT jobs.id, jobs.title FROM jobs
       LEFT JOIN assignments ON assignments.job_id = jobs.id
         AND assignments.status NOT IN ('released', 'cancelled', 'completed', 'closed', 'rejected', 'declined')
-      WHERE jobs.status NOT IN ('completed', 'cancelled')
+      WHERE jobs.status NOT IN ('completed', 'cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
       GROUP BY jobs.id
       HAVING COUNT(assignments.id) = 0
       ORDER BY jobs.created_at DESC
@@ -11211,7 +16937,15 @@ class ContractorOperatingLedger {
       actions.push({ type: 'assign_worker', jobId: job.id, title: job.title, severity: 'high', message: `${job.title} needs a worker assignment.` });
     }
 
-    const pendingApprovals = this.db.prepare("SELECT id, approval_type, summary, job_id FROM approvals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 5").all();
+    const pendingApprovals = this.db.prepare(`
+      SELECT approvals.id, approvals.approval_type, approvals.summary, approvals.job_id
+      FROM approvals
+      LEFT JOIN jobs ON jobs.id = approvals.job_id
+      WHERE approvals.status = 'pending'
+        AND (jobs.id IS NULL OR jobs.status NOT IN ('archived', 'pending_archive_approval', 'cancelled', 'canceled', 'rejected', 'deleted', 'void'))
+      ORDER BY approvals.created_at DESC
+      LIMIT 5
+    `).all();
     for (const approval of pendingApprovals) {
       actions.push({ type: 'review_approval', approvalId: approval.id, jobId: approval.job_id, severity: 'medium', message: approval.summary || `Review ${approval.approval_type}.` });
     }
@@ -11406,10 +17140,10 @@ class ContractorOperatingLedger {
       WHERE jobs.status IN ('planned', 'scheduled', 'in_progress', 'completed')
       GROUP BY jobs.id
       HAVING COUNT(change_orders.id) = 0
-        AND actual_cost > 0
-        AND baseline_cost > 0
-        AND actual_cost > (baseline_cost * 1.1)
-      ORDER BY actual_cost - baseline_cost DESC
+        AND COALESCE(SUM(expenses.amount), 0) > 0
+        AND COALESCE(MAX(quotes.subtotal), jobs.estimated_cost, 0) > 0
+        AND COALESCE(SUM(expenses.amount), 0) > (COALESCE(MAX(quotes.subtotal), jobs.estimated_cost, 0) * 1.1)
+      ORDER BY COALESCE(SUM(expenses.amount), 0) - COALESCE(MAX(quotes.subtotal), jobs.estimated_cost, 0) DESC
       LIMIT 5
     `).all();
     for (const job of changeOrderGaps) {
@@ -11595,7 +17329,7 @@ class ContractorOperatingLedger {
     }
 
     const qualityPunchGaps = this.db.prepare(`
-      SELECT quality_checks.id AS quality_id, quality_checks.job_id, quality_checks.title, jobs.title AS job_title
+      SELECT quality_checks.id AS quality_id, quality_checks.job_id, quality_checks.title, MAX(jobs.title) AS job_title
       FROM quality_checks
       JOIN jobs ON jobs.id = quality_checks.job_id
       LEFT JOIN punch_items
@@ -11619,7 +17353,7 @@ class ContractorOperatingLedger {
     }
 
     const warrantyAftercareGaps = this.db.prepare(`
-      SELECT aftercare_items.id AS aftercare_id, aftercare_items.job_id, aftercare_items.title, jobs.title AS job_title
+      SELECT aftercare_items.id AS aftercare_id, aftercare_items.job_id, aftercare_items.title, MAX(jobs.title) AS job_title
       FROM aftercare_items
       JOIN jobs ON jobs.id = aftercare_items.job_id
       LEFT JOIN warranty_claims
@@ -11838,7 +17572,8 @@ class ContractorOperatingLedger {
       LEFT JOIN loading_plans ON loading_plans.job_id = jobs.id AND loading_plans.status NOT IN ('cancelled', 'rejected')
       WHERE jobs.status IN ('planned', 'scheduled', 'in_progress')
       GROUP BY jobs.id
-      HAVING COUNT(loading_plans.id) = 0 AND (tools > 0 OR materials > 0)
+      HAVING COUNT(loading_plans.id) = 0
+        AND (COUNT(DISTINCT tool_reservations.id) > 0 OR COUNT(DISTINCT material_requirements.id) > 0)
       ORDER BY jobs.updated_at DESC
       LIMIT 5
     `).all();
@@ -11847,12 +17582,12 @@ class ContractorOperatingLedger {
     }
 
     const assignmentsWithoutInstructions = this.db.prepare(`
-      SELECT assignments.id AS assignment_id, assignments.job_id, jobs.title
+      SELECT assignments.id AS assignment_id, assignments.job_id, MAX(jobs.title) AS title
       FROM assignments
       JOIN jobs ON jobs.id = assignments.job_id
       LEFT JOIN worker_instructions
         ON worker_instructions.assignment_id = assignments.id
-        OR (worker_instructions.assignment_id IS NULL AND worker_instructions.job_id = assignments.job_id)
+        AND worker_instructions.status NOT IN ('cancelled', 'rejected')
       WHERE jobs.status IN ('planned', 'scheduled', 'in_progress')
         AND assignments.status IN ('planned', 'scheduled', 'active')
       GROUP BY assignments.id
@@ -11929,7 +17664,48 @@ class ContractorOperatingLedger {
         message: `${String(profile.job_type || 'general').replace(/_/g, ' ')} has ${normalizeNumber(profile.sample_count, 0)} completed job(s) ready for a learning-profile refresh.`
       });
     }
-    return actions.slice(0, 64);
+    const assignmentScopedCrewActions = [];
+    const crewJobs = this.listJobs({ limit: 500 }).filter(job => (
+      ['planned', 'scheduled', 'in_progress'].includes(normalizeStatus(job.status, 'open'))
+      && actionableJobIds.has(job.id)
+    ));
+    for (const job of crewJobs) {
+      const detail = this.getJobDetail(job.id, { includeAudit: false });
+      const crewEvidence = this.crewEvidenceReadiness(detail);
+      for (const item of crewEvidence.items) {
+        if (!item.orientation) {
+          assignmentScopedCrewActions.push({
+            type: 'schedule_orientation',
+            jobId: job.id,
+            assignmentId: item.assignmentId,
+            workerId: item.workerId,
+            workerName: item.workerName,
+            severity: ['critical', 'high'].includes(job.riskLevel) || ['critical', 'high'].includes(job.priority) ? 'high' : 'medium',
+            message: `${job.title} needs orientation evidence for ${item.workerName} before site access is cleared.`
+          });
+        }
+        if (!item.siteAccess) {
+          assignmentScopedCrewActions.push({
+            type: 'create_site_access_gate',
+            jobId: job.id,
+            assignmentId: item.assignmentId,
+            workerId: item.workerId,
+            workerName: item.workerName,
+            orientationId: item.orientation?.id || null,
+            severity: 'medium',
+            message: `${job.title} needs an assignment-scoped site-access gate for ${item.workerName}.`
+          });
+        }
+      }
+    }
+    // A historical child record may remain for audit after a job is archived.
+    // It must not re-enter the operator queue or autonomous command plan.
+    return [
+      ...actions.filter(action => !['schedule_orientation', 'create_site_access_gate'].includes(action.type)),
+      ...assignmentScopedCrewActions
+    ]
+      .filter(action => !action.jobId || actionableJobIds.has(action.jobId))
+      .slice(0, 64);
   }
 
   commandPlanSeverityScore(severity) {
@@ -12029,12 +17805,17 @@ class ContractorOperatingLedger {
         .filter(Boolean)
     );
     const safeActionTypes = this.commandPlanSafeActionTypes();
+    const actionableJobIds = new Set(this.db.prepare(`
+      SELECT id FROM jobs
+      WHERE status NOT IN ('cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
+    `).all().map(row => row.id));
     const commands = [];
     const seen = new Set();
     const add = command => {
       const actionType = normalizeStatus(command.actionType || command.type, 'review');
       const stream = command.stream || this.commandPlanStreamForAction(actionType);
       if (jobFilter.size && command.jobId && !jobFilter.has(command.jobId)) return;
+      if (command.jobId && !actionableJobIds.has(command.jobId)) return;
       const id = command.id || this.commandPlanId('cmd', [stream, actionType, command.jobId, command.approvalId, command.requirementKey, command.sourceId]);
       if (seen.has(id)) return;
       seen.add(id);
@@ -12478,8 +18259,10 @@ class ContractorOperatingLedger {
         const orientations = preview.filter(action => action.type === 'schedule_orientation').slice(0, 3);
         for (const action of orientations) {
           const orientation = this.createWorkerOrientation(action.jobId, {
+            assignmentId: action.assignmentId || null,
+            workerId: action.workerId || null,
             status: 'scheduled',
-            workerName: 'Crew member',
+            workerName: action.workerName || undefined,
             company: 'Project team',
             language: 'nl',
             topics: ['Site rules', 'PPE and VCA controls', 'Emergency contacts', 'Access boundaries'],
@@ -12521,8 +18304,11 @@ class ContractorOperatingLedger {
         const accessGates = preview.filter(action => action.type === 'create_site_access_gate').slice(0, 3);
         for (const action of accessGates) {
           const accessLog = this.createSiteAccessLog(action.jobId, {
+            assignmentId: action.assignmentId || null,
+            workerId: action.workerId || null,
+            orientationId: action.orientationId || null,
             status: 'blocked',
-            workerName: 'Crew member',
+            workerName: action.workerName || undefined,
             company: 'Project team',
             orientationValid: false,
             accessPoint: 'Main site access',
@@ -12535,12 +18321,21 @@ class ContractorOperatingLedger {
 
         const budgetLines = preview.filter(action => action.type === 'create_budget_line').slice(0, 3);
         for (const action of budgetLines) {
+          const budgetAmount = normalizeNumber(action.suggestedAmount, 0);
+          if (!(budgetAmount > 0)) {
+            blocked.push({
+              ...action,
+              status: 'blocked',
+              reason: 'A positive estimate or contract value is required before an internal budget draft can be created.'
+            });
+            continue;
+          }
           const budgetLine = this.createBudgetLine(action.jobId, {
             status: 'draft',
             costCode: '00-100',
             description: 'Autonomous job budget control',
             category: 'general',
-            budgetAmount: normalizeNumber(action.suggestedAmount, 0),
+            budgetAmount,
             notes: 'Autonomous budget draft. Approve or split into cost codes before finance reporting.',
             source: 'autonomous_cycle'
           }, { actor, audit: false });
@@ -12937,6 +18732,12 @@ class ContractorOperatingLedger {
       preview,
       applied,
       blocked,
+      summary: {
+        previewed: preview.length,
+        applied: applied.length,
+        blocked: blocked.length,
+        externalCommitments: 0
+      },
       approvalsStillRequired: this.listApprovals({ status: 'pending', limit: 25 }),
       dashboard: this.dashboardSummary()
     };
@@ -13006,14 +18807,34 @@ class ContractorOperatingLedger {
     if (routeWithoutApproval) issues.push({ severity: 'warning', message: `${routeWithoutApproval} high-risk route plan(s) have no approval gate.` });
     const procurementWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM procurement_orders WHERE amount > 0 AND status IN ('approved', 'ready_to_order', 'ordered', 'submitted', 'sent') AND approval_id IS NULL").get().count || 0);
     if (procurementWithoutApproval) issues.push({ severity: 'warning', message: `${procurementWithoutApproval} procurement commitment(s) have no approval gate.` });
+    const committedSpendRecords = [
+      ...this.db.prepare(`
+        SELECT procurement_orders.* FROM procurement_orders
+        JOIN jobs ON jobs.id = procurement_orders.job_id
+        WHERE ${this.operationalJobStatusSql('jobs')}
+          AND procurement_orders.status IN ('approved', 'ready_to_order', 'ordered', 'submitted', 'sent')
+      `).all(),
+      ...this.db.prepare(`
+        SELECT purchase_orders.* FROM purchase_orders
+        JOIN jobs ON jobs.id = purchase_orders.job_id
+        WHERE ${this.operationalJobStatusSql('jobs')}
+          AND purchase_orders.status IN ('approved', 'ready_to_order', 'ordered', 'submitted', 'sent', 'issued')
+      `).all()
+    ];
+    const nonCompliantCommittedSpend = committedSpendRecords.filter(record => !this.tradePartnerReadinessForSpend(record).compliance.compliant).length;
+    if (nonCompliantCommittedSpend) {
+      issues.push({ severity: 'error', message: `${nonCompliantCommittedSpend} active purchasing commitment(s) lack a current compliant trade partner.` });
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
       valid: !issues.some(issue => issue.severity === 'error'),
       issueCount: issues.length,
       issues,
+      migrations: this.migrationStatus(),
       counts: {
         clients: this.count('clients'),
+        tradePartners: this.count('trade_partners'),
         jobs: this.count('jobs'),
         approvals: this.count('approvals'),
         siteVisits: this.count('site_visits'),
@@ -13073,6 +18894,31 @@ class ContractorOperatingLedger {
     };
   }
 
+  mapTradePartner(row) {
+    if (!row) return null;
+    const partner = {
+      id: row.id,
+      name: row.name,
+      partnerType: row.partner_type,
+      contactName: row.contact_name,
+      email: row.email,
+      phone: row.phone,
+      address: row.address,
+      city: row.city,
+      country: row.country,
+      registrationNumber: row.registration_number,
+      vatNumber: row.vat_number,
+      status: row.status,
+      insuranceExpiresAt: row.insurance_expires_at,
+      vcaExpiresAt: row.vca_expires_at,
+      specialties: fromJson(row.specialties_json, []),
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+    return { ...partner, compliance: this.assessTradePartnerCompliance(partner) };
+  }
+
   mapWorker(row) {
     if (!row) return null;
     return {
@@ -13081,7 +18927,7 @@ class ContractorOperatingLedger {
       role: row.role,
       email: row.email,
       phone: row.phone,
-      status: row.status,
+      status: normalizeWorkerStatus(row.status, 'available'),
       homeRegion: row.home_region,
       hourlyRate: normalizeNumber(row.hourly_rate, 0),
       skills: fromJson(row.skills_json, []),
@@ -13411,9 +19257,12 @@ class ContractorOperatingLedger {
   }
 
   mapWorkerOrientation(row) {
+    const data = fromJson(row.data_json);
     return {
       id: row.id,
       jobId: row.job_id,
+      assignmentId: data.assignmentId || null,
+      workerId: data.workerId || null,
       workerName: row.worker_name,
       company: row.company,
       status: row.status,
@@ -13421,7 +19270,7 @@ class ContractorOperatingLedger {
       dueAt: row.due_at,
       completedAt: row.completed_at,
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -13462,10 +19311,13 @@ class ContractorOperatingLedger {
   }
 
   mapSiteAccessLog(row) {
+    const data = fromJson(row.data_json);
     return {
       id: row.id,
       jobId: row.job_id,
       orientationId: row.orientation_id,
+      assignmentId: data.assignmentId || null,
+      workerId: data.workerId || null,
       workerName: row.worker_name,
       company: row.company,
       status: row.status,
@@ -13473,7 +19325,7 @@ class ContractorOperatingLedger {
       checkedInAt: row.checked_in_at,
       checkedOutAt: row.checked_out_at,
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -13572,6 +19424,7 @@ class ContractorOperatingLedger {
   }
 
   mapProcurementOrder(row) {
+    const data = fromJson(row.data_json);
     return {
       id: row.id,
       jobId: row.job_id,
@@ -13582,24 +19435,29 @@ class ContractorOperatingLedger {
       requiredBy: row.required_by,
       approvalId: row.approval_id,
       items: fromJson(row.items_json, []),
-      data: fromJson(row.data_json),
+      tradePartnerId: data.tradePartnerId || null,
+      partnerComplianceSnapshot: data.partnerComplianceSnapshot || null,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
   }
 
   mapWorkerInstruction(row) {
+    const data = fromJson(row.data_json);
     return {
       id: row.id,
       jobId: row.job_id,
       assignmentId: row.assignment_id,
+      workerId: data.workerId || null,
+      workerName: data.workerName || null,
       audience: row.audience,
       channel: row.channel,
       title: row.title,
       body: row.body,
       status: row.status,
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -13792,6 +19650,7 @@ class ContractorOperatingLedger {
   }
 
   mapPurchaseOrder(row) {
+    const data = fromJson(row.data_json);
     return {
       id: row.id,
       jobId: row.job_id,
@@ -13803,7 +19662,9 @@ class ContractorOperatingLedger {
       requiredBy: row.required_by,
       approvalId: row.approval_id,
       items: fromJson(row.items_json, []),
-      data: fromJson(row.data_json),
+      tradePartnerId: data.tradePartnerId || null,
+      partnerComplianceSnapshot: data.partnerComplianceSnapshot || null,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -13975,6 +19836,53 @@ class ContractorOperatingLedger {
       preview.channel = mapped?.channel || data.channel || null;
       preview.body = mapped?.body || null;
       preview.recipient = mapped?.data?.recipient || data.recipient || null;
+    } else if (targetType === 'job_archive') {
+      primaryEffect = `Archive ${data.jobTitle || approval.jobTitle || 'this job'} from active operating workflows.`;
+      addEffect(`Set job status and phase to archived from ${data.previousStatus || 'its retained state'}.`);
+      addEffect('Remove the job from active queues, schedules, conflict checks, command plans, and operating rollups.');
+      const activePortalAccessCount = Number(data.activePortalAccessCount || 0);
+      if (activePortalAccessCount > 0) {
+        addEffect(`Revoke ${activePortalAccessCount} active client portal link${activePortalAccessCount === 1 ? '' : 's'} so archived work cannot receive client activity.`);
+      }
+      addSafeguard('Does not delete the job or any linked evidence, finance, client, field, resource, or audit record.');
+      addSafeguard('Does not cancel work externally, contact anyone, place an order, make a payment, or create a schedule commitment. Restore requires a separate approval.');
+      addSafeguard('Client portal links are not reactivated by restore; a new scoped link requires a separate approval.');
+      riskLevel = 'high';
+      preview.reason = data.reason || approval.reason || null;
+      preview.previousStatus = data.previousStatus || null;
+      preview.previousPhase = data.previousPhase || null;
+      preview.activePortalAccessCount = activePortalAccessCount;
+      preview.requestedAt = data.requestedAt || null;
+    } else if (targetType === 'job_restore') {
+      primaryEffect = `Restore ${data.jobTitle || approval.jobTitle || 'this job'} to ${data.restoreStatus || 'its retained pre-archive state'}.`;
+      addEffect(`Return the job to ${data.restoreStatus || 'its retained status'} / ${data.restorePhase || 'its retained phase'} and make it available to the applicable internal workflows.`);
+      addSafeguard('Does not send external communication, confirm a schedule, clear safety controls, order materials, or create a financial commitment.');
+      addSafeguard('The archive history remains retained, and current schedule, resource, safety, and approval checks still apply after restore.');
+      riskLevel = 'high';
+      preview.reason = data.reason || approval.reason || null;
+      preview.restoreStatus = data.restoreStatus || null;
+      preview.restorePhase = data.restorePhase || null;
+      preview.archivedAt = data.archivedAt || null;
+      preview.requestedAt = data.requestedAt || null;
+    } else if (targetType === 'client_selection_response') {
+      const selection = data.selectionId
+        ? this.db.prepare('SELECT * FROM client_selections WHERE id = ?').get(data.selectionId)
+        : null;
+      const mapped = selection ? this.mapClientSelection(selection) : null;
+      primaryEffect = data.decision === 'accepted'
+        ? `Record the client's selected option for ${mapped?.title || data.selectionTitle || 'the project selection'}.`
+        : `Record the client's requested change for ${mapped?.title || data.selectionTitle || 'the project selection'}.`;
+      addEffect(data.decision === 'accepted'
+        ? `Set the retained selection to client confirmed with option ${data.selectedOption || 'the submitted option'}.`
+        : 'Set the retained selection to changes requested so the office can revise it.');
+      addSafeguard('Approval records client intent only. It does not change price, scope, schedule, safety state, or procurement commitments.');
+      addSafeguard('No message, supplier order, payment, or external integration is triggered.');
+      riskLevel = 'high';
+      preview.selectionTitle = mapped?.title || data.selectionTitle || null;
+      preview.decision = data.decision || null;
+      preview.selectedOption = data.selectedOption || null;
+      preview.note = data.note || null;
+      preview.submittedAt = data.submittedAt || null;
     } else if (targetType === 'client_portal_access') {
       const access = this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = this.mapClientPortalAccess(access);
@@ -14021,13 +19929,73 @@ class ContractorOperatingLedger {
         preview.conflicts = data.conflicts.slice(0, 6);
       }
       addSafeguard('Does not rent, buy, or externally book equipment.');
+    } else if (targetType === 'worker_retirement') {
+      const activeAssignmentCount = Number(data.activeAssignmentCount || 0);
+      const dormantAssignmentCount = Number(data.dormantAssignmentCount || 0);
+      primaryEffect = `Retire ${data.name || 'this crew member'} from new and restored work.`;
+      addEffect('Set the retained worker to retired so new assignments cannot use this person.');
+      if (dormantAssignmentCount > 0) {
+        addEffect(`Release ${dormantAssignmentCount} dormant assignment${dormantAssignmentCount === 1 ? '' : 's'} retained on inactive jobs so a later restore requires reassignment.`);
+      }
+      if (activeAssignmentCount > 0) {
+        addSafeguard(`Resolution remains blocked until ${activeAssignmentCount} operational assignment${activeAssignmentCount === 1 ? '' : 's'} have been released or reassigned.`);
+      }
+      addSafeguard('Does not delete crew, assignment, time, approval, or audit history. Released dormant assignments remain retained on their jobs.');
+      addSafeguard('Does not contact the crew member, client, payroll provider, or site and creates no external commitment.');
+      riskLevel = 'high';
+      preview.workerId = data.workerId || null;
+      preview.activeAssignmentCount = activeAssignmentCount;
+      preview.dormantAssignmentCount = dormantAssignmentCount;
+      preview.activeAssignments = Array.isArray(data.activeAssignments) ? data.activeAssignments.slice(0, 10) : [];
+      preview.dormantAssignments = Array.isArray(data.dormantAssignments) ? data.dormantAssignments.slice(0, 10) : [];
+    } else if (targetType === 'tool_retirement') {
+      const activeReservationCount = Number(data.activeReservationCount || 0);
+      const dormantReservationCount = Number(data.dormantReservationCount || 0);
+      primaryEffect = `Retire ${data.name || 'this equipment item'} from new and restored work.`;
+      addEffect('Set the retained equipment item to retired so new reservations cannot use it.');
+      if (dormantReservationCount > 0) {
+        addEffect(`Release ${dormantReservationCount} dormant reservation${dormantReservationCount === 1 ? '' : 's'} retained on inactive jobs so a later restore requires a new equipment plan.`);
+      }
+      if (activeReservationCount > 0) {
+        addSafeguard(`Resolution remains blocked until ${activeReservationCount} operational reservation${activeReservationCount === 1 ? '' : 's'} have been released or reassigned.`);
+      }
+      addSafeguard('Does not delete equipment, reservation, approval, or audit history. Released dormant reservations remain retained on their jobs.');
+      addSafeguard('Does not rent, replace, collect, move, or externally book equipment and creates no external commitment.');
+      riskLevel = 'high';
+      preview.toolId = data.toolId || null;
+      preview.category = data.category || null;
+      preview.activeReservationCount = activeReservationCount;
+      preview.dormantReservationCount = dormantReservationCount;
+      preview.activeReservations = Array.isArray(data.activeReservations) ? data.activeReservations.slice(0, 10) : [];
+      preview.dormantReservations = Array.isArray(data.dormantReservations) ? data.dormantReservations.slice(0, 10) : [];
+    } else if (targetType === 'trade_partner_retirement') {
+      primaryEffect = `Retire ${data.name || 'this trade partner'} from new procurement and purchase workflows.`;
+      addEffect('Set the retained trade partner to retired so new supplier commitments cannot use it.');
+      addSafeguard('Does not delete the partner, prior orders, compliance evidence, approvals, or audit history.');
+      addSafeguard('Does not cancel an external order, contact the partner, release payment, or change an existing contract.');
+      if (Number(data.activeProcurement || 0) + Number(data.activePurchaseOrders || 0) > 0) {
+        addSafeguard(`${Number(data.activeProcurement || 0) + Number(data.activePurchaseOrders || 0)} active purchasing record(s) remain retained for operator review.`);
+      }
+      riskLevel = 'high';
+      preview.partnerId = data.partnerId || null;
+      preview.partnerType = data.partnerType || null;
+      preview.activeProcurement = Number(data.activeProcurement || 0);
+      preview.activePurchaseOrders = Number(data.activePurchaseOrders || 0);
+      preview.compliance = data.compliance || null;
     } else if (['procurement_order', 'purchase_order'].includes(targetType)) {
       primaryEffect = `Approve ${ledgerApprovalHumanTarget(targetType)} readiness.`;
       addEffect('Move the purchasing record to the approved or ready-to-order state.');
       addSafeguard('Does not place a supplier order or spend money automatically.');
+      if (data.partnerCompliance?.compliant === false) {
+        addSafeguard('Resolution is refused until the linked trade partner has current retained compliance evidence.');
+      } else {
+        addSafeguard('Partner compliance is rechecked from the current ledger record when this approval resolves.');
+      }
       riskLevel = 'high';
       preview.amount = data.amount || data.total || null;
       preview.supplier = data.supplier || null;
+      preview.tradePartnerId = data.tradePartnerId || null;
+      preview.partnerCompliance = data.partnerCompliance || null;
     } else if (targetType === 'payment') {
       primaryEffect = 'Approve payment confirmation.';
       addEffect('Record the payment as received/settled.');

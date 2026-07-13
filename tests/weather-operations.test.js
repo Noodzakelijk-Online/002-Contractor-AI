@@ -38,12 +38,12 @@ test('dashboard weather comes from recorded ledger assessments instead of fixed 
   });
   assert.equal(intake.response.status, 201);
 
-  const beforeAssessment = await request(baseUrl, '/api/dashboard');
+  const beforeAssessment = await request(baseUrl, '/api/ledger/weather');
   assert.equal(beforeAssessment.response.status, 200);
   assert.equal(beforeAssessment.body.weather.source, 'not_assessed');
   assert.notEqual(beforeAssessment.body.weather.location, 'Amsterdam');
 
-  const assessment = await request(baseUrl, '/api/weather/assess', {
+  const assessment = await request(baseUrl, '/api/ledger/weather/assess', {
     method: 'POST',
     body: JSON.stringify({
       jobId: intake.body.job.id,
@@ -58,13 +58,14 @@ test('dashboard weather comes from recorded ledger assessments instead of fixed 
   assert.equal(assessment.body.provider.source, 'manual');
   assert.equal(assessment.body.weather.precipitationPercent, 72);
 
-  const dashboard = await request(baseUrl, '/api/dashboard');
+  const dashboard = await request(baseUrl, '/api/ledger/weather');
   assert.equal(dashboard.response.status, 200);
   assert.equal(dashboard.body.weather.source, 'local_assessment');
   assert.equal(dashboard.body.weather.status, 'risk');
   assert.equal(dashboard.body.weather.location, 'Rotterdam');
   assert.equal(dashboard.body.weather.precipitation, 72);
   assert.equal(dashboard.body.weather.temperature, 14);
-  assert.equal(dashboard.body.ledger.metrics.weatherAssessments, 1);
-  assert.equal(dashboard.body.ledger.metrics.weatherRisks, 1);
+  const ledgerDashboard = await request(baseUrl, '/api/ledger/dashboard');
+  assert.equal(ledgerDashboard.body.dashboard.metrics.weatherAssessments, 1);
+  assert.equal(ledgerDashboard.body.dashboard.metrics.weatherRisks, 1);
 });

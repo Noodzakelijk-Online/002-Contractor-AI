@@ -4,13 +4,14 @@ uploads/
 data/
 
 __pycache__/
+.pytest_cache/
 *.py[cod]
 
 .env
+.env.hosted
 .env.local
 .env.*.local
 !.env.example
-!advanced_ai_backend/.env.example
 .venv/
 venv/
 *.log
@@ -21,3 +22,5 @@ venv/
 *.db-wal
 *.sqlite-shm
 *.sqlite-wal
+playwright-report/
+test-results/
