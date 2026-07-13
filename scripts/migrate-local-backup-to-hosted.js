@@ -11,6 +11,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const MIGRATION_LOCK_ID = 2_024_070_013;
 const OPERATOR_SESSION_TABLE = 'operator_sessions';
 const AUTH_RATE_LIMIT_TABLE = 'auth_rate_limits';
+const API_RATE_LIMIT_TABLE = 'api_rate_limits';
 
 function parseArguments(values) {
   const parsed = {};
@@ -320,6 +321,10 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
     if (sourceRowsByTable.has(AUTH_RATE_LIMIT_TABLE)) {
       sourceRowsByTable.set(AUTH_RATE_LIMIT_TABLE, []);
     }
+    const clearedApiRateLimits = sourceRowsByTable.get(API_RATE_LIMIT_TABLE)?.length || 0;
+    if (sourceRowsByTable.has(API_RATE_LIMIT_TABLE)) {
+      sourceRowsByTable.set(API_RATE_LIMIT_TABLE, []);
+    }
     const documents = sourceRowsByTable.get('documents') || [];
 
     await client.connect();
@@ -368,6 +373,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       tables: tableResults.length,
       invalidatedOperatorSessions,
       clearedAuthenticationRateLimits,
+      clearedApiRateLimits,
       evidenceFiles: evidence.files.length,
       evidenceSha256: evidence.files.map(file => ({ source: file.source, bytes: file.bytes, sha256: file.sha256 }))
     };
@@ -396,6 +402,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
         sourceRows: receiptMetadata.sourceRows,
         invalidatedOperatorSessions,
         clearedAuthenticationRateLimits,
+        clearedApiRateLimits,
         evidenceFiles: evidence.files.length,
         receiptId,
         migrationVersion: destinationMigrations.currentVersion,

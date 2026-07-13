@@ -26,6 +26,7 @@ function createBackupLedger(file, title) {
     expiresAt
   });
   ledger.recordAuthenticationFailure(crypto.createHash('sha256').update(`restore-rate-limit-${title}`).digest('hex'));
+  ledger.recordApiRateLimitRequest(crypto.createHash('sha256').update(`restore-api-rate-limit-${title}`).digest('hex'));
   ledger.close();
   return job.id;
 }
@@ -67,10 +68,12 @@ test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-re
   assert.equal(result.databaseVerification.valid, true);
   assert.equal(result.invalidatedOperatorSessions, 1);
   assert.equal(result.clearedAuthenticationRateLimits, 1);
+  assert.equal(result.clearedApiRateLimits, 1);
   const restoredDatabase = new DatabaseSync(ledgerFile, { readOnly: true });
   assert.equal(restoredDatabase.prepare('SELECT title FROM jobs WHERE id = ?').get(restoredJobId).title, 'Restored v1 ledger fixture');
   assert.equal(Number(restoredDatabase.prepare('SELECT COUNT(*) AS count FROM operator_sessions WHERE revoked_at IS NULL').get().count), 0);
   assert.equal(Number(restoredDatabase.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
+  assert.equal(Number(restoredDatabase.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);
   restoredDatabase.close();
   assert.equal(fs.readFileSync(path.join(dataDir, 'backups', result.preRestoreBackupId, 'server-state.json'), 'utf8'), 'current-state');
   assert.equal(fs.readFileSync(path.join(dataDir, 'backups', result.preRestoreBackupId, 'contractor-ledger.sqlite'), 'utf8'), 'current-ledger');
@@ -126,10 +129,12 @@ test('stopped-runtime v2 restore replaces evidence only after preserving the cur
   assert.equal(result.databaseVerification.valid, true);
   assert.equal(result.invalidatedOperatorSessions, 1);
   assert.equal(result.clearedAuthenticationRateLimits, 1);
+  assert.equal(result.clearedApiRateLimits, 1);
   const restoredDatabase = new DatabaseSync(ledgerFile, { readOnly: true });
   assert.equal(restoredDatabase.prepare('SELECT title FROM jobs WHERE id = ?').get(restoredJobId).title, 'Restored v2 ledger fixture');
   assert.equal(Number(restoredDatabase.prepare('SELECT COUNT(*) AS count FROM operator_sessions WHERE revoked_at IS NULL').get().count), 0);
   assert.equal(Number(restoredDatabase.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
+  assert.equal(Number(restoredDatabase.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);
   restoredDatabase.close();
   assert.equal(fs.readFileSync(path.join(uploadDir, '2026-07', 'restored-proof.jpg'), 'utf8'), 'restored-evidence-v2');
   assert.equal(fs.existsSync(currentEvidence), false);

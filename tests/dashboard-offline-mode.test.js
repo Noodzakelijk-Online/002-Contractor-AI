@@ -97,6 +97,9 @@ test('operations view lists, verifies, and exports portable checksummed local ba
   assert.match(dashboardSource, /data-testid="login-defense-readiness"/);
   assert.match(dashboardSource, /loginRateLimitCapability\?\.durability === 'ledger'/);
   assert.match(dashboardSource, /loginRateLimitCapability\?\.multiReplicaSafe/);
+  assert.match(dashboardSource, /data-testid="api-defense-readiness"/);
+  assert.match(dashboardSource, /apiRateLimitCapability\?\.durability === 'ledger'/);
+  assert.match(dashboardSource, /apiRateLimitCapability\?\.multiReplicaSafe/);
   assert.match(dashboardSource, /disabled=\{submitting \|\| !localBackupAvailable\}/);
   assert.match(dashboardSource, /Application-local packages are disabled in hosted mode/);
 });

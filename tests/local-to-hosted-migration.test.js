@@ -89,6 +89,7 @@ function createBackupFixture(t, suffix = 'success') {
     expiresAt: new Date(Date.now() + 3_600_000).toISOString()
   });
   source.recordAuthenticationFailure(crypto.createHash('sha256').update(`migration-rate-limit-${suffix}`).digest('hex'));
+  source.recordApiRateLimitRequest(crypto.createHash('sha256').update(`migration-api-rate-limit-${suffix}`).digest('hex'));
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -180,7 +181,8 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.evidenceFiles, 1);
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
-  assert.equal(migration.migrationVersion, '010_durable_auth_rate_limits');
+  assert.equal(migration.clearedApiRateLimits, 1);
+  assert.equal(migration.migrationVersion, '011_durable_api_rate_limits');
   assert.equal(migration.diagnostics.valid, true);
   assert.equal(storage.objects.size, 1);
   assert.deepEqual([...storage.objects.values()][0], fixture.evidenceBytes);
@@ -202,6 +204,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPartner.data.verificationReference, fixture.tradePartner.data.verificationReference);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM operator_sessions').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
+    assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);
     const receipt = hosted.listAudit({ entityType: 'operational_migration', limit: 100 })
       .find(event => event.id === migration.receiptId);
     assert.equal(receipt.action, 'migrate_local_backup_to_hosted');
@@ -209,6 +212,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(receipt.metadata.databaseSha256, migration.databaseSha256);
     assert.equal(receipt.metadata.invalidatedOperatorSessions, 1);
     assert.equal(receipt.metadata.clearedAuthenticationRateLimits, 1);
+    assert.equal(receipt.metadata.clearedApiRateLimits, 1);
   } finally {
     hosted.close();
   }

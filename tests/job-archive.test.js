@@ -514,7 +514,7 @@ test('portal revocation migration normalizes legacy inactive job access on resta
     assert.equal(migratedAccess.status, 'revoked');
     assert.equal(migratedAccess.data.revocation.actor, 'ledger_migration');
     assert.match(migratedAccess.data.revocation.reason, /retained job is inactive/i);
-    assert.equal(ledger.migrationStatus().currentVersion, '010_durable_auth_rate_limits');
+    assert.equal(ledger.migrationStatus().currentVersion, '011_durable_api_rate_limits');
     assert.ok(ledger.listAudit({ entityId: access.id, limit: 100 }).some(event => (
       event.action === 'revoke_client_portal_access'
       && event.actor === 'ledger_migration'

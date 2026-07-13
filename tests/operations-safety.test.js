@@ -193,7 +193,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '010_durable_auth_rate_limits');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '011_durable_api_rate_limits');
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
   const publicReadiness = await request(baseUrl, '/api/health/ready');
@@ -236,6 +236,10 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.evidenceStorage.privateAccess, true);
   assert.equal(capabilities.body.capabilities.evidenceStorage.status, 'verified');
   assert.ok(capabilities.body.capabilities.evidenceStorage.verifiedAt);
+  assert.equal(capabilities.body.capabilities.requestSafety.apiRateLimit.durability, 'ledger');
+  assert.equal(capabilities.body.capabilities.requestSafety.apiRateLimit.keyMaterial, 'hmac-sha256-bucket');
+  assert.equal(capabilities.body.capabilities.requestSafety.apiRateLimit.boundedCardinality, true);
+  assert.equal(capabilities.body.capabilities.requestSafety.apiRateLimit.multiReplicaSafe, true);
   assert.equal(capabilities.body.capabilities.requestSafety.evidenceUploadIdempotency, 'durable');
   assert.equal(capabilities.body.capabilities.requestSafety.evidenceUploadLeaseOwnership, 'unique_claim_token');
   assert.equal(capabilities.body.capabilities.requestSafety.evidenceUploadReclaimSafe, true);

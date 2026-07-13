@@ -128,6 +128,18 @@ function clearRestoredAuthenticationRateLimits(ledgerFile) {
   }
 }
 
+function clearRestoredApiRateLimits(ledgerFile) {
+  const database = new DatabaseSync(ledgerFile);
+  try {
+    const retained = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'api_rate_limits'").get();
+    if (!retained) return 0;
+    const result = database.prepare('DELETE FROM api_rate_limits').run();
+    return Number(result.changes || 0);
+  } finally {
+    database.close();
+  }
+}
+
 function copyDirectoryFiles(sourceRoot, targetRoot) {
   if (!fs.existsSync(sourceRoot)) return [];
   const copied = [];
@@ -229,6 +241,7 @@ function restore(argumentsMap) {
   }
   const invalidatedOperatorSessions = invalidateRestoredOperatorSessions(ledgerFile);
   const clearedAuthenticationRateLimits = clearRestoredAuthenticationRateLimits(ledgerFile);
+  const clearedApiRateLimits = clearRestoredApiRateLimits(ledgerFile);
 
   let evidenceRestored = false;
   let restoredEvidenceFiles = 0;
@@ -265,6 +278,7 @@ function restore(argumentsMap) {
     databaseVerification,
     invalidatedOperatorSessions,
     clearedAuthenticationRateLimits,
+    clearedApiRateLimits,
     preRestoreBackupId: safetyId,
     restartRequired: true
   };

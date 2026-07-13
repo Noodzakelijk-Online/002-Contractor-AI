@@ -897,6 +897,22 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_expiry ON auth_rate_limits(expires_at);
       `);
     }
+  },
+  {
+    version: '011_durable_api_rate_limits',
+    description: 'Coordinate bounded API request windows across restarts and application replicas.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS api_rate_limits (
+          key_hash TEXT PRIMARY KEY,
+          window_started_at TEXT NOT NULL,
+          request_count INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_rate_limits_expiry ON api_rate_limits(expires_at);
+      `);
+    }
   }
 ];
 
@@ -2042,6 +2058,46 @@ class ContractorOperatingLedger {
     if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) return false;
     const result = this.db.prepare('DELETE FROM auth_rate_limits WHERE key_hash = ?').run(normalizedKeyHash);
     return Number(result.changes || 0) > 0;
+  }
+
+  recordApiRateLimitRequest(keyHash, options = {}) {
+    const normalizedKeyHash = normalizeText(keyHash).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) throw new Error('API rate-limit key must be a SHA-256 hash');
+    const limit = Math.max(1, Math.round(normalizeNumber(options.limit, 1_000)));
+    const windowMs = Math.max(1_000, Math.round(normalizeNumber(options.windowMs, 60_000)));
+    const now = options.now ? new Date(options.now) : new Date();
+    if (Number.isNaN(now.getTime())) throw new Error('API rate-limit time is invalid');
+    const timestamp = now.toISOString();
+    const expiresAt = new Date(now.getTime() + windowMs).toISOString();
+
+    return this.transaction(() => {
+      this.db.prepare('DELETE FROM api_rate_limits WHERE expires_at <= ?').run(timestamp);
+      this.db.prepare(`
+        INSERT OR IGNORE INTO api_rate_limits (key_hash, window_started_at, request_count, updated_at, expires_at)
+        VALUES (?, ?, 0, ?, ?)
+      `).run(normalizedKeyHash, timestamp, timestamp, expiresAt);
+      this.db.prepare(`
+        UPDATE api_rate_limits
+        SET request_count = request_count + 1, updated_at = ?
+        WHERE key_hash = ?
+      `).run(timestamp, normalizedKeyHash);
+      const row = this.db.prepare('SELECT * FROM api_rate_limits WHERE key_hash = ?').get(normalizedKeyHash);
+      const requestCount = Number(row.request_count || 0);
+      return {
+        keyHash: normalizedKeyHash,
+        requestCount,
+        limit,
+        remaining: Math.max(0, limit - requestCount),
+        limited: requestCount > limit,
+        windowStartedAt: row.window_started_at,
+        expiresAt: row.expires_at
+      };
+    });
+  }
+
+  clearApiRateLimits() {
+    const result = this.db.prepare('DELETE FROM api_rate_limits').run();
+    return Number(result.changes || 0);
   }
 
   getScheduledJob(jobKey) {

@@ -145,10 +145,12 @@ const autonomousSchedulerEnabled = process.env.CONTRACTOR_AI_AUTONOMOUS_SCHEDULE
 const autonomousSchedulerIntervalSeconds = Math.max(30, Number(process.env.CONTRACTOR_AI_AUTONOMOUS_INTERVAL_SECONDS || 300));
 const autonomousSchedulerLeaseSeconds = Math.max(30, Number(process.env.CONTRACTOR_AI_AUTONOMOUS_LEASE_SECONDS || 120));
 const AUTONOMOUS_SCHEDULER_KEY = 'ledger_autonomous_cycle';
-const apiRateWindowMs = Math.max(1_000, Number(process.env.CONTRACTOR_AI_RATE_WINDOW_MS || 60_000));
-const apiRateLimit = Math.max(50, Number(process.env.CONTRACTOR_AI_RATE_LIMIT || 1000));
-const apiRateBucketLimit = Math.max(100, Number(process.env.CONTRACTOR_AI_RATE_BUCKET_LIMIT || 5_000));
-const apiRateBuckets = new Map();
+const apiRateWindowMs = boundedInteger(process.env.CONTRACTOR_AI_RATE_WINDOW_MS, 60_000, 1_000, 86_400_000);
+const apiRateLimit = boundedInteger(process.env.CONTRACTOR_AI_RATE_LIMIT, 1_000, 50, 1_000_000);
+const apiRateBucketLimit = boundedInteger(process.env.CONTRACTOR_AI_RATE_BUCKET_LIMIT, 5_000, 100, 100_000);
+const apiRateSigningKey = configuredOperatorTokens().length
+  ? operatorSessionSigningKey
+  : crypto.createHash('sha256').update('contractor-ai-local-api-rate\0').update(path.resolve(ledgerFile)).digest();
 function boundedInteger(value, fallback, minimum, maximum) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -346,6 +348,15 @@ function runtimeConfiguration(options = {}) {
       enabled: autonomousSchedulerEnabled,
       intervalSeconds: autonomousSchedulerIntervalSeconds
     },
+    requestRateLimit: {
+      durability: 'ledger',
+      keyMaterial: 'hmac-sha256-bucket',
+      limit: apiRateLimit,
+      windowMs: apiRateWindowMs,
+      bucketCount: apiRateBucketLimit,
+      boundedCardinality: true,
+      multiReplicaSafe: true
+    },
     ready: issues.length === 0,
     issues
   };
@@ -400,32 +411,43 @@ function attachRequestContext(req, res, next) {
 
 function rateLimitApi(req, res, next) {
   if (!req.path.startsWith('/api/') || req.path === '/api/health/ready') return next();
-  const now = Date.now();
-  const remoteKey = String(req.ip || req.socket?.remoteAddress || 'unknown');
-  if (!apiRateBuckets.has(remoteKey) && apiRateBuckets.size >= apiRateBucketLimit - 1) {
-    for (const [bucketKey, entry] of apiRateBuckets) {
-      if (now - entry.startedAt >= apiRateWindowMs) apiRateBuckets.delete(bucketKey);
+  try {
+    const state = operatingLedger.recordApiRateLimitRequest(apiRateLimitKey(req), {
+      limit: apiRateLimit,
+      windowMs: apiRateWindowMs
+    });
+    const resetSeconds = setApiRateLimitHeaders(res, state);
+    if (state.limited) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return sendError(req, res, 429, 'rate_limited', 'Too many requests. Try again shortly.');
     }
+    return next();
+  } catch (error) {
+    log('error', 'api_rate_limit_unavailable', { requestId: req.requestId, error: serializeError(error) });
+    return sendError(req, res, 503, 'api_rate_limit_unavailable', 'Request protection is temporarily unavailable.');
   }
-  const key = apiRateBuckets.has(remoteKey) || apiRateBuckets.size < apiRateBucketLimit - 1
-    ? remoteKey
-    : '__overflow__';
-  const bucket = apiRateBuckets.get(key);
-  const active = !bucket || now - bucket.startedAt >= apiRateWindowMs
-    ? { startedAt: now, count: 0 }
-    : bucket;
-  active.count += 1;
-  apiRateBuckets.set(key, active);
-  const resetSeconds = Math.max(1, Math.ceil((active.startedAt + apiRateWindowMs - now) / 1000));
-  res.setHeader('RateLimit-Limit', String(apiRateLimit));
-  res.setHeader('RateLimit-Remaining', String(Math.max(0, apiRateLimit - active.count)));
+}
+
+function apiRateLimitKey(req) {
+  const remoteAddress = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  const clientDigest = crypto.createHmac('sha256', apiRateSigningKey)
+    .update('contractor-ai-api-client\0')
+    .update(remoteAddress)
+    .digest();
+  const bucket = clientDigest.readUInt32BE(0) % apiRateBucketLimit;
+  return crypto.createHmac('sha256', apiRateSigningKey)
+    .update('contractor-ai-api-bucket\0')
+    .update(String(bucket))
+    .digest('hex');
+}
+
+function setApiRateLimitHeaders(res, state) {
+  const resetSeconds = Math.max(1, Math.ceil((Date.parse(state.expiresAt) - Date.now()) / 1000));
+  res.setHeader('RateLimit-Limit', String(state.limit));
+  res.setHeader('RateLimit-Remaining', String(state.remaining));
   res.setHeader('RateLimit-Reset', String(resetSeconds));
-  res.setHeader('RateLimit-Policy', `${apiRateLimit};w=${Math.ceil(apiRateWindowMs / 1000)}`);
-  if (active.count > apiRateLimit) {
-    res.setHeader('Retry-After', String(resetSeconds));
-    return sendError(req, res, 429, 'rate_limited', 'Too many requests. Try again shortly.');
-  }
-  next();
+  res.setHeader('RateLimit-Policy', `${state.limit};w=${Math.ceil(apiRateWindowMs / 1000)}`);
+  return resetSeconds;
 }
 
 function authenticationRateLimitKey(req) {
@@ -4006,6 +4028,7 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         }
       },
       requestSafety: {
+        apiRateLimit: runtime.requestRateLimit,
         evidenceUploadIdempotency: 'durable',
         evidenceUploadLeaseOwnership: 'unique_claim_token',
         evidenceUploadReclaimSafe: true,
