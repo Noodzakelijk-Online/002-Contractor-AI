@@ -176,7 +176,7 @@ test('equipment directory validates records and blocks retirement while operatio
   assert.equal(retiredEdit.response.status, 409);
   assert.equal(retiredEdit.body.error.code, 'tool_retired');
 
-  const audit = await request(baseUrl, `/api/ledger/audit?entityId=${encodeURIComponent(tool.id)}&limit=100`, { token: tokens.approver });
+  const audit = await request(baseUrl, `/api/ledger/audit?entityId=${encodeURIComponent(tool.id)}&limit=100`, { token: tokens.owner });
   const requestEvent = audit.body.events.find(event => event.action === 'request_tool_retirement');
   assert.equal(requestEvent.actor, 'role:office_operator');
   assert.ok(audit.body.events.some(event => event.action === 'apply_tool_retirement'));
@@ -389,7 +389,7 @@ test('required equipment inspections gate reservations and retain internal evide
   assert.equal(retained.maintenance.historyCount, 1);
   assert.ok(retainedDirectory.body.summary.maintenanceRecords >= 1);
 
-  const audit = await request(baseUrl, `/api/ledger/audit?entityId=${encodeURIComponent(tool.id)}&limit=100`, { token: tokens.approver });
+  const audit = await request(baseUrl, `/api/ledger/audit?entityId=${encodeURIComponent(tool.id)}&limit=100`, { token: tokens.owner });
   const inspectionEvents = audit.body.events.filter(event => event.action === 'record_tool_inspection');
   const maintenanceEvents = audit.body.events.filter(event => event.action === 'record_tool_maintenance');
   assert.equal(inspectionEvents.length, 3);
@@ -469,7 +469,7 @@ test('equipment retirement releases dormant archived-job reservations without de
   assert.equal(retainedReservation.status, 'released');
   assert.match(retainedReservation.data.releaseReason, /equipment retirement approval/i);
 
-  const toolAudit = await request(baseUrl, `/api/ledger/audit?entityId=${encodeURIComponent(tool.id)}&limit=100`, { token: tokens.approver });
+  const toolAudit = await request(baseUrl, `/api/ledger/audit?entityId=${encodeURIComponent(tool.id)}&limit=100`, { token: tokens.owner });
   const applyAudit = toolAudit.body.events.find(event => event.action === 'apply_tool_retirement');
   assert.deepEqual(applyAudit.metadata.releasedDormantReservationIds, [reservation.id]);
   assert.equal(applyAudit.metadata.externalCommitments, 0);

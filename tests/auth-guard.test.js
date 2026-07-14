@@ -350,12 +350,29 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(approverSession.body.operator.capabilities.clientSuccess, true);
     assert.equal(approverSession.body.operator.capabilities.fieldEvidence, false);
 
+    const officeIntake = await request(baseUrl, '/api/ledger/intake', {
+      method: 'POST',
+      headers: officeHeaders,
+      body: JSON.stringify({ title: 'Role audit fixture', client: { name: 'Role Client' }, address: 'Utrecht' })
+    });
+    assert.equal(officeIntake.response.status, 201);
     const ownerBackup = await request(baseUrl, '/api/operations/backup', {
       method: 'POST',
       headers: ownerHeaders,
       body: '{}'
     });
     assert.equal(ownerBackup.response.status, 201);
+    const ownerAudit = await request(baseUrl, '/api/ledger/audit?limit=5&includeFacets=true', { headers: ownerHeaders });
+    assert.equal(ownerAudit.response.status, 200);
+    assert.ok(ownerAudit.body.events.length > 0);
+    assert.ok(ownerAudit.body.page);
+    assert.ok(ownerAudit.body.facets);
+    const deniedOfficeAudit = await request(baseUrl, '/api/ledger/audit?limit=5', { headers: officeHeaders });
+    assert.equal(deniedOfficeAudit.response.status, 403);
+    assert.equal(deniedOfficeAudit.body.error.code, 'insufficient_role');
+    const deniedApproverAudit = await request(baseUrl, '/api/ledger/audit?limit=5', { headers: approverHeaders });
+    assert.equal(deniedApproverAudit.response.status, 403);
+    assert.equal(deniedApproverAudit.body.error.code, 'insufficient_role');
     const deniedOfficeBackup = await request(baseUrl, `/api/operations/backups/${encodeURIComponent(ownerBackup.body.backup.backupId)}/download`, {
       headers: officeHeaders
     });

@@ -17,7 +17,7 @@ npm start
 
 Open `http://localhost:3000`. For development, start the API with `npm run dev:api` and the Vite client with `npm run dev`.
 
-Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and archive QA/demo records. Backups are created before a QA reset. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.
+Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to inspect and filter the chained audit history, create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and archive QA/demo records. Backups are created before a QA reset. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.
 
 To restore a verified SQLite backup, stop the local Contractor.AI process first, then run:
 
@@ -141,6 +141,7 @@ The supported surface is `/api/ledger/*`, including intake, jobs, approvals, dis
 - Owner-only `GET /api/operations/backups/:backupId/download` streams the verified SQLite and evidence package as `tar.gz`.
 - `POST /api/operations/restore/validate` with `{ "backupId": "..." }` verifies the retained backup checksums and SQLite restore readiness. Summary exports are rejected.
 - `GET /api/operations/audit-integrity` verifies the complete retained audit chain against its atomic head and returns `503` when any event or sequence no longer matches.
+- Owner-only `GET /api/ledger/audit` returns newest-first, sequence-cursor pages of retained audit events with chain hashes. Use `beforeSequence` for the next page; exact `jobId`, `entityType`, `entityId`, `action`, and `actor` filters, `from` and `until` date bounds, free-text `query`, and `includeFacets=true` support investigation without loading the full ledger.
 - `GET /api/operations/capabilities`
 - `POST /api/operations/reset-qa` with `{ "confirmation": "RESET_QA" }`
 - `GET /api/readiness`

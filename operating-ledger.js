@@ -916,6 +916,36 @@ function safeLimit(value, fallback = 50, max = 500) {
   return Number.isFinite(limit) ? limit : fallback;
 }
 
+function auditHistorySequence(value, label = 'Audit cursor') {
+  if (value === undefined || value === null || value === '') return null;
+  const sequenceNumber = Number(value);
+  if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 1) {
+    const error = new Error(`${label} must be a positive integer`);
+    error.statusCode = 400;
+    error.code = 'audit_cursor_invalid';
+    throw error;
+  }
+  return sequenceNumber;
+}
+
+function auditHistoryText(value, label, maxLength = 160) {
+  const text = normalizeText(value);
+  if (text.length > maxLength) {
+    const error = new Error(`${label} cannot exceed ${maxLength} characters`);
+    error.statusCode = 400;
+    error.code = 'audit_filter_too_long';
+    throw error;
+  }
+  return text || null;
+}
+
+function auditHistorySearchPattern(value) {
+  const text = auditHistoryText(value, 'Audit search', 120);
+  if (!text) return null;
+  const searchable = text.toLowerCase().replace(/[%\\]/g, '').trim();
+  return searchable ? `%${searchable}%` : null;
+}
+
 const LEDGER_SCHEMA_MIGRATIONS = [
   {
     version: '001_initial_ledger_schema',
@@ -1164,6 +1194,19 @@ const LEDGER_SCHEMA_MIGRATIONS = [
       db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_sequence_number ON audit_events(sequence_number);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_event_hash ON audit_events(event_hash);
+      `);
+    }
+  },
+  {
+    version: '013_audit_history_queries',
+    description: 'Index chained audit history for owner filtering and cursor pagination.',
+    apply(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_audit_job_sequence ON audit_events(job_id, sequence_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_type_sequence ON audit_events(entity_type, sequence_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_action_sequence ON audit_events(action, sequence_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_actor_sequence ON audit_events(actor, sequence_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_created_sequence ON audit_events(created_at, sequence_number DESC);
       `);
     }
   }
@@ -2736,7 +2779,7 @@ class ContractorOperatingLedger {
     return this.db.prepare(`SELECT * FROM audit_chain_state WHERE chain_id = ?${lockClause}`).get(AUDIT_CHAIN_ID) || null;
   }
 
-  audit({ entityType, entityId, jobId = null, action, actor = 'Contractor.AI', before = null, after = null, metadata = null }) {
+  audit({ entityType, entityId, jobId = null, action, actor = 'Contractor.AI', before = null, after = null, metadata = null, createdAt = null }) {
     return this.transaction(() => appendAuditEventToDatabase(this.db, {
       entityType,
       entityId,
@@ -2745,7 +2788,8 @@ class ContractorOperatingLedger {
       actor,
       before,
       after,
-      metadata
+      metadata,
+      createdAt
     }, { databaseMode: this.databaseMode, chainAvailable: true }).id);
   }
 
@@ -17031,6 +17075,114 @@ class ContractorOperatingLedger {
     return this.db.prepare('SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?')
       .all(limit)
       .map(row => this.mapAudit(row));
+  }
+
+  auditHistoryFacets(limit = 100) {
+    const facetLimit = Math.floor(safeLimit(limit, 100, 250));
+    const facet = column => this.db.prepare(`
+      SELECT ${column} AS value, COUNT(*) AS count
+      FROM audit_events
+      WHERE ${column} IS NOT NULL AND ${column} <> ''
+      GROUP BY ${column}
+      ORDER BY count DESC, ${column} ASC
+      LIMIT ?
+    `).all(facetLimit).map(row => ({ value: row.value, count: Number(row.count || 0) }));
+    return {
+      entityTypes: facet('entity_type'),
+      actions: facet('action'),
+      actors: facet('actor')
+    };
+  }
+
+  listAuditPage(filters = {}) {
+    const limit = Math.floor(safeLimit(filters.limit, 25, 100));
+    const beforeSequence = auditHistorySequence(filters.beforeSequence ?? filters.before_sequence, 'Audit cursor');
+    const clauses = [];
+    const parameters = [];
+    const exactFilters = [
+      ['job_id', 'jobId', 'Job id'],
+      ['entity_type', 'entityType', 'Entity type'],
+      ['entity_id', 'entityId', 'Entity id'],
+      ['action', 'action', 'Action'],
+      ['actor', 'actor', 'Actor']
+    ];
+    const appliedFilters = {};
+
+    for (const [column, key, label] of exactFilters) {
+      const value = auditHistoryText(filters[key] ?? filters[key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)], label);
+      if (!value) continue;
+      clauses.push(`${column} = ?`);
+      parameters.push(value);
+      appliedFilters[key] = value;
+    }
+    if (beforeSequence !== null) {
+      clauses.push('sequence_number < ?');
+      parameters.push(beforeSequence);
+    }
+
+    const fromInput = auditHistoryText(filters.from ?? filters.fromDate ?? filters.from_date, 'From date');
+    const untilInput = auditHistoryText(filters.until ?? filters.to ?? filters.untilDate ?? filters.until_date, 'Until date');
+    if (fromInput) {
+      const from = normalizeRetainedDate(fromInput, { label: 'From date', code: 'audit_from_invalid' });
+      const fromTimestamp = /^\d{4}-\d{2}-\d{2}$/.test(from) ? `${from}T00:00:00.000Z` : from;
+      clauses.push('created_at >= ?');
+      parameters.push(fromTimestamp);
+      appliedFilters.from = fromTimestamp;
+    }
+    if (untilInput) {
+      const until = normalizeRetainedDate(untilInput, { label: 'Until date', code: 'audit_until_invalid' });
+      const untilTimestamp = /^\d{4}-\d{2}-\d{2}$/.test(until) ? `${until}T23:59:59.999Z` : until;
+      clauses.push('created_at <= ?');
+      parameters.push(untilTimestamp);
+      appliedFilters.until = untilTimestamp;
+    }
+    if (appliedFilters.from && appliedFilters.until && appliedFilters.from > appliedFilters.until) {
+      const error = new Error('Audit history start date must be before the end date');
+      error.statusCode = 400;
+      error.code = 'audit_date_range_invalid';
+      throw error;
+    }
+
+    const searchPattern = auditHistorySearchPattern(filters.query ?? filters.search);
+    if (searchPattern) {
+      clauses.push(`(
+        LOWER(id) LIKE ?
+        OR LOWER(entity_type) LIKE ?
+        OR LOWER(entity_id) LIKE ?
+        OR LOWER(COALESCE(job_id, '')) LIKE ?
+        OR LOWER(action) LIKE ?
+        OR LOWER(actor) LIKE ?
+      )`);
+      parameters.push(...Array(6).fill(searchPattern));
+      appliedFilters.query = auditHistoryText(filters.query ?? filters.search, 'Audit search', 120);
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`
+      SELECT * FROM audit_events
+      ${where}
+      ORDER BY sequence_number DESC
+      LIMIT ?
+    `).all(...parameters, limit + 1);
+    const hasMore = rows.length > limit;
+    const events = rows.slice(0, limit).map(row => this.mapAudit(row));
+    const newestSequence = events[0]?.sequenceNumber || null;
+    const oldestSequence = events.at(-1)?.sequenceNumber || null;
+    return {
+      events,
+      page: {
+        limit,
+        returned: events.length,
+        hasMore,
+        nextBeforeSequence: hasMore ? oldestSequence : null,
+        newestSequence,
+        oldestSequence,
+        filters: appliedFilters
+      },
+      facets: normalizeBoolean(filters.includeFacets ?? filters.include_facets)
+        ? this.auditHistoryFacets(filters.facetLimit ?? filters.facet_limit)
+        : null
+    };
   }
 
   dashboardSummary() {

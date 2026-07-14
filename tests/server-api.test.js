@@ -1427,12 +1427,14 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.ok(debug.body.dashboard.money.drawRequestValue >= 2783);
   assert.ok(debug.body.dashboard.money.financeHandoffValue >= 1);
 
-  const audit = await request(baseUrl, `/api/ledger/audit?jobId=${encodeURIComponent(jobId)}`);
-  assert.equal(audit.response.status, 200);
-  assert.ok(audit.body.events.some(event => event.action === 'create_intake_job'));
-  assert.ok(audit.body.events.some(event => event.action === 'record_time'));
+  const intakeAudit = await request(baseUrl, `/api/ledger/audit?jobId=${encodeURIComponent(jobId)}&action=create_intake_job`);
+  assert.equal(intakeAudit.response.status, 200);
+  assert.ok(intakeAudit.body.events.some(event => event.action === 'create_intake_job'));
+  const timeAudit = await request(baseUrl, `/api/ledger/audit?jobId=${encodeURIComponent(jobId)}&action=record_time`);
+  assert.equal(timeAudit.response.status, 200);
+  assert.ok(timeAudit.body.events.some(event => event.action === 'record_time'));
 
-  const topLevelAudit = await request(baseUrl, `/api/ledger/audit?jobId=${encodeURIComponent(jobId)}`);
+  const topLevelAudit = await request(baseUrl, `/api/ledger/audit?jobId=${encodeURIComponent(jobId)}&action=assess_weather`);
   assert.equal(topLevelAudit.response.status, 200);
   assert.ok(topLevelAudit.body.events.some(event => event.action === 'assess_weather'));
 

@@ -107,6 +107,22 @@ test('operations view lists, verifies, and exports portable checksummed local ba
   assert.match(dashboardSource, /Application-local packages are disabled in hosted mode/);
 });
 
+test('operations view exposes owner audit investigation with cursor paging and chain proof', () => {
+  assert.match(dashboardSource, /data-testid="audit-history-panel"/);
+  assert.match(dashboardSource, /data-testid="audit-history-filters"/);
+  assert.match(dashboardSource, /data-testid="audit-event-detail"/);
+  assert.match(dashboardSource, /\/api\/ledger\/audit\?/);
+  assert.match(dashboardSource, /beforeSequence/);
+  assert.match(dashboardSource, /includeFacets/);
+  assert.match(dashboardSource, /newestSequence: current\?\.newestSequence \|\| nextPage\.newestSequence/);
+  assert.match(dashboardSource, /Audit history/);
+  assert.match(dashboardSource, /Previous hash/);
+  assert.match(dashboardSource, /Event hash/);
+  assert.match(dashboardSource, /detailCloseRef\.current\?\.focus\(\)/);
+  assert.match(dashboardSource, /window\.addEventListener\('keydown', handleKeyDown\)/);
+  assert.match(dashboardSource, /detailOpenerRef\.current\?\.focus\(\)/);
+});
+
 test('job archive and restore controls use retained approval-gated ledger routes', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/jobs\?archiveOnly=true&limit=100'\)/);
   assert.match(dashboardSource, /`\/api\/ledger\/jobs\/\$\{encodeURIComponent\(job\.id\)\}\/\$\{mode\}`/);

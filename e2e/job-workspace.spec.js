@@ -1713,6 +1713,84 @@ test('job workspace remains horizontally contained on a mobile field viewport', 
   expect(plannerGeometry.scrollWidth).toBeLessThanOrEqual(plannerGeometry.clientWidth);
 });
 
+test('owner investigates cursor-paged audit history with retained chain proof', async ({ page, request }) => {
+  const suffix = Date.now();
+  for (let index = 1; index <= 14; index += 1) {
+    await createBrowserJob(request, `Browser audit history ${suffix}-${index}`, {
+      assignAutomatically: false,
+      client: { name: `Browser audit client ${suffix}-${index}`, email: `audit-${suffix}-${index}@example.test` }
+    });
+  }
+
+  const apiHistoryResponse = await request.get('/api/ledger/audit?limit=2&includeFacets=true');
+  expect(apiHistoryResponse.ok()).toBeTruthy();
+  const apiHistory = await apiHistoryResponse.json();
+  expect(apiHistory.page).toMatchObject({ limit: 2, returned: 2, hasMore: true });
+  expect(apiHistory.facets.actions.some(facet => facet.value === 'create_intake_job')).toBeTruthy();
+  expect(apiHistory.events.every(event => /^\w+$/.test(event.id)
+    && /^[a-f0-9]{64}$/.test(event.previousHash)
+    && /^[a-f0-9]{64}$/.test(event.eventHash))).toBeTruthy();
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Operations', exact: true }).click();
+  const panel = page.getByTestId('audit-history-panel');
+  await expect(panel).toBeVisible();
+  const rows = panel.locator('.audit-history-row');
+  await expect(rows).toHaveCount(25);
+  const initialRowCount = await rows.count();
+  const newestSequence = (await rows.first().locator('.audit-sequence strong').innerText()).replace('#', '');
+  await panel.getByRole('button', { name: 'Load older events' }).click();
+  await expect.poll(() => rows.count()).toBeGreaterThan(initialRowCount);
+  const oldestSequence = (await rows.last().locator('.audit-sequence strong').innerText()).replace('#', '');
+  await expect(panel.locator('.audit-history-summary code')).toHaveText(`#${newestSequence} to #${oldestSequence}`);
+
+  await panel.getByLabel('Action').selectOption('create_intake_job');
+  await panel.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect.poll(() => rows.count()).toBeGreaterThan(0);
+  const actions = await panel.locator('.audit-event-copy > div > strong').allTextContents();
+  expect(actions.every(action => action === 'create intake job')).toBeTruthy();
+
+  let inspectButton = rows.first().getByRole('button', { name: /Inspect audit event/ });
+  await inspectButton.click();
+  let modal = page.getByTestId('audit-event-detail');
+  await expect(modal).toBeVisible();
+  await expect(modal.locator('.audit-chain-proof code')).toHaveCount(2);
+  const hashes = await modal.locator('.audit-chain-proof code').allTextContents();
+  expect(hashes.every(hash => /^[a-f0-9]{64}$/.test(hash))).toBeTruthy();
+  const modalClose = modal.getByRole('button', { name: 'Close audit event detail' });
+  await expect(modalClose).toBeFocused();
+  await modalClose.press('Escape');
+  await expect(modal).toHaveCount(0);
+  await expect(inspectButton).toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileGeometry = await panel.evaluate(element => ({
+    pageWidth: document.documentElement.scrollWidth,
+    viewportWidth: document.documentElement.clientWidth,
+    panelWidth: element.scrollWidth,
+    panelClientWidth: element.clientWidth,
+    filterColumns: getComputedStyle(element.querySelector('[data-testid="audit-history-filters"]')).gridTemplateColumns
+  }));
+  expect(mobileGeometry.pageWidth).toBeLessThanOrEqual(mobileGeometry.viewportWidth);
+  expect(mobileGeometry.panelWidth).toBeLessThanOrEqual(mobileGeometry.panelClientWidth);
+  expect(mobileGeometry.filterColumns.trim().split(/\s+/)).toHaveLength(1);
+
+  inspectButton = rows.first().getByRole('button', { name: /Inspect audit event/ });
+  await inspectButton.click();
+  modal = page.getByTestId('audit-event-detail');
+  await expect(modal).toBeVisible();
+  const modalGeometry = await modal.evaluate(element => ({
+    left: element.getBoundingClientRect().left,
+    right: element.getBoundingClientRect().right,
+    viewportWidth: document.documentElement.clientWidth,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth
+  }));
+  expect(modalGeometry.left).toBeGreaterThanOrEqual(0);
+  expect(modalGeometry.right).toBeLessThanOrEqual(modalGeometry.viewportWidth);
+  expect(modalGeometry.scrollWidth).toBeLessThanOrEqual(modalGeometry.clientWidth);
+});
+
 test('operations distinguishes checksummed exports from restorable local backups', async ({ page, request }) => {
   const retained = await createBrowserJob(request, 'Browser backup evidence job', { service: 'Evidence retention' });
   const upload = await request.post('/api/ledger/upload', {

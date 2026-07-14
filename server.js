@@ -2679,10 +2679,13 @@ app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
 });
 
 app.get('/api/ledger/audit', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    events: operatingLedger.listAudit(req.query || {})
-  }));
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can inspect the global audit history.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const history = operatingLedger.listAuditPage(req.query || {});
+    return { success: true, ...history };
+  });
 });
 
 app.get('/api/ledger/learning', (req, res) => {
@@ -4038,6 +4041,10 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
+        historyEndpoint: '/api/ledger/audit',
+        historyAccess: 'owner_only',
+        historyPagination: 'sequence_cursor',
+        historyFilters: ['query', 'jobId', 'entityType', 'entityId', 'action', 'actor', 'from', 'until'],
         appendMode: 'atomic_hash_chain',
         tamperEvidence: ['modified_event', 'deleted_event', 'sequence_gap', 'stale_head']
       },

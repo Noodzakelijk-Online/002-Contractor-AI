@@ -783,7 +783,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '012_tamper_evident_audit_chain');
+    assert.equal(migrations.currentVersion, '013_audit_history_queries');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -864,12 +864,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('012_tamper_evident_audit_chain'));
+  assert.deepEqual(versions, Array(4).fill('013_audit_history_queries'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 12);
+    assert.equal(Number(migrationCount.count), 13);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -966,6 +966,52 @@ test('PostgreSQL audit chain atomically serializes concurrent replica appends', 
     assert.equal(after.eventCount, before.eventCount + 8);
   } finally {
     verification.close();
+  }
+});
+
+test('PostgreSQL audit history preserves cursor, filter, facet, and chain parity', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const runId = `postgres-history-${Date.now()}`;
+  const actor = `owner:${runId}`;
+  try {
+    for (let index = 1; index <= 5; index += 1) {
+      ledger.audit({
+        entityType: index % 2 ? 'job' : 'approval',
+        entityId: `${runId}-${index}`,
+        jobId: `${runId}-job`,
+        action: index % 2 ? 'inspect_history_job' : 'inspect_history_approval',
+        actor,
+        createdAt: `2026-07-${String(10 + index).padStart(2, '0')}T10:00:00.000Z`,
+        after: { retained: index }
+      });
+    }
+
+    const first = ledger.listAuditPage({ actor, limit: 2, includeFacets: true });
+    assert.equal(first.events.length, 2);
+    assert.equal(first.page.hasMore, true);
+    assert.ok(first.events[0].sequenceNumber > first.events[1].sequenceNumber);
+    assert.ok(first.facets.actors.some(facet => facet.value === actor && facet.count === 5));
+
+    const second = ledger.listAuditPage({ actor, limit: 2, beforeSequence: first.page.nextBeforeSequence });
+    const third = ledger.listAuditPage({ actor, limit: 2, beforeSequence: second.page.nextBeforeSequence });
+    const retained = [...first.events, ...second.events, ...third.events];
+    assert.equal(retained.length, 5);
+    assert.equal(new Set(retained.map(event => event.id)).size, 5);
+    assert.equal(third.page.hasMore, false);
+
+    const filtered = ledger.listAuditPage({
+      actor,
+      entityType: 'approval',
+      query: runId,
+      from: '2026-07-12',
+      until: '2026-07-14',
+      limit: 10
+    });
+    assert.deepEqual(filtered.events.map(event => event.after.retained), [4, 2]);
+    assert.ok(filtered.events.every(event => event.eventHash && event.previousHash));
+    assert.equal(ledger.verifyAuditIntegrity().valid, true);
+  } finally {
+    ledger.close();
   }
 });
 

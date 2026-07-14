@@ -68,6 +68,25 @@ test('operational export and backup are local, auditable maintenance controls', 
   });
   assert.equal(intake.response.status, 201);
 
+  const auditHistory = await request(baseUrl, '/api/ledger/audit?limit=1&includeFacets=true');
+  assert.equal(auditHistory.response.status, 200);
+  assert.equal(auditHistory.body.events.length, 1);
+  assert.equal(auditHistory.body.page.limit, 1);
+  assert.equal(auditHistory.body.page.returned, 1);
+  assert.ok(Number.isSafeInteger(auditHistory.body.events[0].sequenceNumber));
+  assert.match(auditHistory.body.events[0].eventHash, /^[a-f0-9]{64}$/);
+  assert.match(auditHistory.body.events[0].previousHash, /^[a-f0-9]{64}$/);
+  assert.ok(auditHistory.body.facets.entityTypes.length > 0);
+  assert.ok(auditHistory.body.facets.actions.length > 0);
+  assert.ok(auditHistory.body.facets.actors.length > 0);
+  const filteredAuditHistory = await request(baseUrl, `/api/ledger/audit?limit=10&action=${encodeURIComponent(auditHistory.body.events[0].action)}`);
+  assert.equal(filteredAuditHistory.response.status, 200);
+  assert.ok(filteredAuditHistory.body.events.length > 0);
+  assert.ok(filteredAuditHistory.body.events.every(event => event.action === auditHistory.body.events[0].action));
+  const invalidAuditCursor = await request(baseUrl, '/api/ledger/audit?beforeSequence=invalid');
+  assert.equal(invalidAuditCursor.response.status, 400);
+  assert.equal(invalidAuditCursor.body.error.code, 'audit_cursor_invalid');
+
   const exported = await request(baseUrl, '/api/operations/export');
   assert.equal(exported.response.status, 200);
   assert.equal(exported.response.headers.get('cache-control'), 'no-store');
@@ -193,7 +212,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '012_tamper_evident_audit_chain');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '013_audit_history_queries');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -235,6 +254,11 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.auditIntegrity.algorithm, 'sha256');
   assert.equal(capabilities.body.capabilities.auditIntegrity.appendMode, 'atomic_hash_chain');
   assert.equal(capabilities.body.capabilities.auditIntegrity.verificationEndpoint, '/api/operations/audit-integrity');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.historyEndpoint, '/api/ledger/audit');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.historyAccess, 'owner_only');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.historyPagination, 'sequence_cursor');
+  assert.deepEqual(capabilities.body.capabilities.auditIntegrity.historyFilters,
+    ['query', 'jobId', 'entityType', 'entityId', 'action', 'actor', 'from', 'until']);
   assert.equal(capabilities.body.capabilities.authentication.loginRateLimit.durability, 'ledger');
   assert.equal(capabilities.body.capabilities.authentication.loginRateLimit.keyMaterial, 'hmac-sha256');
   assert.equal(capabilities.body.capabilities.authentication.loginRateLimit.successfulLoginResetsFailures, true);
