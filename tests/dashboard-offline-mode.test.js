@@ -100,6 +100,9 @@ test('operations view lists, verifies, and exports portable checksummed local ba
   assert.match(dashboardSource, /data-testid="api-defense-readiness"/);
   assert.match(dashboardSource, /apiRateLimitCapability\?\.durability === 'ledger'/);
   assert.match(dashboardSource, /apiRateLimitCapability\?\.multiReplicaSafe/);
+  assert.match(dashboardSource, /const auditIntegrityCapability = operationCapabilities\?\.auditIntegrity/);
+  assert.match(dashboardSource, /auditIntegrityCapability\?\.appendMode === 'atomic_hash_chain'/);
+  assert.match(dashboardSource, /data-testid="audit-integrity-readiness"/);
   assert.match(dashboardSource, /disabled=\{submitting \|\| !localBackupAvailable\}/);
   assert.match(dashboardSource, /Application-local packages are disabled in hosted mode/);
 });

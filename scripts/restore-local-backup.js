@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
+const { AUDIT_CHAIN_ID, verifyAuditChainRows } = require('../operating-ledger');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -90,7 +91,17 @@ function verifySqliteBackupDatabase(ledgerFile) {
       const retainedTables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name));
       const missingTables = requiredTables.filter(table => !retainedTables.has(table));
       if (missingTables.length) throw new Error(`Backup ledger schema is incomplete: ${missingTables.join(', ')}.`);
-      return { valid: true, tables: retainedTables.size };
+      const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
+      let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
+      if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {
+        if (!retainedTables.has('audit_chain_state')) throw new Error('Backup audit chain state is missing.');
+        const state = database.prepare('SELECT * FROM audit_chain_state WHERE chain_id = ?').get(AUDIT_CHAIN_ID) || null;
+        auditIntegrity = { supported: true, ...verifyAuditChainRows(database.prepare('SELECT * FROM audit_events').all(), state) };
+        if (!auditIntegrity.valid) {
+          throw new Error(`Backup audit chain failed integrity verification: ${auditIntegrity.failures.map(failure => failure.code).join(', ')}.`);
+        }
+      }
+      return { valid: true, tables: retainedTables.size, auditIntegrity };
     } finally {
       database.close();
     }

@@ -31,6 +31,7 @@ The download endpoint streams a private `tar.gz` package only after verifying ev
 ## Safety Model
 
 - The ledger is the source of truth for jobs, work, approvals and audit evidence.
+- Audit evidence is append-chained with SHA-256 inside the same database transaction as each retained business change. Sequence gaps, payload rewrites, deleted events, and a stale chain head make diagnostics and readiness fail; owners can run a fresh verification through `/api/operations/audit-integrity`.
 - Autonomous cycles create internal drafts, reminders and approval records only.
 - Contractor.AI never sends a message, confirms a date, commits supplier spend, invoices, or makes payment claims without a verified integration and a resolved approval.
 - Mandatory lifecycle and procurement gates cannot be disabled by a request payload. Rejected or cancelled approvals restore the prior retained state so the operator can revise and resubmit without leaving a deadlocked `pending_approval` record.
@@ -139,6 +140,7 @@ The supported surface is `/api/ledger/*`, including intake, jobs, approvals, dis
 - `GET /api/operations/backups/:backupId/verify`
 - Owner-only `GET /api/operations/backups/:backupId/download` streams the verified SQLite and evidence package as `tar.gz`.
 - `POST /api/operations/restore/validate` with `{ "backupId": "..." }` verifies the retained backup checksums and SQLite restore readiness. Summary exports are rejected.
+- `GET /api/operations/audit-integrity` verifies the complete retained audit chain against its atomic head and returns `503` when any event or sequence no longer matches.
 - `GET /api/operations/capabilities`
 - `POST /api/operations/reset-qa` with `{ "confirmation": "RESET_QA" }`
 - `GET /api/readiness`

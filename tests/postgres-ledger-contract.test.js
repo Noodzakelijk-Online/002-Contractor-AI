@@ -308,6 +308,79 @@ function startSynchronizedApiRateRequest({ root, keyHash, now }) {
   return { child, ready: readyPromise, result: resultPromise };
 }
 
+function startSynchronizedAuditAppend({ root, entityId }) {
+  const script = `
+    const { ContractorOperatingLedger } = require('./operating-ledger');
+    const ledger = new ContractorOperatingLedger({ databaseUrl: process.env.CONTRACTOR_AI_POSTGRES_TEST_URL });
+    process.stdout.write('READY\\n');
+    process.stdin.once('data', () => {
+      try {
+        const id = ledger.audit({
+          entityType: 'postgres_concurrent_audit',
+          entityId: process.env.CONTRACTOR_AI_TEST_AUDIT_ENTITY,
+          action: 'retain_concurrent_event',
+          actor: 'postgres_audit_replica',
+          after: { retained: true }
+        });
+        const event = ledger.listAudit({ entityId: process.env.CONTRACTOR_AI_TEST_AUDIT_ENTITY, limit: 1 })[0];
+        process.stdout.write('RESULT:' + JSON.stringify({ id, sequenceNumber: event.sequenceNumber, eventHash: event.eventHash }) + '\\n');
+      } catch (error) {
+        process.stderr.write((error && error.stack) || String(error));
+        process.exitCode = 1;
+      } finally {
+        ledger.close();
+        process.stdin.pause();
+      }
+    });
+  `;
+  const child = spawn(process.execPath, ['-e', script], {
+    cwd: root,
+    env: {
+      ...process.env,
+      CONTRACTOR_AI_POSTGRES_TEST_URL: connectionString,
+      CONTRACTOR_AI_TEST_AUDIT_ENTITY: entityId
+    },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  let stderr = '';
+  let ready = false;
+  let resolveReady;
+  let rejectReady;
+  const readyPromise = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const resultPromise = new Promise((resolve, reject) => {
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      if (!ready && stdout.includes('READY\n')) {
+        ready = true;
+        resolveReady();
+      }
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => {
+      rejectReady(error);
+      reject(error);
+    });
+    child.on('exit', code => {
+      if (!ready) rejectReady(new Error(`PostgreSQL audit replica exited before ready: ${stderr}`));
+      if (code !== 0) {
+        reject(new Error(`PostgreSQL audit replica exited ${code}: ${stderr}`));
+        return;
+      }
+      const resultLine = stdout.split(/\r?\n/).find(line => line.startsWith('RESULT:'));
+      if (!resultLine) {
+        reject(new Error(`PostgreSQL audit replica returned no result: ${stdout}`));
+        return;
+      }
+      resolve(JSON.parse(resultLine.slice('RESULT:'.length)));
+    });
+  });
+  return { child, ready: readyPromise, result: resultPromise };
+}
+
 test('PostgreSQL connection options honor explicit TLS modes', () => {
   const local = resolvePostgresConnectionOptions('postgresql://user:secret@127.0.0.1:5432/ledger?sslmode=disable');
   assert.equal(local.ssl, false);
@@ -710,7 +783,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '011_durable_api_rate_limits');
+    assert.equal(migrations.currentVersion, '012_tamper_evident_audit_chain');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -791,12 +864,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('011_durable_api_rate_limits'));
+  assert.deepEqual(versions, Array(4).fill('012_tamper_evident_audit_chain'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 11);
+    assert.equal(Number(migrationCount.count), 12);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -862,6 +935,36 @@ test('PostgreSQL API limiter atomically coordinates concurrent replicas', { skip
     assert.equal(Number(row.request_count), 4);
   } finally {
     verification.clearApiRateLimits();
+    verification.close();
+  }
+});
+
+test('PostgreSQL audit chain atomically serializes concurrent replica appends', { skip: !connectionString }, async () => {
+  const baseline = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const before = baseline.verifyAuditIntegrity();
+  assert.equal(before.valid, true);
+  baseline.close();
+
+  const runId = `postgres-audit-${Date.now()}`;
+  const replicas = Array.from({ length: 8 }, (_, index) => startSynchronizedAuditAppend({
+    root: path.join(__dirname, '..'),
+    entityId: `${runId}-${index}`
+  }));
+  await Promise.all(replicas.map(replica => replica.ready));
+  for (const replica of replicas) replica.child.stdin.end('append\n');
+  const results = await Promise.all(replicas.map(replica => replica.result));
+  assert.deepEqual(
+    results.map(result => result.sequenceNumber).sort((left, right) => left - right),
+    Array.from({ length: 8 }, (_, index) => before.eventCount + index + 1)
+  );
+  assert.equal(new Set(results.map(result => result.eventHash)).size, 8);
+
+  const verification = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const after = verification.verifyAuditIntegrity();
+    assert.equal(after.valid, true);
+    assert.equal(after.eventCount, before.eventCount + 8);
+  } finally {
     verification.close();
   }
 });

@@ -518,6 +518,241 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+const AUDIT_CHAIN_ID = 'operating_ledger';
+const AUDIT_CHAIN_FORMAT = 'contractor-ai-audit-chain/v1';
+const AUDIT_CHAIN_ALGORITHM = 'sha256';
+const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
+
+function auditEventHash(event = {}) {
+  const payload = JSON.stringify([
+    AUDIT_CHAIN_FORMAT,
+    Number(event.sequenceNumber),
+    String(event.previousHash || ''),
+    String(event.id || ''),
+    String(event.entityType || ''),
+    String(event.entityId || ''),
+    event.jobId === null || event.jobId === undefined ? null : String(event.jobId),
+    String(event.action || ''),
+    String(event.actor || ''),
+    String(event.beforeJson ?? '{}'),
+    String(event.afterJson ?? '{}'),
+    String(event.metadataJson ?? '{}'),
+    String(event.createdAt || '')
+  ]);
+  return crypto.createHash(AUDIT_CHAIN_ALGORITHM).update(payload, 'utf8').digest('hex');
+}
+
+function auditEventFromRow(row = {}) {
+  return {
+    sequenceNumber: Number(row.sequence_number),
+    previousHash: row.previous_hash,
+    id: row.id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    jobId: row.job_id,
+    action: row.action,
+    actor: row.actor,
+    beforeJson: row.before_json,
+    afterJson: row.after_json,
+    metadataJson: row.metadata_json,
+    createdAt: row.created_at
+  };
+}
+
+function rebuildAuditChain(db) {
+  const rows = db.prepare('SELECT * FROM audit_events ORDER BY created_at ASC, id ASC').all();
+  db.prepare('UPDATE audit_events SET sequence_number = NULL, previous_hash = NULL, event_hash = NULL').run();
+  let previousHash = AUDIT_CHAIN_GENESIS_HASH;
+  let sequenceNumber = 0;
+  for (const row of rows) {
+    sequenceNumber += 1;
+    const eventHash = auditEventHash({
+      ...auditEventFromRow(row),
+      sequenceNumber,
+      previousHash
+    });
+    db.prepare(`
+      UPDATE audit_events
+      SET sequence_number = ?, previous_hash = ?, event_hash = ?
+      WHERE id = ?
+    `).run(sequenceNumber, previousHash, eventHash, row.id);
+    previousHash = eventHash;
+  }
+  db.prepare('DELETE FROM audit_chain_state WHERE chain_id = ?').run(AUDIT_CHAIN_ID);
+  if (rows.length) {
+    db.prepare(`
+      INSERT INTO audit_chain_state (chain_id, head_event_id, head_hash, event_count, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(AUDIT_CHAIN_ID, rows.at(-1).id, previousHash, sequenceNumber, nowIso());
+  }
+  return { eventCount: sequenceNumber, headHash: previousHash, headEventId: rows.at(-1)?.id || null };
+}
+
+function verifyAuditChainRows(rows = [], state = null, options = {}) {
+  const orderedRows = [...rows].sort((left, right) => {
+    const sequenceDifference = Number(left.sequence_number) - Number(right.sequence_number);
+    return sequenceDifference || String(left.id || '').localeCompare(String(right.id || ''));
+  });
+  const failures = [];
+  let expectedPreviousHash = AUDIT_CHAIN_GENESIS_HASH;
+  let expectedSequenceNumber = 1;
+  let lastEventId = null;
+  let lastEventHash = AUDIT_CHAIN_GENESIS_HASH;
+  const fail = failure => {
+    if (failures.length < 25) failures.push(failure);
+  };
+
+  for (const row of orderedRows) {
+    const sequenceNumber = Number(row.sequence_number);
+    if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber !== expectedSequenceNumber) {
+      fail({ code: 'sequence_gap', eventId: row.id, expected: expectedSequenceNumber, actual: row.sequence_number ?? null });
+    }
+    if (row.previous_hash !== expectedPreviousHash) {
+      fail({ code: 'previous_hash_mismatch', eventId: row.id, sequenceNumber, expected: expectedPreviousHash, actual: row.previous_hash || null });
+    }
+    const calculatedHash = auditEventHash(auditEventFromRow(row));
+    if (row.event_hash !== calculatedHash) {
+      fail({ code: 'event_hash_mismatch', eventId: row.id, sequenceNumber, expected: calculatedHash, actual: row.event_hash || null });
+    }
+    expectedPreviousHash = row.event_hash || calculatedHash;
+    lastEventHash = row.event_hash || calculatedHash;
+    lastEventId = row.id;
+    expectedSequenceNumber += 1;
+  }
+
+  if (!state && orderedRows.length) {
+    fail({ code: 'chain_state_missing', eventCount: orderedRows.length });
+  }
+  if (state) {
+    const stateCount = Number(state.event_count);
+    if (!Number.isSafeInteger(stateCount) || stateCount !== orderedRows.length) {
+      fail({ code: 'head_count_mismatch', expected: orderedRows.length, actual: state.event_count ?? null });
+    }
+    if ((state.head_event_id || null) !== lastEventId) {
+      fail({ code: 'head_event_mismatch', expected: lastEventId, actual: state.head_event_id || null });
+    }
+    if (state.head_hash !== lastEventHash) {
+      fail({ code: 'head_hash_mismatch', expected: lastEventHash, actual: state.head_hash || null });
+    }
+  }
+
+  return {
+    valid: failures.length === 0,
+    status: failures.length === 0 ? 'verified' : 'integrity_failure',
+    format: AUDIT_CHAIN_FORMAT,
+    algorithm: AUDIT_CHAIN_ALGORITHM,
+    eventCount: orderedRows.length,
+    headEventId: lastEventId,
+    headHash: lastEventHash,
+    checkedAt: options.checkedAt || nowIso(),
+    failures
+  };
+}
+
+function databaseTableExists(db, tableName, databaseMode = 'sqlite') {
+  if (databaseMode === 'postgres') {
+    return Boolean(db.prepare(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = ?
+    `).get(tableName));
+  }
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName));
+}
+
+function appendAuditEventToDatabase(db, event = {}, options = {}) {
+  const databaseMode = options.databaseMode || 'sqlite';
+  const id = event.id || makeId('audit');
+  const createdAt = event.createdAt || nowIso();
+  const entityType = event.entityType;
+  const entityId = String(event.entityId);
+  const jobId = event.jobId || null;
+  const action = event.action;
+  const actor = event.actor || 'Contractor.AI';
+  const beforeJson = event.beforeJson ?? toJson(event.before ?? null);
+  const afterJson = event.afterJson ?? toJson(event.after ?? null);
+  const metadataJson = event.metadataJson ?? toJson(event.metadata ?? null);
+
+  const chainAvailable = options.chainAvailable ?? databaseTableExists(db, 'audit_chain_state', databaseMode);
+  if (!chainAvailable) {
+    db.prepare(`
+      INSERT INTO audit_events (id, entity_type, entity_id, job_id, action, actor, before_json, after_json, metadata_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, entityType, entityId, jobId, action, actor, beforeJson, afterJson, metadataJson, createdAt);
+    return { id, chained: false };
+  }
+
+  const lockClause = databaseMode === 'postgres' ? ' FOR UPDATE' : '';
+  let state = db.prepare(`SELECT * FROM audit_chain_state WHERE chain_id = ?${lockClause}`).get(AUDIT_CHAIN_ID);
+  if (!state) {
+    const retainedEvents = Number(db.prepare('SELECT COUNT(*) AS count FROM audit_events').get().count || 0);
+    if (retainedEvents) {
+      const error = new Error('Audit chain state is missing while retained events exist. Verify and recover the ledger before writing new audit evidence.');
+      error.code = 'audit_chain_state_missing';
+      throw error;
+    }
+    db.prepare(`
+      INSERT OR IGNORE INTO audit_chain_state (chain_id, head_event_id, head_hash, event_count, updated_at)
+      VALUES (?, NULL, ?, 0, ?)
+    `).run(AUDIT_CHAIN_ID, AUDIT_CHAIN_GENESIS_HASH, createdAt);
+    state = db.prepare(`SELECT * FROM audit_chain_state WHERE chain_id = ?${lockClause}`).get(AUDIT_CHAIN_ID);
+  }
+  if (!state) {
+    const error = new Error('Audit chain state could not be initialized.');
+    error.code = 'audit_chain_state_initialization_failed';
+    throw error;
+  }
+
+  const sequenceNumber = Number(state.event_count || 0) + 1;
+  const previousHash = state.head_hash || AUDIT_CHAIN_GENESIS_HASH;
+  const eventHash = auditEventHash({
+    sequenceNumber,
+    previousHash,
+    id,
+    entityType,
+    entityId,
+    jobId,
+    action,
+    actor,
+    beforeJson,
+    afterJson,
+    metadataJson,
+    createdAt
+  });
+  db.prepare(`
+    INSERT INTO audit_events (
+      id, entity_type, entity_id, job_id, action, actor,
+      before_json, after_json, metadata_json, created_at,
+      sequence_number, previous_hash, event_hash
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    entityType,
+    entityId,
+    jobId,
+    action,
+    actor,
+    beforeJson,
+    afterJson,
+    metadataJson,
+    createdAt,
+    sequenceNumber,
+    previousHash,
+    eventHash
+  );
+  const advanced = db.prepare(`
+    UPDATE audit_chain_state
+    SET head_event_id = ?, head_hash = ?, event_count = ?, updated_at = ?
+    WHERE chain_id = ? AND head_hash = ? AND event_count = ?
+  `).run(id, eventHash, sequenceNumber, createdAt, AUDIT_CHAIN_ID, previousHash, Number(state.event_count || 0));
+  if (Number(advanced.changes || 0) !== 1) {
+    const error = new Error('Audit chain head changed before the event could be committed.');
+    error.code = 'audit_chain_head_conflict';
+    throw error;
+  }
+  return { id, chained: true, sequenceNumber, previousHash, eventHash };
+}
+
 function makeId(prefix) {
   const random = typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
@@ -789,7 +1024,7 @@ const LEDGER_SCHEMA_MIGRATIONS = [
   {
     version: '007_inactive_job_portal_revocation',
     description: 'Revoke legacy active client portal links retained by inactive jobs.',
-    apply(db) {
+    apply(db, context = {}) {
       const inactiveStatuses = [...INACTIVE_JOB_STATUSES];
       const placeholders = inactiveStatuses.map(() => '?').join(', ');
       const rows = db.prepare(`
@@ -799,6 +1034,7 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         WHERE access.status = 'active' AND LOWER(job.status) IN (${placeholders})
         ORDER BY access.created_at ASC
       `).all(...inactiveStatuses);
+      const chainAvailable = databaseTableExists(db, 'audit_chain_state', context.databaseMode);
       for (const row of rows) {
         const timestamp = nowIso();
         const reason = 'Legacy active portal access was revoked because the retained job is inactive.';
@@ -826,27 +1062,21 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?), data_json = ?, updated_at = ?
           WHERE id = ?
         `).run(timestamp, toJson(data), timestamp, row.id);
-        db.prepare(`
-          INSERT INTO audit_events (
-            id, entity_type, entity_id, job_id, action, actor,
-            before_json, after_json, metadata_json, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          makeId('audit'),
-          'client_portal_access',
-          row.id,
-          row.job_id,
-          'revoke_client_portal_access',
-          'ledger_migration',
-          toJson(before),
-          toJson({ ...before, status: 'revoked', revokedAt: row.revoked_at || timestamp, data }),
-          toJson({
+        appendAuditEventToDatabase(db, {
+          entityType: 'client_portal_access',
+          entityId: row.id,
+          jobId: row.job_id,
+          action: 'revoke_client_portal_access',
+          actor: 'ledger_migration',
+          before,
+          after: { ...before, status: 'revoked', revokedAt: row.revoked_at || timestamp, data },
+          metadata: {
             reason,
             migration: '007_inactive_job_portal_revocation',
             externalCommitments: 0
-          }),
-          timestamp
-        );
+          },
+          createdAt: timestamp
+        }, { databaseMode: context.databaseMode, chainAvailable });
       }
     }
   },
@@ -911,6 +1141,29 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           expires_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_api_rate_limits_expiry ON api_rate_limits(expires_at);
+      `);
+    }
+  },
+  {
+    version: '012_tamper_evident_audit_chain',
+    description: 'Chain retained audit events so modification, deletion, reordering, and stale heads are detectable.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE audit_events ADD COLUMN sequence_number BIGINT;
+        ALTER TABLE audit_events ADD COLUMN previous_hash TEXT;
+        ALTER TABLE audit_events ADD COLUMN event_hash TEXT;
+        CREATE TABLE IF NOT EXISTS audit_chain_state (
+          chain_id TEXT PRIMARY KEY,
+          head_event_id TEXT,
+          head_hash TEXT NOT NULL,
+          event_count BIGINT NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      rebuildAuditChain(db);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_sequence_number ON audit_events(sequence_number);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_event_hash ON audit_events(event_hash);
       `);
     }
   }
@@ -2478,13 +2731,30 @@ class ContractorOperatingLedger {
     return row;
   }
 
+  auditChainState({ lock = false } = {}) {
+    const lockClause = lock && this.databaseMode === 'postgres' ? ' FOR UPDATE' : '';
+    return this.db.prepare(`SELECT * FROM audit_chain_state WHERE chain_id = ?${lockClause}`).get(AUDIT_CHAIN_ID) || null;
+  }
+
   audit({ entityType, entityId, jobId = null, action, actor = 'Contractor.AI', before = null, after = null, metadata = null }) {
-    const id = makeId('audit');
-    this.db.prepare(`
-      INSERT INTO audit_events (id, entity_type, entity_id, job_id, action, actor, before_json, after_json, metadata_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, entityType, String(entityId), jobId, action, actor, toJson(before), toJson(after), toJson(metadata), nowIso());
-    return id;
+    return this.transaction(() => appendAuditEventToDatabase(this.db, {
+      entityType,
+      entityId,
+      jobId,
+      action,
+      actor,
+      before,
+      after,
+      metadata
+    }, { databaseMode: this.databaseMode, chainAvailable: true }).id);
+  }
+
+  verifyAuditIntegrity() {
+    return this.transaction(() => {
+      const state = this.auditChainState({ lock: true });
+      const rows = this.db.prepare('SELECT * FROM audit_events ORDER BY sequence_number ASC, id ASC').all();
+      return verifyAuditChainRows(rows, state);
+    });
   }
 
   seedFromState() {
@@ -18801,6 +19071,25 @@ class ContractorOperatingLedger {
 
   diagnose() {
     const issues = [];
+    let auditIntegrity;
+    try {
+      auditIntegrity = this.verifyAuditIntegrity();
+    } catch (error) {
+      auditIntegrity = {
+        valid: false,
+        status: 'verification_unavailable',
+        format: AUDIT_CHAIN_FORMAT,
+        algorithm: AUDIT_CHAIN_ALGORITHM,
+        eventCount: this.count('audit_events'),
+        headEventId: null,
+        headHash: null,
+        checkedAt: nowIso(),
+        failures: [{ code: error.code || 'audit_integrity_verification_failed' }]
+      };
+    }
+    if (!auditIntegrity.valid) {
+      issues.push({ severity: 'error', message: `Audit integrity verification failed with ${auditIntegrity.failures.length} retained issue(s).` });
+    }
     const orphanTasks = Number(this.db.prepare('SELECT COUNT(*) AS count FROM job_tasks LEFT JOIN jobs ON jobs.id = job_tasks.job_id WHERE jobs.id IS NULL').get().count || 0);
     if (orphanTasks) issues.push({ severity: 'error', message: `${orphanTasks} task(s) are orphaned.` });
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
@@ -18888,6 +19177,7 @@ class ContractorOperatingLedger {
       issueCount: issues.length,
       issues,
       migrations: this.migrationStatus(),
+      auditIntegrity,
       counts: {
         clients: this.count('clients'),
         tradePartners: this.count('trade_partners'),
@@ -20122,6 +20412,9 @@ class ContractorOperatingLedger {
       before: fromJson(row.before_json),
       after: fromJson(row.after_json),
       metadata: fromJson(row.metadata_json),
+      sequenceNumber: Number(row.sequence_number),
+      previousHash: row.previous_hash,
+      eventHash: row.event_hash,
       createdAt: row.created_at
     };
   }
@@ -20144,5 +20437,14 @@ class ContractorOperatingLedger {
 module.exports = {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
-  JOB_OPERATING_PLAYBOOKS
+  JOB_OPERATING_PLAYBOOKS,
+  AUDIT_CHAIN_ID,
+  AUDIT_CHAIN_FORMAT,
+  AUDIT_CHAIN_ALGORITHM,
+  AUDIT_CHAIN_GENESIS_HASH,
+  auditEventHash,
+  auditEventFromRow,
+  rebuildAuditChain,
+  verifyAuditChainRows,
+  appendAuditEventToDatabase
 };

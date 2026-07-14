@@ -3966,6 +3966,14 @@ app.post('/api/operations/restore/validate', (req, res) => {
   }
 });
 
+app.get('/api/operations/audit-integrity', (req, res) => {
+  const integrity = operatingLedger.verifyAuditIntegrity();
+  return res.status(integrity.valid ? 200 : 503).json({
+    success: integrity.valid,
+    integrity
+  });
+});
+
 async function operationalReadiness() {
   const storageVerification = await verifyEvidenceStorage();
   const runtime = runtimeConfiguration({ storageVerification });
@@ -4027,6 +4035,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
           mechanism: runtime.databaseMode === 'postgres' ? 'postgres_advisory_lock' : 'sqlite_write_transaction'
         }
       },
+      auditIntegrity: {
+        ...ledgerDiagnostics.auditIntegrity,
+        verificationEndpoint: '/api/operations/audit-integrity',
+        appendMode: 'atomic_hash_chain',
+        tamperEvidence: ['modified_event', 'deleted_event', 'sequence_gap', 'stale_head']
+      },
       requestSafety: {
         apiRateLimit: runtime.requestRateLimit,
         evidenceUploadIdempotency: 'durable',
@@ -4084,7 +4098,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       }
     },
     runtime,
-    ledger: { valid: ledgerDiagnostics.valid, issueCount: ledgerDiagnostics.issueCount, migrations: ledgerDiagnostics.migrations }
+    ledger: {
+      valid: ledgerDiagnostics.valid,
+      issueCount: ledgerDiagnostics.issueCount,
+      migrations: ledgerDiagnostics.migrations,
+      auditIntegrity: ledgerDiagnostics.auditIntegrity
+    }
   });
 }));
 
@@ -4144,7 +4163,12 @@ app.get('/api/readiness', asyncHandler(async (req, res) => {
   return res.status(status === 'ready' ? 200 : 503).json({
     status,
     runtime,
-    ledger: { valid: ledgerDiagnostics.valid, issueCount: ledgerDiagnostics.issueCount, migrations: ledgerDiagnostics.migrations },
+    ledger: {
+      valid: ledgerDiagnostics.valid,
+      issueCount: ledgerDiagnostics.issueCount,
+      migrations: ledgerDiagnostics.migrations,
+      auditIntegrity: ledgerDiagnostics.auditIntegrity
+    },
     deployment: {
       localFirst: true,
       hostedRequirements: [

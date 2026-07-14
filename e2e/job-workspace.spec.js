@@ -1933,6 +1933,7 @@ test('owner applies an exact safe automation draft and runs the durable cycle', 
   await page.goto('/');
   await page.getByRole('button', { name: 'Operations' }).click();
   await expect(page.getByTestId('storage-readiness')).toContainText('local / verified');
+  await expect(page.getByTestId('audit-integrity-readiness')).toContainText('verified /');
   await expect(page.getByText('Field retries').locator('..').locator('strong')).toHaveText('scoped + deduplicated');
 
   const automation = page.getByTestId('automation-control');

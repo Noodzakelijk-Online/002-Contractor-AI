@@ -3,7 +3,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { Client } = require('pg');
-const { ContractorOperatingLedger } = require('../operating-ledger');
+const {
+  ContractorOperatingLedger,
+  AUDIT_CHAIN_ID,
+  AUDIT_CHAIN_GENESIS_HASH,
+  auditEventHash,
+  auditEventFromRow,
+  verifyAuditChainRows
+} = require('../operating-ledger');
 const { createEvidenceStorage } = require('../evidence-storage');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
 
@@ -139,16 +146,26 @@ function orderedSourceTables(database, tables) {
   return ordered;
 }
 
-function canonicalValue(value) {
+const PORTABLE_INTEGER_COLUMNS = new Set([
+  'audit_chain_state.event_count',
+  'audit_events.sequence_number'
+]);
+
+function canonicalValue(value, columnKey = '') {
   if (value === null || value === undefined) return null;
+  if (PORTABLE_INTEGER_COLUMNS.has(columnKey) && /^\d+$/.test(String(value))) {
+    const integer = Number(value);
+    if (!Number.isSafeInteger(integer)) throw new Error(`Portable ledger integer exceeds the safe range: ${columnKey}`);
+    return integer;
+  }
   if (typeof value === 'bigint') return value.toString();
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return `base64:${Buffer.from(value).toString('base64')}`;
   if (typeof value === 'number' && Object.is(value, -0)) return 0;
   return value;
 }
 
-function tableDigest(columns, rows) {
-  const encodedRows = rows.map(row => JSON.stringify(columns.map(column => canonicalValue(row[column])))).sort();
+function tableDigest(table, columns, rows) {
+  const encodedRows = rows.map(row => JSON.stringify(columns.map(column => canonicalValue(row[column], `${table}.${column}`)))).sort();
   return sha256Buffer(Buffer.from(encodedRows.join('\n'), 'utf8'));
 }
 
@@ -241,6 +258,92 @@ async function insertRows(client, table, columns, rows) {
   }
 }
 
+function verifySourceAuditChain(database) {
+  const columns = sourceColumns(database, 'audit_events');
+  if (!['sequence_number', 'previous_hash', 'event_hash'].every(column => columns.includes(column))) {
+    return { supported: false, valid: null, status: 'legacy_unchained_backup' };
+  }
+  const retainedTables = new Set(sourceTableNames(database));
+  const state = retainedTables.has('audit_chain_state')
+    ? database.prepare('SELECT * FROM audit_chain_state WHERE chain_id = ?').get(AUDIT_CHAIN_ID) || null
+    : null;
+  const integrity = verifyAuditChainRows(database.prepare('SELECT * FROM audit_events').all(), state);
+  if (!integrity.valid) {
+    throw new Error(`Source backup audit chain failed integrity verification: ${integrity.failures.map(failure => failure.code).join(', ')}`);
+  }
+  return { supported: true, ...integrity };
+}
+
+async function rebuildHostedAuditChain(client) {
+  const rows = (await client.query('SELECT * FROM audit_events ORDER BY created_at ASC, id ASC')).rows;
+  await client.query('UPDATE audit_events SET sequence_number = NULL, previous_hash = NULL, event_hash = NULL');
+  let previousHash = AUDIT_CHAIN_GENESIS_HASH;
+  let sequenceNumber = 0;
+  for (const row of rows) {
+    sequenceNumber += 1;
+    const eventHash = auditEventHash({
+      ...auditEventFromRow(row),
+      sequenceNumber,
+      previousHash
+    });
+    await client.query(`
+      UPDATE audit_events
+      SET sequence_number = $1, previous_hash = $2, event_hash = $3
+      WHERE id = $4
+    `, [sequenceNumber, previousHash, eventHash, row.id]);
+    previousHash = eventHash;
+  }
+  await client.query('DELETE FROM audit_chain_state WHERE chain_id = $1', [AUDIT_CHAIN_ID]);
+  if (rows.length) {
+    await client.query(`
+      INSERT INTO audit_chain_state (chain_id, head_event_id, head_hash, event_count, updated_at)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [AUDIT_CHAIN_ID, rows.at(-1).id, previousHash, sequenceNumber, new Date().toISOString()]);
+  }
+  return { eventCount: sequenceNumber, headEventId: rows.at(-1)?.id || null, headHash: previousHash };
+}
+
+async function appendHostedAuditEvent(client, event) {
+  await client.query(`
+    INSERT INTO audit_chain_state (chain_id, head_event_id, head_hash, event_count, updated_at)
+    VALUES ($1, NULL, $2, 0, $3)
+    ON CONFLICT (chain_id) DO NOTHING
+  `, [AUDIT_CHAIN_ID, AUDIT_CHAIN_GENESIS_HASH, event.createdAt]);
+  const state = (await client.query('SELECT * FROM audit_chain_state WHERE chain_id = $1 FOR UPDATE', [AUDIT_CHAIN_ID])).rows[0];
+  if (!state) throw new Error('Hosted migration could not retain the audit chain state.');
+  const sequenceNumber = Number(state.event_count || 0) + 1;
+  const previousHash = state.head_hash || AUDIT_CHAIN_GENESIS_HASH;
+  const eventHash = auditEventHash({ ...event, sequenceNumber, previousHash });
+  await client.query(`
+    INSERT INTO audit_events (
+      id, entity_type, entity_id, job_id, action, actor,
+      before_json, after_json, metadata_json, created_at,
+      sequence_number, previous_hash, event_hash
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+  `, [
+    event.id,
+    event.entityType,
+    event.entityId,
+    event.jobId || null,
+    event.action,
+    event.actor,
+    event.beforeJson,
+    event.afterJson,
+    event.metadataJson,
+    event.createdAt,
+    sequenceNumber,
+    previousHash,
+    eventHash
+  ]);
+  const advanced = await client.query(`
+    UPDATE audit_chain_state
+    SET head_event_id = $1, head_hash = $2, event_count = $3, updated_at = $4
+    WHERE chain_id = $5 AND head_hash = $6 AND event_count = $7
+  `, [event.id, eventHash, sequenceNumber, event.createdAt, AUDIT_CHAIN_ID, previousHash, Number(state.event_count || 0)]);
+  if (advanced.rowCount !== 1) throw new Error('Hosted migration lost ownership of the audit chain head.');
+  return { sequenceNumber, previousHash, eventHash };
+}
+
 async function migrateEvidence(verification, documents, storage, storedObjects = []) {
   if (!verification.evidenceFiles.length) return { replacements: new Map(), stored: storedObjects, files: [] };
   if (!storage || typeof storage.store !== 'function' || typeof storage.read !== 'function' || typeof storage.remove !== 'function') {
@@ -307,6 +410,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
   const uploadedObjects = [];
   let committed = false;
   try {
+    const sourceAuditIntegrity = verifySourceAuditChain(source);
     const tables = orderedSourceTables(source, sourceTableNames(source));
     const sourceColumnsByTable = new Map(tables.map(table => [table, sourceColumns(source, table)]));
     const sourceRowsByTable = new Map(tables.map(table => [
@@ -355,14 +459,15 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       const destinationRows = (await client.query(
         `SELECT ${columns.map(quotedIdentifier).join(', ')} FROM ${quotedIdentifier(table)}`
       )).rows;
-      const sourceDigest = tableDigest(columns, rows);
-      const destinationDigest = tableDigest(columns, destinationRows);
+      const sourceDigest = tableDigest(table, columns, rows);
+      const destinationDigest = tableDigest(table, columns, destinationRows);
       if (destinationRows.length !== rows.length || sourceDigest !== destinationDigest) {
         throw new Error(`Hosted verification failed for ledger table: ${table}`);
       }
       tableResults.push({ table, rows: rows.length, sha256: sourceDigest });
     }
 
+    const rebuiltAuditChain = await rebuildHostedAuditChain(client);
     const databaseDigest = sha256Buffer(Buffer.from(tableResults.map(result => `${result.table}:${result.rows}:${result.sha256}`).join('\n')));
     const receiptId = `migration_${sha256Buffer(Buffer.from(`${verification.manifest.backupId}\0${verification.manifestHash}`)).slice(0, 24)}`;
     const receiptMetadata = {
@@ -374,15 +479,27 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       invalidatedOperatorSessions,
       clearedAuthenticationRateLimits,
       clearedApiRateLimits,
+      sourceAuditIntegrity: {
+        supported: sourceAuditIntegrity.supported,
+        verified: sourceAuditIntegrity.valid,
+        eventCount: sourceAuditIntegrity.eventCount || 0
+      },
+      rebuiltAuditChain,
       evidenceFiles: evidence.files.length,
       evidenceSha256: evidence.files.map(file => ({ source: file.source, bytes: file.bytes, sha256: file.sha256 }))
     };
-    await client.query(`
-      INSERT INTO audit_events (
-        id, entity_type, entity_id, job_id, action, actor,
-        before_json, after_json, metadata_json, created_at
-      ) VALUES ($1, 'operational_migration', $2, NULL, 'migrate_local_backup_to_hosted', $3, '{}', '{}', $4, $5)
-    `, [receiptId, verification.manifest.backupId, actor, JSON.stringify(receiptMetadata), new Date().toISOString()]);
+    await appendHostedAuditEvent(client, {
+      id: receiptId,
+      entityType: 'operational_migration',
+      entityId: verification.manifest.backupId,
+      jobId: null,
+      action: 'migrate_local_backup_to_hosted',
+      actor,
+      beforeJson: '{}',
+      afterJson: '{}',
+      metadataJson: JSON.stringify(receiptMetadata),
+      createdAt: new Date().toISOString()
+    });
     await client.query('COMMIT');
     committed = true;
 
@@ -390,6 +507,8 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
     try {
       const diagnostics = validationLedger.diagnose();
       if (!diagnostics.valid) throw new Error(`Hosted ledger diagnostics reported ${diagnostics.issueCount} issue(s) after migration.`);
+      const auditIntegrity = validationLedger.verifyAuditIntegrity();
+      if (!auditIntegrity.valid) throw new Error('Hosted ledger audit chain failed verification after migration.');
       const receipt = validationLedger.listAudit({ entityType: 'operational_migration', limit: 100 })
         .find(event => event.id === receiptId);
       if (!receipt) throw new Error('Hosted migration receipt was not retained.');
@@ -403,6 +522,8 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
         invalidatedOperatorSessions,
         clearedAuthenticationRateLimits,
         clearedApiRateLimits,
+        sourceAuditIntegrity,
+        auditIntegrity,
         evidenceFiles: evidence.files.length,
         receiptId,
         migrationVersion: destinationMigrations.currentVersion,

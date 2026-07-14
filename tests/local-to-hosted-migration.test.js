@@ -182,7 +182,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '011_durable_api_rate_limits');
+  assert.equal(migration.migrationVersion, '012_tamper_evident_audit_chain');
+  assert.equal(migration.sourceAuditIntegrity.supported, true);
+  assert.equal(migration.sourceAuditIntegrity.valid, true);
+  assert.equal(migration.auditIntegrity.valid, true);
   assert.equal(migration.diagnostics.valid, true);
   assert.equal(storage.objects.size, 1);
   assert.deepEqual([...storage.objects.values()][0], fixture.evidenceBytes);

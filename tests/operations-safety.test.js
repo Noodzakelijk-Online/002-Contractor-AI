@@ -193,7 +193,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '011_durable_api_rate_limits');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '012_tamper_evident_audit_chain');
+  assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
   const publicReadiness = await request(baseUrl, '/api/health/ready');
@@ -229,6 +230,11 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.providerRecovery.applicationPackageAvailable, true);
   assert.equal(capabilities.body.capabilities.persistence.schemaInitialization.serialized, true);
   assert.equal(capabilities.body.capabilities.persistence.schemaInitialization.mechanism, 'sqlite_write_transaction');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.valid, true);
+  assert.equal(capabilities.body.capabilities.auditIntegrity.status, 'verified');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.algorithm, 'sha256');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.appendMode, 'atomic_hash_chain');
+  assert.equal(capabilities.body.capabilities.auditIntegrity.verificationEndpoint, '/api/operations/audit-integrity');
   assert.equal(capabilities.body.capabilities.authentication.loginRateLimit.durability, 'ledger');
   assert.equal(capabilities.body.capabilities.authentication.loginRateLimit.keyMaterial, 'hmac-sha256');
   assert.equal(capabilities.body.capabilities.authentication.loginRateLimit.successfulLoginResetsFailures, true);
@@ -261,6 +267,12 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.automation.coordination, 'durable_compare_and_swap_lease');
   assert.equal(capabilities.body.capabilities.automation.multiReplicaSafe, true);
   assert.equal(capabilities.body.capabilities.automation.externalCommitments, 0);
+
+  const auditIntegrity = await request(baseUrl, '/api/operations/audit-integrity');
+  assert.equal(auditIntegrity.response.status, 200);
+  assert.equal(auditIntegrity.body.success, true);
+  assert.equal(auditIntegrity.body.integrity.valid, true);
+  assert.ok(auditIntegrity.body.integrity.eventCount >= 1);
 });
 
 test('QA reset requires explicit confirmation and preserves non-QA work', async t => {

@@ -66,6 +66,8 @@ test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-re
   assert.equal(result.restartRequired, true);
   assert.equal(fs.readFileSync(stateFile, 'utf8'), 'restored-state');
   assert.equal(result.databaseVerification.valid, true);
+  assert.equal(result.databaseVerification.auditIntegrity.supported, true);
+  assert.equal(result.databaseVerification.auditIntegrity.valid, true);
   assert.equal(result.invalidatedOperatorSessions, 1);
   assert.equal(result.clearedAuthenticationRateLimits, 1);
   assert.equal(result.clearedApiRateLimits, 1);
@@ -127,6 +129,8 @@ test('stopped-runtime v2 restore replaces evidence only after preserving the cur
   assert.equal(result.evidenceRestored, true);
   assert.equal(result.restoredEvidenceFiles, 1);
   assert.equal(result.databaseVerification.valid, true);
+  assert.equal(result.databaseVerification.auditIntegrity.supported, true);
+  assert.equal(result.databaseVerification.auditIntegrity.valid, true);
   assert.equal(result.invalidatedOperatorSessions, 1);
   assert.equal(result.clearedAuthenticationRateLimits, 1);
   assert.equal(result.clearedApiRateLimits, 1);
