@@ -372,8 +372,9 @@ test('job workspace creates, starts, and completes retained tasks with evidence'
 });
 
 test('dispatch workspace renders ledger jobs and prepares an idempotent internal pack', async ({ page, request }) => {
+  const suffix = Date.now();
   const tradePartner = await ensureVerifiedTradePartner(request);
-  const intake = await createBrowserJob(request, 'Browser dispatch preparation job', {
+  const intake = await createBrowserJob(request, `Browser dispatch preparation job ${suffix}`, {
     status: 'scheduled',
     scheduledStart: '2026-07-16T08:00:00.000Z',
     scheduledEnd: '2026-07-16T14:00:00.000Z',
@@ -382,7 +383,7 @@ test('dispatch workspace renders ledger jobs and prepares an idempotent internal
     materials: [{ name: 'Green waste bags', quantity: 8, unit: 'bags', supplier: 'Bouwmaat', cost: 3.5 }]
   });
   const workerResponse = await request.post('/api/ledger/workers', {
-    data: { name: 'Browser dispatch crew', role: 'Garden maintenance', status: 'available', homeRegion: 'Amsterdam' }
+    data: { name: `Browser dispatch crew ${suffix}`, role: 'Garden maintenance', status: 'available', homeRegion: 'Amsterdam' }
   });
   expect(workerResponse.ok()).toBeTruthy();
   const worker = await workerResponse.json();
