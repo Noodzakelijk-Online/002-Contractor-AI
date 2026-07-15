@@ -58,6 +58,19 @@ function createBackupFixture(t, suffix = 'success') {
     estimatedHours: 123.123456789,
     contractValue: 987654321.123456
   }, { actor: 'migration_fixture' });
+  const taskDependency = source.addTaskDependency(job.id, {
+    predecessorTaskId: job.tasks[0].id,
+    successorTaskId: job.tasks[1].id
+  }, { actor: 'migration_fixture' });
+  const scheduleBaseline = source.requestScheduleBaseline(job.id, {
+    plannedStart: '2026-07-20T08:00:00.000Z',
+    reason: 'Retained local schedule migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(scheduleBaseline.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration work-plan sequence and durations verified.'
+  });
   const evidenceBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, ...Buffer.from(`hosted-migration-${suffix}`)]);
   const document = source.addDocument(job.id, {
     type: 'field_photo',
@@ -207,7 +220,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, billingMilestone, document, evidenceBytes, handover, job, localStorageRef, organization, supplierInvoice, supplierPayment, tradePartner };
+  return { backupDir, backupId, billingMilestone, document, evidenceBytes, handover, job, localStorageRef, organization, scheduleBaseline, supplierInvoice, supplierPayment, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -274,7 +287,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '019_billing_milestones');
+  assert.equal(migration.migrationVersion, '020_project_schedule_baselines');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -292,6 +305,9 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedBillingMilestone.amount, 123456.78);
     assert.equal(migratedBillingMilestone.taxAmount, 25925.92);
     assert.equal(migratedBillingMilestone.invoiceId, null);
+    assert.ok(detail.taskDependencies.some(item => item.id === fixture.taskDependency.id && item.status === 'active'));
+    assert.equal(detail.scheduleControl.activeBaseline.id, fixture.scheduleBaseline.baseline.id);
+    assert.equal(detail.scheduleControl.baselineCurrent, true);
     const migratedDocument = detail.documents.find(item => item.id === fixture.document.id);
     assert.match(migratedDocument.storageRef, /^s3:\/\/migration-test\/migrated-1-/);
     assert.notEqual(migratedDocument.storageRef, fixture.localStorageRef);

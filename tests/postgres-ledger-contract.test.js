@@ -528,6 +528,11 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       reason: 'Attempt before retained partner evidence is complete.'
     }), error => error.code === 'trade_partner_compliance_required');
     assert.ok(ledger.listApprovals({ status: 'pending', limit: 100 }).some(approval => approval.id === procurement.approval.id));
+    assert.deepEqual(
+      ledger.listApprovals({ status: 'pending', id: procurement.approval.id }).map(approval => approval.id),
+      [procurement.approval.id]
+    );
+    assert.ok(ledger.listApprovals({ status: 'pending', jobId: job.id, limit: 100 }).some(approval => approval.id === procurement.approval.id));
 
     const verifiedTradePartner = ledger.upsertTradePartner({
       id: tradePartner.id,
@@ -818,10 +823,30 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     });
     assert.equal(conflictingRequest.reason, 'request_conflict');
 
+    const scheduleFirst = ledger.addTask(job.id, { title: 'PostgreSQL schedule first', durationHours: 4 });
+    const scheduleSecond = ledger.addTask(job.id, { title: 'PostgreSQL schedule second', durationHours: 6 });
+    const scheduleDependency = ledger.addTaskDependency(job.id, {
+      predecessorTaskId: scheduleFirst.id,
+      successorTaskId: scheduleSecond.id
+    });
+    const schedulePlan = ledger.calculateJobSchedule(job.id, { plannedStart: '2026-10-05T08:00:00.000Z' });
+    assert.equal(schedulePlan.ready, true);
+    assert.ok(schedulePlan.criticalPathTaskIds.includes(scheduleFirst.id));
+    assert.ok(schedulePlan.criticalPathTaskIds.includes(scheduleSecond.id));
+    const scheduleBaseline = ledger.requestScheduleBaseline(job.id, { plannedStart: '2026-10-05T08:00:00.000Z' });
+    ledger.resolveApproval(scheduleBaseline.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'PostgreSQL schedule contract verified.'
+    });
+
     const detail = ledger.getJobDetail(job.id, { includeAudit: true });
     assert.equal(detail.id, job.id);
     assert.ok(detail.progress.some(entry => entry.note === 'PostgreSQL progress proof.'));
     assert.ok(detail.tasks.some(entry => entry.id === hostedTask.id && entry.status === 'completed'));
+    assert.ok(detail.taskDependencies.some(entry => entry.id === scheduleDependency.id && entry.status === 'active'));
+    assert.equal(detail.scheduleControl.activeBaseline.id, scheduleBaseline.baseline.id);
+    assert.equal(detail.scheduleControl.baselineCurrent, true);
     assert.ok(detail.audit.some(entry => entry.action === 'transition_task'));
     assert.ok(detail.audit.some(entry => entry.actor === 'postgres_contract_test'));
     assert.ok(detail.audit.some(entry => entry.action === 'apply_job_archive'));
@@ -834,7 +859,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '019_billing_milestones');
+    assert.equal(migrations.currentVersion, '020_project_schedule_baselines');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -915,12 +940,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('019_billing_milestones'));
+  assert.deepEqual(versions, Array(4).fill('020_project_schedule_baselines'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 19);
+    assert.equal(Number(migrationCount.count), 20);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

@@ -2049,10 +2049,73 @@ app.post('/api/ledger/jobs/:id/capability-plan', (req, res) => {
 });
 
 app.post('/api/ledger/jobs/:id/tasks', (req, res) => {
+  return handleLedgerRequest(req, res, () => operatingLedger.transaction(() => {
+    const payload = req.body || {};
+    const actor = actorFromRequest(req, payload.actor || 'dashboard');
+    const task = operatingLedger.addTask(req.params.id, payload, { actor });
+    const predecessorTaskId = payload.predecessorTaskId || payload.predecessor_task_id || null;
+    const dependency = predecessorTaskId
+      ? operatingLedger.addTaskDependency(req.params.id, {
+        predecessorTaskId,
+        successorTaskId: task.id,
+        lagHours: payload.lagHours || payload.lag_hours || 0,
+        source: payload.source || 'task_create'
+      }, { actor })
+      : null;
+    return {
+      success: true,
+      task,
+      dependency,
+      job: operatingLedger.getJobDetail(req.params.id)
+    };
+  }), 201);
+});
+
+app.patch('/api/ledger/jobs/:id/tasks/:taskId/schedule', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    task: operatingLedger.addTask(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    task: operatingLedger.updateTaskSchedule(req.params.id, req.params.taskId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
     job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/work-plan/calculate', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    plan: operatingLedger.calculateJobSchedule(req.params.id, req.body || {})
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/task-dependencies', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    dependency: operatingLedger.addTaskDependency(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/task-dependencies/:dependencyId/cancel', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    dependency: operatingLedger.cancelTaskDependency(req.params.id, req.params.dependencyId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/schedule-baselines', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestScheduleBaseline(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
 
@@ -3633,6 +3696,8 @@ function operationalExport() {
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
+    taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
+    scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
     handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
     audit: operatingLedger.listAudit({ limit: 1_000 })
@@ -3662,7 +3727,18 @@ function validateOperationalExport(snapshot) {
   if (!snapshot.exportedAt || Number.isNaN(Date.parse(snapshot.exportedAt))) problems.push('Export timestamp is missing or invalid.');
   if (!snapshot.runtime || typeof snapshot.runtime !== 'object' || Array.isArray(snapshot.runtime)) problems.push('Export is missing runtime metadata.');
   if (!snapshot.dashboard || typeof snapshot.dashboard !== 'object' || Array.isArray(snapshot.dashboard)) problems.push('Export is missing the dashboard summary.');
-  for (const key of ['jobs', 'tradePartners', 'approvals', 'audit']) {
+  for (const key of [
+    'jobs',
+    'tradePartners',
+    'supplierInvoices',
+    'supplierInvoicePayments',
+    'billingMilestones',
+    'taskDependencies',
+    'scheduleBaselines',
+    'handoverPackages',
+    'approvals',
+    'audit'
+  ]) {
     if (!Array.isArray(snapshot[key])) problems.push(`Export is missing the ${key} collection.`);
   }
   const integrity = snapshot.integrity;
@@ -3691,10 +3767,12 @@ function validateOperationalExport(snapshot) {
     counts: {
       jobs: snapshot.jobs.length,
       tradePartners: snapshot.tradePartners.length,
-      supplierInvoices: Array.isArray(snapshot.supplierInvoices) ? snapshot.supplierInvoices.length : 0,
-      supplierInvoicePayments: Array.isArray(snapshot.supplierInvoicePayments) ? snapshot.supplierInvoicePayments.length : 0,
-      billingMilestones: Array.isArray(snapshot.billingMilestones) ? snapshot.billingMilestones.length : 0,
-      handoverPackages: Array.isArray(snapshot.handoverPackages) ? snapshot.handoverPackages.length : 0,
+      supplierInvoices: snapshot.supplierInvoices.length,
+      supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
+      billingMilestones: snapshot.billingMilestones.length,
+      taskDependencies: snapshot.taskDependencies.length,
+      scheduleBaselines: snapshot.scheduleBaselines.length,
+      handoverPackages: snapshot.handoverPackages.length,
       approvals: snapshot.approvals.length,
       audit: snapshot.audit.length
     }

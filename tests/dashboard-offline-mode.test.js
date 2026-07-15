@@ -63,7 +63,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
 
 test('dashboard loads a field worker only through scoped ledger calls and hides owner workflow navigation', () => {
   assert.match(dashboardSource, /const fieldScoped = operator\.fieldScoped === true/);
-  assert.match(dashboardSource, /const visibleNavItems = useMemo\(\(\) => navItems\.filter/);
+  assert.match(dashboardSource, /const visibleNavItems = useMemo\(\s*\(\) =>\s*navItems\.filter/);
   assert.match(dashboardSource, /if \(key === 'field'\) return capabilities\.fieldEvidence/);
   assert.match(dashboardSource, /if \(key === 'operations'\) return capabilities\.maintenance/);
   assert.match(dashboardSource, /if \(fieldScoped\) \{/);
@@ -99,10 +99,10 @@ test('operations view lists, verifies, and exports portable checksummed local ba
   assert.match(dashboardSource, /operationCapabilities\?\.hostedMigration\?\.available/);
   assert.match(dashboardSource, />EU migration</);
   assert.match(dashboardSource, /operations\/backups\/\$\{encodeURIComponent\(backup\.backupId\)\}\/download/);
-  assert.match(dashboardSource, /Download<\/a>/);
+  assert.match(dashboardSource, /<FileDown size=\{15\} \/>\s*Download\s*<\/a>/);
   assert.match(dashboardSource, /Validate export/);
   assert.match(dashboardSource, /Check restore/);
-  assert.match(dashboardSource, /It cannot restore the database or evidence files/);
+  assert.match(dashboardSource, /It cannot restore the database or evidence\s+files/);
   assert.match(dashboardSource, /const providerRecovery = operationCapabilities\?\.providerRecovery/);
   assert.match(dashboardSource, /data-testid="login-defense-readiness"/);
   assert.match(dashboardSource, /loginRateLimitCapability\?\.durability === 'ledger'/);

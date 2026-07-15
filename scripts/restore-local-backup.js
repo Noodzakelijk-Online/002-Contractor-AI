@@ -116,6 +116,29 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup billing-milestone constraints are incomplete: ${missingMilestoneIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('020_project_schedule_baselines')) {
+        const scheduleTables = ['task_dependencies', 'schedule_baselines'];
+        const missingScheduleTables = scheduleTables.filter(table => !retainedTables.has(table));
+        if (missingScheduleTables.length) {
+          throw new Error(`Backup project-schedule schema is incomplete: ${missingScheduleTables.join(', ')}.`);
+        }
+        const taskColumns = new Set(database.prepare('PRAGMA table_info(job_tasks)').all().map(row => row.name));
+        const missingTaskColumns = ['planned_start', 'planned_end', 'duration_hours'].filter(column => !taskColumns.has(column));
+        if (missingTaskColumns.length) {
+          throw new Error(`Backup project-schedule task columns are incomplete: ${missingTaskColumns.join(', ')}.`);
+        }
+        const baselineColumns = new Set(database.prepare('PRAGMA table_info(schedule_baselines)').all().map(row => row.name));
+        const missingBaselineColumns = ['approval_id', 'plan_hash', 'snapshot_hash', 'snapshot_json'].filter(column => !baselineColumns.has(column));
+        if (missingBaselineColumns.length) {
+          throw new Error(`Backup project-schedule baseline columns are incomplete: ${missingBaselineColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const scheduleIndexes = ['idx_task_dependencies_job', 'idx_task_dependencies_successor', 'idx_schedule_baselines_job', 'idx_schedule_baselines_status'];
+        const missingScheduleIndexes = scheduleIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingScheduleIndexes.length) {
+          throw new Error(`Backup project-schedule constraints are incomplete: ${missingScheduleIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

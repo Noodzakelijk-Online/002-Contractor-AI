@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { Graph, alg: graphAlgorithms } = require('@dagrejs/graphlib');
 const { PostgresSyncDatabase } = require('./postgres-sync-database');
 
 const LEDGER_CAPABILITY_BLUEPRINT = [
@@ -529,6 +530,9 @@ const AUDIT_CHAIN_ID = 'operating_ledger';
 const AUDIT_CHAIN_FORMAT = 'contractor-ai-audit-chain/v1';
 const AUDIT_CHAIN_ALGORITHM = 'sha256';
 const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
+const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
+const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
+const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
 function auditEventHash(event = {}) {
   const payload = JSON.stringify([
@@ -1023,6 +1027,68 @@ function normalizeRetainedDate(value, options = {}) {
     throw error;
   }
   return dateOnly ? text : new Date(milliseconds).toISOString();
+}
+
+function normalizeScheduleTimestamp(value, options = {}) {
+  const retained = normalizeRetainedDate(value, options);
+  if (!retained) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(retained)
+    ? `${retained}T08:00:00.000Z`
+    : retained;
+  return new Date(Date.parse(normalized)).toISOString();
+}
+
+function normalizeScheduleDuration(value, { fallback = 0, required = false } = {}) {
+  const duration = value === undefined || value === null || value === '' ? fallback : Number(value);
+  if (!Number.isFinite(duration) || duration < 0 || duration > 10000 || (required && duration <= 0)) {
+    throw ledgerInputError(
+      'task_duration_invalid',
+      required
+        ? 'Task duration must be greater than zero and no more than 10,000 hours.'
+        : 'Task duration must be between zero and 10,000 hours.'
+    );
+  }
+  return Math.round(duration * 100) / 100;
+}
+
+function roundScheduleHours(value) {
+  return Math.round(normalizeNumber(value, 0) * 100) / 100;
+}
+
+function normalizeTaskSchedule(payload = {}, current = {}) {
+  const hasStart = payload.plannedStart !== undefined || payload.planned_start !== undefined;
+  const hasEnd = payload.plannedEnd !== undefined || payload.planned_end !== undefined;
+  const hasDuration = payload.durationHours !== undefined || payload.duration_hours !== undefined;
+  let plannedStart = hasStart
+    ? normalizeScheduleTimestamp(payload.plannedStart ?? payload.planned_start, { label: 'Planned start', code: 'task_planned_start_invalid' })
+    : (current.planned_start || current.plannedStart || null);
+  let plannedEnd = hasEnd
+    ? normalizeScheduleTimestamp(payload.plannedEnd ?? payload.planned_end, { label: 'Planned end', code: 'task_planned_end_invalid' })
+    : (current.planned_end || current.plannedEnd || null);
+  let durationHours = normalizeScheduleDuration(
+    hasDuration ? (payload.durationHours ?? payload.duration_hours) : (current.duration_hours ?? current.durationHours),
+    { fallback: 0 }
+  );
+
+  if (plannedStart && plannedEnd && !hasDuration) {
+    durationHours = roundScheduleHours((Date.parse(plannedEnd) - Date.parse(plannedStart)) / SCHEDULE_HOUR_MS);
+  } else if (durationHours > 0 && plannedStart && (!plannedEnd || (hasDuration && !hasEnd))) {
+    plannedEnd = new Date(Date.parse(plannedStart) + durationHours * SCHEDULE_HOUR_MS).toISOString();
+  } else if (durationHours > 0 && plannedEnd && !plannedStart) {
+    plannedStart = new Date(Date.parse(plannedEnd) - durationHours * SCHEDULE_HOUR_MS).toISOString();
+  }
+
+  if (plannedStart && plannedEnd) {
+    const calculatedHours = roundScheduleHours((Date.parse(plannedEnd) - Date.parse(plannedStart)) / SCHEDULE_HOUR_MS);
+    if (calculatedHours < 0) {
+      throw ledgerInputError('task_schedule_window_invalid', 'Task planned end must be after its planned start.');
+    }
+    if (hasDuration && hasStart && hasEnd && Math.abs(calculatedHours - durationHours) > 0.05) {
+      throw ledgerInputError('task_schedule_duration_mismatch', 'Task duration must match the supplied planned start and end.');
+    }
+  }
+
+  return { plannedStart, plannedEnd, durationHours };
 }
 
 function normalizeList(value) {
@@ -1525,6 +1591,52 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
         CREATE INDEX IF NOT EXISTS idx_billing_milestones_job_status ON billing_milestones(job_id, status, planned_issue_at);
         CREATE INDEX IF NOT EXISTS idx_billing_milestones_due ON billing_milestones(status, due_at);
+      `);
+    }
+  },
+  {
+    version: '020_project_schedule_baselines',
+    description: 'Retain task durations, dependency graphs, critical-path calculations, and approval-gated schedule baselines.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE job_tasks ADD COLUMN planned_start TEXT;
+        ALTER TABLE job_tasks ADD COLUMN planned_end TEXT;
+        ALTER TABLE job_tasks ADD COLUMN duration_hours DOUBLE PRECISION NOT NULL DEFAULT 0;
+
+        CREATE TABLE IF NOT EXISTS task_dependencies (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          predecessor_task_id TEXT NOT NULL REFERENCES job_tasks(id) ON DELETE CASCADE,
+          successor_task_id TEXT NOT NULL REFERENCES job_tasks(id) ON DELETE CASCADE,
+          dependency_type TEXT NOT NULL DEFAULT 'finish_to_start',
+          lag_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'active',
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(predecessor_task_id, successor_task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_dependencies_job ON task_dependencies(job_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_task_dependencies_successor ON task_dependencies(successor_task_id, status);
+
+        CREATE TABLE IF NOT EXISTS schedule_baselines (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          planned_start TEXT NOT NULL,
+          planned_end TEXT NOT NULL,
+          approval_id TEXT,
+          plan_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, version_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedule_baselines_job ON schedule_baselines(job_id, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_schedule_baselines_status ON schedule_baselines(job_id, status, updated_at);
       `);
     }
   }
@@ -5117,10 +5229,10 @@ class ContractorOperatingLedger {
   defaultTasksForJob(job) {
     const due = job.targetCompletion || job.scheduledStart || null;
     return [
-      { title: 'Validate scope and site constraints', status: 'open', priority: job.priority, dueAt: due },
-      { title: 'Prepare quote and approval package', status: 'open', priority: job.priority, dueAt: due },
-      { title: 'Reserve crew, tools, and materials', status: 'open', priority: job.priority, dueAt: due },
-      { title: 'Create client update draft', status: 'open', priority: 'medium', dueAt: due }
+      { title: 'Validate scope and site constraints', status: 'open', priority: job.priority, dueAt: due, durationHours: 1.5 },
+      { title: 'Prepare quote and approval package', status: 'open', priority: job.priority, dueAt: due, durationHours: 2 },
+      { title: 'Reserve crew, tools, and materials', status: 'open', priority: job.priority, dueAt: due, durationHours: 2 },
+      { title: 'Create client update draft', status: 'open', priority: 'medium', dueAt: due, durationHours: 1 }
     ];
   }
 
@@ -8099,9 +8211,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     this.requireJob(jobId);
     const id = makeId('task');
     const timestamp = nowIso();
+    const schedule = normalizeTaskSchedule(payload);
     this.db.prepare(`
-      INSERT INTO job_tasks (id, job_id, title, description, status, priority, assignee_id, due_at, completed_at, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO job_tasks (
+        id, job_id, title, description, status, priority, assignee_id, due_at, completed_at,
+        planned_start, planned_end, duration_hours, data_json, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       jobId,
@@ -8112,6 +8228,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       payload.assigneeId || payload.assignee_id || null,
       payload.dueAt || payload.due_at || payload.dueDate || null,
       payload.completedAt || payload.completed_at || null,
+      schedule.plannedStart,
+      schedule.plannedEnd,
+      schedule.durationHours,
       toJson({
         ...(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {}),
         source: payload.source || payload.data?.source || null
@@ -8124,6 +8243,480 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.audit({ entityType: 'task', entityId: id, jobId, action: 'create_task', actor: options.actor || 'Contractor.AI', after: task });
     }
     return task;
+  }
+
+  updateTaskSchedule(jobId, taskId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, jobId);
+      if (!row) {
+        const error = new Error('Job task not found');
+        error.statusCode = 404;
+        throw error;
+      }
+      if (['completed', 'cancelled'].includes(normalizeStatus(row.status, 'open'))) {
+        const error = new Error('Completed or cancelled tasks cannot be replanned.');
+        error.statusCode = 409;
+        error.code = 'task_schedule_terminal';
+        throw error;
+      }
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const before = this.mapTask(row);
+      const schedule = normalizeTaskSchedule(payload, row);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE job_tasks
+        SET planned_start = ?, planned_end = ?, duration_hours = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(schedule.plannedStart, schedule.plannedEnd, schedule.durationHours, timestamp, taskId, jobId);
+      const task = this.mapTask(this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId));
+      this.audit({
+        entityType: 'task',
+        entityId: taskId,
+        jobId,
+        action: 'update_task_schedule',
+        actor,
+        before,
+        after: task,
+        metadata: { externalCommitments: 0 }
+      });
+      return task;
+    });
+  }
+
+  listTaskDependencies(jobId, options = {}) {
+    this.requireJob(jobId, { allowInactive: true });
+    const includeCancelled = options.includeCancelled === true;
+    const rows = this.db.prepare(`
+      SELECT * FROM task_dependencies
+      WHERE job_id = ? ${includeCancelled ? '' : "AND status = 'active'"}
+      ORDER BY created_at ASC
+    `).all(jobId);
+    return rows.map(row => this.mapTaskDependency(row));
+  }
+
+  listAllTaskDependencies(options = {}) {
+    const limit = Math.max(1, Math.min(5000, Math.round(normalizeNumber(options.limit, 500))));
+    return this.db.prepare(`
+      SELECT * FROM task_dependencies
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT ?
+    `).all(limit).map(row => this.mapTaskDependency(row));
+  }
+
+  addTaskDependency(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const predecessorTaskId = normalizeText(payload.predecessorTaskId || payload.predecessor_task_id, '');
+      const successorTaskId = normalizeText(payload.successorTaskId || payload.successor_task_id, '');
+      if (!predecessorTaskId || !successorTaskId) {
+        throw ledgerInputError('task_dependency_tasks_required', 'A predecessor and successor task are required.');
+      }
+      if (predecessorTaskId === successorTaskId) {
+        throw ledgerInputError('task_dependency_self_reference', 'A task cannot depend on itself.');
+      }
+      const dependencyType = normalizeStatus(payload.dependencyType || payload.dependency_type, 'finish_to_start');
+      if (dependencyType !== 'finish_to_start') {
+        throw ledgerInputError('task_dependency_type_unsupported', 'Only finish-to-start task dependencies are currently supported.');
+      }
+      const lagHours = Number(payload.lagHours ?? payload.lag_hours ?? 0);
+      if (!Number.isFinite(lagHours) || lagHours < -1000 || lagHours > 10000) {
+        throw ledgerInputError('task_dependency_lag_invalid', 'Dependency lag must be between -1,000 and 10,000 hours.');
+      }
+      const tasks = this.db.prepare('SELECT * FROM job_tasks WHERE job_id = ? ORDER BY created_at ASC').all(jobId);
+      const taskIds = new Set(tasks.map(task => task.id));
+      if (!taskIds.has(predecessorTaskId) || !taskIds.has(successorTaskId)) {
+        throw ledgerInputError('task_dependency_job_mismatch', 'Both dependency tasks must belong to the same job.');
+      }
+
+      const graph = new Graph({ directed: true });
+      for (const task of tasks) graph.setNode(task.id);
+      const activeDependencies = this.db.prepare(`
+        SELECT * FROM task_dependencies
+        WHERE job_id = ? AND status = 'active'
+      `).all(jobId);
+      for (const dependency of activeDependencies) {
+        if (dependency.predecessor_task_id === predecessorTaskId && dependency.successor_task_id === successorTaskId) continue;
+        graph.setEdge(dependency.predecessor_task_id, dependency.successor_task_id);
+      }
+      graph.setEdge(predecessorTaskId, successorTaskId);
+      if (!graphAlgorithms.isAcyclic(graph)) {
+        const error = ledgerInputError('task_dependency_cycle', 'This dependency would create a cycle in the work plan.');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const existing = this.db.prepare(`
+        SELECT * FROM task_dependencies
+        WHERE predecessor_task_id = ? AND successor_task_id = ?
+      `).get(predecessorTaskId, successorTaskId);
+      const timestamp = nowIso();
+      if (existing) {
+        const before = this.mapTaskDependency(existing);
+        if (existing.status === 'active'
+          && existing.dependency_type === dependencyType
+          && normalizeNumber(existing.lag_hours, 0) === roundScheduleHours(lagHours)) {
+          return before;
+        }
+        this.db.prepare(`
+          UPDATE task_dependencies
+          SET dependency_type = ?, lag_hours = ?, status = 'active', data_json = ?, updated_at = ?
+          WHERE id = ? AND job_id = ?
+        `).run(
+          dependencyType,
+          roundScheduleHours(lagHours),
+          toJson({ ...fromJson(existing.data_json, {}), source: payload.source || fromJson(existing.data_json, {}).source || null }),
+          timestamp,
+          existing.id,
+          jobId
+        );
+        const dependency = this.mapTaskDependency(this.db.prepare('SELECT * FROM task_dependencies WHERE id = ?').get(existing.id));
+        this.audit({ entityType: 'task_dependency', entityId: existing.id, jobId, action: 'reactivate_task_dependency', actor, before, after: dependency });
+        return dependency;
+      }
+
+      const id = makeId('dependency');
+      this.db.prepare(`
+        INSERT INTO task_dependencies (
+          id, job_id, predecessor_task_id, successor_task_id, dependency_type, lag_hours, status, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        predecessorTaskId,
+        successorTaskId,
+        dependencyType,
+        roundScheduleHours(lagHours),
+        toJson({ source: payload.source || null }),
+        timestamp,
+        timestamp
+      );
+      const dependency = this.mapTaskDependency(this.db.prepare('SELECT * FROM task_dependencies WHERE id = ?').get(id));
+      this.audit({ entityType: 'task_dependency', entityId: id, jobId, action: 'create_task_dependency', actor, after: dependency });
+      return dependency;
+    });
+  }
+
+  cancelTaskDependency(jobId, dependencyId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM task_dependencies WHERE id = ? AND job_id = ?').get(dependencyId, jobId);
+      if (!row) {
+        const error = new Error('Task dependency not found');
+        error.statusCode = 404;
+        throw error;
+      }
+      if (row.status === 'cancelled') return this.mapTaskDependency(row);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const before = this.mapTaskDependency(row);
+      const data = {
+        ...fromJson(row.data_json, {}),
+        cancellation: {
+          reason: normalizeText(payload.reason || payload.notes, 'Dependency removed from the current work plan.'),
+          actor,
+          cancelledAt: timestamp
+        }
+      };
+      this.db.prepare(`
+        UPDATE task_dependencies
+        SET status = 'cancelled', data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(toJson(data), timestamp, dependencyId, jobId);
+      const dependency = this.mapTaskDependency(this.db.prepare('SELECT * FROM task_dependencies WHERE id = ?').get(dependencyId));
+      this.audit({ entityType: 'task_dependency', entityId: dependencyId, jobId, action: 'cancel_task_dependency', actor, before, after: dependency });
+      return dependency;
+    });
+  }
+
+  calculateJobSchedule(jobId, payload = {}) {
+    const job = this.mapJob(this.requireJob(jobId, { allowInactive: true }));
+    const taskRows = this.db.prepare('SELECT * FROM job_tasks WHERE job_id = ? ORDER BY created_at ASC').all(jobId);
+    const tasks = taskRows.map(row => this.mapTask(row)).filter(task => SCHEDULE_TASK_STATUSES.has(normalizeStatus(task.status, 'open')));
+    const activeTaskIds = new Set(tasks.map(task => task.id));
+    const dependencies = this.listTaskDependencies(jobId).filter(dependency => (
+      activeTaskIds.has(dependency.predecessorTaskId) && activeTaskIds.has(dependency.successorTaskId)
+    ));
+    const startInput = payload.plannedStart || payload.planned_start || job.scheduledStart
+      || tasks.map(task => task.plannedStart).filter(Boolean).sort()[0]
+      || null;
+    const plannedStart = normalizeScheduleTimestamp(startInput, {
+      label: 'Work-plan start',
+      code: 'schedule_start_invalid'
+    });
+    const unscheduledTasks = tasks
+      .filter(task => !(normalizeNumber(task.durationHours, 0) > 0))
+      .map(task => ({ id: task.id, title: task.title, reason: 'duration_required' }));
+
+    const graph = new Graph({ directed: true });
+    for (const task of tasks) graph.setNode(task.id, task);
+    for (const dependency of dependencies) {
+      graph.setEdge(dependency.predecessorTaskId, dependency.successorTaskId, dependency);
+    }
+    if (!graphAlgorithms.isAcyclic(graph)) {
+      const error = new Error('The retained work plan contains a dependency cycle.');
+      error.statusCode = 409;
+      error.code = 'task_dependency_cycle';
+      throw error;
+    }
+
+    const basis = {
+      format: SCHEDULE_BASELINE_FORMAT,
+      calculationMode: 'elapsed_hours',
+      jobId,
+      plannedStart,
+      tasks: tasks.map(task => ({
+        id: task.id,
+        status: task.status,
+        durationHours: roundScheduleHours(task.durationHours)
+      })).sort((left, right) => left.id.localeCompare(right.id)),
+      dependencies: dependencies.map(dependency => ({
+        id: dependency.id,
+        predecessorTaskId: dependency.predecessorTaskId,
+        successorTaskId: dependency.successorTaskId,
+        type: dependency.dependencyType,
+        lagHours: roundScheduleHours(dependency.lagHours)
+      })).sort((left, right) => left.id.localeCompare(right.id))
+    };
+    const planningHash = sha256Text(toJson(basis));
+    if (!tasks.length || !plannedStart || unscheduledTasks.length) {
+      return {
+        generatedAt: nowIso(),
+        calculationMode: basis.calculationMode,
+        ready: false,
+        reason: !tasks.length ? 'no_active_tasks' : (!plannedStart ? 'planned_start_required' : 'task_durations_required'),
+        plannedStart,
+        plannedEnd: null,
+        projectDurationHours: 0,
+        planningHash,
+        tasks,
+        dependencies,
+        unscheduledTasks,
+        criticalPathTaskIds: [],
+        lookAhead: []
+      };
+    }
+
+    const order = graphAlgorithms.topsort(graph);
+    const anchorMs = Date.parse(plannedStart);
+    const forward = new Map();
+    for (const taskId of order) {
+      const task = graph.node(taskId);
+      const incoming = graph.inEdges(taskId) || [];
+      const earliestStartMs = incoming.reduce((latest, edge) => {
+        const predecessor = forward.get(edge.v);
+        const dependency = graph.edge(edge);
+        return Math.max(latest, predecessor.earliestFinishMs + normalizeNumber(dependency.lagHours, 0) * SCHEDULE_HOUR_MS);
+      }, anchorMs);
+      const earliestFinishMs = earliestStartMs + normalizeNumber(task.durationHours, 0) * SCHEDULE_HOUR_MS;
+      forward.set(taskId, { earliestStartMs, earliestFinishMs });
+    }
+    const projectEndMs = Math.max(...[...forward.values()].map(item => item.earliestFinishMs));
+    const backward = new Map();
+    for (const taskId of [...order].reverse()) {
+      const task = graph.node(taskId);
+      const outgoing = graph.outEdges(taskId) || [];
+      const latestFinishMs = outgoing.length
+        ? Math.min(...outgoing.map(edge => {
+          const successor = backward.get(edge.w);
+          const dependency = graph.edge(edge);
+          return successor.latestStartMs - normalizeNumber(dependency.lagHours, 0) * SCHEDULE_HOUR_MS;
+        }))
+        : projectEndMs;
+      const latestStartMs = latestFinishMs - normalizeNumber(task.durationHours, 0) * SCHEDULE_HOUR_MS;
+      backward.set(taskId, { latestStartMs, latestFinishMs });
+    }
+
+    const scheduledTasks = order.map(taskId => {
+      const task = graph.node(taskId);
+      const early = forward.get(taskId);
+      const late = backward.get(taskId);
+      const totalFloatHours = roundScheduleHours((late.latestStartMs - early.earliestStartMs) / SCHEDULE_HOUR_MS);
+      return {
+        ...task,
+        plannedStart: new Date(early.earliestStartMs).toISOString(),
+        plannedEnd: new Date(early.earliestFinishMs).toISOString(),
+        latestStart: new Date(late.latestStartMs).toISOString(),
+        latestEnd: new Date(late.latestFinishMs).toISOString(),
+        totalFloatHours,
+        critical: Math.abs(totalFloatHours) < 0.01
+      };
+    });
+    const criticalPathTaskIds = scheduledTasks.filter(task => task.critical).map(task => task.id);
+    const referenceAt = normalizeScheduleTimestamp(payload.referenceAt || payload.reference_at || nowIso(), {
+      label: 'Look-ahead reference',
+      code: 'schedule_reference_invalid'
+    });
+    const horizonDays = Math.max(1, Math.min(90, Math.round(normalizeNumber(payload.horizonDays || payload.horizon_days, 14))));
+    const referenceMs = Date.parse(referenceAt);
+    const horizonMs = referenceMs + horizonDays * 24 * SCHEDULE_HOUR_MS;
+    const lookAhead = scheduledTasks.filter(task => (
+      Date.parse(task.plannedEnd) >= referenceMs && Date.parse(task.plannedStart) <= horizonMs
+    ));
+    return {
+      generatedAt: nowIso(),
+      calculationMode: basis.calculationMode,
+      ready: true,
+      reason: null,
+      plannedStart,
+      plannedEnd: new Date(projectEndMs).toISOString(),
+      projectDurationHours: roundScheduleHours((projectEndMs - anchorMs) / SCHEDULE_HOUR_MS),
+      planningHash,
+      tasks: scheduledTasks,
+      dependencies,
+      unscheduledTasks: [],
+      criticalPathTaskIds,
+      lookAhead,
+      horizonDays,
+      referenceAt
+    };
+  }
+
+  listScheduleBaselines(jobId) {
+    this.requireJob(jobId, { allowInactive: true });
+    return this.db.prepare(`
+      SELECT * FROM schedule_baselines
+      WHERE job_id = ?
+      ORDER BY version_number DESC
+    `).all(jobId).map(row => this.mapScheduleBaseline(row));
+  }
+
+  listAllScheduleBaselines(options = {}) {
+    const limit = Math.max(1, Math.min(5000, Math.round(normalizeNumber(options.limit, 500))));
+    return this.db.prepare(`
+      SELECT * FROM schedule_baselines
+      ORDER BY updated_at DESC, version_number DESC
+      LIMIT ?
+    `).all(limit).map(row => this.mapScheduleBaseline(row));
+  }
+
+  requestScheduleBaseline(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.mapJob(this.requireJob(jobId));
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const plan = this.calculateJobSchedule(jobId, payload);
+      if (!plan.ready) {
+        const error = ledgerInputError(
+          'schedule_baseline_not_ready',
+          plan.reason === 'planned_start_required'
+            ? 'A work-plan start is required before requesting baseline approval.'
+            : 'Every active task needs a positive duration before requesting baseline approval.',
+          { reason: plan.reason, unscheduledTasks: plan.unscheduledTasks }
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM schedule_baselines
+        WHERE job_id = ? AND status = 'pending_approval'
+        ORDER BY version_number DESC
+        LIMIT 1
+      `).get(jobId);
+      if (pending) {
+        if (pending.plan_hash === plan.planningHash) {
+          return {
+            baseline: this.mapScheduleBaseline(pending),
+            approval: pending.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)) : null,
+            plan,
+            idempotent: true
+          };
+        }
+        const error = new Error('Resolve the pending schedule baseline before requesting a revised version.');
+        error.statusCode = 409;
+        error.code = 'schedule_baseline_pending';
+        error.details = { baselineId: pending.id, approvalId: pending.approval_id };
+        throw error;
+      }
+
+      const nextVersion = normalizeNumber(this.db.prepare(`
+        SELECT MAX(version_number) AS version_number FROM schedule_baselines WHERE job_id = ?
+      `).get(jobId)?.version_number, 0) + 1;
+      const snapshot = {
+        format: SCHEDULE_BASELINE_FORMAT,
+        jobId,
+        jobTitle: job.title,
+        versionNumber: nextVersion,
+        calculationMode: plan.calculationMode,
+        planningHash: plan.planningHash,
+        plannedStart: plan.plannedStart,
+        plannedEnd: plan.plannedEnd,
+        projectDurationHours: plan.projectDurationHours,
+        criticalPathTaskIds: plan.criticalPathTaskIds,
+        tasks: plan.tasks.map(task => ({
+          id: task.id,
+          title: task.title,
+          status: task.status,
+          durationHours: task.durationHours,
+          plannedStart: task.plannedStart,
+          plannedEnd: task.plannedEnd,
+          latestStart: task.latestStart,
+          latestEnd: task.latestEnd,
+          totalFloatHours: task.totalFloatHours,
+          critical: task.critical
+        })),
+        dependencies: plan.dependencies.map(dependency => ({
+          id: dependency.id,
+          predecessorTaskId: dependency.predecessorTaskId,
+          successorTaskId: dependency.successorTaskId,
+          dependencyType: dependency.dependencyType,
+          lagHours: dependency.lagHours
+        }))
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('baseline');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO schedule_baselines (
+          id, job_id, version_number, status, planned_start, planned_end, approval_id,
+          plan_hash, snapshot_hash, snapshot_json, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        nextVersion,
+        plan.plannedStart,
+        plan.plannedEnd,
+        plan.planningHash,
+        snapshotHash,
+        snapshotJson,
+        toJson({ requestedBy: actor, reason: payload.reason || payload.notes || null }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'schedule_baseline',
+        targetId: id,
+        jobId,
+        approvalType: 'internal_schedule_baseline',
+        summary: `Approve work-plan baseline v${nextVersion} for ${job.title}`,
+        reason: 'The internal baseline fixes task sequencing, duration, float, and critical-path evidence for variance control.',
+        data: {
+          versionNumber: nextVersion,
+          planningHash: plan.planningHash,
+          snapshotHash,
+          plannedStart: plan.plannedStart,
+          plannedEnd: plan.plannedEnd,
+          projectDurationHours: plan.projectDurationHours,
+          criticalPathTaskIds: plan.criticalPathTaskIds,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE schedule_baselines SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const baseline = this.mapScheduleBaseline(this.db.prepare('SELECT * FROM schedule_baselines WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'schedule_baseline',
+        entityId: id,
+        jobId,
+        action: 'request_schedule_baseline_approval',
+        actor,
+        after: baseline,
+        metadata: { approvalId: approval.id, versionNumber: nextVersion, externalCommitments: 0 }
+      });
+      return { baseline, approval, plan, idempotent: false };
+    });
   }
 
   addAssignment(jobId, payload = {}, options = {}) {
@@ -14392,6 +14985,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         },
         update(row, next) {
           const completed = next.data.requestedStatus === 'completed';
+          const schedule = normalizeTaskSchedule(payload, row);
           return {
             status: next.status,
             data: next.data,
@@ -14404,13 +14998,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             dueAt: payload.dueAt !== undefined || payload.due_at !== undefined
               ? (payload.dueAt || payload.due_at || null)
               : row.due_at,
-            completedAt: completed ? next.closedAt : null
+            completedAt: completed ? next.closedAt : null,
+            ...schedule
           };
         },
         save(recordId, values, timestamp) {
           this.db.prepare(`
             UPDATE job_tasks
-            SET title = ?, description = ?, status = ?, priority = ?, assignee_id = ?, due_at = ?, completed_at = ?, data_json = ?, updated_at = ?
+            SET title = ?, description = ?, status = ?, priority = ?, assignee_id = ?, due_at = ?, completed_at = ?,
+                planned_start = ?, planned_end = ?, duration_hours = ?, data_json = ?, updated_at = ?
             WHERE id = ? AND job_id = ?
           `).run(
             values.title,
@@ -14420,6 +15016,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             values.assigneeId,
             values.dueAt,
             values.completedAt,
+            values.plannedStart,
+            values.plannedEnd,
+            values.durationHours,
             toJson(values.data),
             timestamp,
             recordId,
@@ -16865,6 +17464,91 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return after;
   }
 
+  applyScheduleBaselineApproval(baselineId) {
+    const row = this.db.prepare('SELECT * FROM schedule_baselines WHERE id = ?').get(baselineId);
+    if (!row) {
+      const error = new Error('Schedule baseline not found');
+      error.statusCode = 404;
+      throw error;
+    }
+    if (row.status === 'approved') return this.mapScheduleBaseline(row);
+    if (row.status !== 'pending_approval') {
+      const error = new Error(`Schedule baseline cannot be approved from ${row.status}.`);
+      error.statusCode = 409;
+      error.code = 'schedule_baseline_state_conflict';
+      throw error;
+    }
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    if (!snapshot || sha256Text(snapshotJson) !== row.snapshot_hash || snapshot.planningHash !== row.plan_hash) {
+      const error = new Error('Schedule baseline snapshot integrity verification failed.');
+      error.statusCode = 409;
+      error.code = 'schedule_baseline_snapshot_tampered';
+      throw error;
+    }
+    const currentPlan = this.calculateJobSchedule(row.job_id, { plannedStart: row.planned_start });
+    if (!currentPlan.ready || currentPlan.planningHash !== row.plan_hash) {
+      const error = new Error('The work plan changed after this baseline was requested. Reject it and request a current baseline.');
+      error.statusCode = 409;
+      error.code = 'schedule_baseline_stale';
+      throw error;
+    }
+    const approval = row.approval_id
+      ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id)
+      : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    const before = this.mapScheduleBaseline(row);
+    this.db.prepare(`
+      UPDATE schedule_baselines
+      SET status = 'superseded', updated_at = ?
+      WHERE job_id = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.job_id, baselineId);
+    this.db.prepare(`
+      UPDATE schedule_baselines
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: {
+        approvalId: row.approval_id || null,
+        approvedAt: timestamp,
+        approvedBy: actor
+      }
+    }), timestamp, baselineId);
+    for (const task of snapshot.tasks || []) {
+      const currentTask = this.db.prepare('SELECT id FROM job_tasks WHERE id = ? AND job_id = ?').get(task.id, row.job_id);
+      if (!currentTask) {
+        const error = new Error('Schedule baseline references a task that no longer belongs to the job.');
+        error.statusCode = 409;
+        error.code = 'schedule_baseline_task_missing';
+        throw error;
+      }
+      this.db.prepare(`
+        UPDATE job_tasks
+        SET planned_start = ?, planned_end = ?, duration_hours = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(task.plannedStart, task.plannedEnd, task.durationHours, timestamp, task.id, row.job_id);
+    }
+    const baseline = this.mapScheduleBaseline(this.db.prepare('SELECT * FROM schedule_baselines WHERE id = ?').get(baselineId));
+    this.audit({
+      entityType: 'schedule_baseline',
+      entityId: baselineId,
+      jobId: row.job_id,
+      action: 'approve_schedule_baseline',
+      actor,
+      before,
+      after: baseline,
+      metadata: {
+        approvalId: row.approval_id || null,
+        versionNumber: row.version_number,
+        criticalPathTaskIds: snapshot.criticalPathTaskIds || [],
+        externalCommitments: 0
+      }
+    });
+    return baseline;
+  }
+
   resolveApproval(approvalId, payload = {}, options = {}) {
     return this.transaction(() => {
       const before = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -16990,6 +17674,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = ?, updated_at = ?
           WHERE id = ? AND status = 'pending_approval'
         `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'schedule_baseline') {
+        this.db.prepare(`
+          UPDATE schedule_baselines
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM schedule_baselines WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'change_order') {
         this.db.prepare(`
           UPDATE change_orders
@@ -17130,6 +17834,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           metadata: { approvalId: approval.id, commercial }
         });
       }
+    } else if (targetType === 'schedule_baseline') {
+      this.applyScheduleBaselineApproval(targetId);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -20699,6 +21405,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ...this.mapJob(row),
       client: this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(row.client_id)),
       tasks: this.db.prepare('SELECT * FROM job_tasks WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapTask(row)),
+      taskDependencies: this.db.prepare('SELECT * FROM task_dependencies WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapTaskDependency(row)),
+      scheduleBaselines: this.db.prepare('SELECT * FROM schedule_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapScheduleBaseline(row)),
       quotes: this.db.prepare('SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapQuote(row)),
       siteVisits: this.db.prepare('SELECT * FROM site_visits WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapSiteVisit(row)),
       changeOrders: this.db.prepare('SELECT * FROM change_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapChangeOrder(row)),
@@ -20747,6 +21455,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       portalAccess: this.db.prepare('SELECT * FROM client_portal_access WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapClientPortalAccess(row)),
       approvals: this.db.prepare('SELECT * FROM approvals WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapApproval(row)),
       weather: this.db.prepare('SELECT * FROM schedule_weather WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapWeather(row))
+    };
+    const approvedBaseline = detail.scheduleBaselines.find(baseline => baseline.status === 'approved') || null;
+    const pendingBaseline = detail.scheduleBaselines.find(baseline => baseline.status === 'pending_approval') || null;
+    const schedulePlan = this.calculateJobSchedule(jobId, {
+      plannedStart: pendingBaseline?.plannedStart || approvedBaseline?.plannedStart || detail.scheduledStart || null
+    });
+    detail.scheduleControl = {
+      calculationMode: schedulePlan.calculationMode,
+      ready: schedulePlan.ready,
+      reason: schedulePlan.reason,
+      planningHash: schedulePlan.planningHash,
+      plannedStart: schedulePlan.plannedStart,
+      plannedEnd: schedulePlan.plannedEnd,
+      projectDurationHours: schedulePlan.projectDurationHours,
+      criticalPathTaskIds: schedulePlan.criticalPathTaskIds,
+      tasks: schedulePlan.tasks,
+      dependencies: schedulePlan.dependencies,
+      unscheduledTasks: schedulePlan.unscheduledTasks,
+      lookAhead: schedulePlan.lookAhead,
+      activeBaseline: approvedBaseline,
+      pendingBaseline,
+      baselineCurrent: Boolean(approvedBaseline && schedulePlan.ready && approvedBaseline.planningHash === schedulePlan.planningHash),
+      baselineStale: Boolean(approvedBaseline && (!schedulePlan.ready || approvedBaseline.planningHash !== schedulePlan.planningHash))
     };
     if (options.includeAudit) {
       detail.audit = this.listAudit({ jobId, limit: 50 });
@@ -21506,12 +22237,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   listApprovals(filters = {}) {
     const status = normalizeStatus(filters.status, 'pending');
     const includeAll = filters.status === 'all' || filters.all === true;
+    const approvalId = String(filters.id || filters.approvalId || '').trim();
+    const jobId = String(filters.jobId || filters.job_id || '').trim();
     const rows = this.db.prepare(`
       SELECT * FROM approvals
       WHERE (? = 1 OR status = ?)
+        AND (? = '' OR id = ?)
+        AND (? = '' OR job_id = ?)
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(includeAll ? 1 : 0, status, safeLimit(filters.limit, 100, 500));
+    `).all(
+      includeAll ? 1 : 0,
+      status,
+      approvalId,
+      approvalId,
+      jobId,
+      jobId,
+      safeLimit(filters.limit, 100, 500)
+    );
     return rows.map(row => this.mapApproval(row));
   }
 
@@ -21686,6 +22429,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       budgetLines: activeCount('budget_lines'),
       billingMilestones: activeCount('billing_milestones'),
       dueBillingMilestones: activeCount('billing_milestones', "records.status = 'approved' AND records.invoice_id IS NULL AND records.planned_issue_at <= ?", [nowIso()]),
+      taskDependencies: activeCount('task_dependencies', "records.status = 'active'"),
+      scheduleBaselines: activeCount('schedule_baselines'),
+      approvedScheduleBaselines: activeCount('schedule_baselines', "records.status = 'approved'"),
+      pendingScheduleBaselines: activeCount('schedule_baselines', "records.status = 'pending_approval'"),
       purchaseOrders: activeCount('purchase_orders'),
       supplierInvoices: activeCount('supplier_invoices'),
       openSupplierInvoices: activeCount('supplier_invoices', "records.status IN ('pending_approval', 'approved', 'partially_paid')"),
@@ -21786,6 +22533,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM site_access_logs records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('blocked', 'requested', 'pending_approval') OR records.orientation_valid = 0), 0) AS siteAccessQueue,
         COALESCE((SELECT COUNT(*) FROM budget_lines records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval') OR records.forecast_amount > records.budget_amount), 0) AS budgetReviews,
         COALESCE((SELECT COUNT(*) FROM billing_milestones records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval' OR (records.status = 'approved' AND records.invoice_id IS NULL AND records.planned_issue_at <= ?)), 0) AS billingMilestoneQueue,
+        COALESCE((SELECT COUNT(*) FROM schedule_baselines records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval'), 0) AS scheduleBaselineQueue,
         COALESCE((SELECT COUNT(*) FROM purchase_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS purchaseOrderQueue,
         COALESCE((SELECT COUNT(*) FROM supplier_invoices records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('pending_approval', 'approved', 'partially_paid')), 0) AS supplierInvoiceQueue,
         COALESCE((SELECT COUNT(*) FROM supplier_invoice_payments records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_confirmation'), 0) AS supplierPaymentQueue,
@@ -22366,6 +23114,56 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const scheduleJobs = this.db.prepare(`
+      SELECT * FROM jobs
+      WHERE status IN ('planned', 'scheduled', 'in_progress')
+      ORDER BY updated_at DESC
+      LIMIT 20
+    `).all();
+    for (const job of scheduleJobs) {
+      const pendingBaseline = this.db.prepare(`
+        SELECT id FROM schedule_baselines
+        WHERE job_id = ? AND status = 'pending_approval'
+        LIMIT 1
+      `).get(job.id);
+      if (pendingBaseline) continue;
+      const taskSummary = this.db.prepare(`
+        SELECT COUNT(*) AS task_count,
+          SUM(CASE WHEN duration_hours > 0 THEN 1 ELSE 0 END) AS scheduled_count,
+          MIN(planned_start) AS earliest_start
+        FROM job_tasks
+        WHERE job_id = ? AND status IN ('open', 'in_progress', 'blocked')
+      `).get(job.id);
+      if (!normalizeNumber(taskSummary?.task_count, 0)
+        || normalizeNumber(taskSummary?.task_count, 0) !== normalizeNumber(taskSummary?.scheduled_count, 0)) continue;
+      const approvedBaseline = this.db.prepare(`
+        SELECT * FROM schedule_baselines
+        WHERE job_id = ? AND status = 'approved'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(job.id);
+      const plannedStart = job.scheduled_start || taskSummary.earliest_start || futureIsoDate(1);
+      let baselineCurrent = false;
+      if (approvedBaseline) {
+        try {
+          const plan = this.calculateJobSchedule(job.id, { plannedStart: approvedBaseline.planned_start });
+          baselineCurrent = plan.ready && plan.planningHash === approvedBaseline.plan_hash;
+        } catch {
+          baselineCurrent = false;
+        }
+      }
+      if (baselineCurrent) continue;
+      actions.push({
+        type: 'prepare_schedule_baseline',
+        jobId: job.id,
+        severity: approvedBaseline ? 'high' : 'medium',
+        requiresApproval: true,
+        plannedStart,
+        message: approvedBaseline
+          ? `${job.title} changed after its approved work-plan baseline and needs a revised internal baseline.`
+          : `${job.title} has schedulable tasks but no approved critical-path baseline.`
+      });
+    }
+
     const procurementWithoutPurchaseOrders = this.db.prepare(`
       SELECT procurement_orders.id, procurement_orders.job_id, procurement_orders.supplier, procurement_orders.amount, jobs.title
       FROM procurement_orders
@@ -22821,6 +23619,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_site_access_gate',
       'create_budget_line',
       'create_billing_milestone',
+      'prepare_schedule_baseline',
       'draft_invoice',
       'create_finance_handoff',
       'create_procurement_order',
@@ -23452,6 +24251,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           this.audit({ entityType: 'billing_milestone', entityId: milestone.id, jobId: action.jobId, action: 'autonomous_create_billing_milestone', actor, after: milestone });
         }
 
+        const scheduleBaselines = preview.filter(action => action.type === 'prepare_schedule_baseline').slice(0, 3);
+        for (const action of scheduleBaselines) {
+          try {
+            const result = this.requestScheduleBaseline(action.jobId, {
+              plannedStart: action.plannedStart,
+              reason: 'Autonomous internal work-plan baseline draft for owner review.',
+              source: 'autonomous_cycle'
+            }, { actor });
+            applied.push({
+              ...action,
+              scheduleBaselineId: result.baseline.id,
+              approvalId: result.approval?.id || result.baseline.approvalId || null,
+              status: 'pending_approval'
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message, code: error.code || null });
+          }
+        }
+
         const purchaseOrders = preview.filter(action => action.type === 'create_purchase_order').slice(0, 3);
         for (const action of purchaseOrders) {
           const procurement = this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(action.procurementOrderId);
@@ -23944,6 +24762,61 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     const orphanTasks = Number(this.db.prepare('SELECT COUNT(*) AS count FROM job_tasks LEFT JOIN jobs ON jobs.id = job_tasks.job_id WHERE jobs.id IS NULL').get().count || 0);
     if (orphanTasks) issues.push({ severity: 'error', message: `${orphanTasks} task(s) are orphaned.` });
+    const invalidDependencies = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM task_dependencies dependencies
+      LEFT JOIN job_tasks predecessor ON predecessor.id = dependencies.predecessor_task_id
+      LEFT JOIN job_tasks successor ON successor.id = dependencies.successor_task_id
+      WHERE predecessor.id IS NULL OR successor.id IS NULL
+        OR predecessor.job_id <> dependencies.job_id OR successor.job_id <> dependencies.job_id
+    `).get().count || 0);
+    if (invalidDependencies) issues.push({ severity: 'error', message: `${invalidDependencies} task dependency record(s) cross a job boundary or reference a missing task.` });
+    const dependencyJobs = this.db.prepare("SELECT DISTINCT job_id FROM task_dependencies WHERE status = 'active'").all();
+    for (const dependencyJob of dependencyJobs) {
+      const graph = new Graph({ directed: true });
+      const taskRows = this.db.prepare('SELECT id FROM job_tasks WHERE job_id = ?').all(dependencyJob.job_id);
+      for (const task of taskRows) graph.setNode(task.id);
+      const rows = this.db.prepare("SELECT * FROM task_dependencies WHERE job_id = ? AND status = 'active'").all(dependencyJob.job_id);
+      for (const dependency of rows) graph.setEdge(dependency.predecessor_task_id, dependency.successor_task_id);
+      if (!graphAlgorithms.isAcyclic(graph)) {
+        issues.push({ severity: 'error', message: `Job ${dependencyJob.job_id} contains a cyclic task dependency graph.` });
+      }
+    }
+    const approvedBaselinesWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM schedule_baselines baselines
+      LEFT JOIN approvals ON approvals.id = baselines.approval_id
+      WHERE baselines.status = 'approved'
+        AND (approvals.id IS NULL OR approvals.status <> 'approved' OR approvals.target_type <> 'schedule_baseline' OR approvals.target_id <> baselines.id)
+    `).get().count || 0);
+    if (approvedBaselinesWithoutApproval) issues.push({ severity: 'error', message: `${approvedBaselinesWithoutApproval} approved schedule baseline(s) lack a matching approval decision.` });
+    const baselineRows = this.db.prepare(`
+      SELECT * FROM schedule_baselines
+      WHERE status IN ('pending_approval', 'approved', 'superseded')
+      ORDER BY job_id, version_number
+    `).all();
+    for (const baseline of baselineRows) {
+      const snapshot = fromJson(baseline.snapshot_json, null);
+      if (!snapshot || sha256Text(normalizeText(baseline.snapshot_json, '')) !== baseline.snapshot_hash || snapshot.planningHash !== baseline.plan_hash) {
+        issues.push({ severity: 'error', message: `Schedule baseline ${baseline.id} failed retained snapshot integrity verification.` });
+      }
+    }
+    const activeBaselineJobs = this.db.prepare("SELECT DISTINCT job_id FROM schedule_baselines WHERE status = 'approved'").all();
+    for (const baselineJob of activeBaselineJobs) {
+      const baseline = this.db.prepare(`
+        SELECT * FROM schedule_baselines
+        WHERE job_id = ? AND status = 'approved'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(baselineJob.job_id);
+      try {
+        const plan = this.calculateJobSchedule(baselineJob.job_id, { plannedStart: baseline.planned_start });
+        if (!plan.ready || plan.planningHash !== baseline.plan_hash) {
+          issues.push({ severity: 'warning', message: `Job ${baselineJob.job_id} work plan changed after its approved schedule baseline.` });
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Job ${baselineJob.job_id} schedule baseline cannot be recalculated: ${error.message}` });
+      }
+    }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
     if (jobsWithoutClient) issues.push({ severity: 'error', message: `${jobsWithoutClient} job(s) are missing clients.` });
     const quotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'draft' AND approval_id IS NULL").get().count || 0);
@@ -24082,6 +24955,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         siteAccessLogs: this.count('site_access_logs'),
         budgetLines: this.count('budget_lines'),
         billingMilestones: this.count('billing_milestones'),
+        taskDependencies: this.count('task_dependencies'),
+        scheduleBaselines: this.count('schedule_baselines'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -24254,6 +25129,45 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       assigneeId: row.assignee_id,
       dueAt: row.due_at,
       completedAt: row.completed_at,
+      plannedStart: row.planned_start || null,
+      plannedEnd: row.planned_end || null,
+      durationHours: normalizeNumber(row.duration_hours, 0),
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapTaskDependency(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      predecessorTaskId: row.predecessor_task_id,
+      successorTaskId: row.successor_task_id,
+      dependencyType: row.dependency_type,
+      lagHours: normalizeNumber(row.lag_hours, 0),
+      status: row.status,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapScheduleBaseline(row) {
+    if (!row) return null;
+    const snapshot = fromJson(row.snapshot_json, {});
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      versionNumber: normalizeNumber(row.version_number, 0),
+      status: row.status,
+      plannedStart: row.planned_start,
+      plannedEnd: row.planned_end,
+      approvalId: row.approval_id || null,
+      planningHash: row.plan_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
       data: fromJson(row.data_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at

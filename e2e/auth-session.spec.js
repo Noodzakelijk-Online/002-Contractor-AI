@@ -87,7 +87,8 @@ test('field worker opens an assigned job and completes only the scoped task', as
   await expect(workspace.getByRole('heading', { name: intake.job.title })).toBeVisible();
   await expect(workspace.getByText('Field-scoped job workspace')).toBeVisible();
   await expect(page.locator('.error-banner')).toHaveCount(0);
-  const taskRow = workspace.getByText('Install scoped field blocking').locator('..').locator('..');
+  const taskRow = workspace.locator('.work-plan-task').filter({ hasText: 'Install scoped field blocking' });
+  await expect(taskRow).toHaveCount(1);
   await taskRow.getByRole('button', { name: 'Complete Install scoped field blocking' }).click();
   const taskModal = page.getByTestId('task-action-modal');
   await taskModal.getByLabel('Evidence and outcome').fill('Scoped field completion checked against the assigned work package.');

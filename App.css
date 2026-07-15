@@ -351,3 +351,58 @@
 .invoice-preview { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 .status-payable_due { color: #94620a; background: #fff1d4; }
 @media (max-width: 760px) { .finance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.finance-summary div:nth-child(n+3) { border-top: 1px solid #e6ece9; }.finance-summary div:nth-child(odd) { border-left: 0; }.finance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }.invoice-preview { grid-template-columns: 1fr; } }
+
+.work-plan-control { display: grid; gap: 16px; min-width: 0; }
+.work-plan-heading { align-items: center; }
+.work-plan-heading > .tag { flex: 0 0 auto; margin-left: auto; }
+.work-plan-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dbe5e1; border-left: 3px solid #16705d; }
+.work-plan-metrics > div { display: grid; gap: 4px; min-width: 0; padding: 11px 12px; border-right: 1px solid #e3eae7; }
+.work-plan-metrics > div:last-child { border-right: 0; }
+.work-plan-metrics span { overflow-wrap: anywhere; color: #718079; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.work-plan-metrics strong { color: #273d35; font-size: 15px; }
+.work-plan-task-form { padding: 14px; background: #f7f9f8; border: 1px solid #e0e8e4; }
+.work-plan-task-list { display: grid; border-top: 1px solid #dfe7e3; }
+.work-plan-task { display: grid; grid-template-columns: 16px minmax(0, 1fr) 104px minmax(220px, auto); align-items: center; gap: 10px; min-width: 0; padding: 12px 0; border-bottom: 1px solid #e2e9e6; }
+.work-plan-task.is-terminal { opacity: .68; }
+.work-plan-task-index { display: grid; place-items: center; align-self: stretch; }
+.work-plan-task-index::before { width: 1px; height: 100%; content: ''; background: #cbd9d3; }
+.work-plan-task-index span { position: absolute; width: 9px; height: 9px; background: #fff; border: 2px solid #4a8e7d; border-radius: 50%; }
+.work-plan-task.is-critical .work-plan-task-index::before { background: #d8a09a; }
+.work-plan-task.is-critical .work-plan-task-index span { border-color: #b83d35; }
+.work-plan-task-copy { display: grid; gap: 4px; min-width: 0; }
+.work-plan-task-copy > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.work-plan-task-copy strong { min-width: 0; overflow-wrap: anywhere; color: #273c34; font-size: 13px; }
+.work-plan-task-copy small { overflow-wrap: anywhere; color: #6b7a74; font-size: 10px; line-height: 1.4; }
+.work-plan-window { display: flex; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; color: #49685e; font-size: 10px; }
+.work-plan-window svg { flex: 0 0 auto; }
+.work-plan-duration { display: flex; align-items: center; justify-content: flex-end; gap: 5px; min-width: 0; }
+.work-plan-duration label { min-width: 0; }
+.work-plan-duration input { width: 62px; min-height: 32px; padding: 5px 7px; }
+.work-plan-duration strong { color: #385047; font-size: 12px; }
+.work-plan-task-actions { justify-content: flex-end; min-width: 0; }
+.work-plan-task-actions .secondary-button { min-height: 31px; padding: 0 8px; font-size: 11px; }
+.tag-red { color: #9d302b; background: #fbe7e4; }
+.work-plan-dependencies, .work-plan-baseline { display: grid; gap: 12px; padding: 14px; background: #f7f9f8; border: 1px solid #dfe7e3; }
+.work-plan-subheading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.work-plan-subheading > div { display: flex; align-items: center; gap: 7px; color: #246f5d; }
+.work-plan-subheading h4 { margin: 0; color: #30473e; font-size: 12px; }
+.work-plan-subheading > span { color: #718079; font-size: 10px; }
+.dependency-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: end; gap: 9px; }
+.dependency-form label, .baseline-form label { display: grid; gap: 5px; min-width: 0; color: #40564e; font-size: 10px; font-weight: 750; }
+.dependency-form select, .dependency-form input, .baseline-form input { width: 100%; min-width: 0; }
+.dependency-list { display: grid; border-top: 1px solid #dde6e2; }
+.dependency-list > div { display: grid; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto 30px; align-items: center; gap: 7px; min-width: 0; padding: 8px 0; border-bottom: 1px solid #e2e9e6; }
+.dependency-list span, .dependency-list strong { min-width: 0; overflow-wrap: anywhere; color: #465e55; font-size: 10px; }
+.dependency-list strong { color: #263d34; }
+.dependency-list small { color: #8a650d; font-size: 10px; }
+.baseline-form { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: end; gap: 10px; }
+.baseline-form .form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.work-plan-alert { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #8a5f0c; background: #fff5dc; border-left: 3px solid #d49a20; font-size: 11px; }
+.work-plan-result { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #dfe7e3; }
+.work-plan-result > div { display: grid; gap: 4px; min-width: 0; padding: 10px 11px; border-right: 1px solid #e0e8e4; }
+.work-plan-result > div:last-child { border-right: 0; }
+.work-plan-result span { overflow-wrap: anywhere; color: #708078; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.work-plan-result strong { overflow-wrap: anywhere; color: #2c443a; font-size: 11px; }
+.baseline-review-button { justify-self: start; }
+@media (max-width: 920px) { .work-plan-task { grid-template-columns: 16px minmax(0, 1fr) 104px; }.work-plan-task-actions { grid-column: 2 / -1; justify-content: flex-start; }.dependency-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }.dependency-form button { align-self: end; } }
+@media (max-width: 760px) { .work-plan-heading { align-items: flex-start; flex-wrap: wrap; }.work-plan-heading > .tag { width: calc(100% - 28px); margin-left: 28px; }.work-plan-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }.work-plan-metrics > div:nth-child(2) { border-right: 0; }.work-plan-metrics > div:nth-child(-n+2) { border-bottom: 1px solid #e3eae7; }.work-plan-task-form { padding: 12px; }.work-plan-task { grid-template-columns: 14px minmax(0, 1fr); align-items: start; }.work-plan-duration, .work-plan-task-actions { grid-column: 2; justify-content: flex-start; }.work-plan-task-actions .secondary-button { flex: 1 1 104px; }.work-plan-dependencies, .work-plan-baseline { padding: 12px; }.dependency-form, .baseline-form, .work-plan-result { grid-template-columns: 1fr; }.dependency-form button, .baseline-form .form-actions, .baseline-form .form-actions button { width: 100%; }.dependency-list > div { grid-template-columns: minmax(0, 1fr) 14px minmax(0, 1fr) 30px; }.dependency-list small { grid-column: 3; }.dependency-list button { grid-column: 4; grid-row: 1; }.work-plan-result > div { border-right: 0; border-bottom: 1px solid #e0e8e4; }.work-plan-result > div:last-child { border-bottom: 0; }.baseline-review-button { width: 100%; } }

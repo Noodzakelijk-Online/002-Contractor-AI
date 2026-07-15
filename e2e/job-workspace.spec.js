@@ -397,7 +397,7 @@ test('job workspace creates, starts, and completes retained tasks with evidence'
   await page.getByRole('button', { name: `Open ${intake.job.title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
   const taskControl = workspace.getByTestId('job-task-control');
-  await expect(taskControl.getByRole('heading', { name: 'Task control' })).toBeVisible();
+  await expect(taskControl.getByRole('heading', { name: 'Work plan' })).toBeVisible();
 
   await taskControl.getByLabel('Task title').fill(taskTitle);
   await taskControl.getByLabel('Priority').selectOption('high');
@@ -405,7 +405,8 @@ test('job workspace creates, starts, and completes retained tasks with evidence'
   await taskControl.getByRole('button', { name: 'Add task' }).click();
   await expect(page.getByText(`Task retained: ${taskTitle}.`)).toBeVisible();
 
-  const taskRow = taskControl.getByText(taskTitle).locator('..').locator('..');
+  const taskRow = taskControl.locator('.work-plan-task').filter({ hasText: taskTitle });
+  await expect(taskRow).toHaveCount(1);
   await expect(taskRow.getByText('open', { exact: true })).toBeVisible();
   await taskRow.getByRole('button', { name: `Start ${taskTitle}` }).click();
   await expect(page.getByText(`${taskTitle} is now in progress.`)).toBeVisible();
@@ -2915,7 +2916,16 @@ test('replacement crew completes assignment-scoped instruction and access approv
   await expect(accessApproval).toHaveCount(1);
   await approveQueueItem(page, accessApproval, 'Replacement worker access and assignment linkage were verified.');
 
+  await expect
+    .poll(async () => {
+      const response = await request.get('/api/ledger/workforce?mode=all&limit=500');
+      if (!response.ok()) return `http-${response.status()}`;
+      const workforce = await response.json();
+      return workforce.jobs.find(job => job.jobId === intake.job.id)?.workforceStatus || 'missing';
+    })
+    .toBe('stable');
   await page.getByRole('button', { name: 'Resources', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
   resourceRow = resources.locator('.resource-readiness-item').filter({ hasText: intake.job.title });
   await expect(resourceRow.getByText('stable', { exact: true })).toBeVisible();
   await expect(resourceRow.getByText('3 historical crew records')).toBeVisible();
