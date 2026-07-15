@@ -980,6 +980,36 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     }, { actor: 'postgres_contract_test' });
     assert.equal(hostedMeetingAction.action.status, 'completed');
 
+    const hostedInspectionTemplate = ledger.createInspectionTemplate({
+      name: 'PostgreSQL facade hold point',
+      templateKey: 'postgres_facade_hold_point',
+      inspectionType: 'quality_hold_point',
+      discipline: 'quality',
+      items: [
+        { key: 'substrate', prompt: 'Hosted substrate tolerance is verified', failureSeverity: 'high' },
+        { key: 'fixings', prompt: 'Hosted fixing pattern matches the drawing', failureSeverity: 'medium' }
+      ]
+    }, { actor: 'postgres_contract_test' });
+    const hostedInspection = ledger.createInspectionFromTemplate(job.id, {
+      templateId: hostedInspectionTemplate.id,
+      title: 'PostgreSQL elevation inspection',
+      entryKey: 'postgres-inspection-schedule-0001'
+    }, { actor: 'postgres_contract_test' });
+    const hostedInspectionSubmission = ledger.submitInspectionChecklist(job.id, hostedInspection.id, {
+      entryKey: 'postgres-inspection-submit-0001',
+      responses: hostedInspection.checklist.snapshot.items.map(item => ({ itemKey: item.key, result: 'pass' }))
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedInspectionSubmission.submission.integrityValid, true);
+    assert.equal(hostedInspectionSubmission.submission.result, 'passed');
+    ledger.resolveApproval(hostedInspectionSubmission.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted inspection checklist snapshot and complete responses verified.'
+    });
+    const hostedInspectionApproved = ledger.getJobDetail(job.id).inspections.find(record => record.id === hostedInspection.id);
+    assert.equal(hostedInspectionApproved.status, 'passed');
+    assert.equal(hostedInspectionApproved.checklist.submissions[0].status, 'passed');
+
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
     assert.ok(dashboard.metrics.documentTransmittals >= 1);
@@ -988,7 +1018,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '024_project_meeting_minutes');
+    assert.equal(migrations.currentVersion, '025_inspection_checklists');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1069,18 +1099,37 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('024_project_meeting_minutes'));
+  assert.deepEqual(versions, Array(4).fill('025_inspection_checklists'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 24);
+    assert.equal(Number(migrationCount.count), 25);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
       WHERE table_schema = 'public' AND table_name IN ('opportunities', 'opportunity_activities')
     `).rows[0];
     assert.equal(Number(opportunityTableCount.count), 2);
+    const inspectionChecklistTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN ('inspection_templates', 'inspection_checklist_submissions')
+    `).rows[0];
+    assert.equal(Number(inspectionChecklistTableCount.count), 2);
+    const inspectionChecklistIndexCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN (
+          'idx_inspection_templates_current',
+          'idx_inspection_checklist_inspection',
+          'idx_inspection_checklist_job',
+          'idx_inspection_checklist_approval'
+        )
+    `).rows[0];
+    assert.equal(Number(inspectionChecklistIndexCount.count), 4);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

@@ -181,6 +181,70 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ]
 };
 
+const BUILT_IN_INSPECTION_TEMPLATES = [
+  {
+    id: 'inspection_template_prestart_v1',
+    templateKey: 'prestart_site',
+    name: 'Pre-start site inspection',
+    inspectionType: 'pre_start',
+    discipline: 'safety',
+    version: 1,
+    items: [
+      { key: 'access', prompt: 'Work area access and emergency routes are clear', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+      { key: 'ppe', prompt: 'Required PPE is available and in use', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+      { key: 'permits', prompt: 'Required permits and current work information are available', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+      { key: 'plant_tools', prompt: 'Plant, tools, and temporary works are visibly fit for use', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+      { key: 'housekeeping', prompt: 'Work area housekeeping and public protection are adequate', required: true, allowNotApplicable: false, failureSeverity: 'medium' }
+    ]
+  },
+  {
+    id: 'inspection_template_quality_stage_v1',
+    templateKey: 'quality_stage',
+    name: 'Quality stage inspection',
+    inspectionType: 'quality_stage',
+    discipline: 'quality',
+    version: 1,
+    items: [
+      { key: 'current_documents', prompt: 'Current drawings, specifications, and approved submittals are being used', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+      { key: 'substrate', prompt: 'Substrate and preceding work are suitable for the next activity', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+      { key: 'dimensions', prompt: 'Set-out, dimensions, levels, and tolerances have been checked', required: true, allowNotApplicable: true, failureSeverity: 'medium' },
+      { key: 'workmanship', prompt: 'Workmanship and installed materials meet the retained requirements', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+      { key: 'concealed_evidence', prompt: 'Evidence is retained before work becomes concealed', required: true, allowNotApplicable: true, failureSeverity: 'medium' }
+    ]
+  },
+  {
+    id: 'inspection_template_handover_v1',
+    templateKey: 'handover_readiness',
+    name: 'Handover readiness inspection',
+    inspectionType: 'handover',
+    discipline: 'closeout',
+    version: 1,
+    items: [
+      { key: 'scope_complete', prompt: 'Retained contract scope and accepted changes are complete', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+      { key: 'tests', prompt: 'Required tests, commissioning, and certificates are retained', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+      { key: 'defects', prompt: 'Outstanding defects and punch items are identified and controlled', required: true, allowNotApplicable: false, failureSeverity: 'medium' },
+      { key: 'wkb_evidence', prompt: 'Required Wkb-style quality evidence is linked to the job dossier', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+      { key: 'client_area', prompt: 'Client areas are clean, protected, and ready for controlled handover', required: true, allowNotApplicable: false, failureSeverity: 'medium' }
+    ]
+  }
+];
+
+function builtInInspectionTemplateRows(timestamp = null) {
+  return BUILT_IN_INSPECTION_TEMPLATES.map(template => ({
+    id: template.id,
+    template_key: template.templateKey,
+    name: template.name,
+    inspection_type: template.inspectionType,
+    discipline: template.discipline,
+    version_number: template.version,
+    status: 'active',
+    items_json: toJson(normalizeInspectionTemplateItems(template.items), []),
+    data_json: toJson({ builtIn: true, immutable: true }),
+    created_at: timestamp,
+    updated_at: timestamp
+  }));
+}
+
 const LEDGER_CLOSED_STATUSES = new Set([
   'accepted',
   'approved',
@@ -1165,6 +1229,97 @@ function normalizeList(value) {
     .filter(Boolean);
 }
 
+function inspectionTemplateKey(value, fallback = '') {
+  const key = normalizeStatus(value, fallback)
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+  if (!key || key.length > 80) {
+    throw ledgerInputError('inspection_template_key_invalid', 'Inspection template key must contain 1 to 80 letters, numbers, or underscores.');
+  }
+  return key;
+}
+
+function normalizeInspectionTemplateItems(value) {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 50) {
+    throw ledgerInputError('inspection_template_items_invalid', 'Inspection templates require between 2 and 50 checklist items.');
+  }
+  const keys = new Set();
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw ledgerInputError('inspection_template_item_invalid', `Checklist item ${index + 1} must be an object.`);
+    }
+    const prompt = normalizeText(item.prompt || item.label || item.title, '');
+    if (prompt.length < 3 || prompt.length > 300) {
+      throw ledgerInputError('inspection_template_item_invalid', `Checklist item ${index + 1} requires a prompt between 3 and 300 characters.`);
+    }
+    const key = inspectionTemplateKey(item.key || `item_${index + 1}`);
+    if (keys.has(key)) {
+      throw ledgerInputError('inspection_template_item_duplicate', `Checklist item key ${key} is repeated.`);
+    }
+    keys.add(key);
+    return {
+      key,
+      prompt,
+      required: item.required !== false,
+      allowNotApplicable: item.allowNotApplicable === true || item.allow_not_applicable === true,
+      failureSeverity: normalizePriority(item.failureSeverity || item.failure_severity || item.severity || 'medium'),
+      category: normalizeStatus(item.category || 'general')
+    };
+  });
+}
+
+function normalizeInspectionChecklistResponses(value, checklistItems) {
+  if (!Array.isArray(value)) {
+    throw ledgerInputError('inspection_checklist_responses_invalid', 'Inspection checklist responses must be an array.');
+  }
+  const byKey = new Map();
+  const retainedItems = new Map(checklistItems.map(item => [item.key, item]));
+  for (const response of value) {
+    if (!response || typeof response !== 'object' || Array.isArray(response)) {
+      throw ledgerInputError('inspection_checklist_response_invalid', 'Each inspection checklist response must be an object.');
+    }
+    const itemKey = inspectionTemplateKey(response.itemKey || response.item_key || response.key, '');
+    const item = retainedItems.get(itemKey);
+    if (!item) {
+      throw ledgerInputError('inspection_checklist_item_unknown', `Checklist response ${itemKey} does not belong to this inspection snapshot.`);
+    }
+    if (byKey.has(itemKey)) {
+      throw ledgerInputError('inspection_checklist_response_duplicate', `Checklist item ${itemKey} was answered more than once.`);
+    }
+    const result = normalizeStatus(response.result, '');
+    if (!['pass', 'fail', 'not_applicable'].includes(result)) {
+      throw ledgerInputError('inspection_checklist_result_invalid', `Checklist item ${itemKey} must be pass, fail, or not applicable.`);
+    }
+    if (result === 'not_applicable' && !item.allowNotApplicable) {
+      throw ledgerInputError('inspection_checklist_not_applicable_forbidden', `Checklist item ${itemKey} cannot be marked not applicable.`);
+    }
+    const notes = normalizeText(response.notes || response.note, '');
+    if (notes.length > 2000) {
+      throw ledgerInputError('inspection_checklist_notes_too_long', `Checklist item ${itemKey} notes must be 2,000 characters or fewer.`);
+    }
+    const evidenceDocumentIds = [...new Set(normalizeList(
+      response.evidenceDocumentIds || response.evidence_document_ids || response.evidence
+    ).map(id => normalizeText(id, '')).filter(Boolean))];
+    if (evidenceDocumentIds.length > 20) {
+      throw ledgerInputError('inspection_checklist_evidence_invalid', `Checklist item ${itemKey} supports at most 20 evidence links.`);
+    }
+    if (result === 'fail' && notes.length < 3 && evidenceDocumentIds.length === 0) {
+      throw ledgerInputError('inspection_checklist_failure_evidence_required', `Failed checklist item ${itemKey} requires notes or retained evidence.`);
+    }
+    byKey.set(itemKey, { itemKey, result, notes: notes || null, evidenceDocumentIds });
+  }
+  const missing = checklistItems.filter(item => item.required && !byKey.has(item.key)).map(item => item.key);
+  if (missing.length) {
+    throw ledgerInputError(
+      'inspection_checklist_required_items_missing',
+      `Inspection checklist is missing required responses: ${missing.join(', ')}.`,
+      { missing }
+    );
+  }
+  return checklistItems.filter(item => byKey.has(item.key)).map(item => ({ ...byKey.get(item.key) }));
+}
+
 function rowDate(value) {
   return value || null;
 }
@@ -1905,6 +2060,82 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON meeting_action_items(carried_from_action_id)
           WHERE carried_from_action_id IS NOT NULL AND status <> 'cancelled';
       `);
+    }
+  },
+  {
+    version: '025_inspection_checklists',
+    description: 'Retain reusable inspection templates, immutable checklist snapshots, replay-safe field submissions, and corrective-action links.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS inspection_templates (
+          id TEXT PRIMARY KEY,
+          template_key TEXT NOT NULL,
+          name TEXT NOT NULL,
+          inspection_type TEXT NOT NULL DEFAULT 'site_inspection',
+          discipline TEXT NOT NULL DEFAULT 'general',
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          items_json TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(template_key, version_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_inspection_templates_active
+          ON inspection_templates(status, discipline, name, version_number DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_templates_current
+          ON inspection_templates(template_key)
+          WHERE status = 'active';
+
+        CREATE TABLE IF NOT EXISTS inspection_checklist_submissions (
+          id TEXT PRIMARY KEY,
+          inspection_id TEXT NOT NULL REFERENCES inspection_records(id) ON DELETE CASCADE,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          template_id TEXT REFERENCES inspection_templates(id) ON DELETE SET NULL,
+          template_version INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          result TEXT NOT NULL,
+          response_count INTEGER NOT NULL,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          approval_id TEXT,
+          submitted_by TEXT NOT NULL,
+          submitted_at TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_inspection_checklist_inspection
+          ON inspection_checklist_submissions(inspection_id, submitted_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_inspection_checklist_job
+          ON inspection_checklist_submissions(job_id, status, submitted_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_inspection_checklist_approval
+          ON inspection_checklist_submissions(approval_id, status);
+      `);
+
+      const timestamp = nowIso();
+      const insertTemplate = db.prepare(`
+        INSERT INTO inspection_templates (
+          id, template_key, name, inspection_type, discipline, version_number, status,
+          items_json, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+      `);
+      for (const template of builtInInspectionTemplateRows(timestamp)) {
+        insertTemplate.run(
+          template.id,
+          template.template_key,
+          template.name,
+          template.inspection_type,
+          template.discipline,
+          template.version_number,
+          template.items_json,
+          template.data_json,
+          template.created_at,
+          template.updated_at
+        );
+      }
     }
   }
 ];
@@ -14709,6 +14940,436 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  listInspectionTemplates(filters = {}) {
+    const includeSuperseded = filters.includeSuperseded === true || filters.include_superseded === true;
+    const discipline = normalizeStatus(filters.discipline, '');
+    const clauses = [];
+    const parameters = [];
+    if (!includeSuperseded) clauses.push("status = 'active'");
+    if (discipline) {
+      clauses.push('discipline = ?');
+      parameters.push(discipline);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return this.db.prepare(`
+      SELECT * FROM inspection_templates
+      ${where}
+      ORDER BY status = 'active' DESC, discipline ASC, name ASC, version_number DESC
+    `).all(...parameters).map(row => this.mapInspectionTemplate(row));
+  }
+
+  listInspectionChecklistSubmissions(filters = {}) {
+    const clauses = [];
+    const parameters = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('job_id = ?');
+      parameters.push(filters.jobId || filters.job_id);
+    }
+    if (filters.inspectionId || filters.inspection_id) {
+      clauses.push('inspection_id = ?');
+      parameters.push(filters.inspectionId || filters.inspection_id);
+    }
+    const limit = Math.min(Math.max(Number(filters.limit || 500), 1), 5000);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return this.db.prepare(`
+      SELECT * FROM inspection_checklist_submissions
+      ${where}
+      ORDER BY submitted_at DESC, created_at DESC
+      LIMIT ?
+    `).all(...parameters, limit).map(row => this.mapInspectionChecklistSubmission(row));
+  }
+
+  createInspectionTemplate(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const name = normalizeText(payload.name || payload.title, '');
+      if (name.length < 3 || name.length > 160) {
+        throw ledgerInputError('inspection_template_name_invalid', 'Inspection template name must be between 3 and 160 characters.');
+      }
+      const items = normalizeInspectionTemplateItems(payload.items || payload.checklist);
+      const sourceTemplateId = normalizeText(payload.sourceTemplateId || payload.source_template_id, '');
+      const source = sourceTemplateId
+        ? this.db.prepare('SELECT * FROM inspection_templates WHERE id = ?').get(sourceTemplateId)
+        : null;
+      if (sourceTemplateId && !source) {
+        const error = new Error('Inspection template revision source was not found.');
+        error.statusCode = 404;
+        error.code = 'inspection_template_not_found';
+        throw error;
+      }
+      if (source && normalizeStatus(source.status, '') !== 'active') {
+        throw ledgerInputError('inspection_template_revision_stale', 'Only the current active inspection template can be revised.');
+      }
+      if (source && fromJson(source.data_json, {}).builtIn === true) {
+        throw ledgerInputError('inspection_template_builtin_immutable', 'Built-in inspection templates are immutable; create a new custom template instead.');
+      }
+      const templateKey = source
+        ? source.template_key
+        : inspectionTemplateKey(payload.templateKey || payload.template_key || name);
+      const versionNumber = source ? Number(source.version_number || 0) + 1 : 1;
+      if (!source) {
+        const existing = this.db.prepare('SELECT id FROM inspection_templates WHERE template_key = ? LIMIT 1').get(templateKey);
+        if (existing) {
+          throw ledgerInputError('inspection_template_key_conflict', 'This inspection template key already exists; revise the active template or choose another key.');
+        }
+      }
+      const inspectionType = normalizeStatus(payload.inspectionType || payload.inspection_type, source?.inspection_type || 'site_inspection');
+      const discipline = normalizeStatus(payload.discipline, source?.discipline || 'general');
+      const id = makeId('inspection_template');
+      const timestamp = nowIso();
+      if (source) {
+        this.db.prepare("UPDATE inspection_templates SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'active'")
+          .run(timestamp, source.id);
+      }
+      this.db.prepare(`
+        INSERT INTO inspection_templates (
+          id, template_key, name, inspection_type, discipline, version_number, status,
+          items_json, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+      `).run(
+        id,
+        templateKey,
+        name,
+        inspectionType,
+        discipline,
+        versionNumber,
+        toJson(items, []),
+        toJson({
+          builtIn: false,
+          immutable: true,
+          notes: normalizeText(payload.notes || payload.note, '') || null,
+          revisedFromTemplateId: source?.id || null
+        }),
+        timestamp,
+        timestamp
+      );
+      const template = this.mapInspectionTemplate(this.db.prepare('SELECT * FROM inspection_templates WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'inspection_template',
+        entityId: id,
+        action: source ? 'revise_inspection_template' : 'create_inspection_template',
+        actor,
+        before: source ? this.mapInspectionTemplate(source) : null,
+        after: template,
+        metadata: { templateKey, versionNumber, itemCount: items.length, externalCommitments: 0 }
+      });
+      return template;
+    });
+  }
+
+  createInspectionFromTemplate(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const templateId = normalizeText(payload.templateId || payload.template_id, '');
+      const templateRow = this.db.prepare("SELECT * FROM inspection_templates WHERE id = ? AND status = 'active'").get(templateId);
+      if (!templateRow) {
+        const error = new Error('Active inspection template was not found.');
+        error.statusCode = 404;
+        error.code = 'inspection_template_not_found';
+        throw error;
+      }
+      const template = this.mapInspectionTemplate(templateRow);
+      const title = normalizeText(payload.title, template.name);
+      if (title.length < 3 || title.length > 240) {
+        throw ledgerInputError('inspection_title_invalid', 'Inspection title must be between 3 and 240 characters.');
+      }
+      const scheduledAtInput = normalizeText(payload.scheduledAt || payload.scheduled_at, '');
+      let scheduledAt = null;
+      if (scheduledAtInput) {
+        const parsed = new Date(scheduledAtInput);
+        if (Number.isNaN(parsed.getTime())) {
+          throw ledgerInputError('inspection_schedule_invalid', 'Inspection schedule date is invalid.');
+        }
+        scheduledAt = parsed.toISOString();
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey && !/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('inspection_entry_key_invalid', 'Inspection retry key must contain 8 to 200 safe characters.');
+      }
+      const id = entryKey
+        ? `inspection_${sha256Text(`${jobId}\0${entryKey}`).slice(0, 24)}`
+        : makeId('inspection');
+      const existing = this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(id);
+      if (existing) {
+        const existingData = fromJson(existing.data_json, {});
+        if (existing.job_id !== jobId || existingData.entryKey !== entryKey || existingData.checklistSnapshot?.templateId !== templateId) {
+          throw ledgerInputError('inspection_entry_key_conflict', 'This inspection retry key was already used for another request.');
+        }
+        return { ...this.mapInspection(existing), replayed: true };
+      }
+      const checklistSnapshot = {
+        templateId: template.id,
+        templateKey: template.templateKey,
+        templateName: template.name,
+        templateVersion: template.versionNumber,
+        inspectionType: template.inspectionType,
+        discipline: template.discipline,
+        items: template.items
+      };
+      const checklistSnapshotHash = sha256Json(checklistSnapshot);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO inspection_records (
+          id, job_id, inspection_type, title, status, result, inspector, scheduled_at,
+          completed_at, defects_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'scheduled', 'pending', ?, ?, NULL, '[]', NULL, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        template.inspectionType,
+        title,
+        payload.inspector || payload.owner || actor,
+        scheduledAt,
+        toJson({
+          requestedStatus: 'scheduled',
+          notes: normalizeText(payload.notes || payload.note, '') || null,
+          wkbEvidence: payload.wkbEvidence === true,
+          clientVisible: false,
+          checklistStatus: 'scheduled',
+          checklistSnapshot,
+          checklistSnapshotHash,
+          latestChecklistSubmissionId: null,
+          entryKey: entryKey || null
+        }),
+        timestamp,
+        timestamp
+      );
+      const inspection = this.mapInspection(this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'inspection_record',
+        entityId: id,
+        jobId,
+        action: 'schedule_inspection_checklist',
+        actor,
+        after: inspection,
+        metadata: {
+          templateId,
+          templateVersion: template.versionNumber,
+          checklistSnapshotHash,
+          itemCount: template.items.length,
+          externalCommitments: 0
+        }
+      });
+      return inspection;
+    });
+  }
+
+  submitInspectionChecklist(jobId, inspectionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('inspection_checklist_entry_key_invalid', 'Checklist submission requires a retry key containing 8 to 200 safe characters.');
+      }
+      const submissionId = `inspection_submission_${sha256Text(`${jobId}\0${inspectionId}\0${entryKey}`).slice(0, 24)}`;
+      const inspectionRow = this.db.prepare('SELECT * FROM inspection_records WHERE id = ? AND job_id = ?').get(inspectionId, jobId);
+      if (!inspectionRow) {
+        const error = new Error('Inspection was not found for this job.');
+        error.statusCode = 404;
+        error.code = 'inspection_not_found';
+        throw error;
+      }
+      const inspectionData = fromJson(inspectionRow.data_json, {});
+      const checklistSnapshot = inspectionData.checklistSnapshot;
+      if (!checklistSnapshot || !Array.isArray(checklistSnapshot.items) || !inspectionData.checklistSnapshotHash) {
+        throw ledgerInputError('inspection_checklist_not_configured', 'This inspection was not scheduled from a retained checklist template.');
+      }
+      if (sha256Json(checklistSnapshot) !== inspectionData.checklistSnapshotHash) {
+        const error = new Error('Inspection checklist snapshot integrity verification failed.');
+        error.statusCode = 409;
+        error.code = 'inspection_checklist_snapshot_tampered';
+        throw error;
+      }
+      const responses = normalizeInspectionChecklistResponses(payload.responses, checklistSnapshot.items);
+      const notes = normalizeText(payload.notes || payload.note, '');
+      if (notes.length > 4000) {
+        throw ledgerInputError('inspection_checklist_notes_too_long', 'Inspection checklist notes must be 4,000 characters or fewer.');
+      }
+      const retainedResponses = responses.map(response => {
+        const item = checklistSnapshot.items.find(candidate => candidate.key === response.itemKey);
+        return {
+          ...response,
+          prompt: item.prompt,
+          category: item.category,
+          failureSeverity: item.failureSeverity,
+          required: item.required,
+          allowNotApplicable: item.allowNotApplicable
+        };
+      });
+      const requestHash = sha256Json({ responses: retainedResponses, notes: notes || null });
+      const existingSubmissionRow = this.db.prepare('SELECT * FROM inspection_checklist_submissions WHERE id = ?').get(submissionId);
+      if (existingSubmissionRow) {
+        const existingData = fromJson(existingSubmissionRow.data_json, {});
+        if (existingData.entryKey !== entryKey || existingData.requestHash !== requestHash) {
+          throw ledgerInputError('inspection_checklist_entry_key_conflict', 'This checklist retry key was already used for a different submission.');
+        }
+        return {
+          inspection: this.mapInspection(inspectionRow),
+          submission: { ...this.mapInspectionChecklistSubmission(existingSubmissionRow), replayed: true },
+          observations: normalizeList(existingData.observationIds)
+            .map(id => this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(id))
+            .filter(Boolean)
+            .map(row => this.mapObservation(row)),
+          approval: existingSubmissionRow.approval_id
+            ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existingSubmissionRow.approval_id))
+            : null,
+          replayed: true
+        };
+      }
+      if (!['scheduled', 'in_progress', 'pending_review'].includes(normalizeStatus(inspectionRow.status, ''))) {
+        const error = new Error(`Inspection checklist cannot be submitted from ${inspectionRow.status}.`);
+        error.statusCode = 409;
+        error.code = 'inspection_checklist_state_conflict';
+        throw error;
+      }
+      const evidenceIds = [...new Set(retainedResponses.flatMap(response => response.evidenceDocumentIds))];
+      for (const documentId of evidenceIds) {
+        const document = this.db.prepare('SELECT id FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+        if (!document) {
+          throw ledgerInputError('inspection_checklist_evidence_not_found', `Evidence document ${documentId} does not belong to this job.`);
+        }
+      }
+      const failures = retainedResponses.filter(response => response.result === 'fail');
+      const result = failures.length ? 'failed' : 'passed';
+      const timestamp = nowIso();
+      const observationIds = [];
+      for (const failure of failures) {
+        const observationId = `observation_${sha256Text(`${submissionId}\0${failure.itemKey}`).slice(0, 24)}`;
+        const observation = this.createObservationRecord(jobId, {
+          id: observationId,
+          category: checklistSnapshot.discipline === 'safety' ? 'safety' : 'quality',
+          title: `${checklistSnapshot.templateName}: ${failure.prompt}`.slice(0, 240),
+          status: 'open',
+          severity: failure.failureSeverity,
+          responsible: payload.responsible || actor,
+          dueAt: payload.correctiveDueAt || payload.corrective_due_at || futureIsoDate(failure.failureSeverity === 'critical' ? 1 : 3),
+          notes: failure.notes || 'Failed inspection checklist item requires corrective review.',
+          correctiveAction: 'Review the failed checklist evidence, correct the condition, and retain closure proof.',
+          evidenceDocumentIds: failure.evidenceDocumentIds,
+          sourceInspectionId: inspectionId,
+          sourceChecklistSubmissionId: submissionId,
+          sourceChecklistItemKey: failure.itemKey
+        }, { actor, audit: true });
+        observationIds.push(observation.id);
+      }
+      const transition = this.transitionLifecycleRecord(jobId, 'inspection', inspectionId, {
+        status: result,
+        result,
+        notes: notes || `${retainedResponses.length} checklist responses retained; ${failures.length} failed item(s).`,
+        defects: failures.map(failure => ({
+          itemKey: failure.itemKey,
+          prompt: failure.prompt,
+          severity: failure.failureSeverity,
+          notes: failure.notes,
+          evidenceDocumentIds: failure.evidenceDocumentIds,
+          observationId: observationIds[failures.indexOf(failure)]
+        })),
+        evidence: evidenceIds
+      }, { actor });
+      const submissionSnapshot = {
+        inspectionId,
+        jobId,
+        template: {
+          id: checklistSnapshot.templateId,
+          key: checklistSnapshot.templateKey,
+          name: checklistSnapshot.templateName,
+          version: checklistSnapshot.templateVersion
+        },
+        checklistSnapshotHash: inspectionData.checklistSnapshotHash,
+        result,
+        responses: retainedResponses,
+        notes: notes || null,
+        submittedBy: actor,
+        submittedAt: timestamp
+      };
+      const submissionSnapshotJson = toJson(submissionSnapshot);
+      const submissionSnapshotHash = sha256Text(submissionSnapshotJson);
+      this.db.prepare(`
+        INSERT INTO inspection_checklist_submissions (
+          id, inspection_id, job_id, template_id, template_version, status, result,
+          response_count, failed_count, snapshot_json, snapshot_hash, approval_id,
+          submitted_by, submitted_at, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        submissionId,
+        inspectionId,
+        jobId,
+        checklistSnapshot.templateId,
+        checklistSnapshot.templateVersion,
+        result,
+        retainedResponses.length,
+        failures.length,
+        submissionSnapshotJson,
+        submissionSnapshotHash,
+        transition.approval?.id || null,
+        actor,
+        timestamp,
+        toJson({ entryKey, requestHash, observationIds }),
+        timestamp,
+        timestamp
+      );
+      const nextInspectionData = {
+        ...fromJson(this.db.prepare('SELECT data_json FROM inspection_records WHERE id = ?').get(inspectionId)?.data_json, {}),
+        checklistStatus: 'pending_approval',
+        latestChecklistSubmissionId: submissionId,
+        latestChecklistSummary: {
+          result,
+          responseCount: retainedResponses.length,
+          failedCount: failures.length,
+          submittedAt: timestamp,
+          submissionSnapshotHash
+        }
+      };
+      this.db.prepare('UPDATE inspection_records SET data_json = ?, updated_at = ? WHERE id = ?')
+        .run(toJson(nextInspectionData), timestamp, inspectionId);
+      if (transition.approval?.id) {
+        const approvalData = fromJson(this.db.prepare('SELECT data_json FROM approvals WHERE id = ?').get(transition.approval.id)?.data_json, {});
+        this.db.prepare('UPDATE approvals SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson({
+          ...approvalData,
+          checklistSubmissionId: submissionId,
+          checklistSnapshotHash: submissionSnapshotHash,
+          responseCount: retainedResponses.length,
+          failedCount: failures.length,
+          observationIds
+        }), timestamp, transition.approval.id);
+      }
+      const retainedApproval = transition.approval?.id
+        ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(transition.approval.id))
+        : null;
+      const submission = this.mapInspectionChecklistSubmission(
+        this.db.prepare('SELECT * FROM inspection_checklist_submissions WHERE id = ?').get(submissionId)
+      );
+      const inspection = this.mapInspection(this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(inspectionId));
+      this.audit({
+        entityType: 'inspection_checklist_submission',
+        entityId: submissionId,
+        jobId,
+        action: 'submit_inspection_checklist',
+        actor,
+        after: submission,
+        metadata: {
+          inspectionId,
+          result,
+          responseCount: retainedResponses.length,
+          failedCount: failures.length,
+          observationIds,
+          approvalId: transition.approval?.id || null,
+          snapshotHash: submissionSnapshotHash,
+          externalCommitments: 0
+        }
+      });
+      return {
+        inspection,
+        submission,
+        observations: observationIds.map(id => this.mapObservation(this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(id))),
+        approval: retainedApproval,
+        replayed: false
+      };
+    });
+  }
+
   createInspectionRecord(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
@@ -14782,7 +15443,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.transaction(() => {
       this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const id = makeId('observation');
+      const id = normalizeText(payload.id, '') || makeId('observation');
       const timestamp = nowIso();
       const requestedStatus = normalizeStatus(payload.status, 'open');
       const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'medium');
@@ -14813,6 +15474,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           notes: payload.notes || payload.note || null,
           correctiveAction: payload.correctiveAction || payload.corrective_action || null,
           photos: normalizeList(payload.photos),
+          evidenceDocumentIds: normalizeList(payload.evidenceDocumentIds || payload.evidence_document_ids),
+          sourceInspectionId: payload.sourceInspectionId || payload.source_inspection_id || null,
+          sourceChecklistSubmissionId: payload.sourceChecklistSubmissionId || payload.source_checklist_submission_id || null,
+          sourceChecklistItemKey: payload.sourceChecklistItemKey || payload.source_checklist_item_key || null,
           clientVisible: payload.clientVisible === true
         }),
         timestamp,
@@ -19156,6 +19821,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       SET status = ?, approval_id = NULL, data_json = ?, updated_at = ?
       WHERE id = ?
     `).run(restoredStatus, toJson(nextData), timestamp, approvalRow.target_id);
+    if (normalizeStatus(approvalRow.target_type, '') === 'inspection_record') {
+      this.db.prepare(`
+        UPDATE inspection_checklist_submissions
+        SET status = ?, updated_at = ?
+        WHERE inspection_id = ? AND approval_id = ? AND status = 'pending_approval'
+      `).run(resolutionStatus, timestamp, approvalRow.target_id, approvalRow.id);
+      if (data.latestChecklistSubmissionId) {
+        this.db.prepare('UPDATE inspection_records SET data_json = ? WHERE id = ?').run(toJson({
+          ...nextData,
+          checklistStatus: resolutionStatus
+        }), approvalRow.target_id);
+      }
+    }
     this.audit({
       entityType: approvalRow.target_type,
       entityId: approvalRow.target_id,
@@ -20476,13 +21154,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.db.prepare("UPDATE safety_checks SET status = 'approved', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?")
         .run(timestamp, timestamp, targetId);
     } else if (targetType === 'inspection_record') {
-      const inspection = this.db.prepare('SELECT data_json FROM inspection_records WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(inspection?.data_json, {}).requestedStatus, 'completed');
+      const inspection = this.db.prepare('SELECT approval_id, data_json FROM inspection_records WHERE id = ?').get(targetId);
+      const inspectionData = fromJson(inspection?.data_json, {});
+      const requestedStatus = normalizeStatus(inspectionData.requestedStatus, 'completed');
       const approvedStatus = ['completed', 'passed', 'failed', 'approved', 'closed'].includes(requestedStatus)
         ? requestedStatus
         : 'completed';
-      this.db.prepare('UPDATE inspection_records SET status = ?, completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?')
-        .run(approvedStatus, timestamp, timestamp, targetId);
+      this.db.prepare('UPDATE inspection_records SET status = ?, completed_at = COALESCE(completed_at, ?), data_json = ?, updated_at = ? WHERE id = ?')
+        .run(approvedStatus, timestamp, toJson({
+          ...inspectionData,
+          checklistStatus: inspectionData.latestChecklistSubmissionId ? approvedStatus : inspectionData.checklistStatus
+        }), timestamp, targetId);
+      if (inspection?.approval_id) {
+        this.db.prepare(`
+          UPDATE inspection_checklist_submissions
+          SET status = ?, updated_at = ?
+          WHERE inspection_id = ? AND approval_id = ? AND status = 'pending_approval'
+        `).run(approvedStatus, timestamp, targetId, inspection.approval_id);
+      }
     } else if (targetType === 'observation_record') {
       const observation = this.db.prepare('SELECT data_json FROM observation_records WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(observation?.data_json, {}).requestedStatus, 'resolved');
@@ -27586,6 +28275,50 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (selectionsWithoutApproval) issues.push({ severity: 'warning', message: `${selectionsWithoutApproval} locked client selection(s) have no approval gate.` });
     const permitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM permit_records WHERE status IN ('active', 'approved', 'issued', 'submitted') AND approval_id IS NULL").get().count || 0);
     if (permitsWithoutApproval) issues.push({ severity: 'warning', message: `${permitsWithoutApproval} active permit/compliance record(s) have no approval gate.` });
+    const checklistInspectionRows = this.db.prepare("SELECT * FROM inspection_records WHERE data_json LIKE '%\"checklistSnapshot\"%'").all();
+    for (const inspection of checklistInspectionRows) {
+      const data = fromJson(inspection.data_json, {});
+      if (!data.checklistSnapshot || !data.checklistSnapshotHash || sha256Json(data.checklistSnapshot) !== data.checklistSnapshotHash) {
+        issues.push({ severity: 'error', message: `Inspection ${inspection.id} failed retained checklist-template snapshot verification.` });
+      }
+    }
+    const checklistSubmissionRows = this.db.prepare('SELECT * FROM inspection_checklist_submissions ORDER BY created_at').all();
+    for (const submission of checklistSubmissionRows) {
+      const snapshotJson = normalizeText(submission.snapshot_json, '');
+      const snapshot = fromJson(snapshotJson, null);
+      if (!snapshot || sha256Text(snapshotJson) !== submission.snapshot_hash) {
+        issues.push({ severity: 'error', message: `Inspection checklist submission ${submission.id} failed retained snapshot verification.` });
+        continue;
+      }
+      const inspection = this.db.prepare('SELECT job_id FROM inspection_records WHERE id = ?').get(submission.inspection_id);
+      if (!inspection || inspection.job_id !== submission.job_id || snapshot.inspectionId !== submission.inspection_id || snapshot.jobId !== submission.job_id) {
+        issues.push({ severity: 'error', message: `Inspection checklist submission ${submission.id} crosses a job boundary or references a missing inspection.` });
+      }
+      const observationIds = normalizeList(fromJson(submission.data_json, {}).observationIds);
+      const validObservationCount = observationIds.filter(id => {
+        const observation = this.db.prepare('SELECT job_id, data_json FROM observation_records WHERE id = ?').get(id);
+        const observationData = fromJson(observation?.data_json, {});
+        return observation?.job_id === submission.job_id
+          && observationData.sourceInspectionId === submission.inspection_id
+          && observationData.sourceChecklistSubmissionId === submission.id;
+      }).length;
+      if (Number(submission.failed_count || 0) !== observationIds.length || validObservationCount !== observationIds.length) {
+        issues.push({ severity: 'error', message: `Inspection checklist submission ${submission.id} does not match its corrective observation register.` });
+      }
+    }
+    const checklistSubmissionsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM inspection_checklist_submissions submissions
+      LEFT JOIN approvals ON approvals.id = submissions.approval_id
+      WHERE submissions.status IN ('pending_approval', 'passed', 'failed', 'completed', 'closed')
+        AND (
+          approvals.id IS NULL OR approvals.target_type <> 'inspection_record'
+          OR approvals.target_id <> submissions.inspection_id
+          OR (submissions.status = 'pending_approval' AND approvals.status <> 'pending')
+          OR (submissions.status <> 'pending_approval' AND approvals.status <> 'approved')
+        )
+    `).get().count || 0);
+    if (checklistSubmissionsWithoutApproval) issues.push({ severity: 'error', message: `${checklistSubmissionsWithoutApproval} inspection checklist submission(s) lack a matching approval decision.` });
     const inspectionsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM inspection_records WHERE status IN ('completed', 'passed', 'failed', 'approved', 'closed') AND approval_id IS NULL").get().count || 0);
     if (inspectionsWithoutApproval) issues.push({ severity: 'warning', message: `${inspectionsWithoutApproval} completed inspection record(s) have no approval gate.` });
     const observationsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM observation_records WHERE (severity IN ('high', 'critical') OR status IN ('closed', 'resolved', 'approved', 'client_visible')) AND approval_id IS NULL").get().count || 0);
@@ -27702,6 +28435,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         meetingActionItems: this.count('meeting_action_items'),
         clientSelections: this.count('client_selections'),
         permitRecords: this.count('permit_records'),
+        inspectionTemplates: this.count('inspection_templates'),
+        inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
         inspectionRecords: this.count('inspection_records'),
         observationRecords: this.count('observation_records'),
         incidentRecords: this.count('incident_records'),
@@ -28256,7 +28991,61 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapInspectionTemplate(row) {
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      templateKey: row.template_key,
+      name: row.name,
+      inspectionType: row.inspection_type,
+      discipline: row.discipline,
+      versionNumber: Number(row.version_number || 0),
+      status: row.status,
+      items: fromJson(row.items_json, []),
+      builtIn: data.builtIn === true,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapInspectionChecklistSubmission(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      inspectionId: row.inspection_id,
+      jobId: row.job_id,
+      templateId: row.template_id,
+      templateVersion: Number(row.template_version || 0),
+      status: row.status,
+      result: row.result,
+      responseCount: Number(row.response_count || 0),
+      failedCount: Number(row.failed_count || 0),
+      snapshot,
+      snapshotHash: row.snapshot_hash,
+      integrityValid: Boolean(snapshot && sha256Text(snapshotJson) === row.snapshot_hash),
+      approvalId: row.approval_id,
+      submittedBy: row.submitted_by,
+      submittedAt: row.submitted_at,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapInspection(row) {
+    const data = fromJson(row.data_json, {});
+    const checklistSnapshot = data.checklistSnapshot || null;
+    const checklistSnapshotHash = data.checklistSnapshotHash || null;
+    const submissions = checklistSnapshot
+      ? this.db.prepare(`
+          SELECT * FROM inspection_checklist_submissions
+          WHERE inspection_id = ?
+          ORDER BY submitted_at DESC, created_at DESC
+        `).all(row.id).map(submission => this.mapInspectionChecklistSubmission(submission))
+      : [];
     return {
       id: row.id,
       jobId: row.job_id,
@@ -28269,7 +29058,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       completedAt: row.completed_at,
       defects: fromJson(row.defects_json, []),
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      checklist: checklistSnapshot ? {
+        configured: true,
+        status: data.checklistStatus || row.status,
+        snapshot: checklistSnapshot,
+        snapshotHash: checklistSnapshotHash,
+        integrityValid: sha256Json(checklistSnapshot) === checklistSnapshotHash,
+        latestSubmissionId: data.latestChecklistSubmissionId || null,
+        summary: data.latestChecklistSummary || null,
+        submissions
+      } : { configured: false, status: null, snapshot: null, snapshotHash: null, integrityValid: null, latestSubmissionId: null, summary: null, submissions: [] },
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -29398,5 +30197,6 @@ module.exports = {
   auditEventFromRow,
   rebuildAuditChain,
   verifyAuditChainRows,
-  appendAuditEventToDatabase
+  appendAuditEventToDatabase,
+  builtInInspectionTemplateRows
 };

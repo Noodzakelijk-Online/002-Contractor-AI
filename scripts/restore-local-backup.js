@@ -235,6 +235,37 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup project-meeting constraints are incomplete: ${missingMeetingIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('025_inspection_checklists')) {
+        const checklistTables = ['inspection_templates', 'inspection_checklist_submissions'];
+        const missingChecklistTables = checklistTables.filter(table => !retainedTables.has(table));
+        if (missingChecklistTables.length) {
+          throw new Error(`Backup inspection-checklist schema is incomplete: ${missingChecklistTables.join(', ')}.`);
+        }
+        const templateColumns = new Set(database.prepare('PRAGMA table_info(inspection_templates)').all().map(row => row.name));
+        const missingTemplateColumns = ['template_key', 'version_number', 'items_json', 'status']
+          .filter(column => !templateColumns.has(column));
+        if (missingTemplateColumns.length) {
+          throw new Error(`Backup inspection-template columns are incomplete: ${missingTemplateColumns.join(', ')}.`);
+        }
+        const submissionColumns = new Set(database.prepare('PRAGMA table_info(inspection_checklist_submissions)').all().map(row => row.name));
+        const missingSubmissionColumns = ['inspection_id', 'job_id', 'snapshot_json', 'snapshot_hash', 'approval_id', 'failed_count']
+          .filter(column => !submissionColumns.has(column));
+        if (missingSubmissionColumns.length) {
+          throw new Error(`Backup inspection-checklist submission columns are incomplete: ${missingSubmissionColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const checklistIndexes = [
+          'idx_inspection_templates_active',
+          'idx_inspection_templates_current',
+          'idx_inspection_checklist_inspection',
+          'idx_inspection_checklist_job',
+          'idx_inspection_checklist_approval'
+        ];
+        const missingChecklistIndexes = checklistIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingChecklistIndexes.length) {
+          throw new Error(`Backup inspection-checklist constraints are incomplete: ${missingChecklistIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

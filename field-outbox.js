@@ -6,7 +6,7 @@ const MAX_EVIDENCE_DRAFTS = 20;
 const MAX_TOTAL_EVIDENCE_BYTES = 50 * 1024 * 1024;
 const MAX_OPERATION_DRAFTS = 100;
 const MAX_TOTAL_OPERATION_BYTES = 1024 * 1024;
-const FIELD_OPERATION_TYPES = new Set(['progress', 'daily_log']);
+const FIELD_OPERATION_TYPES = new Set(['progress', 'daily_log', 'inspection_checklist']);
 
 function onlineState() {
   return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
@@ -148,7 +148,7 @@ export async function enqueueFieldOperationDraft({ id, type, jobId, payload, ope
   };
   const existingSize = drafts.reduce((total, item) => total + operationSize(item), 0);
   if (drafts.length >= MAX_OPERATION_DRAFTS || existingSize + operationSize(draft) > MAX_TOTAL_OPERATION_BYTES) {
-    throw new Error('The field operation outbox is full. Reconnect and sync existing daily logs and progress updates before saving another draft.');
+    throw new Error('The field operation outbox is full. Reconnect and sync existing daily logs, progress updates, and inspection checklists before saving another draft.');
   }
   await withStore(OPERATION_STORE_NAME, 'readwrite', store => requestResult(store.put(draft)));
   return draft;

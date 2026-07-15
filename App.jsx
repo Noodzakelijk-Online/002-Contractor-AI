@@ -181,11 +181,21 @@ async function recordFieldEvidence({ id, jobId, notes, riskLevel, file }) {
 }
 
 async function recordFieldOperation({ id, type, jobId, payload }) {
-  const route = type === 'daily_log' ? 'daily-logs' : type === 'progress' ? 'progress' : null
+  const inspectionId = type === 'inspection_checklist' ? String(payload?.inspectionId || '') : ''
+  const route =
+    type === 'daily_log'
+      ? 'daily-logs'
+      : type === 'progress'
+        ? 'progress'
+        : type === 'inspection_checklist' && inspectionId
+          ? `inspections/${encodeURIComponent(inspectionId)}/checklist-submissions`
+          : null
   if (!route) throw new Error('This queued field operation is not supported.')
+  const requestPayload = { ...payload, entryKey: id }
+  delete requestPayload.inspectionId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
-    body: JSON.stringify({ ...payload, entryKey: id }),
+    body: JSON.stringify(requestPayload),
   })
 }
 
@@ -677,6 +687,107 @@ function fieldScopedDashboard(jobs) {
 
 function initialOperatorDashboard(jobs) {
   return { ...fieldScopedDashboard(jobs), fieldScoped: false }
+}
+
+function upsertById(records, record) {
+  if (!record?.id) return records || EMPTY_LIST
+  return [record, ...(records || EMPTY_LIST).filter((item) => item.id !== record.id)]
+}
+
+function reconcileJobCollections(data, job) {
+  if (!data || !job?.id) return data
+  const archived = job.status === 'archived'
+  return {
+    ...data,
+    jobs: archived ? (data.jobs || EMPTY_LIST).filter((item) => item.id !== job.id) : upsertById(data.jobs, job),
+    archivedJobs: archived
+      ? upsertById(data.archivedJobs, job)
+      : (data.archivedJobs || EMPTY_LIST).filter((item) => item.id !== job.id),
+  }
+}
+
+async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false) {
+  if (section === 'pipeline') {
+    const result = await api('/api/ledger/opportunities?includeClosed=true&limit=500')
+    return { opportunities: result.opportunities || [], opportunityForecast: result.forecast || null }
+  }
+  if (section === 'jobs') {
+    const [jobs, templates] = await Promise.all([
+      api('/api/ledger/jobs?limit=100'),
+      api('/api/ledger/inspection-templates'),
+    ])
+    return { jobs: jobs.jobs || [], inspectionTemplates: templates.templates || [] }
+  }
+  if (section === 'approvals') {
+    const result = await api('/api/ledger/approvals?status=pending&limit=100')
+    return { approvals: result.approvals || [] }
+  }
+  if (section === 'dispatch') {
+    const [dispatch, partners] = await Promise.all([
+      api('/api/ledger/dispatch?limit=100'),
+      api('/api/ledger/trade-partners?includeRetired=true&limit=200'),
+    ])
+    return {
+      dispatch,
+      tradePartners: partners.partners || [],
+      tradePartnerSummary: partners.summary || {},
+    }
+  }
+  if (section === 'resources') {
+    if (resourceView === 'inventory') return { inventory: await api('/api/ledger/inventory?limit=100') }
+    if (resourceView === 'equipment') {
+      const result = await api('/api/ledger/tools?limit=500')
+      return { tools: result.tools || [], toolSummary: result.summary || {} }
+    }
+    if (resourceView === 'partners') {
+      const result = await api('/api/ledger/trade-partners?includeRetired=true&limit=200')
+      return { tradePartners: result.partners || [], tradePartnerSummary: result.summary || {} }
+    }
+    const [workforce, workers] = await Promise.all([
+      api('/api/ledger/workforce?limit=100'),
+      api('/api/ledger/workers?limit=500'),
+    ])
+    return {
+      workforce,
+      workers: workers.workers || [],
+      workerSummary: workers.summary || {},
+    }
+  }
+  if (section === 'finance') return { finance: await api('/api/ledger/finance?limit=100') }
+  if (section === 'clients') return { clients: await api('/api/ledger/client-success?limit=100') }
+  if (section === 'field') {
+    const [field, workers] = await Promise.all([
+      api('/api/ledger/field-assurance?limit=100'),
+      fieldScoped ? Promise.resolve(null) : api('/api/ledger/workers?limit=500'),
+    ])
+    return {
+      field,
+      ...(workers
+        ? { workers: workers.workers || [], workerSummary: workers.summary || {} }
+        : {}),
+    }
+  }
+  if (section === 'operations') {
+    const [templates, scheduler, organization, backups, capabilities, commandPlan, archivedJobs] = await Promise.all([
+      api('/api/ledger/inspection-templates'),
+      api('/api/ledger/scheduler').catch(() => null),
+      api('/api/ledger/organization'),
+      api('/api/operations/backups').catch(() => ({ backups: [] })),
+      api('/api/operations/capabilities').catch(() => null),
+      api('/api/ledger/command-plan?limit=100').catch(() => null),
+      api('/api/ledger/jobs?archiveOnly=true&limit=100').catch(() => ({ jobs: [] })),
+    ])
+    return {
+      inspectionTemplates: templates.templates || [],
+      scheduler: scheduler?.scheduler || null,
+      organization: organization.organization,
+      backups: backups.backups || [],
+      operationsCapabilities: capabilities,
+      commandPlan,
+      archivedJobs: archivedJobs.jobs || [],
+    }
+  }
+  return {}
 }
 
 function Metric({ icon, label, value, hint, tone = 'default' }) {
@@ -3215,6 +3326,228 @@ function ProjectControls({
   )
 }
 
+function InspectionChecklistControl({
+  job,
+  templates,
+  canCoordinate,
+  canApprove,
+  fieldScoped,
+  operator,
+  submitting,
+  onCreateTemplate,
+  onSchedule,
+  onSubmit,
+  onOpenApprovals,
+}) {
+  const checklistInspections = (job.inspections || EMPTY_LIST).filter((inspection) => inspection.checklist?.configured)
+  const [scheduleDraft, setScheduleDraft] = useState(null)
+  const [templateDraft, setTemplateDraft] = useState(null)
+  const [activeInspection, setActiveInspection] = useState(null)
+  const [responses, setResponses] = useState({})
+  const [submissionNotes, setSubmissionNotes] = useState('')
+
+  const resetTemplateDraft = () => ({
+    name: '',
+    templateKey: '',
+    inspectionType: 'site_inspection',
+    discipline: 'quality',
+    notes: '',
+    items: [
+      { key: 'item_1', prompt: '', required: true, allowNotApplicable: false, failureSeverity: 'medium' },
+      { key: 'item_2', prompt: '', required: true, allowNotApplicable: false, failureSeverity: 'medium' },
+    ],
+  })
+
+  const beginSchedule = () => {
+    const first = templates.find((template) => template.status === 'active')
+    setScheduleDraft({
+      templateId: first?.id || '',
+      title: first?.name || '',
+      scheduledAt: toLocalDateTimeInput(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()),
+      inspector: operator?.name || '',
+      notes: '',
+    })
+    setTemplateDraft(null)
+  }
+
+  const beginChecklist = (inspection) => {
+    const latest = inspection.checklist?.submissions?.[0]?.snapshot?.responses || EMPTY_LIST
+    setResponses(
+      Object.fromEntries(
+        (inspection.checklist?.snapshot?.items || EMPTY_LIST).map((item) => {
+          const prior = latest.find((response) => response.itemKey === item.key)
+          return [item.key, {
+            result: prior?.result || '',
+            notes: prior?.notes || '',
+            evidenceDocumentId: prior?.evidenceDocumentIds?.[0] || '',
+          }]
+        }),
+      ),
+    )
+    setSubmissionNotes(inspection.checklist?.submissions?.[0]?.snapshot?.notes || '')
+    setActiveInspection(inspection)
+    setScheduleDraft(null)
+    setTemplateDraft(null)
+  }
+
+  const updateResponse = (itemKey, patch) => {
+    setResponses((current) => ({ ...current, [itemKey]: { ...current[itemKey], ...patch } }))
+  }
+
+  const scheduleTemplate = templates.find((template) => template.id === scheduleDraft?.templateId)
+  const checklistItems = activeInspection?.checklist?.snapshot?.items || EMPTY_LIST
+  const checklistReady = checklistItems.length > 0 && checklistItems.every((item) => {
+    const response = responses[item.key]
+    if (!response?.result) return !item.required
+    if (response.result === 'fail' && !response.notes.trim() && !response.evidenceDocumentId) return false
+    return response.result !== 'not_applicable' || item.allowNotApplicable
+  })
+
+  async function submitSchedule(event) {
+    event.preventDefault()
+    if (!scheduleDraft?.templateId || !toIsoDateTime(scheduleDraft.scheduledAt)) return
+    const result = await onSchedule({
+      ...scheduleDraft,
+      scheduledAt: toIsoDateTime(scheduleDraft.scheduledAt),
+      entryKey: createFieldEvidenceDraftId(),
+    })
+    if (result) setScheduleDraft(null)
+  }
+
+  async function submitTemplate(event) {
+    event.preventDefault()
+    if (!templateDraft) return
+    const result = await onCreateTemplate({ ...templateDraft })
+    if (result) {
+      setTemplateDraft(null)
+      setScheduleDraft({
+        templateId: result.id,
+        title: result.name,
+        scheduledAt: toLocalDateTimeInput(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()),
+        inspector: operator?.name || '',
+        notes: '',
+      })
+    }
+  }
+
+  async function submitChecklist(event) {
+    event.preventDefault()
+    if (!activeInspection || !checklistReady) return
+    const result = await onSubmit(activeInspection, {
+      entryKey: createFieldEvidenceDraftId(),
+      notes: submissionNotes.trim(),
+      responses: checklistItems
+        .filter((item) => responses[item.key]?.result)
+        .map((item) => ({
+          itemKey: item.key,
+          result: responses[item.key].result,
+          notes: responses[item.key].notes.trim(),
+          evidenceDocumentIds: responses[item.key].evidenceDocumentId ? [responses[item.key].evidenceDocumentId] : [],
+        })),
+    })
+    if (result) setActiveInspection(null)
+  }
+
+  return (
+    <section className="job-workspace-section inspection-checklist-control" data-testid="inspection-checklist-control">
+      <div className="section-heading inspection-checklist-heading">
+        <ClipboardCheck size={18} />
+        <div>
+          <h3>Inspection checklists</h3>
+          <p>Versioned questions, field responses, corrective observations, and approval-backed sign-off.</p>
+        </div>
+        {canCoordinate ? (
+          <div className="inspection-checklist-heading-actions">
+            <button type="button" className="icon-button" aria-label="Create inspection template" title="Create inspection template" onClick={() => { setTemplateDraft(resetTemplateDraft()); setScheduleDraft(null); setActiveInspection(null) }}>
+              <Plus size={17} />
+            </button>
+            <button type="button" className="secondary-button" disabled={!templates.length || submitting} onClick={beginSchedule}>
+              <CalendarDays size={15} />Schedule
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {templateDraft ? (
+        <form className="inspection-template-editor" data-testid="inspection-template-form" onSubmit={submitTemplate}>
+          <div className="form-grid compact-form">
+            <label>Template name<input autoFocus required minLength="3" maxLength="160" value={templateDraft.name} onChange={(event) => setTemplateDraft({ ...templateDraft, name: event.target.value })} /></label>
+            <label>Template key<input required pattern="[A-Za-z0-9_ -]+" value={templateDraft.templateKey} onChange={(event) => setTemplateDraft({ ...templateDraft, templateKey: event.target.value })} placeholder="facade_quality" /></label>
+            <label>Type<input required value={templateDraft.inspectionType} onChange={(event) => setTemplateDraft({ ...templateDraft, inspectionType: event.target.value })} /></label>
+            <label>Discipline<select value={templateDraft.discipline} onChange={(event) => setTemplateDraft({ ...templateDraft, discipline: event.target.value })}><option value="quality">Quality</option><option value="safety">Safety</option><option value="closeout">Closeout</option><option value="general">General</option></select></label>
+          </div>
+          <fieldset className="inspection-template-items">
+            <legend>Checklist items</legend>
+            {templateDraft.items.map((item, index) => (
+              <div className="inspection-template-item" key={`${item.key}-${index}`}>
+                <label className="inspection-template-prompt">Prompt<input required minLength="3" maxLength="300" value={item.prompt} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, prompt: event.target.value } : candidate) })} /></label>
+                <label>Failure severity<select value={item.failureSeverity} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, failureSeverity: event.target.value } : candidate) })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+                <label className="checkbox-label"><input type="checkbox" checked={item.allowNotApplicable} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, allowNotApplicable: event.target.checked } : candidate) })} />Allow N/A</label>
+                <button type="button" className="icon-button" aria-label={`Remove checklist item ${index + 1}`} disabled={templateDraft.items.length <= 2} onClick={() => setTemplateDraft({ ...templateDraft, items: templateDraft.items.filter((_, itemIndex) => itemIndex !== index).map((candidate, itemIndex) => ({ ...candidate, key: `item_${itemIndex + 1}` })) })}><X size={15} /></button>
+              </div>
+            ))}
+            <button type="button" className="secondary-button" disabled={templateDraft.items.length >= 50} onClick={() => setTemplateDraft({ ...templateDraft, items: [...templateDraft.items, { key: `item_${templateDraft.items.length + 1}`, prompt: '', required: true, allowNotApplicable: false, failureSeverity: 'medium' }] })}><Plus size={15} />Add item</button>
+          </fieldset>
+          <div className="form-actions"><button className="primary-button" disabled={submitting || templateDraft.items.some((item) => item.prompt.trim().length < 3)}><ClipboardCheck size={15} />Retain template</button><button type="button" className="secondary-button" onClick={() => setTemplateDraft(null)}>Cancel</button></div>
+        </form>
+      ) : null}
+
+      {scheduleDraft ? (
+        <form className="inspection-schedule-form form-grid compact-form" data-testid="inspection-schedule-form" onSubmit={submitSchedule}>
+          <label>Template<select required value={scheduleDraft.templateId} onChange={(event) => { const template = templates.find((candidate) => candidate.id === event.target.value); setScheduleDraft({ ...scheduleDraft, templateId: event.target.value, title: template?.name || scheduleDraft.title }) }}>{templates.filter((template) => template.status === 'active').map((template) => <option key={template.id} value={template.id}>{template.name} / v{template.versionNumber}</option>)}</select></label>
+          <label>Scheduled date and time<input required type="datetime-local" value={scheduleDraft.scheduledAt} onChange={(event) => setScheduleDraft({ ...scheduleDraft, scheduledAt: event.target.value })} /></label>
+          <label className="form-span">Inspection title<input required minLength="3" maxLength="240" value={scheduleDraft.title} onChange={(event) => setScheduleDraft({ ...scheduleDraft, title: event.target.value })} /></label>
+          <label>Inspector<input value={scheduleDraft.inspector} onChange={(event) => setScheduleDraft({ ...scheduleDraft, inspector: event.target.value })} /></label>
+          <div className="inspection-template-summary"><strong>{scheduleTemplate?.items?.length || 0} checks</strong><span>{formatStatus(scheduleTemplate?.discipline || 'general')} / immutable v{scheduleTemplate?.versionNumber || '-'}</span></div>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || !scheduleDraft.templateId || !toIsoDateTime(scheduleDraft.scheduledAt)}><CalendarDays size={15} />Schedule checklist</button><button type="button" className="secondary-button" onClick={() => setScheduleDraft(null)}>Cancel</button></div>
+        </form>
+      ) : null}
+
+      {activeInspection ? (
+        <form className="inspection-checklist-form" data-testid="inspection-checklist-form" onSubmit={submitChecklist}>
+          <div className="inspection-checklist-run-heading"><div><strong>{activeInspection.title}</strong><small>{activeInspection.checklist.snapshot.templateName} / v{activeInspection.checklist.snapshot.templateVersion}</small></div><span className={`status status-${activeInspection.status}`}>{formatStatus(activeInspection.status)}</span></div>
+          <div className="inspection-checklist-items">
+            {checklistItems.map((item, index) => {
+              const response = responses[item.key] || { result: '', notes: '', evidenceDocumentId: '' }
+              return (
+                <fieldset className={`inspection-checklist-item inspection-result-${response.result || 'pending'}`} key={item.key}>
+                  <legend>{index + 1}. {item.prompt}</legend>
+                  <div className="inspection-result-options" role="radiogroup" aria-label={`Result for ${item.prompt}`}>
+                    {[['pass', 'Pass', Check], ['fail', 'Fail', TriangleAlert], ...(item.allowNotApplicable ? [['not_applicable', 'N/A', Ban]] : [])].map(([value, label, Icon]) => (
+                      <label key={value} className={response.result === value ? 'selected' : ''}><input required={item.required} type="radio" name={`inspection-${item.key}`} value={value} checked={response.result === value} onChange={() => updateResponse(item.key, { result: value })} />{createElement(Icon, { size: 15 })}{label}</label>
+                    ))}
+                  </div>
+                  <label>Item notes<textarea required={response.result === 'fail' && !response.evidenceDocumentId} value={response.notes} onChange={(event) => updateResponse(item.key, { notes: event.target.value })} placeholder={response.result === 'fail' ? 'Describe the defect, immediate control, or required correction.' : 'Optional retained context.'} /></label>
+                  <label>Evidence link<select value={response.evidenceDocumentId} onChange={(event) => updateResponse(item.key, { evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+                  <small>{formatStatus(item.failureSeverity)} failure severity{item.allowNotApplicable ? ' / N/A allowed' : ''}</small>
+                </fieldset>
+              )
+            })}
+          </div>
+          <label className="inspection-run-notes">Inspection summary<textarea maxLength="4000" value={submissionNotes} onChange={(event) => setSubmissionNotes(event.target.value)} placeholder="Record overall context, limitations, and follow-up." /></label>
+          <p className="workflow-note">Submission freezes these responses, creates corrective observations for failed items, and requests approval. It does not certify statutory compliance or notify an external party.</p>
+          <div className="form-actions"><button className="primary-button" disabled={submitting || !checklistReady}><ShieldCheck size={15} />{navigator.onLine === false ? 'Save checklist offline' : 'Submit for review'}</button><button type="button" className="secondary-button" onClick={() => setActiveInspection(null)}>Cancel</button></div>
+        </form>
+      ) : null}
+
+      <div className="inspection-checklist-register">
+        {checklistInspections.length ? checklistInspections.map((inspection) => {
+          const summary = inspection.checklist.summary
+          const pending = (job.approvals || EMPTY_LIST).find((approval) => approval.id === inspection.approvalId && approval.status === 'pending')
+          const canFill = ['scheduled', 'in_progress', 'pending_review'].includes(inspection.status) && !pending
+          return (
+            <article className="inspection-checklist-row" key={inspection.id} data-testid={`inspection-checklist-${inspection.id}`}>
+              <div><strong>{inspection.title}</strong><small>{inspection.checklist.snapshot.templateName} / v{inspection.checklist.snapshot.templateVersion} / {formatDateTime(inspection.scheduledAt)}</small><span>{summary ? `${summary.responseCount} responses / ${summary.failedCount} failed` : `${inspection.checklist.snapshot.items.length} checks waiting`}</span></div>
+              <div className="inspection-checklist-row-actions"><span className={`status status-${inspection.status}`}>{formatStatus(inspection.status)}</span>{pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}{canFill ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginChecklist(inspection)}><ClipboardList size={14} />{inspection.checklist.submissions.length ? 'Correct and resubmit' : 'Complete'}</button> : null}</div>
+            </article>
+          )
+        }) : <p className="workflow-note">No versioned inspection checklist has been scheduled for this job.</p>}
+      </div>
+      {fieldScoped ? <p className="workflow-note">Assigned field workers can complete scheduled checklists. Template and schedule control remain with the office.</p> : null}
+    </section>
+  )
+}
+
 function FieldAssuranceWorkspace({
   field,
   jobs,
@@ -4556,6 +4889,7 @@ function App() {
   const [authError, setAuthError] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [sectionLoading, setSectionLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [showIntake, setShowIntake] = useState(false)
   const [opportunityEditor, setOpportunityEditor] = useState(null)
@@ -4640,6 +4974,9 @@ function App() {
   const commercialDialogOpenerRef = useRef(null)
   const noticeSequenceRef = useRef(0)
   const hasLoadedDataRef = useRef(false)
+  const sectionRef = useRef('today')
+  const resourceViewRef = useRef('workforce')
+  const sectionLoadSequenceRef = useRef(0)
 
   const refresh = useCallback(async () => {
     if (!hasLoadedDataRef.current) setLoading(true)
@@ -4680,6 +5017,7 @@ function App() {
           finance: { jobs: [], summary: {} },
           clients: { jobs: [], summary: {} },
           field: { rows: [] },
+          inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
           scheduler: null,
@@ -4712,6 +5050,7 @@ function App() {
           finance: { jobs: [], summary: {} },
           clients: { jobs: [], summary: {} },
           field: { rows: [] },
+          inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
           scheduler: null,
@@ -4724,75 +5063,26 @@ function App() {
           opportunityForecast: null,
         })
       }
-      const [
-        dashboardResult,
-        opportunitiesResult,
-        approvalsResult,
-        dispatchResult,
-        workforceResult,
-        workersResult,
-        toolsResult,
-        inventoryResult,
-        partnersResult,
-        financeResult,
-        clientsResult,
-        fieldResult,
-        schedulerResult,
-        organizationResult,
-      ] = await Promise.all([
+      const currentSection = sectionRef.current
+      const [dashboardResult, approvalsResult, sectionPatch] = await Promise.all([
         api('/api/ledger/dashboard'),
-        api('/api/ledger/opportunities?includeClosed=true&limit=500'),
         api('/api/ledger/approvals?status=pending&limit=100'),
-        api('/api/ledger/dispatch?limit=100'),
-        api('/api/ledger/workforce?limit=100'),
-        api('/api/ledger/workers?limit=500'),
-        api('/api/ledger/tools?limit=500'),
-        api('/api/ledger/inventory?limit=100'),
-        api('/api/ledger/trade-partners?includeRetired=true&limit=200'),
-        api('/api/ledger/finance?limit=100'),
-        api('/api/ledger/client-success?limit=100'),
-        api('/api/ledger/field-assurance?limit=100'),
-        api('/api/ledger/scheduler').catch(() => null),
-        api('/api/ledger/organization'),
+        currentSection === 'today'
+          ? Promise.resolve({})
+          : loadSectionPatch(currentSection, resourceViewRef.current, fieldScoped),
       ])
-      setOrganizationProfileDraft(organizationDraft(organizationResult.organization))
-      const [backupResult, capabilitiesResult, commandPlanResult, archivedJobsResult] = operator.capabilities.maintenance
-        ? await Promise.all([
-            api('/api/operations/backups').catch(() => ({ backups: [] })),
-            api('/api/operations/capabilities').catch(() => null),
-            api('/api/ledger/command-plan?limit=100').catch(() => null),
-            api('/api/ledger/jobs?archiveOnly=true&limit=100').catch(() => ({ jobs: [] })),
-          ])
-        : [{ backups: [] }, null, null, { jobs: [] }]
+      if (sectionPatch.organization) setOrganizationProfileDraft(organizationDraft(sectionPatch.organization))
       hasLoadedDataRef.current = true
-      setData({
+      setData((current) => ({
+        ...current,
+        ...sectionPatch,
         session: sessionResult,
         dashboard: dashboardResult.dashboard,
-        opportunities: opportunitiesResult.opportunities || [],
-        opportunityForecast: opportunitiesResult.forecast || null,
         jobs: jobsResult.jobs || [],
         approvals: approvalsResult.approvals || [],
-        dispatch: dispatchResult,
-        workforce: workforceResult,
-        workers: workersResult.workers || [],
-        workerSummary: workersResult.summary || {},
-        tools: toolsResult.tools || [],
-        toolSummary: toolsResult.summary || {},
-        inventory: inventoryResult,
-        tradePartners: partnersResult.partners || [],
-        tradePartnerSummary: partnersResult.summary || {},
-        finance: financeResult,
-        clients: clientsResult,
-        field: fieldResult,
         health: healthResult,
         readiness: readinessResult,
-        scheduler: schedulerResult?.scheduler || null,
-        commandPlan: commandPlanResult,
-        backups: backupResult.backups || [],
-        archivedJobs: archivedJobsResult.jobs || [],
-        operationsCapabilities: capabilitiesResult,
-        organization: organizationResult.organization,
-      })
+      }))
     } catch (requestError) {
       if (requestError.status === 401 || requestError.code === 'authentication_required') {
         setData(null)
@@ -4856,6 +5146,7 @@ function App() {
   const tools = data?.tools ?? EMPTY_LIST
   const tradePartners = data?.tradePartners ?? EMPTY_LIST
   const approvals = data?.approvals ?? EMPTY_LIST
+  const inspectionTemplates = data?.inspectionTemplates ?? EMPTY_LIST
   const visibleApprovals = useMemo(() => {
     if (!approvalFocus) return approvals
     if (approvalFocus.approvalId) return approvals.filter((approval) => approval.id === approvalFocus.approvalId)
@@ -4928,15 +5219,40 @@ function App() {
     [capabilities],
   )
 
+  async function refreshSection(next, nextResourceView = resourceViewRef.current) {
+    if (next === 'today') return
+    const sequence = ++sectionLoadSequenceRef.current
+    setSectionLoading(true)
+    setError('')
+    try {
+      const patch = await loadSectionPatch(next, nextResourceView, fieldScoped)
+      if (sequence !== sectionLoadSequenceRef.current) return
+      if (patch.organization) setOrganizationProfileDraft(organizationDraft(patch.organization))
+      setData((current) => current ? { ...current, ...patch } : current)
+    } catch (requestError) {
+      if (sequence === sectionLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (sequence === sectionLoadSequenceRef.current) setSectionLoading(false)
+    }
+  }
+
   const selectSection = (next) => {
     if (initialDataLoading && !['today', 'jobs'].includes(next)) return
     setApprovalFocus(null)
+    sectionRef.current = next
     setSection(next)
     setMobileNavOpen(false)
+    void refreshSection(next)
+  }
+  const selectResourceView = (next) => {
+    resourceViewRef.current = next
+    setResourceView(next)
+    if (sectionRef.current === 'resources') void refreshSection('resources', next)
   }
   const openApprovals = (focus = null) => {
     if (selectedJobId) closeJobWorkspace()
     setApprovalFocus(focus)
+    sectionRef.current = 'approvals'
     setSection('approvals')
     setMobileNavOpen(false)
     if (focus?.approvalId || focus?.jobId) {
@@ -4989,6 +5305,7 @@ function App() {
       setData(null)
       setAuthError('')
       setAuthState('required')
+      sectionRef.current = 'today'
       setSection('today')
       setOutboxPending(0)
       setOutboxQuarantined(0)
@@ -5044,7 +5361,10 @@ function App() {
   }, [loading, notice, outboxSyncing, submitting])
 
   useEffect(() => {
-    if (!visibleNavItems.some(([key]) => key === section)) setSection('today')
+    if (!visibleNavItems.some(([key]) => key === section)) {
+      sectionRef.current = 'today'
+      setSection('today')
+    }
   }, [section, visibleNavItems])
 
   useEffect(() => {
@@ -5088,7 +5408,7 @@ function App() {
     const { item, status } = approvalReview
     setSubmitting(true)
     try {
-      await api(`/api/ledger/approvals/${item.id}/resolve`, {
+      const result = await api(`/api/ledger/approvals/${item.id}/resolve`, {
         method: 'POST',
         body: JSON.stringify({
           status,
@@ -5098,8 +5418,18 @@ function App() {
       })
       setApprovalReview(null)
       setApprovalReason('')
+      if (result.job) {
+        setData((current) => reconcileJobCollections({
+          ...current,
+          dashboard: result.dashboard || current?.dashboard,
+          approvals: (current?.approvals || EMPTY_LIST).filter((approval) => approval.id !== item.id),
+        }, result.job))
+        if (selectedJobId === result.job.id) setSelectedJob(result.job)
+      } else {
+        await refresh()
+      }
+      setSubmitting(false)
       notify(`Approval ${status}. The ledger and audit trail were updated.`)
-      await refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -5274,6 +5604,7 @@ function App() {
       id: opportunity.convertedJobId,
       title: opportunity.title,
     }
+    sectionRef.current = 'jobs'
     setSection('jobs')
     void openJobWorkspace(linkedJob)
   }
@@ -5285,6 +5616,8 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ actor: 'owner_scheduler', maxActions: 10 }),
       })
+      setData((current) => current ? { ...current, scheduler: result.scheduler || current.scheduler } : current)
+      setSubmitting(false)
       if (result.ran) {
         notify(
           `Durable cycle completed with ${result.result?.applied?.length || 0} internal draft action(s) and ${result.result?.blocked?.length || 0} blocked action(s). No external commitment was made.`,
@@ -5292,7 +5625,6 @@ function App() {
       } else {
         notify(`Durable cycle was not due: ${formatStatus(result.claim?.reason || 'lease retained')}.`)
       }
-      await refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -5317,10 +5649,15 @@ function App() {
         }),
       })
       setSelectedCommandIds([])
+      setData((current) => current ? {
+        ...current,
+        commandPlan: result.commandPlan || current.commandPlan,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      setSubmitting(false)
       notify(
         `${result.summary?.applied || 0} safe command-plan draft(s) retained; ${result.summary?.skipped || 0} action(s) skipped. External commitments remain zero.`,
       )
-      await refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -5368,7 +5705,7 @@ function App() {
         }),
       })
       setOrganizationProfileDraft(organizationDraft(result.organization))
-      await refresh()
+      setData((current) => current ? { ...current, organization: result.organization } : current)
       notify(
         result.organization.readiness.ready
           ? 'Business identity retained and ready for controlled commercial packages.'
@@ -5643,7 +5980,15 @@ function App() {
     setTaskDraft(emptyTaskDraft())
     setTaskAction(null)
     setTaskActionNote('')
-    await Promise.all([loadSelectedJob(job.id), canCoordinate ? loadResourceOptions() : Promise.resolve()])
+    await Promise.all([
+      loadSelectedJob(job.id),
+      canCoordinate ? loadResourceOptions() : Promise.resolve(),
+      canCoordinate
+        ? api('/api/ledger/inspection-templates').then((result) => {
+            setData((current) => current ? { ...current, inspectionTemplates: result.templates || [] } : current)
+          })
+        : Promise.resolve(),
+    ])
   }
 
   function closeJobWorkspace() {
@@ -6018,7 +6363,6 @@ function App() {
                 ? 'Transmittal package retained for approval. No files or messages were sent.'
                 : 'Draft meeting minutes retained with decisions and proposed actions.',
       )
-      await refresh()
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -6046,7 +6390,6 @@ function App() {
           ? `${record.title} is retained for explicit approval. No field or external reliance was created.`
           : `${record.title} is now ${formatStatus(payload.status)}.`,
       )
-      await refresh()
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -6066,8 +6409,8 @@ function App() {
         { method: 'POST', body: JSON.stringify(payload) },
       )
       setSelectedJob(result.job)
+      setSubmitting(false)
       notify(`${record.transmittalNumber} issue evidence retained. Contractor.AI did not send the package.`)
-      await refresh()
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -6087,8 +6430,8 @@ function App() {
         { method: 'POST', body: JSON.stringify(payload) },
       )
       setSelectedJob(result.job)
+      setSubmitting(false)
       notify(result.transmittal.status === 'acknowledged' ? `${record.transmittalNumber} is fully acknowledged.` : 'Recipient acknowledgment evidence retained.')
-      await refresh()
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -6182,6 +6525,100 @@ function App() {
     }
   }
 
+  async function createInspectionTemplate(payload) {
+    if (!canCoordinate) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/inspection-templates', {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, actor: 'office_operator' }),
+      })
+      setData((current) => current ? {
+        ...current,
+        inspectionTemplates: [
+          result.template,
+          ...(current.inspectionTemplates || []).filter((template) => template.id !== result.template.id),
+        ],
+      } : current)
+      notify(`${result.template.name} retained as reusable inspection template v${result.template.versionNumber}.`)
+      return result.template
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function scheduleInspectionChecklist(payload) {
+    if (!selectedJobId || !canCoordinate) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/inspection-checklists`, {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, actor: 'office_operator' }),
+      })
+      setSelectedJob(result.job)
+      notify(`${result.inspection.title} scheduled with an immutable template snapshot.`)
+      await refresh()
+      return result.inspection
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function submitInspectionChecklist(inspection, payload) {
+    const jobId = inspection?.jobId || selectedJobId
+    if (!jobId || !inspection?.id) return null
+    const draft = {
+      id: payload.entryKey,
+      type: 'inspection_checklist',
+      jobId,
+      payload: { ...payload, inspectionId: inspection.id },
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        notify('Inspection checklist saved locally for this operator and scheduled for exact retry after reconnection.')
+        return { queued: true }
+      }
+      const result = await recordFieldOperation(draft)
+      setSelectedJob(result.job)
+      notify(
+        result.replayed
+          ? 'This checklist submission was already retained; no duplicate observations or approval were created.'
+          : `${result.submission.failedCount} failed item(s) retained with corrective observations. Inspection sign-off is waiting for approval.`,
+      )
+      await refresh()
+      return result
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          notify('Connection interrupted. The complete inspection checklist was saved locally for an exact retry.')
+          return { queued: true }
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return null
+        }
+      }
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function transitionJobTask(task, status, note = '') {
     if (!selectedJobId || !task?.id) return
     setSubmitting(true)
@@ -6241,6 +6678,7 @@ function App() {
       setJobLifecycleAction(null)
       setJobLifecycleReason('')
       if (selectedJobId === job.id) closeJobWorkspace()
+      setSubmitting(false)
       notify(
         mode === 'archive'
           ? 'Archive decision retained. The job remains active until an approver confirms the exact effects.'
@@ -6249,7 +6687,6 @@ function App() {
       if (capabilities.approvals && result.approval?.id) {
         openApprovals({ jobId: job.id, jobTitle: job.title, approvalId: result.approval.id })
       }
-      await refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -6991,8 +7428,9 @@ function App() {
 
   function openTradePartnerDirectory() {
     closeResourceControl()
-    setResourceView('partners')
+    sectionRef.current = 'resources'
     setSection('resources')
+    selectResourceView('partners')
   }
 
   async function prepareLoadingChecklist(item) {
@@ -7997,13 +8435,15 @@ function App() {
   }
 
   function reviewDispatchEquipment() {
-    setResourceView('equipment')
+    sectionRef.current = 'resources'
     setSection('resources')
+    selectResourceView('equipment')
   }
 
   function reviewDispatchWorkforce() {
-    setResourceView('workforce')
+    sectionRef.current = 'resources'
     setSection('resources')
+    selectResourceView('workforce')
   }
 
   function openFieldReview(item, target) {
@@ -8153,7 +8593,7 @@ function App() {
         </div>
       </aside>
 
-      <main className="workspace" aria-busy={loading}>
+      <main className="workspace" aria-busy={loading || sectionLoading}>
         <header className="topbar">
           <button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}>
             <Menu size={20} />
@@ -8177,8 +8617,8 @@ function App() {
                 <span>{operator.name || formatStatus(operator.role)}</span>
               </span>
             ) : null}
-            <button className="icon-button" aria-label="Refresh data" onClick={refresh} disabled={loading}>
-              <RefreshCw size={18} className={loading ? 'spin' : ''} />
+            <button className="icon-button" aria-label="Refresh data" onClick={refresh} disabled={loading || sectionLoading}>
+              <RefreshCw size={18} className={loading || sectionLoading ? 'spin' : ''} />
             </button>
             {operator.authenticated ? (
               <button className="icon-button" aria-label="Sign out" title="Sign out" onClick={logoutOperator} disabled={submitting}>
@@ -8219,6 +8659,13 @@ function App() {
         ) : null}
         {data ? (
           <>
+            {sectionLoading ? (
+              <div className="loading" role="status">
+                <LoaderCircle className="spin" size={26} />
+                Loading {pageTitle.toLowerCase()}
+              </div>
+            ) : (
+              <>
             {section === 'today' && (
               <section className="page-grid">
                 <div className="metrics-grid">
@@ -8563,7 +9010,7 @@ function App() {
                 tradePartnerSummary={data.tradePartnerSummary}
                 jobs={jobs}
                 view={resourceView}
-                onViewChange={setResourceView}
+                onViewChange={selectResourceView}
                 canCoordinate={canCoordinate}
                 canApprove={capabilities.approvals === true}
                 submitting={submitting}
@@ -9449,6 +9896,8 @@ function App() {
                   )}
                 </section>
               </section>
+            )}
+              </>
             )}
           </>
         ) : null}
@@ -10687,6 +11136,19 @@ function App() {
                   onIssueMeeting={issueProjectMeeting}
                   onCompleteMeetingAction={completeProjectMeetingAction}
                   onCreateMeetingFollowUp={createProjectMeetingFollowUp}
+                  onOpenApprovals={openApprovals}
+                />
+                <InspectionChecklistControl
+                  job={selectedJob}
+                  templates={inspectionTemplates}
+                  canCoordinate={canCoordinate}
+                  canApprove={capabilities.approvals === true}
+                  fieldScoped={fieldScoped}
+                  operator={operator}
+                  submitting={submitting}
+                  onCreateTemplate={createInspectionTemplate}
+                  onSchedule={scheduleInspectionChecklist}
+                  onSubmit={submitInspectionChecklist}
                   onOpenApprovals={openApprovals}
                 />
                 {canCoordinate ? (

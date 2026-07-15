@@ -1192,6 +1192,7 @@ function allowsOperatorRequest(role, req) {
     }
     if (req.method === 'POST' && pathName === '/api/ledger/upload') return true;
     if (req.method === 'PATCH' && /^\/api\/ledger\/jobs\/[^/]+\/lifecycle\/task\/[^/]+$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|field-reports|observations|incidents|safety-checks|time-logs|daily-logs)$/.test(pathName);
   }
 
@@ -1232,7 +1233,12 @@ const FIELD_RECORD_PRIVATE_KEYS = new Set([
 
 function projectFieldRecord(record) {
   if (!record || typeof record !== 'object') return record;
-  return Object.fromEntries(Object.entries(record).filter(([key]) => !FIELD_RECORD_PRIVATE_KEYS.has(key)));
+  if (Array.isArray(record)) return record.map(projectFieldRecord);
+  return Object.fromEntries(
+    Object.entries(record)
+      .filter(([key]) => !FIELD_RECORD_PRIVATE_KEYS.has(key))
+      .map(([key, value]) => [key, projectFieldRecord(value)])
+  );
 }
 
 function projectFieldRecords(records) {
@@ -1945,6 +1951,9 @@ app.post('/api/ledger/command-plan', (req, res) => {
     return {
       success: true,
       ...result,
+      commandPlan: mode === 'preview'
+        ? result
+        : operatingLedger.buildTodayCommandPlan({ mode: payload.refreshMode || 'all', limit: 100 }),
       dashboard: operatingLedger.dashboardSummary()
     };
   }, 201);
@@ -2315,6 +2324,36 @@ app.post('/api/ledger/jobs/:id/permits', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/inspection-templates', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    templates: operatingLedger.listInspectionTemplates({
+      includeSuperseded: req.query.includeSuperseded === 'true',
+      discipline: req.query.discipline
+    })
+  }));
+});
+
+app.post('/api/ledger/inspection-templates', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    template: operatingLedger.createInspectionTemplate(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/inspection-checklists', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    inspection: operatingLedger.createInspectionFromTemplate(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/inspections', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -2322,6 +2361,24 @@ app.post('/api/ledger/jobs/:id/inspections', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.submitInspectionChecklist(req.params.id, req.params.inspectionId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      inspection: recordForOperator(req, result.inspection),
+      submission: recordForOperator(req, result.submission),
+      observations: (result.observations || []).map(record => recordForOperator(req, record)),
+      approval: req.operator?.role === 'field_worker' ? null : result.approval,
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/observations', (req, res) => {
@@ -3151,6 +3208,7 @@ app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
     return {
       success: true,
       approval,
+      job: approval.jobId ? operatingLedger.getJobDetail(approval.jobId) : null,
       dashboard: operatingLedger.dashboardSummary()
     };
   });
@@ -3898,6 +3956,8 @@ function operationalExport() {
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
+    inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
+    inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
     handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
@@ -3942,7 +4002,7 @@ function validateOperationalExport(snapshot) {
   ]) {
     if (!Array.isArray(snapshot[key])) problems.push(`Export is missing the ${key} collection.`);
   }
-  for (const key of ['opportunities', 'opportunityActivities']) {
+  for (const key of ['opportunities', 'opportunityActivities', 'inspectionTemplates', 'inspectionChecklistSubmissions']) {
     if (snapshot[key] !== undefined && !Array.isArray(snapshot[key])) {
       problems.push(`Export ${key} must be a collection when present.`);
     }
@@ -3995,6 +4055,8 @@ function validateOperationalExport(snapshot) {
       billingMilestones: snapshot.billingMilestones.length,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
+      inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
+      inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
       submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
       transmittals: Array.isArray(snapshot.projectControls?.transmittals) ? snapshot.projectControls.transmittals.length : 0,

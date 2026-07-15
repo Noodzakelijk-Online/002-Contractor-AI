@@ -42,7 +42,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'daily_log'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'daily_log', 'inspection_checklist'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -58,7 +58,21 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(dashboardSource, /window\.addEventListener\('online', handleOnline\)/);
   assert.match(dashboardSource, /Save daily log offline/);
   assert.match(dashboardSource, /Save progress offline/);
+  assert.match(dashboardSource, /Save checklist offline/);
   assert.doesNotMatch(outboxSource, /localStorage|sessionStorage/);
+});
+
+test('job workspace schedules and completes immutable approval-backed inspection checklists', () => {
+  assert.match(dashboardSource, /data-testid="inspection-checklist-control"/);
+  assert.match(dashboardSource, /data-testid="inspection-template-form"/);
+  assert.match(dashboardSource, /data-testid="inspection-schedule-form"/);
+  assert.match(dashboardSource, /data-testid="inspection-checklist-form"/);
+  assert.match(dashboardSource, /api\('\/api\/ledger\/inspection-templates'/);
+  assert.match(dashboardSource, /\/inspection-checklists`/);
+  assert.match(dashboardSource, /\/checklist-submissions`/);
+  assert.match(dashboardSource, /type: 'inspection_checklist'/);
+  assert.match(dashboardSource, /creates corrective observations for failed items/);
+  assert.match(dashboardSource, /does not certify statutory compliance or notify an external party/);
 });
 
 test('dashboard loads a field worker only through scoped ledger calls and hides owner workflow navigation', () => {
@@ -79,7 +93,7 @@ test('field workflow can record scoped progress without exposing job completion'
   const fieldProgressSource = dashboardSource.slice(fieldProgressStart, fieldProgressEnd);
   assert.match(dashboardSource, /function recordFieldProgress\(event\)/);
   assert.match(dashboardSource, /type: 'progress'/);
-  assert.match(dashboardSource, /type === 'progress' \? 'progress'/);
+  assert.match(dashboardSource, /type === 'progress'\s*\?\s*'progress'/);
   assert.match(dashboardSource, /id: fieldProgress\.entryKey/);
   assert.match(dashboardSource, /source: 'field_dashboard'/);
   assert.match(fieldProgressSource, /<option value="in_progress">In progress<\/option>/);

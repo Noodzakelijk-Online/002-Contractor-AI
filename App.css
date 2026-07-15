@@ -589,3 +589,64 @@
   .project-control-review .form-actions { grid-column: auto; }
   .project-control-review .form-actions button { width: 100%; }
 }
+
+.inspection-checklist-control { display: grid; gap: 14px; min-width: 0; }
+.inspection-checklist-heading { align-items: center; }
+.inspection-checklist-heading-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.inspection-template-editor, .inspection-schedule-form, .inspection-checklist-form { display: grid; gap: 14px; margin: 0; padding: 14px; background: #f7f9f8; border: 1px solid #dce6e2; }
+.inspection-template-editor > .form-grid, .inspection-schedule-form { padding: 0; }
+.inspection-template-items { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 12px; border: 1px solid #d4e0db; }
+.inspection-template-items legend { padding: 0 5px; color: #40564e; font-size: 10px; font-weight: 750; }
+.inspection-template-item { display: grid; grid-template-columns: minmax(240px, 1.5fr) minmax(130px, .7fr) minmax(92px, auto) 34px; align-items: end; gap: 8px; min-width: 0; padding: 9px; background: #fff; border: 1px solid #e0e8e4; }
+.inspection-template-item label, .inspection-checklist-item > label, .inspection-run-notes { display: grid; gap: 5px; min-width: 0; color: #40564e; font-size: 10px; font-weight: 750; }
+.inspection-template-item input, .inspection-template-item select, .inspection-checklist-item textarea, .inspection-checklist-item select, .inspection-run-notes textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 9px; color: #263a32; background: #fff; border: 1px solid #cbd9d3; border-radius: 5px; }
+.inspection-template-item textarea, .inspection-checklist-item textarea, .inspection-run-notes textarea { min-height: 64px; resize: vertical; }
+.inspection-template-summary { display: grid; align-self: end; gap: 3px; min-height: 38px; padding: 6px 9px; color: #61756d; background: #edf4f1; border-left: 3px solid #3a806d; }
+.inspection-template-summary strong { color: #2d4b40; font-size: 11px; }
+.inspection-template-summary span { font-size: 9px; }
+.inspection-checklist-register { display: grid; border-top: 1px solid #dde6e2; }
+.inspection-checklist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; padding: 11px 0; border-bottom: 1px solid #e4ebe8; }
+.inspection-checklist-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.inspection-checklist-row strong { overflow-wrap: anywhere; color: #2a4037; font-size: 12px; }
+.inspection-checklist-row small, .inspection-checklist-row > div:first-child > span { overflow-wrap: anywhere; color: #6d7d77; font-size: 10px; }
+.inspection-checklist-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
+.inspection-checklist-row-actions .secondary-button { min-height: 31px; padding: 0 8px; font-size: 10px; }
+.inspection-checklist-run-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.inspection-checklist-run-heading > div { display: grid; gap: 3px; min-width: 0; }
+.inspection-checklist-run-heading strong { overflow-wrap: anywhere; color: #294138; font-size: 13px; }
+.inspection-checklist-run-heading small { color: #6b7c75; font-size: 10px; }
+.inspection-checklist-items { display: grid; gap: 10px; }
+.inspection-checklist-item { display: grid; grid-template-columns: minmax(240px, 1.2fr) minmax(180px, .9fr); gap: 10px 12px; min-width: 0; margin: 0; padding: 12px; background: #fff; border: 1px solid #dce5e1; border-left: 3px solid #9aaca5; }
+.inspection-checklist-item legend { max-width: calc(100% - 16px); padding: 0 6px; overflow-wrap: anywhere; color: #2e473d; font-size: 11px; font-weight: 750; line-height: 1.4; }
+.inspection-checklist-item > small { grid-column: 1 / -1; color: #708079; font-size: 9px; }
+.inspection-result-pass { border-left-color: #3c8a69; }
+.inspection-result-fail { background: #fff9f7; border-left-color: #bd4a3f; }
+.inspection-result-not_applicable { border-left-color: #70837b; }
+.inspection-result-options { display: grid; grid-template-columns: repeat(3, minmax(68px, 1fr)); grid-column: 1 / -1; overflow: hidden; border: 1px solid #cbd8d2; border-radius: 6px; }
+.inspection-result-options label { position: relative; display: inline-flex; min-height: 36px; align-items: center; justify-content: center; gap: 6px; color: #52665e; font-size: 10px; font-weight: 750; background: #fff; border-right: 1px solid #dbe4e0; cursor: pointer; }
+.inspection-result-options label:last-child { border-right: 0; }
+.inspection-result-options label:focus-within { z-index: 1; outline: 3px solid #99c9bc; outline-offset: -3px; }
+.inspection-result-options label.selected { color: #fff; background: #326f60; }
+.inspection-result-options label:nth-child(2).selected { background: #a74339; }
+.inspection-result-options input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.inspection-run-notes { margin: 0; }
+.inspection-checklist-form > .form-actions, .inspection-template-editor > .form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.status-passed, .status-approved, .status-completed { color: #147049; background: #e0f4e7; }
+.status-failed { color: #a63a31; background: #fae8e6; }
+.status-pending_approval, .status-scheduled { color: #8b5d0c; background: #fff0d4; }
+
+@media (max-width: 760px) {
+  .inspection-checklist-heading { align-items: flex-start; flex-wrap: wrap; }
+  .inspection-checklist-heading-actions { width: calc(100% - 28px); margin-left: 28px; }
+  .inspection-checklist-heading-actions .secondary-button { flex: 1; }
+  .inspection-template-item, .inspection-checklist-item, .inspection-checklist-row { grid-template-columns: minmax(0, 1fr); }
+  .inspection-template-item .inspection-template-prompt { grid-column: auto; }
+  .inspection-template-item .checkbox-label { min-height: 32px; }
+  .inspection-template-item .icon-button { justify-self: end; }
+  .inspection-checklist-row-actions { justify-content: flex-start; }
+  .inspection-checklist-row-actions .secondary-button { flex: 1 1 120px; }
+  .inspection-result-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .inspection-checklist-item > small { grid-column: auto; }
+  .inspection-checklist-form > .form-actions, .inspection-template-editor > .form-actions { align-items: stretch; flex-direction: column; }
+  .inspection-checklist-form > .form-actions button, .inspection-template-editor > .form-actions button { width: 100%; }
+}

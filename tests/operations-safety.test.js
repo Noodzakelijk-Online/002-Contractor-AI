@@ -128,6 +128,9 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
   assert.ok(Array.isArray(exported.body.taskDependencies));
   assert.ok(Array.isArray(exported.body.scheduleBaselines));
+  assert.ok(Array.isArray(exported.body.inspectionTemplates));
+  assert.ok(Array.isArray(exported.body.inspectionChecklistSubmissions));
+  assert.equal(exported.body.inspectionTemplates.filter(template => template.builtIn).length, 3);
   assert.ok(exported.body.projectControls.rfis.some(record => record.id === exportedRfi.body.rfi.id));
   assert.ok(exported.body.projectControls.submittals.some(record => record.id === exportedSubmittal.body.submittal.id));
   assert.ok(exported.body.projectControls.controlledDocuments.some(record => record.id === exportedDocument.body.document.id));
@@ -147,6 +150,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
   assert.equal(exportValidation.body.counts.taskDependencies, exported.body.taskDependencies.length);
   assert.equal(exportValidation.body.counts.scheduleBaselines, exported.body.scheduleBaselines.length);
+  assert.equal(exportValidation.body.counts.inspectionTemplates, exported.body.inspectionTemplates.length);
+  assert.equal(exportValidation.body.counts.inspectionChecklistSubmissions, exported.body.inspectionChecklistSubmissions.length);
   assert.equal(exportValidation.body.counts.rfis, exported.body.projectControls.rfis.length);
   assert.equal(exportValidation.body.counts.submittals, exported.body.projectControls.submittals.length);
   assert.equal(exportValidation.body.counts.controlledDocuments, exported.body.projectControls.controlledDocuments.length);
@@ -155,6 +160,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   const prePipelineExport = structuredClone(exported.body);
   delete prePipelineExport.opportunities;
   delete prePipelineExport.opportunityActivities;
+  delete prePipelineExport.inspectionTemplates;
+  delete prePipelineExport.inspectionChecklistSubmissions;
   delete prePipelineExport.projectControls;
   const { integrity: prePipelineIntegrity, ...prePipelinePayload } = prePipelineExport;
   prePipelineExport.integrity = {
@@ -168,6 +175,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(prePipelineValidation.response.status, 200);
   assert.equal(prePipelineValidation.body.counts.opportunities, 0);
   assert.equal(prePipelineValidation.body.counts.opportunityActivities, 0);
+  assert.equal(prePipelineValidation.body.counts.inspectionTemplates, 0);
+  assert.equal(prePipelineValidation.body.counts.inspectionChecklistSubmissions, 0);
   assert.equal(prePipelineValidation.body.counts.rfis, 0);
   assert.equal(prePipelineValidation.body.counts.submittals, 0);
   assert.equal(prePipelineValidation.body.counts.controlledDocuments, 0);
@@ -278,7 +287,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '024_project_meeting_minutes');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '025_inspection_checklists');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 

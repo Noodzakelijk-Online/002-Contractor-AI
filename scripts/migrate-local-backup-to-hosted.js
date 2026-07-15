@@ -9,7 +9,8 @@ const {
   AUDIT_CHAIN_GENESIS_HASH,
   auditEventHash,
   auditEventFromRow,
-  verifyAuditChainRows
+  verifyAuditChainRows,
+  builtInInspectionTemplateRows
 } = require('../operating-ledger');
 const { createEvidenceStorage } = require('../evidence-storage');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
@@ -300,6 +301,37 @@ async function insertRows(client, table, columns, rows) {
   }
 }
 
+const MIGRATION_SEED_COLUMNS = {
+  inspection_templates: [
+    'id',
+    'template_key',
+    'name',
+    'inspection_type',
+    'discipline',
+    'version_number',
+    'status',
+    'items_json',
+    'data_json'
+  ]
+};
+
+async function prepareMigrationSeedTable(client, table, sourceIncludesTable) {
+  const columns = MIGRATION_SEED_COLUMNS[table];
+  if (!columns) return false;
+  const destinationRows = (await client.query(
+    `SELECT ${columns.map(quotedIdentifier).join(', ')} FROM ${quotedIdentifier(table)}`
+  )).rows;
+  if (!destinationRows.length) return false;
+  const expectedRows = table === 'inspection_templates'
+    ? builtInInspectionTemplateRows().map(row => Object.fromEntries(columns.map(column => [column, row[column]])))
+    : [];
+  const canonical = destinationRows.length === expectedRows.length
+    && tableDigest(table, columns, destinationRows) === tableDigest(table, columns, expectedRows);
+  if (!canonical) throw new Error(`Hosted migration target is not empty: ${table}`);
+  if (sourceIncludesTable) await client.query(`DELETE FROM ${quotedIdentifier(table)}`);
+  return true;
+}
+
 function verifySourceAuditChain(database) {
   const columns = sourceColumns(database, 'audit_events');
   if (!['sequence_number', 'previous_hash', 'event_hash'].every(column => columns.includes(column))) {
@@ -485,6 +517,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       await client.query(`LOCK TABLE ${targetTables.map(quotedIdentifier).join(', ')} IN ACCESS EXCLUSIVE MODE`);
     }
     for (const table of targetTables) {
+      if (await prepareMigrationSeedTable(client, table, sourceRowsByTable.has(table))) continue;
       const count = await client.query(`SELECT COUNT(*)::bigint AS count FROM ${quotedIdentifier(table)}`);
       if (BigInt(count.rows[0].count) !== 0n) throw new Error(`Hosted migration target is not empty: ${table}`);
     }

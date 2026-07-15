@@ -516,6 +516,8 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(commandApply.response.status, 201);
   assert.equal(commandApply.body.success, true);
   assert.equal(commandApply.body.summary.externalCommitments, 0);
+  assert.ok(commandApply.body.commandPlan);
+  assert.equal(commandApply.body.commandPlan.actions.some(action => action.id === siteVisitCommand.id), false);
   assert.ok(commandApply.body.applied.some(item =>
     item.type === 'draft_capability_gap'
     && item.jobId === commandJobId
