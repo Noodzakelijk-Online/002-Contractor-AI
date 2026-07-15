@@ -139,6 +139,25 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup project-schedule constraints are incomplete: ${missingScheduleIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('021_preconstruction_opportunities')) {
+        const opportunityTables = ['opportunities', 'opportunity_activities'];
+        const missingOpportunityTables = opportunityTables.filter(table => !retainedTables.has(table));
+        if (missingOpportunityTables.length) {
+          throw new Error(`Backup preconstruction-pipeline schema is incomplete: ${missingOpportunityTables.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const opportunityIndexes = [
+          'idx_opportunities_stage_follow_up',
+          'idx_opportunities_client',
+          'idx_opportunities_converted_job',
+          'idx_opportunity_activities_due',
+          'idx_opportunity_activities_idempotency'
+        ];
+        const missingOpportunityIndexes = opportunityIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingOpportunityIndexes.length) {
+          throw new Error(`Backup preconstruction-pipeline constraints are incomplete: ${missingOpportunityIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

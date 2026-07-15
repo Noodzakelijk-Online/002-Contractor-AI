@@ -853,13 +853,39 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(detail.audit.some(entry => entry.action === 'apply_job_restore'));
     assert.ok(detail.audit.some(entry => entry.action === 'release_tool_reservation' && entry.actor === 'postgres_contract_test'));
 
+    const opportunity = ledger.createOpportunity({
+      title: 'PostgreSQL preconstruction contract',
+      client: { name: 'PostgreSQL opportunity client' },
+      stage: 'estimating',
+      estimatedValue: 48000,
+      probabilityPercent: 55,
+      nextFollowUpAt: '2027-01-15T09:00:00.000Z'
+    }, { actor: 'postgres_contract_test' });
+    const opportunityActivity = ledger.createOpportunityActivity(opportunity.id, {
+      type: 'follow_up',
+      status: 'draft',
+      summary: 'Retain hosted pipeline follow-up',
+      idempotencyKey: 'postgres-opportunity-follow-up'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(opportunityActivity.replayed, false);
+    assert.equal(opportunityActivity.activity.opportunityId, opportunity.id);
+    const opportunityConversion = ledger.convertOpportunityToJob(opportunity.id, {}, { actor: 'postgres_contract_test' });
+    assert.equal(opportunityConversion.replayed, false);
+    assert.equal(opportunityConversion.opportunity.convertedJobId, opportunityConversion.job.id);
+    const replayedOpportunityConversion = ledger.convertOpportunityToJob(opportunity.id, {}, { actor: 'postgres_contract_test' });
+    assert.equal(replayedOpportunityConversion.replayed, true);
+    assert.equal(replayedOpportunityConversion.job.id, opportunityConversion.job.id);
+    assert.equal(ledger.listOpportunities({ includeClosed: true }).filter(record => record.id === opportunity.id).length, 1);
+    assert.equal(ledger.listOpportunityActivities({ opportunityId: opportunity.id }).length, 1);
+    assert.ok(ledger.opportunityForecast().summary.weightedValue >= 26400);
+
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
     assert.ok(Array.isArray(dashboard.nextActions));
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '020_project_schedule_baselines');
+    assert.equal(migrations.currentVersion, '021_preconstruction_opportunities');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -940,12 +966,18 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('020_project_schedule_baselines'));
+  assert.deepEqual(versions, Array(4).fill('021_preconstruction_opportunities'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 20);
+    assert.equal(Number(migrationCount.count), 21);
+    const opportunityTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('opportunities', 'opportunity_activities')
+    `).rows[0];
+    assert.equal(Number(opportunityTableCount.count), 2);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

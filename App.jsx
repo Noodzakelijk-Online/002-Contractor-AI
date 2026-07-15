@@ -38,6 +38,7 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Target,
   Timer,
   TriangleAlert,
   Users,
@@ -58,6 +59,7 @@ import './App.css'
 
 const navItems = [
   ['today', 'Today', LayoutDashboard],
+  ['pipeline', 'Pipeline', Target],
   ['jobs', 'Jobs', BriefcaseBusiness],
   ['approvals', 'Approvals', ClipboardCheck],
   ['dispatch', 'Dispatch', MapPin],
@@ -498,6 +500,37 @@ function emptyInvoiceDraft() {
   }
 }
 
+function emptyOpportunityDraft(opportunity = null) {
+  return {
+    clientName: opportunity?.client?.name || '',
+    company: opportunity?.client?.company || '',
+    email: opportunity?.client?.email || '',
+    phone: opportunity?.client?.phone || '',
+    title: opportunity?.title || '',
+    stage: opportunity?.stage || 'new',
+    service: opportunity?.service || '',
+    sourceChannel: opportunity?.sourceChannel || 'manual',
+    description: opportunity?.description || '',
+    address: opportunity?.address || '',
+    city: opportunity?.city || '',
+    estimatedValue: opportunity ? String(opportunity.estimatedValue || '') : '',
+    probabilityPercent: opportunity ? String(opportunity.probabilityPercent ?? 10) : '10',
+    targetDecisionAt: toLocalDateTimeInput(opportunity?.targetDecisionAt),
+    nextFollowUpAt: toLocalDateTimeInput(opportunity?.nextFollowUpAt),
+    ownerName: opportunity?.ownerName || '',
+    lostReason: opportunity?.lostReason || '',
+  }
+}
+
+function emptyOpportunityActivityDraft() {
+  return {
+    activityType: 'follow_up',
+    summary: '',
+    dueAt: '',
+    notes: '',
+  }
+}
+
 function roundMoney(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100
 }
@@ -541,6 +574,235 @@ function Empty({ title, detail }) {
       <strong>{title}</strong>
       <span>{detail}</span>
     </div>
+  )
+}
+
+const PIPELINE_STAGES = ['new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating', 'won', 'lost', 'archived']
+
+function PipelineWorkspace({
+  opportunities,
+  forecast,
+  selectedOpportunity,
+  canCoordinate,
+  submitting,
+  onCreate,
+  onEdit,
+  onSelect,
+  onFollowUp,
+  onCompleteActivity,
+  onConvert,
+  onOpenJob,
+}) {
+  const [query, setQuery] = useState('')
+  const [stage, setStage] = useState('open')
+  const normalizedQuery = query.trim().toLowerCase()
+  const rows = useMemo(
+    () =>
+      opportunities.filter((opportunity) => {
+        const stageMatches =
+          stage === 'all' ||
+          (stage === 'open'
+            ? !['won', 'lost', 'archived'].includes(opportunity.stage)
+            : opportunity.stage === stage)
+        return stageMatches && (!normalizedQuery || JSON.stringify(opportunity).toLowerCase().includes(normalizedQuery))
+      }),
+    [normalizedQuery, opportunities, stage],
+  )
+  const summary = forecast?.summary || {}
+
+  return (
+    <section className="page-grid pipeline-workspace" data-testid="pipeline-workspace">
+      <div className="metrics-grid pipeline-metrics">
+        <Metric icon={Target} label="Open opportunities" value={summary.open || 0} hint={`${summary.total || 0} retained leads`} />
+        <Metric
+          icon={ReceiptEuro}
+          label="Weighted forecast"
+          value={currency.format(summary.weightedValue || 0)}
+          hint={`${currency.format(summary.estimatedValue || 0)} unweighted`}
+          tone="green"
+        />
+        <Metric
+          icon={Timer}
+          label="Follow-ups due"
+          value={summary.overdueFollowUps || 0}
+          hint="Internal action required"
+          tone={summary.overdueFollowUps ? 'amber' : 'green'}
+        />
+        <Metric icon={BriefcaseBusiness} label="Converted" value={summary.converted || 0} hint={`${summary.won || 0} verified wins`} tone="blue" />
+      </div>
+
+      <section className="panel pipeline-panel">
+        <div className="panel-heading pipeline-heading">
+          <div>
+            <h2>Preconstruction pipeline</h2>
+            <p>Qualify demand before work enters planning, resources, or finance.</p>
+          </div>
+          {canCoordinate ? (
+            <button className="primary-button" onClick={onCreate}>
+              <Plus size={16} />
+              New opportunity
+            </button>
+          ) : null}
+        </div>
+        <div className="pipeline-toolbar">
+          <label className="search-control">
+            <Search size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search client, scope or location" />
+          </label>
+          <div className="pipeline-stage-tabs" role="group" aria-label="Filter opportunities by stage">
+            {['open', 'proposal', 'negotiating', 'won', 'lost', 'all'].map((option) => (
+              <button key={option} className={stage === option ? 'active' : ''} onClick={() => setStage(option)}>
+                {formatStatus(option)}
+              </button>
+            ))}
+          </div>
+        </div>
+        {rows.length ? (
+          <div className="pipeline-list">
+            {rows.map((opportunity) => {
+              const overdue =
+                opportunity.nextFollowUpAt &&
+                Date.parse(opportunity.nextFollowUpAt) <= Date.now() &&
+                !['won', 'lost', 'archived'].includes(opportunity.stage)
+              return (
+                <article
+                  className={`pipeline-row ${selectedOpportunity?.id === opportunity.id ? 'pipeline-row-selected' : ''}`}
+                  key={opportunity.id}
+                >
+                  <button className="pipeline-row-main" onClick={() => onSelect(opportunity)} aria-label={`Open ${opportunity.title}`}>
+                    <span className={`pipeline-stage-marker pipeline-stage-${opportunity.stage}`} aria-hidden="true" />
+                    <span className="pipeline-copy">
+                      <span className="pipeline-title">
+                        <strong>{opportunity.title}</strong>
+                        <span className={`status status-${opportunity.stage}`}>{formatStatus(opportunity.stage)}</span>
+                      </span>
+                      <small>
+                        {opportunity.client?.name || 'Client pending'} / {opportunity.service || 'Service pending'} /{' '}
+                        {opportunity.city || opportunity.address || 'Location pending'}
+                      </small>
+                    </span>
+                  </button>
+                  <dl className="pipeline-values">
+                    <div>
+                      <dt>Value</dt>
+                      <dd>{currency.format(opportunity.estimatedValue || 0)}</dd>
+                    </div>
+                    <div>
+                      <dt>Weighted</dt>
+                      <dd>{currency.format(opportunity.weightedValue || 0)}</dd>
+                    </div>
+                    <div>
+                      <dt>Follow-up</dt>
+                      <dd className={overdue ? 'pipeline-overdue' : ''}>
+                        {opportunity.nextFollowUpAt ? formatDate(opportunity.nextFollowUpAt) : 'Not planned'}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="pipeline-actions">
+                    {canCoordinate ? (
+                      <button className="secondary-button" onClick={() => onEdit(opportunity)}>
+                        <Pencil size={15} />
+                        Edit
+                      </button>
+                    ) : null}
+                    {canCoordinate && !['won', 'lost', 'archived'].includes(opportunity.stage) ? (
+                      <button className="secondary-button" onClick={() => onFollowUp(opportunity)}>
+                        <MessageSquareText size={15} />
+                        Follow-up
+                      </button>
+                    ) : null}
+                    {opportunity.convertedJobId ? (
+                      <button className="icon-button table-action" aria-label={`Open linked job for ${opportunity.title}`} onClick={() => onOpenJob(opportunity)}>
+                        <ArrowUpRight size={16} />
+                      </button>
+                    ) : canCoordinate && !['won', 'lost', 'archived'].includes(opportunity.stage) ? (
+                      <button className="primary-button" disabled={submitting} onClick={() => onConvert(opportunity)}>
+                        <BriefcaseBusiness size={15} />
+                        Create job
+                      </button>
+                    ) : null}
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        ) : (
+          <Empty title="No opportunities in this view" detail="Adjust the stage filter or retain a new qualified inquiry." />
+        )}
+      </section>
+
+      {selectedOpportunity ? (
+        <section className="panel pipeline-detail" aria-live="polite">
+          <div className="panel-heading">
+            <div>
+              <h2>{selectedOpportunity.title}</h2>
+              <p>
+                {selectedOpportunity.client?.name || 'Client pending'} / {formatStatus(selectedOpportunity.stage)} /{' '}
+                {selectedOpportunity.probabilityPercent}% probability
+              </p>
+            </div>
+            <button className="icon-button" aria-label="Close opportunity detail" onClick={() => onSelect(null)}>
+              <X size={17} />
+            </button>
+          </div>
+          <div className="pipeline-detail-grid">
+            <div>
+              <span>Owner</span>
+              <strong>{selectedOpportunity.ownerName || 'Unassigned'}</strong>
+            </div>
+            <div>
+              <span>Decision target</span>
+              <strong>{selectedOpportunity.targetDecisionAt ? formatDate(selectedOpportunity.targetDecisionAt) : 'Not set'}</strong>
+            </div>
+            <div>
+              <span>Source</span>
+              <strong>{formatStatus(selectedOpportunity.sourceChannel)}</strong>
+            </div>
+            <div>
+              <span>Linked job</span>
+              <strong>{selectedOpportunity.convertedJob?.title || 'Not converted'}</strong>
+            </div>
+          </div>
+          {selectedOpportunity.description ? <p className="pipeline-description">{selectedOpportunity.description}</p> : null}
+          <div className="pipeline-activity-heading">
+            <div>
+              <h3>Activity</h3>
+              <p>Internal notes and follow-up drafts; no external delivery occurs here.</p>
+            </div>
+            {canCoordinate && !['won', 'lost', 'archived'].includes(selectedOpportunity.stage) ? (
+              <button className="secondary-button" onClick={() => onFollowUp(selectedOpportunity)}>
+                <Plus size={15} />
+                Add activity
+              </button>
+            ) : null}
+          </div>
+          {selectedOpportunity.activities?.length ? (
+            <div className="pipeline-activity-list">
+              {selectedOpportunity.activities.map((activity) => (
+                <div className="pipeline-activity" key={activity.id}>
+                  <span className={`status status-${activity.status}`}>{formatStatus(activity.status)}</span>
+                  <div>
+                    <strong>{activity.summary}</strong>
+                    <small>
+                      {formatStatus(activity.activityType)} / {activity.dueAt ? `due ${formatDate(activity.dueAt)}` : formatDate(activity.createdAt)}
+                    </small>
+                    {activity.notes ? <p>{activity.notes}</p> : null}
+                  </div>
+                  {canCoordinate && !['completed', 'cancelled'].includes(activity.status) ? (
+                    <button className="secondary-button" disabled={submitting} onClick={() => onCompleteActivity(selectedOpportunity, activity)}>
+                      <Check size={15} />
+                      Complete
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty title="No retained activity" detail="Add the next internal follow-up or qualification note." />
+          )}
+        </section>
+      ) : null}
+    </section>
   )
 }
 
@@ -3760,6 +4022,11 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [showIntake, setShowIntake] = useState(false)
+  const [opportunityEditor, setOpportunityEditor] = useState(null)
+  const [opportunityDraft, setOpportunityDraft] = useState(() => emptyOpportunityDraft())
+  const [selectedOpportunity, setSelectedOpportunity] = useState(null)
+  const [opportunityActivity, setOpportunityActivity] = useState(null)
+  const [opportunityActivityDraft, setOpportunityActivityDraft] = useState(() => emptyOpportunityActivityDraft())
   const [approvalFocus, setApprovalFocus] = useState(null)
   const [approvalReview, setApprovalReview] = useState(null)
   const [approvalReason, setApprovalReason] = useState('')
@@ -3836,9 +4103,10 @@ function App() {
   const equipmentMaintenanceOpenerRef = useRef(null)
   const commercialDialogOpenerRef = useRef(null)
   const noticeSequenceRef = useRef(0)
+  const hasLoadedDataRef = useRef(false)
 
   const refresh = useCallback(async () => {
-    setLoading(true)
+    if (!hasLoadedDataRef.current) setLoading(true)
     setError('')
     try {
       const sessionResult = await api('/api/session')
@@ -3858,6 +4126,7 @@ function App() {
       ])
       if (fieldScoped) {
         const scopedJobs = jobsResult.jobs || []
+        hasLoadedDataRef.current = true
         setData({
           session: sessionResult,
           dashboard: fieldScopedDashboard(scopedJobs),
@@ -3883,11 +4152,14 @@ function App() {
           archivedJobs: [],
           operationsCapabilities: null,
           organization: null,
+          opportunities: [],
+          opportunityForecast: null,
         })
         return
       }
       const [
         dashboardResult,
+        opportunitiesResult,
         approvalsResult,
         dispatchResult,
         workforceResult,
@@ -3902,6 +4174,7 @@ function App() {
         organizationResult,
       ] = await Promise.all([
         api('/api/ledger/dashboard'),
+        api('/api/ledger/opportunities?includeClosed=true&limit=500'),
         api('/api/ledger/approvals?status=pending&limit=100'),
         api('/api/ledger/dispatch?limit=100'),
         api('/api/ledger/workforce?limit=100'),
@@ -3924,9 +4197,12 @@ function App() {
             api('/api/ledger/jobs?archiveOnly=true&limit=100').catch(() => ({ jobs: [] })),
           ])
         : [{ backups: [] }, null, null, { jobs: [] }]
+      hasLoadedDataRef.current = true
       setData({
         session: sessionResult,
         dashboard: dashboardResult.dashboard,
+        opportunities: opportunitiesResult.opportunities || [],
+        opportunityForecast: opportunitiesResult.forecast || null,
         jobs: jobsResult.jobs || [],
         approvals: approvalsResult.approvals || [],
         dispatch: dispatchResult,
@@ -4071,6 +4347,7 @@ function App() {
   const visibleNavItems = useMemo(
     () =>
       navItems.filter(([key]) => {
+        if (key === 'pipeline') return capabilities.pipeline
         if (key === 'approvals') return capabilities.approvals
         if (key === 'dispatch') return capabilities.dispatch
         if (key === 'resources') return capabilities.resources
@@ -4275,6 +4552,161 @@ function App() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  function openOpportunityEditor(opportunity = null) {
+    setOpportunityEditor({ mode: opportunity ? 'edit' : 'create', opportunity })
+    setOpportunityDraft(emptyOpportunityDraft(opportunity))
+  }
+
+  function closeOpportunityEditor() {
+    setOpportunityEditor(null)
+    setOpportunityDraft(emptyOpportunityDraft())
+  }
+
+  async function submitOpportunity(event) {
+    event.preventDefault()
+    if (!opportunityEditor) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const payload = {
+        ...opportunityDraft,
+        estimatedValue: Number(opportunityDraft.estimatedValue) || 0,
+        probabilityPercent: Number(opportunityDraft.probabilityPercent) || 0,
+        targetDecisionAt: toIsoDateTime(opportunityDraft.targetDecisionAt),
+        nextFollowUpAt: toIsoDateTime(opportunityDraft.nextFollowUpAt),
+      }
+      const result = opportunityEditor.mode === 'create'
+        ? await api('/api/ledger/opportunities', { method: 'POST', body: JSON.stringify(payload) })
+        : await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityEditor.opportunity.id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          })
+      closeOpportunityEditor()
+      setData((current) => {
+        if (!current || !result.opportunity) return current
+        const retained = current.opportunities || []
+        const opportunityExists = retained.some((opportunity) => opportunity.id === result.opportunity.id)
+        return {
+          ...current,
+          opportunities: opportunityExists
+            ? retained.map((opportunity) => (opportunity.id === result.opportunity.id ? result.opportunity : opportunity))
+            : [result.opportunity, ...retained],
+        }
+      })
+      setSelectedOpportunity(result.opportunity)
+      notify(opportunityEditor.mode === 'create' ? 'Opportunity retained in the preconstruction pipeline.' : 'Opportunity updated in the ledger.')
+      await refresh()
+      if (result.opportunity?.id) {
+        const detail = await api(`/api/ledger/opportunities/${encodeURIComponent(result.opportunity.id)}`)
+        setSelectedOpportunity(detail.opportunity)
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function selectOpportunity(opportunity) {
+    if (!opportunity) {
+      setSelectedOpportunity(null)
+      return
+    }
+    setError('')
+    try {
+      const result = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunity.id)}`)
+      setSelectedOpportunity(result.opportunity)
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  function openOpportunityActivity(opportunity) {
+    setOpportunityActivity(opportunity)
+    setOpportunityActivityDraft(emptyOpportunityActivityDraft())
+  }
+
+  async function submitOpportunityActivity(event) {
+    event.preventDefault()
+    if (!opportunityActivity) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityActivity.id)}/activities`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...opportunityActivityDraft,
+          dueAt: toIsoDateTime(opportunityActivityDraft.dueAt),
+          internalOnly: true,
+        }),
+      })
+      setOpportunityActivity(null)
+      setOpportunityActivityDraft(emptyOpportunityActivityDraft())
+      setSelectedOpportunity(result.opportunity)
+      notify('Internal opportunity activity retained. No external message was sent.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function completeOpportunityActivity(opportunity, activity) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/opportunities/${encodeURIComponent(opportunity.id)}/activities/${encodeURIComponent(activity.id)}`,
+        { method: 'PATCH', body: JSON.stringify({ status: 'completed' }) },
+      )
+      setSelectedOpportunity(result.opportunity)
+      notify('Opportunity activity completed in the internal ledger.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function convertOpportunity(opportunity) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunity.id)}/convert`, {
+        method: 'POST',
+        body: JSON.stringify({ priority: 'medium' }),
+      })
+      setData((current) => {
+        if (!current || !result.opportunity) return current
+        return {
+          ...current,
+          opportunities: (current.opportunities || []).map((record) =>
+            record.id === result.opportunity.id ? result.opportunity : record,
+          ),
+        }
+      })
+      setSelectedOpportunity(result.opportunity)
+      notify(result.replayed ? 'The existing linked job was reopened.' : 'Qualified opportunity converted to an internal job. No external commitment was made.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openOpportunityJob(opportunity) {
+    if (!opportunity.convertedJobId) return
+    const linkedJob = jobs.find((job) => job.id === opportunity.convertedJobId) || {
+      id: opportunity.convertedJobId,
+      title: opportunity.title,
+    }
+    setSection('jobs')
+    void openJobWorkspace(linkedJob)
   }
 
   async function runCycle() {
@@ -6957,10 +7389,10 @@ function App() {
                 <LogOut size={17} />
               </button>
             ) : null}
-            {capabilities.intake ? (
-              <button className="primary-button" onClick={() => setShowIntake(true)}>
+            {capabilities.intake && capabilities.pipeline ? (
+              <button className="primary-button" onClick={() => openOpportunityEditor()}>
                 <Plus size={17} />
-                New intake
+                New opportunity
               </button>
             ) : null}
           </div>
@@ -7016,9 +7448,9 @@ function App() {
                   />
                   <Metric
                     icon={Gauge}
-                    label="Pipeline"
-                    value={currency.format(dashboard.money?.estimatedPipeline || 0)}
-                    hint="Estimated active value"
+                    label="Weighted pipeline"
+                    value={currency.format(dashboard.preconstruction?.summary?.weightedValue || 0)}
+                    hint={`${dashboard.preconstruction?.summary?.open || 0} open opportunities`}
                     tone="green"
                   />
                 </div>
@@ -7185,6 +7617,23 @@ function App() {
               </section>
             )}
 
+            {section === 'pipeline' && capabilities.pipeline ? (
+              <PipelineWorkspace
+                opportunities={data.opportunities || EMPTY_LIST}
+                forecast={data.opportunityForecast}
+                selectedOpportunity={selectedOpportunity}
+                canCoordinate={canCoordinate}
+                submitting={submitting}
+                onCreate={() => openOpportunityEditor()}
+                onEdit={openOpportunityEditor}
+                onSelect={selectOpportunity}
+                onFollowUp={openOpportunityActivity}
+                onCompleteActivity={completeOpportunityActivity}
+                onConvert={convertOpportunity}
+                onOpenJob={openOpportunityJob}
+              />
+            ) : null}
+
             {section === 'jobs' && (
               <section className="panel page-panel">
                 <div className="panel-heading">
@@ -7199,7 +7648,7 @@ function App() {
                   {capabilities.intake ? (
                     <button className="primary-button" onClick={() => setShowIntake(true)}>
                       <Plus size={16} />
-                      New intake
+                      New job
                     </button>
                   ) : null}
                 </div>
@@ -10124,6 +10573,285 @@ function App() {
           </section>
         </div>
       ) : null}
+      {opportunityEditor ? (
+        <div className="modal-backdrop opportunity-backdrop" role="presentation">
+          <section
+            className="modal opportunity-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="opportunity-title"
+            data-testid="opportunity-modal"
+          >
+            <div className="modal-heading">
+              <div>
+                <h2 id="opportunity-title">{opportunityEditor.mode === 'create' ? 'New opportunity' : 'Edit opportunity'}</h2>
+                <p>Retain qualification and forecast data before operational job creation.</p>
+              </div>
+              <button className="icon-button" aria-label="Close opportunity" onClick={closeOpportunityEditor}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitOpportunity}>
+              <div className="form-grid opportunity-form-grid">
+                <label>
+                  Client name
+                  <input
+                    required
+                    disabled={opportunityEditor.mode === 'edit'}
+                    value={opportunityDraft.clientName}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, clientName: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Company
+                  <input
+                    disabled={opportunityEditor.mode === 'edit'}
+                    value={opportunityDraft.company}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, company: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Email
+                  <input
+                    type="email"
+                    disabled={opportunityEditor.mode === 'edit'}
+                    value={opportunityDraft.email}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, email: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Phone
+                  <input
+                    disabled={opportunityEditor.mode === 'edit'}
+                    value={opportunityDraft.phone}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, phone: event.target.value })}
+                  />
+                </label>
+                <label className="form-span">
+                  Opportunity title
+                  <input
+                    required
+                    minLength="2"
+                    value={opportunityDraft.title}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, title: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Stage
+                  <select
+                    value={opportunityDraft.stage}
+                    disabled={opportunityDraft.stage === 'won'}
+                    onChange={(event) => {
+                      const nextStage = event.target.value
+                      const defaultProbability = {
+                        new: 10,
+                        qualifying: 20,
+                        site_visit: 35,
+                        estimating: 50,
+                        proposal: 65,
+                        negotiating: 80,
+                        lost: 0,
+                        archived: 0,
+                      }[nextStage]
+                      setOpportunityDraft({
+                        ...opportunityDraft,
+                        stage: nextStage,
+                        probabilityPercent: String(defaultProbability ?? opportunityDraft.probabilityPercent),
+                      })
+                    }}
+                  >
+                    {PIPELINE_STAGES.map((option) => (
+                      <option key={option} value={option} disabled={option === 'won' && opportunityDraft.stage !== 'won'}>
+                        {formatStatus(option)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Probability
+                  <div className="probability-control">
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      disabled={['won', 'lost', 'archived'].includes(opportunityDraft.stage)}
+                      value={opportunityDraft.probabilityPercent}
+                      onChange={(event) => setOpportunityDraft({ ...opportunityDraft, probabilityPercent: event.target.value })}
+                    />
+                    <output>{opportunityDraft.probabilityPercent}%</output>
+                  </div>
+                </label>
+                <label>
+                  Service
+                  <input
+                    value={opportunityDraft.service}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, service: event.target.value })}
+                    placeholder="Renovation, maintenance..."
+                  />
+                </label>
+                <label>
+                  Source
+                  <input
+                    value={opportunityDraft.sourceChannel}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, sourceChannel: event.target.value })}
+                    placeholder="Referral, website, tender..."
+                  />
+                </label>
+                <label>
+                  Estimated value
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={opportunityDraft.estimatedValue}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, estimatedValue: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Owner
+                  <input
+                    value={opportunityDraft.ownerName}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, ownerName: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Next follow-up
+                  <input
+                    type="datetime-local"
+                    value={opportunityDraft.nextFollowUpAt}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, nextFollowUpAt: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Decision target
+                  <input
+                    type="datetime-local"
+                    value={opportunityDraft.targetDecisionAt}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, targetDecisionAt: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Address
+                  <input
+                    value={opportunityDraft.address}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, address: event.target.value })}
+                  />
+                </label>
+                <label>
+                  City
+                  <input
+                    value={opportunityDraft.city}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, city: event.target.value })}
+                  />
+                </label>
+                {opportunityDraft.stage === 'lost' ? (
+                  <label className="form-span">
+                    Loss reason
+                    <textarea
+                      required
+                      minLength="4"
+                      value={opportunityDraft.lostReason}
+                      onChange={(event) => setOpportunityDraft({ ...opportunityDraft, lostReason: event.target.value })}
+                      placeholder="Retain why this opportunity was not won."
+                    />
+                  </label>
+                ) : null}
+                <label className="form-span">
+                  Scope and qualification notes
+                  <textarea
+                    value={opportunityDraft.description}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, description: event.target.value })}
+                    placeholder="Need, access, constraints, decision process and scope assumptions."
+                  />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeOpportunityEditor}>
+                  Cancel
+                </button>
+                <button className="primary-button" disabled={submitting || opportunityDraft.title.trim().length < 2}>
+                  {submitting ? 'Saving...' : opportunityEditor.mode === 'create' ? 'Retain opportunity' : 'Save changes'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {opportunityActivity ? (
+        <div className="modal-backdrop opportunity-activity-backdrop" role="presentation">
+          <section
+            className="modal opportunity-activity-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="opportunity-activity-title"
+            data-testid="opportunity-activity-modal"
+          >
+            <div className="modal-heading">
+              <div>
+                <h2 id="opportunity-activity-title">Add pipeline activity</h2>
+                <p>{opportunityActivity.title} / internal ledger only</p>
+              </div>
+              <button className="icon-button" aria-label="Close opportunity activity" onClick={() => setOpportunityActivity(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitOpportunityActivity}>
+              <div className="form-grid opportunity-activity-form">
+                <label>
+                  Activity type
+                  <select
+                    value={opportunityActivityDraft.activityType}
+                    onChange={(event) => setOpportunityActivityDraft({ ...opportunityActivityDraft, activityType: event.target.value })}
+                  >
+                    <option value="follow_up">Follow-up</option>
+                    <option value="qualification">Qualification</option>
+                    <option value="site_visit">Site visit</option>
+                    <option value="estimate_review">Estimate review</option>
+                    <option value="note">Note</option>
+                  </select>
+                </label>
+                <label>
+                  Due
+                  <input
+                    type="datetime-local"
+                    value={opportunityActivityDraft.dueAt}
+                    onChange={(event) => setOpportunityActivityDraft({ ...opportunityActivityDraft, dueAt: event.target.value })}
+                  />
+                </label>
+                <label className="form-span">
+                  Summary
+                  <input
+                    required
+                    minLength="3"
+                    value={opportunityActivityDraft.summary}
+                    onChange={(event) => setOpportunityActivityDraft({ ...opportunityActivityDraft, summary: event.target.value })}
+                    placeholder="Confirm site visit availability"
+                  />
+                </label>
+                <label className="form-span">
+                  Internal notes
+                  <textarea
+                    value={opportunityActivityDraft.notes}
+                    onChange={(event) => setOpportunityActivityDraft({ ...opportunityActivityDraft, notes: event.target.value })}
+                    placeholder="Context for the office. This does not send a message."
+                  />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={() => setOpportunityActivity(null)}>
+                  Cancel
+                </button>
+                <button className="primary-button" disabled={submitting || opportunityActivityDraft.summary.trim().length < 3}>
+                  {submitting ? 'Saving...' : 'Retain activity'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
       {showIntake ? (
         <div className="modal-backdrop" role="presentation">
           <section className="modal" role="dialog" aria-modal="true" aria-labelledby="intake-title">

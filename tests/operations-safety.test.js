@@ -6,6 +6,14 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function parseTarFiles(buffer) {
   const files = new Map();
   let offset = 0;
@@ -118,6 +126,22 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.counts.scheduleBaselines, exported.body.scheduleBaselines.length);
   assert.equal(exportValidation.body.counts.handoverPackages, exported.body.handoverPackages.length);
 
+  const prePipelineExport = structuredClone(exported.body);
+  delete prePipelineExport.opportunities;
+  delete prePipelineExport.opportunityActivities;
+  const { integrity: prePipelineIntegrity, ...prePipelinePayload } = prePipelineExport;
+  prePipelineExport.integrity = {
+    ...prePipelineIntegrity,
+    digest: crypto.createHash('sha256').update(stableJson(prePipelinePayload)).digest('hex')
+  };
+  const prePipelineValidation = await request(baseUrl, '/api/operations/exports/validate', {
+    method: 'POST',
+    body: JSON.stringify({ snapshot: prePipelineExport })
+  });
+  assert.equal(prePipelineValidation.response.status, 200);
+  assert.equal(prePipelineValidation.body.counts.opportunities, 0);
+  assert.equal(prePipelineValidation.body.counts.opportunityActivities, 0);
+
   const tamperedExport = structuredClone(exported.body);
   tamperedExport.jobs[0].title = 'Tampered after export';
   const invalidExport = await request(baseUrl, '/api/operations/exports/validate', {
@@ -224,7 +248,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '020_project_schedule_baselines');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '021_preconstruction_opportunities');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -327,12 +351,16 @@ test('QA reset requires explicit confirmation and preserves non-QA work', async 
 
   const real = await request(baseUrl, '/api/ledger/intake', { method: 'POST', body: JSON.stringify({ title: 'Kitchen handover', client: { name: 'Real Client' } }) });
   const qa = await request(baseUrl, '/api/ledger/intake', { method: 'POST', body: JSON.stringify({ title: 'Browser QA dispatch fixture', client: { name: 'QA Client' } }) });
+  const realOpportunity = await request(baseUrl, '/api/ledger/opportunities', { method: 'POST', body: JSON.stringify({ title: 'School roof inquiry', client: { name: 'Municipal Client' }, estimatedValue: 18000 }) });
+  const qaOpportunity = await request(baseUrl, '/api/ledger/opportunities', { method: 'POST', body: JSON.stringify({ title: 'Browser QA pipeline fixture', client: { name: 'Demo Pipeline Client' }, estimatedValue: 4200 }) });
   const realWorker = await request(baseUrl, '/api/ledger/workers', { method: 'POST', body: JSON.stringify({ name: 'Field supervisor', status: 'available' }) });
   const qaWorker = await request(baseUrl, '/api/ledger/workers', { method: 'POST', body: JSON.stringify({ name: 'Browser QA field worker', status: 'available' }) });
   const realTool = await request(baseUrl, '/api/ledger/tools', { method: 'POST', body: JSON.stringify({ name: 'Company laser level', status: 'available' }) });
   const qaTool = await request(baseUrl, '/api/ledger/tools', { method: 'POST', body: JSON.stringify({ name: 'Demo laser level', status: 'available' }) });
   assert.equal(real.response.status, 201);
   assert.equal(qa.response.status, 201);
+  assert.equal(realOpportunity.response.status, 201);
+  assert.equal(qaOpportunity.response.status, 201);
   assert.equal(realWorker.response.status, 201);
   assert.equal(qaWorker.response.status, 201);
   assert.equal(realTool.response.status, 201);
@@ -345,6 +373,7 @@ test('QA reset requires explicit confirmation and preserves non-QA work', async 
   const reset = await request(baseUrl, '/api/operations/reset-qa', { method: 'POST', body: JSON.stringify({ confirmation: 'RESET_QA' }) });
   assert.equal(reset.response.status, 200);
   assert.ok(reset.body.archivedLedgerJobIds.includes(qa.body.job.id));
+  assert.ok(reset.body.archivedOpportunityIds.includes(qaOpportunity.body.opportunity.id));
   assert.ok(reset.body.retiredWorkerIds.includes(qaWorker.body.worker.id));
   assert.ok(reset.body.retiredToolIds.includes(qaTool.body.tool.id));
 
@@ -353,6 +382,10 @@ test('QA reset requires explicit confirmation and preserves non-QA work', async 
   const qaJob = jobs.body.jobs.find(job => job.id === qa.body.job.id);
   assert.equal(realJob.status, 'intake');
   assert.equal(qaJob.status, 'archived');
+
+  const opportunities = await request(baseUrl, '/api/ledger/opportunities?includeClosed=true&limit=100');
+  assert.equal(opportunities.body.opportunities.find(opportunity => opportunity.id === realOpportunity.body.opportunity.id).stage, 'new');
+  assert.equal(opportunities.body.opportunities.find(opportunity => opportunity.id === qaOpportunity.body.opportunity.id).stage, 'archived');
 
   const workers = await request(baseUrl, '/api/ledger/workers?limit=100');
   assert.equal(workers.body.workers.find(worker => worker.id === realWorker.body.worker.id).status, 'available');

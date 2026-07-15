@@ -17,7 +17,7 @@ npm start
 
 Open `http://localhost:3000`. For development, start the API with `npm run dev:api` and the Vite client with `npm run dev`.
 
-Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to retain the owner-controlled business identity used on quote packages, inspect and filter the chained audit history, create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and archive QA/demo records. Backups are created before a QA reset. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.
+Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to retain the owner-controlled business identity used on quote packages, inspect and filter the chained audit history, create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and archive eligible QA/demo jobs, non-won opportunities, workers, and tools. Backups are created before a QA reset. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.
 
 To restore a verified SQLite backup, stop the local Contractor.AI process first, then run:
 
@@ -93,11 +93,13 @@ Hosted `POST /api/operations/backup`, local backup listing/download, and backup-
 
 ## Authoritative API
 
-The supported surface is `/api/ledger/*`, including intake, jobs, approvals, dispatch, workforce, field assurance, finance, client success and autonomous cycles. Operational maintenance endpoints are:
+The supported surface is `/api/ledger/*`, including opportunities, intake, jobs, approvals, dispatch, workforce, field assurance, finance, client success and autonomous cycles. Operational maintenance endpoints are:
 
 - `GET /api/session` returns the current role and capability boundary without exposing token material. `POST /api/auth/login` exchanges a configured role key for a revocable HTTP-only browser session; `POST /api/auth/logout` revokes it in the ledger and clears the cookie.
+- `GET /api/ledger/opportunities` returns the retained preconstruction pipeline and weighted forecast. Owner and office operators can `POST /api/ledger/opportunities`, `PATCH /api/ledger/opportunities/:id`, retain or complete internal activities under `/activities`, and idempotently `POST /api/ledger/opportunities/:id/convert`. Conversion creates one linked job without assigning crew or making an external commitment. A linked opportunity becomes `won` only when a separate quote-acceptance approval verifies dated client evidence; a manual win is rejected and a loss requires a retained reason. Approvers have read-only pipeline access and field workers have none.
 - `GET /api/ledger/command-plan` previews prioritized ledger work; owner-only `POST /api/ledger/command-plan` applies selected safe action IDs without external commitment.
 - Owner-only `POST /api/ledger/autonomous-cycle` preserves dry-run inspection while routing every bounded mutating request through the durable scheduler lease; callers can scope work with `actionTypes`, `jobIds`, and `maxActions`.
+- Overdue open opportunities enter the command queue as `draft_opportunity_follow_up`. An autonomous cycle can retain one idempotent internal follow-up draft per opportunity/due timestamp, but cannot send it or create any external commitment.
 - `GET /api/ledger/scheduler` exposes the durable lease and last outcome; owner-only `POST /api/ledger/scheduler/run` claims and completes a due cycle idempotently.
 - `POST /api/ledger/weather/assess`
 - `POST /api/ledger/schedule/recommend`
@@ -160,7 +162,7 @@ The supported surface is `/api/ledger/*`, including intake, jobs, approvals, dis
 - `GET /api/operations/audit-integrity` verifies the complete retained audit chain against its atomic head and returns `503` when any event or sequence no longer matches.
 - Owner-only `GET /api/ledger/audit` returns newest-first, sequence-cursor pages of retained audit events with chain hashes. Use `beforeSequence` for the next page; exact `jobId`, `entityType`, `entityId`, `action`, and `actor` filters, `from` and `until` date bounds, free-text `query`, and `includeFacets=true` support investigation without loading the full ledger.
 - `GET /api/operations/capabilities`
-- `POST /api/operations/reset-qa` with `{ "confirmation": "RESET_QA" }`
+- `POST /api/operations/reset-qa` with `{ "confirmation": "RESET_QA" }` creates a verified local backup before archiving eligible QA/demo jobs and non-won opportunities and retiring matching workers and tools. Verified wins remain immutable.
 - `GET /api/readiness`
 - `GET /api/health/ready` exposes only a minimal orchestration status; hosted startup and readiness require a successful bounded object-storage PUT/GET/DELETE check inside the configured private prefix.
 

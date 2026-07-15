@@ -21,7 +21,7 @@ test('office operator signs in through an HTTP-only role session and signs out c
 
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await expect(page.locator('.operator-session')).toContainText('office operator');
-  await expect(page.getByRole('button', { name: 'New intake' }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'New opportunity' }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approvals' })).toHaveCount(0);
 
   const cookies = await context.cookies();

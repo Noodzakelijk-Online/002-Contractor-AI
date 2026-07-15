@@ -241,6 +241,63 @@ const INACTIVE_JOB_STATUSES = new Set([
   'void'
 ]);
 
+const OPPORTUNITY_STAGES = new Set([
+  'new',
+  'qualifying',
+  'site_visit',
+  'estimating',
+  'proposal',
+  'negotiating',
+  'won',
+  'lost',
+  'archived'
+]);
+
+const OPEN_OPPORTUNITY_STAGES = new Set([
+  'new',
+  'qualifying',
+  'site_visit',
+  'estimating',
+  'proposal',
+  'negotiating'
+]);
+
+const OPPORTUNITY_STAGE_PROBABILITY = {
+  new: 10,
+  qualifying: 20,
+  site_visit: 35,
+  estimating: 50,
+  proposal: 65,
+  negotiating: 80,
+  won: 100,
+  lost: 0,
+  archived: 0
+};
+
+function normalizeOpportunityStage(value, fallback = 'new') {
+  const stage = normalizeStatus(value, fallback);
+  if (!OPPORTUNITY_STAGES.has(stage)) {
+    const error = new Error(`Opportunity stage must be one of: ${[...OPPORTUNITY_STAGES].join(', ')}`);
+    error.statusCode = 400;
+    error.code = 'opportunity_stage_invalid';
+    throw error;
+  }
+  return stage;
+}
+
+function normalizeProbability(value, stage) {
+  const fallback = OPPORTUNITY_STAGE_PROBABILITY[stage] ?? 0;
+  if (value === undefined || value === null || value === '') return fallback;
+  const probability = Number(value);
+  if (!Number.isFinite(probability) || probability < 0 || probability > 100) {
+    const error = new Error('Opportunity probability must be between 0 and 100');
+    error.statusCode = 400;
+    error.code = 'opportunity_probability_invalid';
+    throw error;
+  }
+  return Math.round(probability);
+}
+
 function capabilityRequirementActionTarget(requirementKey) {
   const targets = {
     intake: 'job_update_form',
@@ -1637,6 +1694,57 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
         CREATE INDEX IF NOT EXISTS idx_schedule_baselines_job ON schedule_baselines(job_id, version_number DESC);
         CREATE INDEX IF NOT EXISTS idx_schedule_baselines_status ON schedule_baselines(job_id, status, updated_at);
+      `);
+    }
+  },
+  {
+    version: '021_preconstruction_opportunities',
+    description: 'Retain qualified preconstruction opportunities, follow-up activity, forecast value, and idempotent job conversion.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS opportunities (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE RESTRICT,
+          title TEXT NOT NULL,
+          stage TEXT NOT NULL DEFAULT 'new',
+          source_channel TEXT NOT NULL DEFAULT 'manual',
+          service TEXT,
+          description TEXT,
+          address TEXT,
+          city TEXT,
+          postal_code TEXT,
+          country TEXT NOT NULL DEFAULT 'NL',
+          estimated_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+          probability_percent INTEGER NOT NULL DEFAULT 10,
+          target_decision_at TEXT,
+          next_follow_up_at TEXT,
+          owner_name TEXT,
+          lost_reason TEXT,
+          converted_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunities_stage_follow_up ON opportunities(stage, next_follow_up_at, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_opportunities_client ON opportunities(client_id, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_converted_job ON opportunities(converted_job_id) WHERE converted_job_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS opportunity_activities (
+          id TEXT PRIMARY KEY,
+          opportunity_id TEXT NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+          activity_type TEXT NOT NULL DEFAULT 'note',
+          status TEXT NOT NULL DEFAULT 'open',
+          due_at TEXT,
+          completed_at TEXT,
+          summary TEXT NOT NULL,
+          notes TEXT,
+          idempotency_key TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_activities_due ON opportunity_activities(opportunity_id, status, due_at, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunity_activities_idempotency ON opportunity_activities(idempotency_key) WHERE idempotency_key IS NOT NULL;
       `);
     }
   }
@@ -3588,6 +3696,506 @@ class ContractorOperatingLedger {
       LIMIT ?
     `).all(search, `%${search}%`, limit);
     return rows.map(row => this.mapClient(row));
+  }
+
+  requireOpportunity(opportunityId) {
+    const row = this.db.prepare(`
+      SELECT opportunities.*, clients.name AS client_name, clients.company AS client_company,
+        clients.email AS client_email, clients.phone AS client_phone
+      FROM opportunities
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE opportunities.id = ?
+    `).get(opportunityId);
+    if (!row) {
+      const error = new Error('Opportunity not found');
+      error.statusCode = 404;
+      error.code = 'opportunity_not_found';
+      throw error;
+    }
+    return row;
+  }
+
+  createOpportunity(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const title = normalizeText(payload.title || payload.projectTitle, '');
+      if (title.length < 2) {
+        const error = new Error('Opportunity title must contain at least 2 characters');
+        error.statusCode = 400;
+        error.code = 'opportunity_title_required';
+        throw error;
+      }
+      const stage = normalizeOpportunityStage(payload.stage || payload.status, 'new');
+      if (stage === 'won') {
+        const error = new Error('An opportunity can become won only through verified quote acceptance');
+        error.statusCode = 409;
+        error.code = 'opportunity_won_evidence_required';
+        throw error;
+      }
+      const lostReason = normalizeText(payload.lostReason || payload.lost_reason, '');
+      if (stage === 'lost' && lostReason.length < 4) {
+        const error = new Error('A retained loss reason is required when closing an opportunity as lost');
+        error.statusCode = 400;
+        error.code = 'opportunity_lost_reason_required';
+        throw error;
+      }
+      const client = this.findOrCreateClient(payload.client || payload, { actor });
+      const timestamp = nowIso();
+      const id = makeId('opp');
+      const record = {
+        id,
+        clientId: client.id,
+        title,
+        stage,
+        sourceChannel: normalizeText(payload.sourceChannel || payload.source_channel || payload.source, 'manual'),
+        service: normalizeText(payload.service || payload.jobType || payload.job_type, '') || null,
+        description: normalizeText(payload.description || payload.scope, '') || null,
+        address: normalizeText(payload.address || payload.location, '') || client.address || null,
+        city: normalizeText(payload.city, '') || client.city || null,
+        postalCode: normalizeText(payload.postalCode || payload.postal_code, '') || null,
+        country: normalizeText(payload.country || client.country, 'NL'),
+        estimatedValue: roundMoney(normalizeNumber(payload.estimatedValue || payload.estimated_value || payload.value || payload.budgetAmount, 0)),
+        probabilityPercent: normalizeProbability(payload.probabilityPercent ?? payload.probability_percent ?? payload.probability, stage),
+        targetDecisionAt: rowDate(payload.targetDecisionAt || payload.target_decision_at || payload.decisionDate),
+        nextFollowUpAt: rowDate(payload.nextFollowUpAt || payload.next_follow_up_at || payload.followUpAt),
+        ownerName: normalizeText(payload.ownerName || payload.owner_name || payload.owner, '') || null,
+        lostReason: lostReason || null,
+        convertedJobId: null,
+        data: {
+          notes: normalizeText(payload.notes, '') || null,
+          externalCommitments: 0
+        },
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      this.db.prepare(`
+        INSERT INTO opportunities (
+          id, client_id, title, stage, source_channel, service, description, address, city, postal_code, country,
+          estimated_value, probability_percent, target_decision_at, next_follow_up_at, owner_name, lost_reason,
+          converted_job_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        record.id, record.clientId, record.title, record.stage, record.sourceChannel, record.service,
+        record.description, record.address, record.city, record.postalCode, record.country, record.estimatedValue,
+        record.probabilityPercent, record.targetDecisionAt, record.nextFollowUpAt, record.ownerName, record.lostReason,
+        record.convertedJobId, toJson(record.data), record.createdAt, record.updatedAt
+      );
+      const opportunity = this.getOpportunity(id);
+      this.audit({
+        entityType: 'opportunity',
+        entityId: id,
+        action: 'create_opportunity',
+        actor,
+        after: opportunity,
+        metadata: { sourceChannel: record.sourceChannel, externalCommitments: 0 }
+      });
+      return opportunity;
+    });
+  }
+
+  updateOpportunity(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getOpportunity(opportunityId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const stage = payload.stage === undefined && payload.status === undefined
+        ? before.stage
+        : normalizeOpportunityStage(payload.stage || payload.status, before.stage);
+      if (stage === 'won' && before.stage !== 'won') {
+        const error = new Error('An opportunity can become won only through verified quote acceptance');
+        error.statusCode = 409;
+        error.code = 'opportunity_won_evidence_required';
+        throw error;
+      }
+      if (before.stage === 'won' && stage !== 'won') {
+        const error = new Error('A won opportunity is immutable because it is backed by verified quote acceptance');
+        error.statusCode = 409;
+        error.code = 'opportunity_won_immutable';
+        throw error;
+      }
+      const lostReason = stage === 'lost'
+        ? normalizeText(payload.lostReason || payload.lost_reason || before.lostReason, '')
+        : null;
+      if (stage === 'lost' && lostReason.length < 4) {
+        const error = new Error('A retained loss reason is required when closing an opportunity as lost');
+        error.statusCode = 400;
+        error.code = 'opportunity_lost_reason_required';
+        throw error;
+      }
+      const title = payload.title === undefined ? before.title : normalizeText(payload.title, '');
+      if (title.length < 2) {
+        const error = new Error('Opportunity title must contain at least 2 characters');
+        error.statusCode = 400;
+        error.code = 'opportunity_title_required';
+        throw error;
+      }
+      const timestamp = nowIso();
+      const probabilitySupplied = payload.probabilityPercent !== undefined
+        || payload.probability_percent !== undefined
+        || payload.probability !== undefined;
+      const probabilityPercent = ['lost', 'archived'].includes(stage)
+        ? 0
+        : stage === 'won'
+          ? 100
+          : normalizeProbability(
+              probabilitySupplied ? (payload.probabilityPercent ?? payload.probability_percent ?? payload.probability) : before.probabilityPercent,
+              stage
+            );
+      const nextData = {
+        ...before.data,
+        ...(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {}),
+        notes: payload.notes === undefined ? before.data?.notes || null : normalizeText(payload.notes, '') || null,
+        externalCommitments: 0
+      };
+      this.db.prepare(`
+        UPDATE opportunities SET
+          title = ?, stage = ?, source_channel = ?, service = ?, description = ?, address = ?, city = ?, postal_code = ?,
+          country = ?, estimated_value = ?, probability_percent = ?, target_decision_at = ?, next_follow_up_at = ?,
+          owner_name = ?, lost_reason = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        title,
+        stage,
+        payload.sourceChannel === undefined && payload.source_channel === undefined ? before.sourceChannel : normalizeText(payload.sourceChannel || payload.source_channel, 'manual'),
+        payload.service === undefined ? before.service : normalizeText(payload.service, '') || null,
+        payload.description === undefined && payload.scope === undefined ? before.description : normalizeText(payload.description || payload.scope, '') || null,
+        payload.address === undefined && payload.location === undefined ? before.address : normalizeText(payload.address || payload.location, '') || null,
+        payload.city === undefined ? before.city : normalizeText(payload.city, '') || null,
+        payload.postalCode === undefined && payload.postal_code === undefined ? before.postalCode : normalizeText(payload.postalCode || payload.postal_code, '') || null,
+        payload.country === undefined ? before.country : normalizeText(payload.country, 'NL'),
+        payload.estimatedValue === undefined && payload.estimated_value === undefined && payload.value === undefined
+          ? before.estimatedValue
+          : roundMoney(normalizeNumber(payload.estimatedValue ?? payload.estimated_value ?? payload.value, 0)),
+        probabilityPercent,
+        payload.targetDecisionAt === undefined && payload.target_decision_at === undefined
+          ? before.targetDecisionAt
+          : rowDate(payload.targetDecisionAt || payload.target_decision_at),
+        payload.nextFollowUpAt === undefined && payload.next_follow_up_at === undefined
+          ? before.nextFollowUpAt
+          : rowDate(payload.nextFollowUpAt || payload.next_follow_up_at),
+        payload.ownerName === undefined && payload.owner_name === undefined && payload.owner === undefined
+          ? before.ownerName
+          : normalizeText(payload.ownerName || payload.owner_name || payload.owner, '') || null,
+        lostReason,
+        toJson(nextData),
+        timestamp,
+        opportunityId
+      );
+      const after = this.getOpportunity(opportunityId);
+      this.audit({
+        entityType: 'opportunity',
+        entityId: opportunityId,
+        action: 'update_opportunity',
+        actor,
+        before,
+        after,
+        metadata: { stageChanged: before.stage !== after.stage, externalCommitments: 0 }
+      });
+      return after;
+    });
+  }
+
+  listOpportunities(filters = {}) {
+    const stage = normalizeText(filters.stage || filters.status, '').toLowerCase().replace(/[\s-]+/g, '_');
+    if (stage) normalizeOpportunityStage(stage);
+    const search = normalizeText(filters.search || filters.q, '').toLowerCase();
+    const includeClosed = normalizeBoolean(filters.includeClosed ?? filters.include_closed, false);
+    const limit = safeLimit(filters.limit, 100, 500);
+    const rows = this.db.prepare(`
+      SELECT opportunities.*, clients.name AS client_name, clients.company AS client_company,
+        clients.email AS client_email, clients.phone AS client_phone
+      FROM opportunities
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE (? = '' OR opportunities.stage = ?)
+      ORDER BY CASE WHEN opportunities.next_follow_up_at IS NULL THEN 1 ELSE 0 END,
+        opportunities.next_follow_up_at ASC, opportunities.updated_at DESC
+      LIMIT 500
+    `).all(stage, stage).map(row => this.mapOpportunity(row));
+    return rows.filter(opportunity => (
+      (includeClosed || OPEN_OPPORTUNITY_STAGES.has(opportunity.stage))
+      && (!search || JSON.stringify(opportunity).toLowerCase().includes(search))
+    )).slice(0, limit);
+  }
+
+  getOpportunity(opportunityId) {
+    const row = this.requireOpportunity(opportunityId);
+    const opportunity = this.mapOpportunity(row);
+    opportunity.activities = this.db.prepare(`
+      SELECT * FROM opportunity_activities
+      WHERE opportunity_id = ?
+      ORDER BY CASE WHEN status IN ('open', 'draft', 'planned') THEN 0 ELSE 1 END,
+        due_at ASC, created_at DESC
+    `).all(opportunityId).map(activity => this.mapOpportunityActivity(activity));
+    opportunity.convertedJob = opportunity.convertedJobId
+      ? this.listJobs({ includeArchived: true, limit: 500 }).find(job => job.id === opportunity.convertedJobId) || null
+      : null;
+    return opportunity;
+  }
+
+  opportunityForecast(filters = {}) {
+    const opportunities = this.listOpportunities({ ...filters, includeClosed: true, limit: 500 });
+    const open = opportunities.filter(opportunity => OPEN_OPPORTUNITY_STAGES.has(opportunity.stage));
+    const overdue = open.filter(opportunity => opportunity.nextFollowUpAt && Date.parse(opportunity.nextFollowUpAt) <= Date.now());
+    const stages = [...OPPORTUNITY_STAGES].map(stage => {
+      const records = opportunities.filter(opportunity => opportunity.stage === stage);
+      return {
+        stage,
+        count: records.length,
+        estimatedValue: roundMoney(records.reduce((sum, opportunity) => sum + opportunity.estimatedValue, 0)),
+        weightedValue: roundMoney(records.reduce((sum, opportunity) => sum + opportunity.weightedValue, 0))
+      };
+    });
+    return {
+      generatedAt: nowIso(),
+      summary: {
+        total: opportunities.length,
+        open: open.length,
+        overdueFollowUps: overdue.length,
+        converted: opportunities.filter(opportunity => Boolean(opportunity.convertedJobId)).length,
+        won: opportunities.filter(opportunity => opportunity.stage === 'won').length,
+        lost: opportunities.filter(opportunity => opportunity.stage === 'lost').length,
+        estimatedValue: roundMoney(open.reduce((sum, opportunity) => sum + opportunity.estimatedValue, 0)),
+        weightedValue: roundMoney(open.reduce((sum, opportunity) => sum + opportunity.weightedValue, 0))
+      },
+      stages
+    };
+  }
+
+  listOpportunityActivities(filters = {}) {
+    const opportunityId = normalizeText(filters.opportunityId || filters.opportunity_id, '');
+    const status = normalizeText(filters.status, '').toLowerCase().replace(/[\s-]+/g, '_');
+    const limit = safeLimit(filters.limit, 500, 1_000);
+    return this.db.prepare(`
+      SELECT * FROM opportunity_activities
+      WHERE (? = '' OR opportunity_id = ?)
+        AND (? = '' OR status = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(opportunityId, opportunityId, status, status, limit).map(row => this.mapOpportunityActivity(row));
+  }
+
+  createOpportunityActivity(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireOpportunity(opportunityId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const summary = normalizeText(payload.summary || payload.title, '');
+      if (summary.length < 3) {
+        const error = new Error('Opportunity activity summary must contain at least 3 characters');
+        error.statusCode = 400;
+        error.code = 'opportunity_activity_summary_required';
+        throw error;
+      }
+      const idempotencyKey = normalizeText(payload.idempotencyKey || payload.idempotency_key, '') || null;
+      if (idempotencyKey) {
+        const existing = this.db.prepare('SELECT * FROM opportunity_activities WHERE idempotency_key = ?').get(idempotencyKey);
+        if (existing) {
+          if (existing.opportunity_id !== opportunityId) {
+            const error = new Error('Opportunity activity idempotency key belongs to another opportunity');
+            error.statusCode = 409;
+            error.code = 'opportunity_activity_idempotency_conflict';
+            throw error;
+          }
+          return { activity: this.mapOpportunityActivity(existing), replayed: true };
+        }
+      }
+      const status = normalizeStatus(payload.status, 'open');
+      if (!['open', 'planned', 'draft', 'completed', 'cancelled'].includes(status)) {
+        const error = new Error('Opportunity activity status is invalid');
+        error.statusCode = 400;
+        error.code = 'opportunity_activity_status_invalid';
+        throw error;
+      }
+      const timestamp = nowIso();
+      const id = makeId('oppact');
+      const completedAt = status === 'completed' ? rowDate(payload.completedAt || payload.completed_at) || timestamp : null;
+      this.db.prepare(`
+        INSERT INTO opportunity_activities (
+          id, opportunity_id, activity_type, status, due_at, completed_at, summary, notes,
+          idempotency_key, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        opportunityId,
+        normalizeStatus(payload.activityType || payload.activity_type || payload.type, 'note'),
+        status,
+        rowDate(payload.dueAt || payload.due_at),
+        completedAt,
+        summary,
+        normalizeText(payload.notes, '') || null,
+        idempotencyKey,
+        toJson({
+          source: normalizeText(payload.source, 'manual'),
+          internalOnly: payload.internalOnly === true,
+          externalCommitments: 0
+        }),
+        timestamp,
+        timestamp
+      );
+      const activity = this.mapOpportunityActivity(this.db.prepare('SELECT * FROM opportunity_activities WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'opportunity_activity',
+        entityId: id,
+        action: 'create_opportunity_activity',
+        actor,
+        after: activity,
+        metadata: { opportunityId, internalOnly: activity.data.internalOnly === true, externalCommitments: 0 }
+      });
+      return { activity, replayed: false };
+    });
+  }
+
+  updateOpportunityActivity(opportunityId, activityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireOpportunity(opportunityId);
+      const row = this.db.prepare('SELECT * FROM opportunity_activities WHERE id = ? AND opportunity_id = ?').get(activityId, opportunityId);
+      if (!row) {
+        const error = new Error('Opportunity activity not found');
+        error.statusCode = 404;
+        error.code = 'opportunity_activity_not_found';
+        throw error;
+      }
+      const before = this.mapOpportunityActivity(row);
+      const status = normalizeStatus(payload.status, before.status);
+      if (!['open', 'planned', 'draft', 'completed', 'cancelled'].includes(status)) {
+        const error = new Error('Opportunity activity status is invalid');
+        error.statusCode = 400;
+        error.code = 'opportunity_activity_status_invalid';
+        throw error;
+      }
+      const summary = payload.summary === undefined ? before.summary : normalizeText(payload.summary, '');
+      if (summary.length < 3) {
+        const error = new Error('Opportunity activity summary must contain at least 3 characters');
+        error.statusCode = 400;
+        error.code = 'opportunity_activity_summary_required';
+        throw error;
+      }
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE opportunity_activities
+        SET activity_type = ?, status = ?, due_at = ?, completed_at = ?, summary = ?, notes = ?, updated_at = ?
+        WHERE id = ? AND opportunity_id = ?
+      `).run(
+        payload.activityType === undefined && payload.activity_type === undefined ? before.activityType : normalizeStatus(payload.activityType || payload.activity_type, 'note'),
+        status,
+        payload.dueAt === undefined && payload.due_at === undefined ? before.dueAt : rowDate(payload.dueAt || payload.due_at),
+        status === 'completed' ? (rowDate(payload.completedAt || payload.completed_at) || before.completedAt || timestamp) : null,
+        summary,
+        payload.notes === undefined ? before.notes : normalizeText(payload.notes, '') || null,
+        timestamp,
+        activityId,
+        opportunityId
+      );
+      const after = this.mapOpportunityActivity(this.db.prepare('SELECT * FROM opportunity_activities WHERE id = ?').get(activityId));
+      this.audit({
+        entityType: 'opportunity_activity',
+        entityId: activityId,
+        action: 'update_opportunity_activity',
+        actor: options.actor || payload.actor || 'Contractor.AI',
+        before,
+        after,
+        metadata: { opportunityId, externalCommitments: 0 }
+      });
+      return after;
+    });
+  }
+
+  convertOpportunityToJob(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getOpportunity(opportunityId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      if (before.convertedJobId) {
+        return { opportunity: before, job: this.getJobDetail(before.convertedJobId), replayed: true };
+      }
+      if (!OPEN_OPPORTUNITY_STAGES.has(before.stage)) {
+        const error = new Error('Only an open opportunity can be converted to a job');
+        error.statusCode = 409;
+        error.code = 'opportunity_not_convertible';
+        throw error;
+      }
+      const job = this.createIntake({
+        ...payload,
+        client: before.client,
+        title: before.title,
+        service: before.service || 'contracting',
+        description: before.description || '',
+        address: before.address || '',
+        city: before.city || '',
+        country: before.country || 'NL',
+        estimatedCost: before.estimatedValue,
+        priority: payload.priority || 'medium',
+        assignAutomatically: false,
+        sourceChannel: `opportunity:${before.sourceChannel}`,
+        actor
+      }, { actor });
+      const jobData = {
+        ...job.data,
+        source: 'opportunity_conversion',
+        sourceOpportunityId: opportunityId,
+        opportunityStageAtConversion: before.stage,
+        externalCommitments: 0
+      };
+      const timestamp = nowIso();
+      this.db.prepare('UPDATE jobs SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson(jobData), timestamp, job.id);
+      this.db.prepare(`
+        UPDATE opportunities
+        SET converted_job_id = ?, stage = CASE WHEN stage IN ('new', 'qualifying', 'site_visit', 'estimating') THEN 'proposal' ELSE stage END,
+          probability_percent = CASE WHEN probability_percent < 65 THEN 65 ELSE probability_percent END,
+          data_json = ?, updated_at = ?
+        WHERE id = ? AND converted_job_id IS NULL
+      `).run(
+        job.id,
+        toJson({ ...before.data, conversion: { jobId: job.id, convertedAt: timestamp, convertedBy: actor }, externalCommitments: 0 }),
+        timestamp,
+        opportunityId
+      );
+      const opportunity = this.getOpportunity(opportunityId);
+      this.audit({
+        entityType: 'opportunity',
+        entityId: opportunityId,
+        jobId: job.id,
+        action: 'convert_opportunity_to_job',
+        actor,
+        before,
+        after: opportunity,
+        metadata: { jobId: job.id, replayed: false, externalCommitments: 0 }
+      });
+      return { opportunity, job: this.getJobDetail(job.id), replayed: false };
+    });
+  }
+
+  synchronizeOpportunityWonFromJob(jobId, evidence = {}) {
+    const row = this.db.prepare('SELECT * FROM opportunities WHERE converted_job_id = ?').get(jobId);
+    if (!row || row.stage === 'won') return row ? this.mapOpportunity(row) : null;
+    const timestamp = nowIso();
+    const before = this.mapOpportunity(this.requireOpportunity(row.id));
+    const data = {
+      ...before.data,
+      wonEvidence: {
+        quoteId: evidence.quoteId || null,
+        approvalId: evidence.approvalId || null,
+        evidenceReference: evidence.evidenceReference || null,
+        acceptedAt: evidence.acceptedAt || null,
+        verifiedAt: evidence.verifiedAt || timestamp
+      },
+      externalCommitments: 0
+    };
+    this.db.prepare(`
+      UPDATE opportunities
+      SET stage = 'won', probability_percent = 100, next_follow_up_at = NULL, lost_reason = NULL,
+        data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(toJson(data), timestamp, row.id);
+    const after = this.mapOpportunity(this.requireOpportunity(row.id));
+    this.audit({
+      entityType: 'opportunity',
+      entityId: row.id,
+      jobId,
+      action: 'win_opportunity_from_verified_quote',
+      actor: evidence.actor || 'approval',
+      before,
+      after,
+      metadata: { quoteId: evidence.quoteId || null, approvalId: evidence.approvalId || null, externalCommitments: 0 }
+    });
+    return after;
   }
 
   updateClient(clientId, payload = {}, options = {}) {
@@ -17833,6 +18441,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           after: this.mapQuote(this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(targetId)),
           metadata: { approvalId: approval.id, commercial }
         });
+        this.synchronizeOpportunityWonFromJob(quote.job_id, {
+          quoteId: targetId,
+          approvalId: approval.id,
+          evidenceReference: acceptance.evidenceReference,
+          acceptedAt: acceptance.acceptedAt,
+          verifiedAt: approval.resolved_at,
+          actor: approval.resolved_by || 'approval'
+        });
       }
     } else if (targetType === 'schedule_baseline') {
       this.applyScheduleBaselineApproval(targetId);
@@ -22387,10 +23003,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const toolReservationConflicts = this.detectToolReservationConflicts(100);
     const assignmentConflicts = this.detectAssignmentConflicts(100);
     const tradePartnerSummary = this.summarizeTradePartners();
+    const opportunityPipeline = this.opportunityForecast();
     const activeCount = (table, condition = '1 = 1', params = []) => this.countActiveRecords(table, condition, params);
     const activeSum = (table, column, condition = '1 = 1', params = []) => this.sumActiveRecords(table, column, condition, params);
     const metrics = {
       clients: this.count('clients'),
+      opportunities: opportunityPipeline.summary.total,
+      openOpportunities: opportunityPipeline.summary.open,
+      overdueOpportunityFollowUps: opportunityPipeline.summary.overdueFollowUps,
       tradePartners: tradePartnerSummary.total,
       activeTradePartners: tradePartnerSummary.active,
       verifiedTradePartners: tradePartnerSummary.verified,
@@ -22612,7 +23232,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       },
       nextActions,
       capabilities: capabilityMap.capabilities,
-      capabilitySummary: capabilityMap.summary
+      capabilitySummary: capabilityMap.summary,
+      preconstruction: opportunityPipeline
     };
   }
 
@@ -22622,6 +23243,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       SELECT id FROM jobs
       WHERE status NOT IN ('cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
     `).all().map(row => row.id));
+    const dueOpportunities = this.db.prepare(`
+      SELECT opportunities.*, clients.name AS client_name
+      FROM opportunities
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE opportunities.stage IN ('new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating')
+        AND opportunities.next_follow_up_at IS NOT NULL
+        AND opportunities.next_follow_up_at <= ?
+      ORDER BY opportunities.next_follow_up_at ASC
+      LIMIT 10
+    `).all(nowIso());
+    for (const opportunity of dueOpportunities) {
+      const idempotencyKey = `opportunity-follow-up:${opportunity.id}:${opportunity.next_follow_up_at}`;
+      const existingDraft = this.db.prepare('SELECT id FROM opportunity_activities WHERE idempotency_key = ?').get(idempotencyKey);
+      if (existingDraft) continue;
+      const overdueHours = Math.max(0, Math.round((Date.now() - Date.parse(opportunity.next_follow_up_at)) / (60 * 60 * 1000)));
+      actions.push({
+        type: 'draft_opportunity_follow_up',
+        opportunityId: opportunity.id,
+        idempotencyKey,
+        title: opportunity.title,
+        clientName: opportunity.client_name,
+        severity: overdueHours >= 24 ? 'high' : 'medium',
+        dueAt: opportunity.next_follow_up_at,
+        message: `${opportunity.title} for ${opportunity.client_name} needs an internal follow-up draft (${overdueHours}h overdue). No message will be sent.`
+      });
+    }
     const jobsWithoutAssignment = this.db.prepare(`
       SELECT jobs.id, jobs.title FROM jobs
       LEFT JOIN assignments ON assignments.job_id = jobs.id
@@ -23988,6 +24635,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     if (!dryRun) {
       this.transaction(() => {
+        const opportunityFollowUps = preview.filter(action => action.type === 'draft_opportunity_follow_up').slice(0, 5);
+        for (const action of opportunityFollowUps) {
+          try {
+            const result = this.createOpportunityActivity(action.opportunityId, {
+              activityType: 'internal_follow_up_draft',
+              status: 'draft',
+              dueAt: action.dueAt,
+              summary: `Follow up on ${action.title}`,
+              notes: 'Autonomous internal draft. Confirm the contact channel, recipient, current scope, and next decision before any external communication.',
+              source: 'autonomous_cycle',
+              internalOnly: true,
+              idempotencyKey: action.idempotencyKey
+            }, { actor });
+            applied.push({ ...action, activityId: result.activity.id, status: result.replayed ? 'replayed' : 'drafted' });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
         const assignActions = preview.filter(action => action.type === 'assign_worker').slice(0, 3);
         for (const action of assignActions) {
           try {
@@ -24819,6 +25485,30 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
     if (jobsWithoutClient) issues.push({ severity: 'error', message: `${jobsWithoutClient} job(s) are missing clients.` });
+    const invalidOpportunityProbabilities = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM opportunities
+      WHERE probability_percent < 0 OR probability_percent > 100
+    `).get().count || 0);
+    if (invalidOpportunityProbabilities) issues.push({ severity: 'error', message: `${invalidOpportunityProbabilities} opportunity probability value(s) are outside 0-100.` });
+    const lostOpportunitiesWithoutReason = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM opportunities
+      WHERE stage = 'lost' AND LENGTH(TRIM(COALESCE(lost_reason, ''))) < 4
+    `).get().count || 0);
+    if (lostOpportunitiesWithoutReason) issues.push({ severity: 'error', message: `${lostOpportunitiesWithoutReason} lost opportunity record(s) lack a retained reason.` });
+    const wonOpportunitiesWithoutEvidence = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM opportunities
+      LEFT JOIN quotes ON quotes.job_id = opportunities.converted_job_id AND quotes.status = 'accepted'
+      WHERE opportunities.stage = 'won' AND quotes.id IS NULL
+    `).get().count || 0);
+    if (wonOpportunitiesWithoutEvidence) issues.push({ severity: 'error', message: `${wonOpportunitiesWithoutEvidence} won opportunity record(s) lack an accepted quote evidence chain.` });
+    const acceptedQuotesWithoutWonOpportunity = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM opportunities
+      JOIN quotes ON quotes.job_id = opportunities.converted_job_id AND quotes.status = 'accepted'
+      WHERE opportunities.stage <> 'won'
+    `).get().count || 0);
+    if (acceptedQuotesWithoutWonOpportunity) issues.push({ severity: 'error', message: `${acceptedQuotesWithoutWonOpportunity} linked opportunity record(s) were not synchronized after verified quote acceptance.` });
     const quotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'draft' AND approval_id IS NULL").get().count || 0);
     if (quotesWithoutApproval) issues.push({ severity: 'warning', message: `${quotesWithoutApproval} draft quote(s) have no approval gate.` });
     const siteVisitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_visits WHERE status IN ('confirmed', 'client_confirmed', 'committed', 'approved') AND approval_id IS NULL").get().count || 0);
@@ -24934,6 +25624,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       auditIntegrity,
       counts: {
         clients: this.count('clients'),
+        opportunities: this.count('opportunities'),
+        opportunityActivities: this.count('opportunity_activities'),
         tradePartners: this.count('trade_partners'),
         organizationProfiles: this.count('organization_profile'),
         jobs: this.count('jobs'),
@@ -24996,6 +25688,62 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       vatNumber: row.vat_number,
       preferredLanguage: row.preferred_language,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOpportunity(row) {
+    if (!row) return null;
+    const stage = normalizeOpportunityStage(row.stage, 'new');
+    const estimatedValue = roundMoney(normalizeNumber(row.estimated_value, 0));
+    const probabilityPercent = normalizeProbability(row.probability_percent, stage);
+    return {
+      id: row.id,
+      clientId: row.client_id,
+      client: {
+        id: row.client_id,
+        name: row.client_name || null,
+        company: row.client_company || null,
+        email: row.client_email || null,
+        phone: row.client_phone || null
+      },
+      title: row.title,
+      stage,
+      sourceChannel: row.source_channel,
+      service: row.service,
+      description: row.description,
+      address: row.address,
+      city: row.city,
+      postalCode: row.postal_code,
+      country: row.country,
+      estimatedValue,
+      probabilityPercent,
+      weightedValue: roundMoney(estimatedValue * probabilityPercent / 100),
+      targetDecisionAt: row.target_decision_at,
+      nextFollowUpAt: row.next_follow_up_at,
+      ownerName: row.owner_name,
+      lostReason: row.lost_reason,
+      convertedJobId: row.converted_job_id,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOpportunityActivity(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      opportunityId: row.opportunity_id,
+      activityType: row.activity_type,
+      status: row.status,
+      dueAt: row.due_at,
+      completedAt: row.completed_at,
+      summary: row.summary,
+      notes: row.notes,
+      idempotencyKey: row.idempotency_key,
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

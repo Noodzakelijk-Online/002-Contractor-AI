@@ -1522,6 +1522,7 @@ app.get('/api/session', (req, res) => {
       capabilities: {
         dashboard: !fieldWorker,
         intake: role === 'owner' || role === 'office_operator',
+        pipeline: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
         resources: !fieldWorker,
@@ -1953,6 +1954,71 @@ app.get('/api/ledger/jobs', (req, res) => {
       ? { fieldScoped: true, jobCount: scopedLedgerJobs(req, req.query || {}).length }
       : operatingLedger.dashboardSummary()
   }));
+});
+
+app.get('/api/ledger/opportunities', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunities: operatingLedger.listOpportunities(req.query || {}),
+    forecast: operatingLedger.opportunityForecast(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/opportunities', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunity: operatingLedger.createOpportunity(req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    forecast: operatingLedger.opportunityForecast()
+  }), 201);
+});
+
+app.get('/api/ledger/opportunities/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunity: operatingLedger.getOpportunity(req.params.id)
+  }));
+});
+
+app.patch('/api/ledger/opportunities/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunity: operatingLedger.updateOpportunity(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    forecast: operatingLedger.opportunityForecast()
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/activities', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createOpportunityActivity(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    opportunity: operatingLedger.getOpportunity(req.params.id)
+  }), 201);
+});
+
+app.patch('/api/ledger/opportunities/:id/activities/:activityId', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    activity: operatingLedger.updateOpportunityActivity(req.params.id, req.params.activityId, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    opportunity: operatingLedger.getOpportunity(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/convert', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.convertOpportunityToJob(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    forecast: operatingLedger.opportunityForecast()
+  }), 201);
 });
 
 app.post('/api/ledger/intake', (req, res) => {
@@ -3691,6 +3757,8 @@ function operationalExport() {
     runtime: runtimeConfiguration(),
     dashboard,
     organization: operatingLedger.getOrganizationProfile(),
+    opportunities: operatingLedger.listOpportunities({ includeClosed: true, limit: 500 }),
+    opportunityActivities: operatingLedger.listOpportunityActivities({ limit: 1_000 }),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
@@ -3741,6 +3809,11 @@ function validateOperationalExport(snapshot) {
   ]) {
     if (!Array.isArray(snapshot[key])) problems.push(`Export is missing the ${key} collection.`);
   }
+  for (const key of ['opportunities', 'opportunityActivities']) {
+    if (snapshot[key] !== undefined && !Array.isArray(snapshot[key])) {
+      problems.push(`Export ${key} must be a collection when present.`);
+    }
+  }
   const integrity = snapshot.integrity;
   if (
     integrity?.algorithm !== 'sha256'
@@ -3766,6 +3839,8 @@ function validateOperationalExport(snapshot) {
     integrity: { verified: true, algorithm: 'sha256', digest: expectedDigest },
     counts: {
       jobs: snapshot.jobs.length,
+      opportunities: Array.isArray(snapshot.opportunities) ? snapshot.opportunities.length : 0,
+      opportunityActivities: Array.isArray(snapshot.opportunityActivities) ? snapshot.opportunityActivities.length : 0,
       tradePartners: snapshot.tradePartners.length,
       supplierInvoices: snapshot.supplierInvoices.length,
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
@@ -4133,7 +4208,9 @@ function isQaRecord(record) {
     record?.category,
     record?.company,
     record?.clientName,
-    record?.client_name
+    record?.client_name,
+    record?.client?.name,
+    record?.client?.company
   ]
     .filter(Boolean)
     .join(' ')
@@ -4452,6 +4529,8 @@ app.post('/api/operations/reset-qa', (req, res) => {
     const backup = backupOperationalState();
     const ledgerJobs = operatingLedger.listJobs({ includeArchived: true, limit: 500 })
       .filter(job => job.status !== 'archived' && isQaRecord(job));
+    const qaOpportunities = operatingLedger.listOpportunities({ includeClosed: true, limit: 500 })
+      .filter(opportunity => !['archived', 'won'].includes(opportunity.stage) && isQaRecord(opportunity));
     const qaWorkers = operatingLedger.listWorkers({ limit: 500 })
       .filter(worker => worker.status !== 'retired' && isQaRecord(worker));
     const qaTools = operatingLedger.listTools({ limit: 500 })
@@ -4473,6 +4552,12 @@ app.post('/api/operations/reset-qa', (req, res) => {
         data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
       }, { actor });
     }
+    for (const opportunity of qaOpportunities) {
+      operatingLedger.updateOpportunity(opportunity.id, {
+        stage: 'archived',
+        data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
+      }, { actor });
+    }
     for (const worker of qaWorkers) {
       operatingLedger.retireWorker(worker.id, { actor });
     }
@@ -4483,10 +4568,11 @@ app.post('/api/operations/reset-qa', (req, res) => {
       success: true,
       backup,
       archivedLedgerJobIds: ledgerJobs.map(job => job.id),
+      archivedOpportunityIds: qaOpportunities.map(opportunity => opportunity.id),
       retiredWorkerIds: qaWorkers.map(worker => worker.id),
       retiredToolIds: qaTools.map(tool => tool.id),
       rejectedApprovalIds: qaApprovals.map(approval => approval.id),
-      archivedCount: ledgerJobs.length + qaWorkers.length + qaTools.length,
+      archivedCount: ledgerJobs.length + qaOpportunities.length + qaWorkers.length + qaTools.length,
       dashboard: operatingLedger.dashboardSummary()
     });
   } catch (error) {
