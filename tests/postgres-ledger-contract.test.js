@@ -1066,7 +1066,7 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
       buyerCountry: 'NL'
     }, { actor: 'postgres_commercial_test' });
     assert.equal(invoice.total, 1361.25);
-    assert.equal(invoice.structuredReadiness.ready, true);
+    assert.equal(invoice.data.structuredReadiness.ready, true);
     ledger.resolveApproval(invoice.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
     const invoicePackage = ledger.prepareInvoiceIssuePackage(job.id, invoice.id, { actor: 'postgres_commercial_test' });
     assert.match(invoicePackage.invoiceReference, /^INV-\d{4}-\d{6}$/);
