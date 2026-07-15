@@ -685,17 +685,19 @@ function appendAuditEventToDatabase(db, event = {}, options = {}) {
   const lockClause = databaseMode === 'postgres' ? ' FOR UPDATE' : '';
   let state = db.prepare(`SELECT * FROM audit_chain_state WHERE chain_id = ?${lockClause}`).get(AUDIT_CHAIN_ID);
   if (!state) {
-    const retainedEvents = Number(db.prepare('SELECT COUNT(*) AS count FROM audit_events').get().count || 0);
-    if (retainedEvents) {
-      const error = new Error('Audit chain state is missing while retained events exist. Verify and recover the ledger before writing new audit evidence.');
-      error.code = 'audit_chain_state_missing';
-      throw error;
-    }
-    db.prepare(`
+    const initialized = db.prepare(`
       INSERT OR IGNORE INTO audit_chain_state (chain_id, head_event_id, head_hash, event_count, updated_at)
       VALUES (?, NULL, ?, 0, ?)
     `).run(AUDIT_CHAIN_ID, AUDIT_CHAIN_GENESIS_HASH, createdAt);
     state = db.prepare(`SELECT * FROM audit_chain_state WHERE chain_id = ?${lockClause}`).get(AUDIT_CHAIN_ID);
+    if (Number(initialized.changes || 0) === 1) {
+      const retainedEvents = Number(db.prepare('SELECT COUNT(*) AS count FROM audit_events').get().count || 0);
+      if (retainedEvents) {
+        const error = new Error('Audit chain state is missing while retained events exist. Verify and recover the ledger before writing new audit evidence.');
+        error.code = 'audit_chain_state_missing';
+        throw error;
+      }
+    }
   }
   if (!state) {
     const error = new Error('Audit chain state could not be initialized.');

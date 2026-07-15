@@ -939,10 +939,18 @@ test('PostgreSQL API limiter atomically coordinates concurrent replicas', { skip
   }
 });
 
-test('PostgreSQL audit chain atomically serializes concurrent replica appends', { skip: !connectionString }, async () => {
+test('PostgreSQL audit chain atomically initializes and serializes concurrent replica appends', { skip: !connectionString }, async () => {
+  const reset = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  reset.transaction(() => {
+    reset.db.prepare('DELETE FROM audit_chain_state').run();
+    reset.db.prepare('DELETE FROM audit_events').run();
+  });
+  reset.close();
+
   const baseline = new ContractorOperatingLedger({ databaseUrl: connectionString });
   const before = baseline.verifyAuditIntegrity();
   assert.equal(before.valid, true);
+  assert.equal(before.eventCount, 0);
   baseline.close();
 
   const runId = `postgres-audit-${Date.now()}`;

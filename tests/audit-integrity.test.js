@@ -6,6 +6,7 @@ const test = require('node:test');
 const { DatabaseSync } = require('node:sqlite');
 const {
   ContractorOperatingLedger,
+  AUDIT_CHAIN_ID,
   AUDIT_CHAIN_FORMAT,
   AUDIT_CHAIN_GENESIS_HASH
 } = require('../operating-ledger');
@@ -184,4 +185,22 @@ test('restore validation rejects a checksummed database whose chained audit payl
     () => verifySqliteBackupDatabase(dbFile),
     /audit chain failed integrity verification: event_hash_mismatch/i
   );
+});
+
+test('audit append refuses to recreate a missing chain head over retained evidence', t => {
+  const { ledger } = temporaryLedger(t, 'contractor-ai-audit-missing-head-');
+  appendFixtureEvents(ledger);
+  ledger.db.prepare('DELETE FROM audit_chain_state WHERE chain_id = ?').run(AUDIT_CHAIN_ID);
+
+  assert.throws(
+    () => ledger.audit({
+      entityType: 'job',
+      entityId: 'job_missing_head',
+      action: 'must_not_append',
+      actor: 'audit-integrity-test'
+    }),
+    error => error.code === 'audit_chain_state_missing'
+  );
+  assert.equal(ledger.db.prepare('SELECT COUNT(*) AS count FROM audit_chain_state').get().count, 0);
+  assert.equal(ledger.db.prepare('SELECT COUNT(*) AS count FROM audit_events').get().count, 3);
 });
