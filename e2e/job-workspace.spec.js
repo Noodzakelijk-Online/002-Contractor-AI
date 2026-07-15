@@ -1812,6 +1812,95 @@ test('finance workspace creates and prepares an approval-gated structured invoic
   expect(packagedDetail.job.communications.find(communication => communication.data.source === 'invoice_issue_package')).toMatchObject({ status: 'draft' });
 });
 
+test('finance workspace plans a billing milestone and locks its values into the invoice draft', async ({ page, request }) => {
+  const intake = await createBrowserJob(request, 'Browser staged billing workflow', {
+    status: 'completed',
+    progressPercent: 100,
+    estimatedCost: 1200,
+    contractValue: 1800,
+    targetCompletion: '2026-07-10T16:00:00.000Z',
+    assignAutomatically: false
+  });
+  const plannedIssueDate = new Date().toISOString().slice(0, 10);
+  const dueDate = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Finance', exact: true }).click();
+  const finance = page.getByTestId('finance-workspace');
+  let row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await row.getByRole('button', { name: `Billing milestone for ${intake.job.title}` }).click();
+
+  const control = page.getByTestId('finance-control-modal');
+  await expect(control.getByRole('heading', { name: 'Billing milestone' })).toBeVisible();
+  await expect(control.getByLabel('Net milestone (EUR)')).toHaveValue('1800.00');
+  await expect(control.getByLabel('VAT rate (%)')).toHaveValue('21');
+  await control.getByLabel('Planned invoice date').fill(plannedIssueDate);
+  await control.getByLabel('Payment due date').fill(dueDate);
+  await control.getByLabel('Milestone description').fill('Contract completion milestone');
+  await control.getByLabel('Internal evidence and notes').fill('Signed contract and completion evidence checked for staged billing.');
+  await expect(control.getByLabel('Billing milestone calculation')).toContainText(/Total\s*€\s*2\.178,00/);
+  await control.getByRole('button', { name: 'Request milestone approval' }).click();
+  await expect(page.getByText(/Billing milestone retained for €\s*2\.178,00/)).toBeVisible();
+
+  let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  expect(detailResponse.ok()).toBeTruthy();
+  let detail = await detailResponse.json();
+  expect(detail.job.billingMilestones).toHaveLength(1);
+  const milestone = detail.job.billingMilestones[0];
+  expect(milestone).toMatchObject({
+    title: 'Contract completion milestone',
+    status: 'pending_approval',
+    amount: 1800,
+    taxAmount: 378,
+    total: 2178,
+    invoiceId: null
+  });
+
+  const approvalResponse = await request.post(`/api/ledger/approvals/${milestone.approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Milestone matches the signed contract and completion evidence.' }
+  });
+  expect(approvalResponse.ok()).toBeTruthy();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await expect(row.getByText('1 billing milestone')).toBeVisible();
+  await expect(row.getByText('1 milestone due')).toBeVisible();
+  await row.getByRole('button', { name: `Draft invoice for ${intake.job.title}` }).click();
+
+  const invoiceModal = page.getByTestId('invoice-draft-modal');
+  await expect(invoiceModal.getByRole('heading', { name: 'Draft milestone invoice' })).toBeVisible();
+  await expect(invoiceModal.getByTestId('invoice-milestone-source')).toContainText('Contract completion milestone');
+  await expect(invoiceModal.getByLabel('Net amount (EUR)')).toHaveValue('1800.00');
+  await expect(invoiceModal.getByLabel('VAT rate (%)')).toHaveValue('21');
+  await expect(invoiceModal.getByLabel('Due date')).toHaveValue(dueDate);
+  await expect(invoiceModal.getByLabel('Net amount (EUR)')).not.toBeEditable();
+  await expect(invoiceModal.getByLabel('VAT rate (%)')).not.toBeEditable();
+  await expect(invoiceModal.getByLabel('Due date')).not.toBeEditable();
+  const structuredExport = invoiceModal.getByLabel('Prepare Peppol BIS / UBL 2.1 export');
+  if (await structuredExport.isChecked()) await structuredExport.uncheck();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const geometry = await page.evaluate(() => {
+    const modal = document.querySelector('[data-testid="invoice-draft-modal"]');
+    return {
+      pageWidth: document.body.scrollWidth,
+      viewportWidth: window.innerWidth,
+      modalWidth: modal?.scrollWidth || 0,
+      modalClientWidth: modal?.clientWidth || 0
+    };
+  });
+  expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+  expect(geometry.modalWidth).toBeLessThanOrEqual(geometry.modalClientWidth);
+  await invoiceModal.getByRole('button', { name: 'Create approval-gated draft' }).click();
+  await expect(page.getByText(/Invoice draft retained/i)).toBeVisible();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.invoices).toHaveLength(1);
+  expect(detail.job.invoices[0]).toMatchObject({ amount: 1800, taxAmount: 378, total: 2178, dueAt: milestone.dueAt });
+  expect(detail.job.invoices[0].data.billingMilestoneId).toBe(milestone.id);
+  expect(detail.job.billingMilestones[0]).toMatchObject({ status: 'invoicing', invoiceId: detail.job.invoices[0].id });
+});
+
 test('finance workspace matches a supplier invoice and confirms payment evidence without moving funds', async ({ page, request }) => {
   const supplier = await ensureVerifiedTradePartner(request, `Browser payable supplier ${Date.now()}`);
   const intake = await createBrowserJob(request, 'Browser supplier payable workflow', {

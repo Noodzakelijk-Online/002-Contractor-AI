@@ -95,6 +95,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exported.body.restorable, false);
   assert.match(exported.body.integrity.digest, /^[a-f0-9]{64}$/);
   assert.ok(exported.body.jobs.some(job => job.id === intake.body.job.id));
+  assert.ok(Array.isArray(exported.body.billingMilestones));
   assert.ok(Array.isArray(exported.body.supplierInvoices));
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
   assert.ok(Array.isArray(exported.body.handoverPackages));
@@ -108,6 +109,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.restorable, false);
   assert.equal(exportValidation.body.integrity.verified, true);
   assert.equal(exportValidation.body.counts.jobs, exported.body.jobs.length);
+  assert.equal(exportValidation.body.counts.billingMilestones, exported.body.billingMilestones.length);
   assert.equal(exportValidation.body.counts.supplierInvoices, exported.body.supplierInvoices.length);
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
   assert.equal(exportValidation.body.counts.handoverPackages, exported.body.handoverPackages.length);
@@ -218,7 +220,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '018_supplier_payables');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '019_billing_milestones');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 

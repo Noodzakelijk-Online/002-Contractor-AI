@@ -25,6 +25,16 @@ test('dashboard mutations remain API-backed and confirmation-gated where they af
   assert.match(dashboardSource, /window\.confirm\('Archive Browser QA and demo records/);
 });
 
+test('finance dashboard plans and invoices retained billing milestones without editable source values', () => {
+  assert.match(dashboardSource, /\/billing-milestones`/);
+  assert.match(dashboardSource, /create_billing_milestone/);
+  assert.match(dashboardSource, /Request milestone approval/);
+  assert.match(dashboardSource, /data-testid="invoice-milestone-source"/);
+  assert.match(dashboardSource, /billingMilestoneId: milestone\?\.id \|\| ''/);
+  assert.match(dashboardSource, /readOnly=\{Boolean\(invoiceDraft\.billingMilestoneId\)\}/);
+  assert.match(dashboardSource, /Approved source/);
+});
+
 test('field updates use a bounded operator-scoped IndexedDB outbox only for interrupted requests', () => {
   assert.match(outboxSource, /const DATABASE_VERSION = 2/);
   assert.match(outboxSource, /indexedDB\.open\(DATABASE_NAME, DATABASE_VERSION\)/);

@@ -123,6 +123,19 @@ function createBackupFixture(t, suffix = 'success') {
     resolvedBy: 'migration_fixture_approver',
     reason: 'Migration supplier payment evidence verified.'
   });
+  const billingMilestone = source.createBillingMilestone(job.id, {
+    title: 'Migration staged billing control',
+    amount: 123456.78,
+    taxRate: 21,
+    plannedIssueAt: '2026-07-01T09:00:00.000Z',
+    dueAt: '2026-07-31T23:59:59.000Z',
+    notes: 'Retained staged billing migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(billingMilestone.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration billing milestone verified against contract value.'
+  });
   const organization = source.updateOrganizationProfile({
     legalName: `Migration Contractor ${suffix} B.V.`,
     registrationNumber: '44332211',
@@ -194,7 +207,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, document, evidenceBytes, handover, job, localStorageRef, organization, supplierInvoice, supplierPayment, tradePartner };
+  return { backupDir, backupId, billingMilestone, document, evidenceBytes, handover, job, localStorageRef, organization, supplierInvoice, supplierPayment, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -261,7 +274,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '018_supplier_payables');
+  assert.equal(migration.migrationVersion, '019_billing_milestones');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -274,6 +287,11 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     const detail = hosted.getJobDetail(fixture.job.id, { includeAudit: true });
     assert.equal(detail.contractValue, 987654321.123456);
     assert.equal(detail.estimatedHours, 123.123456789);
+    const migratedBillingMilestone = detail.billingMilestones.find(item => item.id === fixture.billingMilestone.id);
+    assert.equal(migratedBillingMilestone.status, 'approved');
+    assert.equal(migratedBillingMilestone.amount, 123456.78);
+    assert.equal(migratedBillingMilestone.taxAmount, 25925.92);
+    assert.equal(migratedBillingMilestone.invoiceId, null);
     const migratedDocument = detail.documents.find(item => item.id === fixture.document.id);
     assert.match(migratedDocument.storageRef, /^s3:\/\/migration-test\/migrated-1-/);
     assert.notEqual(migratedDocument.storageRef, fixture.localStorageRef);

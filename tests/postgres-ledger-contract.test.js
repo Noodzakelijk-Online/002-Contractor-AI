@@ -834,7 +834,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '018_supplier_payables');
+    assert.equal(migrations.currentVersion, '019_billing_milestones');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -915,12 +915,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('018_supplier_payables'));
+  assert.deepEqual(versions, Array(4).fill('019_billing_milestones'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 18);
+    assert.equal(Number(migrationCount.count), 19);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

@@ -58,6 +58,7 @@ const FINANCE_ACTION_LABELS = {
   prepare_finance_handoff: 'Finance handoff',
   record_time_expense: 'Record costs',
   create_budget_line: 'Budget baseline',
+  create_billing_milestone: 'Billing milestone',
   create_draw_request: 'Progress draw',
   request_lien_waiver: 'Waiver request'
 }
@@ -267,10 +268,12 @@ function emptyFinanceActionDraft() {
   return {
     outcome: 'follow_up_recorded',
     amount: '',
+    taxRate: '21',
     forecastAmount: '',
     hours: '',
     rate: '52',
     expenseAmount: '',
+    plannedIssueAt: futureDateInput(7),
     dueAt: futureDateInput(7),
     paidAt: futureDateInput(0),
     method: 'bank_transfer',
@@ -422,6 +425,7 @@ function organizationDraft(profile = {}) {
 
 function emptyInvoiceDraft() {
   return {
+    billingMilestoneId: '',
     amount: '',
     taxRate: '21',
     dueAt: futureDateInput(14),
@@ -782,6 +786,7 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
     <div className="panel-heading"><div><h2>Finance readiness</h2><p>Review earned value, costs, receivables, supplier payables, and approval gates from the retained ledger.</p></div><span className="count-badge">{rows.length}</span></div>
     <div className="finance-summary" aria-label="Finance summary">
       <div><span>Invoice ready</span><strong>{summary.invoiceReady || 0}</strong></div>
+      <div><span>Planned billing</span><strong>{currency.format(summary.plannedBillingValue || 0)}</strong></div>
       <div><span>Uninvoiced net</span><strong>{currency.format(summary.uninvoicedNetValue ?? summary.uninvoicedValue ?? 0)}</strong></div>
       <div><span>Unpaid</span><strong>{currency.format(summary.unpaidValue || 0)}</strong></div>
       <div><span>Supplier payable</span><strong>{currency.format(summary.supplierPayableValue || 0)}</strong></div>
@@ -790,7 +795,8 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
     <div className="finance-list">{rows.map(item => {
       const job = jobs.find(candidate => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
       const canAct = canCoordinate && !item.flags?.approvalRequired
-      const canDraftInvoice = canAct && item.flags?.invoiceReady && !item.counts?.draftInvoices
+      const draftInvoiceAction = canAct ? item.nextActions?.find(action => action.type === 'draft_invoice') : null
+      const canDraftInvoice = Boolean(draftInvoiceAction) && !item.counts?.draftInvoices
       const prepareAction = canAct ? item.nextActions?.find(action => ['prepare_invoice_package', 'prepare_credit_note_package'].includes(action.type)) : null
       const issuePackage = item.latest?.invoice?.data?.issuePackage
       const creditNotePackage = item.latest?.creditNote?.data?.issuePackage
@@ -799,10 +805,10 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
           && FINANCE_ACTION_LABELS[action.type]
       )).slice(0, 3) : EMPTY_LIST
       return <article className="finance-item" key={item.jobId}>
-        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Supplier payable <strong>{currency.format(item.money?.supplierPayableValue || 0)}</strong></span><span>Received <strong>{currency.format(item.money?.receivedValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.money?.creditedValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.creditedValue)} credited</span> : null}{item.money?.pendingCreditValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingCreditValue)} credit pending</span> : null}{item.money?.writtenOffValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.writtenOffValue)} written off</span> : null}{item.money?.pendingPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingPaymentValue)} client payment pending</span> : null}{item.money?.pendingSupplierPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingSupplierPaymentValue)} supplier payment pending</span> : null}{item.counts?.dueSupplierInvoices ? <span className="tag tag-amber">{item.counts.dueSupplierInvoices} supplier invoice{item.counts.dueSupplierInvoices === 1 ? '' : 's'} due</span> : null}{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{creditNotePackage ? <span className="tag tag-green">{creditNotePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
+        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Planned billing <strong>{currency.format(item.money?.plannedBillingValue || 0)}</strong></span><span>Billing due <strong>{currency.format(item.money?.dueBillingValue || 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Supplier payable <strong>{currency.format(item.money?.supplierPayableValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.counts?.billingMilestones ? <span className="tag tag-green">{item.counts.billingMilestones} billing milestone{item.counts.billingMilestones === 1 ? '' : 's'}</span> : null}{item.counts?.dueBillingMilestones ? <span className="tag tag-amber">{item.counts.dueBillingMilestones} milestone{item.counts.dueBillingMilestones === 1 ? '' : 's'} due</span> : null}{item.money?.creditedValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.creditedValue)} credited</span> : null}{item.money?.pendingCreditValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingCreditValue)} credit pending</span> : null}{item.money?.writtenOffValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.writtenOffValue)} written off</span> : null}{item.money?.pendingPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingPaymentValue)} client payment pending</span> : null}{item.money?.pendingSupplierPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingSupplierPaymentValue)} supplier payment pending</span> : null}{item.counts?.dueSupplierInvoices ? <span className="tag tag-amber">{item.counts.dueSupplierInvoices} supplier invoice{item.counts.dueSupplierInvoices === 1 ? '' : 's'} due</span> : null}{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{creditNotePackage ? <span className="tag tag-green">{creditNotePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
         <div className="finance-actions">
           {item.flags?.approvalRequired && canApprove ? <button className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ jobId: item.jobId, jobTitle: job.title, approvalId: item.nextActions?.find(action => action.approvalId)?.approvalId || null })}><ShieldCheck size={16} />Review approval</button> : null}
-          {canDraftInvoice ? <button className="secondary-button" aria-label={`Draft invoice for ${job.title}`} disabled={submitting} onClick={() => onDraftInvoice(item)}><ReceiptEuro size={16} />Draft invoice</button> : null}
+          {canDraftInvoice ? <button className="secondary-button" aria-label={`Draft invoice for ${job.title}`} disabled={submitting} onClick={() => onDraftInvoice(item, draftInvoiceAction)}><ReceiptEuro size={16} />{draftInvoiceAction.billingMilestoneId ? 'Invoice milestone' : 'Draft invoice'}</button> : null}
           {prepareAction ? <button className="secondary-button" aria-label={`Prepare ${prepareAction.type === 'prepare_credit_note_package' ? 'credit note' : 'invoice'} package for ${job.title}`} disabled={submitting} onClick={() => onPrepareInvoice(item, prepareAction)}><PackageCheck size={16} />{prepareAction.type === 'prepare_credit_note_package' ? 'Prepare credit' : 'Prepare package'}</button> : null}
           {issuePackage?.htmlDocumentId ? <a className="secondary-button" aria-label={`Download invoice for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.htmlDocumentId)}/issue-package`} download><FileDown size={16} />Invoice</a> : null}
           {issuePackage?.ublDocumentId ? <a className="secondary-button" aria-label={`Download UBL for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.ublDocumentId)}/issue-package`} download><FileDown size={16} />UBL</a> : null}
@@ -3227,7 +3233,7 @@ function App() {
     }
   }
 
-  async function openInvoiceDraft(item) {
+  async function openInvoiceDraft(item, action = null) {
     if (!item?.jobId) {
       setError('The finance row is not linked to a retained ledger job.')
       return
@@ -3236,14 +3242,18 @@ function App() {
     try {
       const result = await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}`)
       const quote = result.job?.quotes?.find(candidate => !['cancelled', 'rejected', 'expired'].includes(candidate.status)) || result.job?.quotes?.[0]
-      const amount = Math.max(0, Number(item.money?.invoiceDraftAmount ?? quote?.subtotal ?? item.money?.contractValue ?? 0))
+      const milestone = action?.billingMilestoneId
+        ? result.job?.billingMilestones?.find(candidate => candidate.id === action.billingMilestoneId)
+        : null
+      const amount = Math.max(0, Number(milestone?.amount ?? action?.amount ?? item.money?.invoiceDraftAmount ?? quote?.subtotal ?? item.money?.contractValue ?? 0))
       const client = result.job?.client || {}
-      setInvoiceJob(item)
+      setInvoiceJob({ ...item, billingMilestone: milestone || null })
       setInvoiceDraft({
         ...emptyInvoiceDraft(),
+        billingMilestoneId: milestone?.id || '',
         amount: amount ? amount.toFixed(2) : '',
-        taxRate: quote?.taxRate != null ? String(quote.taxRate) : '21',
-        dueAt: futureDateInput(14),
+        taxRate: milestone?.taxRate != null ? String(milestone.taxRate) : quote?.taxRate != null ? String(quote.taxRate) : '21',
+        dueAt: milestone?.dueAt ? String(milestone.dueAt).slice(0, 10) : futureDateInput(14),
         peppolReady: true,
         buyerLegalName: client.company || client.name || item.clientName || '',
         buyerRegistrationNumber: client.data?.registrationNumber || '',
@@ -3253,7 +3263,9 @@ function App() {
         buyerPostalCode: client.data?.postalCode || '',
         buyerCity: client.city || result.job?.city || '',
         buyerCountry: client.country || result.job?.country || 'NL',
-        notes: 'Approval-gated invoice draft prepared from retained quote or contract value. No invoice has been issued or sent.'
+        notes: milestone
+          ? `Approval-gated invoice draft derived from billing milestone ${milestone.sequenceNumber}: ${milestone.title}. No invoice has been issued or sent.`
+          : 'Approval-gated invoice draft prepared from retained quote or contract value. No invoice has been issued or sent.'
       })
     } catch (requestError) {
       setError(requestError.message)
@@ -3298,6 +3310,7 @@ function App() {
           status: 'draft',
           currency: 'EUR',
           amount: roundMoney(amount),
+          billingMilestoneId: invoiceDraft.billingMilestoneId || null,
           taxAmount,
           total,
           dueAt: new Date(`${invoiceDraft.dueAt}T23:59:59`).toISOString(),
@@ -3307,8 +3320,8 @@ function App() {
           purchaseOrderReference: invoiceDraft.purchaseOrderReference.trim(),
           buyerLegalName: invoiceDraft.buyerLegalName.trim(),
           buyerRegistrationNumber: invoiceDraft.buyerRegistrationNumber.trim(),
-          buyerEndpointScheme: invoiceDraft.buyerEndpointScheme.trim(),
-          buyerEndpointId: invoiceDraft.buyerEndpointId.trim(),
+          buyerEndpointScheme: invoiceDraft.peppolReady ? invoiceDraft.buyerEndpointScheme.trim() : '',
+          buyerEndpointId: invoiceDraft.peppolReady ? invoiceDraft.buyerEndpointId.trim() : '',
           buyerAddress: invoiceDraft.buyerAddress.trim(),
           buyerPostalCode: invoiceDraft.buyerPostalCode.trim(),
           buyerCity: invoiceDraft.buyerCity.trim(),
@@ -3365,8 +3378,8 @@ function App() {
       ? creditNoteAmount
       : action.type === 'record_supplier_invoice'
         ? supplierInvoiceAmount
-      : action.type === 'create_budget_line'
-      ? contractAmount
+      : ['create_budget_line', 'create_billing_milestone'].includes(action.type)
+      ? Number(action.suggestedAmount || contractAmount)
       : action.type === 'create_draw_request'
         ? drawAmount
         : paymentAmount
@@ -3375,11 +3388,15 @@ function App() {
       ...emptyFinanceActionDraft(),
       outcome: action.type === 'record_payment_reconciliation' ? 'received' : 'follow_up_recorded',
       amount: amount > 0 ? amount.toFixed(2) : '',
+      taxRate: action.taxRate == null ? '21' : String(action.taxRate),
       taxAmount: action.type === 'record_supplier_invoice' && amount > 0 ? roundMoney(amount * 0.21).toFixed(2) : '',
       forecastAmount: contractAmount > 0 ? contractAmount.toFixed(2) : '',
-      dueAt: action.dueAt ? String(action.dueAt).slice(0, 10) : futureDateInput(7),
+      plannedIssueAt: action.plannedIssueAt ? String(action.plannedIssueAt).slice(0, 10) : futureDateInput(7),
+      dueAt: action.dueAt ? String(action.dueAt).slice(0, 10) : futureDateInput(action.type === 'create_billing_milestone' ? 37 : 7),
       vendor: action.supplier || item.latest?.purchaseOrder?.supplier || '',
-      description: `${item.jobTitle || 'Job'} finance baseline`,
+      description: action.type === 'create_billing_milestone'
+        ? `${item.jobTitle || 'Job'} billing milestone ${action.nextSequenceNumber || ''}`.trim()
+        : `${item.jobTitle || 'Job'} finance baseline`,
       percentComplete: String(Math.max(0, Math.min(100, Number(item.progressPercent) || 0)))
     })
   }
@@ -3561,6 +3578,30 @@ function App() {
         forecastAmount: roundMoney(financeControlForecast || financeControlAmount),
         notes
       }
+    } else if (type === 'create_billing_milestone') {
+      const taxRate = Number(financeActionDraft.taxRate)
+      if (!(financeControlAmount > 0) || !Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100
+        || !financeActionDraft.description.trim() || !financeActionDraft.plannedIssueAt || !financeActionDraft.dueAt) {
+        setError('Record a positive milestone amount, VAT rate, description, planned issue date, and due date.')
+        return
+      }
+      const plannedIssueAt = new Date(`${financeActionDraft.plannedIssueAt}T12:00:00`).toISOString()
+      const dueAt = new Date(`${financeActionDraft.dueAt}T23:59:59`).toISOString()
+      if (Date.parse(dueAt) < Date.parse(plannedIssueAt)) {
+        setError('The milestone due date must be on or after its planned issue date.')
+        return
+      }
+      route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/billing-milestones`
+      body = {
+        title: financeActionDraft.description.trim(),
+        sequenceNumber: financeAction.action.nextSequenceNumber || undefined,
+        amount: roundMoney(financeControlAmount),
+        taxRate: roundMoney(taxRate),
+        currency: 'EUR',
+        plannedIssueAt,
+        dueAt,
+        notes
+      }
     } else if (type === 'create_draw_request') {
       const percentComplete = Number(financeActionDraft.percentComplete)
       if (!(financeControlAmount > 0) || !financeActionDraft.dueAt || !Number.isFinite(percentComplete) || percentComplete < 0 || percentComplete > 100) {
@@ -3616,6 +3657,8 @@ function App() {
           : 'Internal payment follow-up retained. No reminder or external message was sent.')
       } else if (type === 'record_time_expense') {
         notify('Time and expense evidence retained atomically in the job ledger.')
+      } else if (type === 'create_billing_milestone') {
+        notify(`Billing milestone retained for ${currency.format(result.billingMilestone?.total || financeControlAmount)}. Approval is required before an invoice can be derived.`)
       } else if (type === 'request_lien_waiver') {
         notify('Internal waiver request retained. No supplier request or release was sent.')
       } else {
@@ -4480,14 +4523,15 @@ function App() {
     {invoiceJob ? <div className="modal-backdrop" role="presentation">
       <section className="modal invoice-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-draft-title" data-testid="invoice-draft-modal">
         <div className="modal-heading">
-          <div><p className="eyebrow">Approval-gated finance</p><h2 id="invoice-draft-title">Draft invoice</h2><p>{invoiceJob.jobTitle} / {invoiceJob.clientName || 'Client not set'}</p></div>
+          <div><p className="eyebrow">Approval-gated finance</p><h2 id="invoice-draft-title">{invoiceJob.billingMilestone ? 'Draft milestone invoice' : 'Draft invoice'}</h2><p>{invoiceJob.jobTitle} / {invoiceJob.clientName || 'Client not set'}</p></div>
           <button className="icon-button" aria-label="Close invoice draft" onClick={closeInvoiceDraft}><X size={18} /></button>
         </div>
         <form onSubmit={createInvoiceDraft}>
           <div className="form-grid">
-            <label>Net amount (EUR)<input required type="number" min="0.01" step="0.01" value={invoiceDraft.amount} onChange={event => setInvoiceDraft({ ...invoiceDraft, amount: event.target.value })} /></label>
-            <label>VAT rate (%)<input required type="number" min="0" max="100" step="0.01" value={invoiceDraft.taxRate} onChange={event => setInvoiceDraft({ ...invoiceDraft, taxRate: event.target.value })} /></label>
-            <label>Due date<input required type="date" value={invoiceDraft.dueAt} onChange={event => setInvoiceDraft({ ...invoiceDraft, dueAt: event.target.value })} /></label>
+            {invoiceJob.billingMilestone ? <div className="workflow-result form-span" data-testid="invoice-milestone-source"><div><strong>Milestone {invoiceJob.billingMilestone.sequenceNumber}: {invoiceJob.billingMilestone.title}</strong><span>The approved net amount, VAT rate, and payment date are locked to this retained billing plan.</span></div><span className="tag tag-green">Approved source</span></div> : null}
+            <label>Net amount (EUR)<input required readOnly={Boolean(invoiceDraft.billingMilestoneId)} type="number" min="0.01" step="0.01" value={invoiceDraft.amount} onChange={event => setInvoiceDraft({ ...invoiceDraft, amount: event.target.value })} /></label>
+            <label>VAT rate (%)<input required readOnly={Boolean(invoiceDraft.billingMilestoneId)} type="number" min="0" max="100" step="0.01" value={invoiceDraft.taxRate} onChange={event => setInvoiceDraft({ ...invoiceDraft, taxRate: event.target.value })} /></label>
+            <label>Due date<input required readOnly={Boolean(invoiceDraft.billingMilestoneId)} type="date" value={invoiceDraft.dueAt} onChange={event => setInvoiceDraft({ ...invoiceDraft, dueAt: event.target.value })} /></label>
             <label className="checkbox-label"><input type="checkbox" checked={invoiceDraft.peppolReady} onChange={event => setInvoiceDraft({ ...invoiceDraft, peppolReady: event.target.checked })} />Prepare Peppol BIS / UBL 2.1 export</label>
             {invoiceDraft.peppolReady ? <>
               <label>Buyer reference<input required={!invoiceDraft.purchaseOrderReference.trim()} value={invoiceDraft.buyerReference} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerReference: event.target.value })} placeholder="Reference supplied by the buyer" /></label>
@@ -4621,6 +4665,15 @@ function App() {
               <label className="form-span">Budget description<input required value={financeActionDraft.description} onChange={event => setFinanceActionDraft({ ...financeActionDraft, description: event.target.value })} /></label>
             </> : null}
 
+            {financeAction.action.type === 'create_billing_milestone' ? <>
+              <label>Net milestone (EUR)<input required type="number" min="0.01" step="0.01" value={financeActionDraft.amount} onChange={event => setFinanceActionDraft({ ...financeActionDraft, amount: event.target.value })} /></label>
+              <label>VAT rate (%)<input required type="number" min="0" max="100" step="0.01" value={financeActionDraft.taxRate} onChange={event => setFinanceActionDraft({ ...financeActionDraft, taxRate: event.target.value })} /></label>
+              <label>Planned invoice date<input required type="date" value={financeActionDraft.plannedIssueAt} onChange={event => setFinanceActionDraft({ ...financeActionDraft, plannedIssueAt: event.target.value })} /></label>
+              <label>Payment due date<input required type="date" value={financeActionDraft.dueAt} onChange={event => setFinanceActionDraft({ ...financeActionDraft, dueAt: event.target.value })} /></label>
+              <label className="form-span">Milestone description<input required value={financeActionDraft.description} onChange={event => setFinanceActionDraft({ ...financeActionDraft, description: event.target.value })} /></label>
+              <div className="invoice-preview form-span" aria-label="Billing milestone calculation"><span>Net <strong>{currency.format(financeControlAmount)}</strong></span><span>VAT <strong>{currency.format(roundMoney(financeControlAmount * (Number(financeActionDraft.taxRate) || 0) / 100))}</strong></span><span>Total <strong>{currency.format(roundMoney(financeControlAmount * (1 + (Number(financeActionDraft.taxRate) || 0) / 100)))}</strong></span></div>
+            </> : null}
+
             {financeAction.action.type === 'create_draw_request' ? <>
               <label>Draw amount (EUR)<input required type="number" min="0.01" step="0.01" value={financeActionDraft.amount} onChange={event => setFinanceActionDraft({ ...financeActionDraft, amount: event.target.value })} /></label>
               <label>Work complete (%)<input required type="number" min="0" max="100" step="1" value={financeActionDraft.percentComplete} onChange={event => setFinanceActionDraft({ ...financeActionDraft, percentComplete: event.target.value })} /></label>
@@ -4639,7 +4692,7 @@ function App() {
           </div>
           <div className="modal-actions">
             <button type="button" className="secondary-button" onClick={closeFinanceControl}>Cancel</button>
-            <button className="primary-button" disabled={submitting || !financeActionDraft.notes.trim()}><ShieldCheck size={16} />{submitting ? 'Recording...' : financeAction.action.type === 'create_credit_note' ? 'Request credit-note approval' : financeAction.action.type === 'record_supplier_invoice' ? 'Request payable approval' : financeAction.action.type === 'record_supplier_payment' ? 'Request payment confirmation' : financeAction.action.type === 'record_time_expense' ? 'Record ledger costs' : financeAction.action.type === 'request_lien_waiver' ? 'Retain waiver request' : financeAction.action.type === 'record_payment_follow_up' && financeActionDraft.outcome === 'follow_up_recorded' ? 'Record internal follow-up' : 'Request approver review'}</button>
+            <button className="primary-button" disabled={submitting || !financeActionDraft.notes.trim()}><ShieldCheck size={16} />{submitting ? 'Recording...' : financeAction.action.type === 'create_credit_note' ? 'Request credit-note approval' : financeAction.action.type === 'record_supplier_invoice' ? 'Request payable approval' : financeAction.action.type === 'record_supplier_payment' ? 'Request payment confirmation' : financeAction.action.type === 'create_billing_milestone' ? 'Request milestone approval' : financeAction.action.type === 'record_time_expense' ? 'Record ledger costs' : financeAction.action.type === 'request_lien_waiver' ? 'Retain waiver request' : financeAction.action.type === 'record_payment_follow_up' && financeActionDraft.outcome === 'follow_up_recorded' ? 'Record internal follow-up' : 'Request approver review'}</button>
           </div>
         </form>
       </section>

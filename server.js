@@ -2705,6 +2705,18 @@ app.post('/api/ledger/jobs/:id/budget-lines', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/billing-milestones', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    billingMilestone: operatingLedger.createBillingMilestone(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/purchase-orders', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3620,6 +3632,7 @@ function operationalExport() {
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
+    billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
     handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
     audit: operatingLedger.listAudit({ limit: 1_000 })
@@ -3680,6 +3693,7 @@ function validateOperationalExport(snapshot) {
       tradePartners: snapshot.tradePartners.length,
       supplierInvoices: Array.isArray(snapshot.supplierInvoices) ? snapshot.supplierInvoices.length : 0,
       supplierInvoicePayments: Array.isArray(snapshot.supplierInvoicePayments) ? snapshot.supplierInvoicePayments.length : 0,
+      billingMilestones: Array.isArray(snapshot.billingMilestones) ? snapshot.billingMilestones.length : 0,
       handoverPackages: Array.isArray(snapshot.handoverPackages) ? snapshot.handoverPackages.length : 0,
       approvals: snapshot.approvals.length,
       audit: snapshot.audit.length
@@ -4321,6 +4335,9 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       },
       invoicing: {
         serverCalculatedTotals: true,
+        stagedBillingPlans: true,
+        milestoneApprovalRequired: true,
+        milestoneInvoiceLinkage: 'one_to_one',
         durableNumbering: true,
         immutableHtmlPackage: true,
         ubl21Export: true,

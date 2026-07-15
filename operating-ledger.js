@@ -146,6 +146,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ],
   'financial-control': [
     { key: 'budget', label: 'Budget lines', table: 'budget_lines', detailKey: 'budgetLines' },
+    { key: 'billing_milestone', label: 'Billing milestones', table: 'billing_milestones', detailKey: 'billingMilestones' },
     { key: 'expense', label: 'Expenses', table: 'expenses', detailKey: 'expenses' },
     { key: 'purchase_order', label: 'Purchase orders', table: 'purchase_orders', detailKey: 'purchaseOrders' },
     { key: 'supplier_invoice', label: 'Supplier invoices', table: 'supplier_invoices', detailKey: 'supplierInvoices' },
@@ -271,6 +272,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     incident: 'incident_form',
     site_access: 'site_access_form',
     budget: 'budget_line_form',
+    billing_milestone: 'billing_milestone_form',
     expense: 'expense_form',
     purchase_order: 'purchase_order_form',
     supplier_invoice: 'supplier_invoice_form',
@@ -1492,6 +1494,37 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_invoice_payments_reconciliation_key ON supplier_invoice_payments(reconciliation_key);
         CREATE INDEX IF NOT EXISTS idx_supplier_invoice_payments_invoice_status ON supplier_invoice_payments(supplier_invoice_id, status);
+      `);
+    }
+  },
+  {
+    version: '019_billing_milestones',
+    description: 'Retain approval-gated staged billing plans and bind each milestone to at most one invoice.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS billing_milestones (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          invoice_id TEXT REFERENCES invoices(id) ON DELETE SET NULL,
+          sequence_number INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          amount REAL NOT NULL DEFAULT 0,
+          tax_rate REAL NOT NULL DEFAULT 0,
+          tax_amount REAL NOT NULL DEFAULT 0,
+          total REAL NOT NULL DEFAULT 0,
+          planned_issue_at TEXT NOT NULL,
+          due_at TEXT NOT NULL,
+          approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, sequence_number),
+          UNIQUE(invoice_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_billing_milestones_job_status ON billing_milestones(job_id, status, planned_issue_at);
+        CREATE INDEX IF NOT EXISTS idx_billing_milestones_due ON billing_milestones(status, due_at);
       `);
     }
   }
@@ -5472,6 +5505,7 @@ class ContractorOperatingLedger {
         if (action.type === 'site_access') addCreated(action.type, this.createSiteAccessLog(jobId, data, { actor }));
         if (action.type === 'worker_instruction') addCreated(action.type, this.createWorkerInstruction(jobId, data, { actor }));
         if (action.type === 'budget_line') addCreated(action.type, this.createBudgetLine(jobId, data, { actor }));
+        if (action.type === 'billing_milestone') addCreated(action.type, this.createBillingMilestone(jobId, data, { actor }));
         if (action.type === 'client_selection') addCreated(action.type, this.createClientSelection(jobId, data, { actor }));
         if (action.type === 'rfi') addCreated(action.type, this.createRfi(jobId, data, { actor }));
         if (action.type === 'quality_check') addCreated(action.type, this.addQualityCheck(jobId, data, { actor }));
@@ -6678,6 +6712,10 @@ class ContractorOperatingLedger {
       };
       this.db.prepare("UPDATE invoices SET status = 'prepared', data_json = ?, updated_at = ? WHERE id = ?")
         .run(toJson(updatedInvoiceData), nowIso(), invoiceId);
+      if (invoiceData.billingMilestoneId) {
+        this.db.prepare("UPDATE billing_milestones SET status = 'prepared', updated_at = ? WHERE id = ? AND invoice_id = ?")
+          .run(nowIso(), invoiceData.billingMilestoneId, invoiceId);
+      }
       this.audit({
         entityType: 'invoice_issue_package',
         entityId: htmlDocumentId,
@@ -10859,6 +10897,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             providerMessageId: data.deliveryReceipt.providerMessageId
           }
         }), nowIso(), invoiceRow.id);
+      if (invoiceData.billingMilestoneId) {
+        this.db.prepare("UPDATE billing_milestones SET status = 'invoiced', updated_at = ? WHERE id = ? AND invoice_id = ?")
+          .run(nowIso(), invoiceData.billingMilestoneId, invoiceRow.id);
+      }
       const invoiceReconciliation = this.getInvoiceReconciliation(invoiceRow.id);
       if (invoiceReconciliation.receivedAmount > 0.01 || invoiceReconciliation.writtenOffAmount > 0.01 || invoiceReconciliation.creditedAmount > 0.01) {
         this.reconcileInvoiceReceivable(invoiceRow.id, {
@@ -11336,20 +11378,181 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  listBillingMilestones(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const status = normalizeStatus(filters.status, 'all');
+    const limit = safeLimit(filters.limit, 100, 500);
+    const rows = this.db.prepare(`
+      SELECT billing_milestones.*, jobs.title AS job_title
+      FROM billing_milestones
+      JOIN jobs ON jobs.id = billing_milestones.job_id
+      WHERE (? = '' OR billing_milestones.job_id = ?)
+        AND (? = 'all' OR billing_milestones.status = ?)
+      ORDER BY billing_milestones.planned_issue_at ASC, billing_milestones.sequence_number ASC
+      LIMIT ?
+    `).all(jobId, jobId, status, status, limit);
+    return rows.map(row => ({ ...this.mapBillingMilestone(row), jobTitle: row.job_title }));
+  }
+
+  createBillingMilestone(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const contractValue = roundMoney(normalizeNumber(job.contract_value, 0));
+      if (!(contractValue > 0)) {
+        throw ledgerInputError(
+          'billing_milestone_contract_required',
+          'A positive retained contract value is required before a billing plan can be approved.'
+        );
+      }
+      const title = normalizeText(payload.title || payload.description, '');
+      if (title.length < 2 || title.length > 240) {
+        throw ledgerInputError('billing_milestone_title_invalid', 'Billing milestone title must contain 2 to 240 characters.');
+      }
+      const amountInput = payload.amount ?? payload.netAmount ?? payload.net_amount;
+      const amount = roundMoney(Number(amountInput));
+      if (!Number.isFinite(Number(amountInput)) || amount <= 0 || amount > 100_000_000) {
+        throw ledgerInputError('billing_milestone_amount_invalid', 'Billing milestone net amount must be greater than zero and no more than 100,000,000.');
+      }
+      const taxRateInput = payload.taxRate ?? payload.tax_rate ?? 21;
+      const taxRate = roundMoney(Number(taxRateInput));
+      if (!Number.isFinite(Number(taxRateInput)) || taxRate < 0 || taxRate > 100) {
+        throw ledgerInputError('billing_milestone_tax_rate_invalid', 'Billing milestone VAT rate must be between 0 and 100.');
+      }
+      const taxAmount = roundMoney(amount * taxRate / 100);
+      const total = roundMoney(amount + taxAmount);
+      const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) {
+        throw ledgerInputError('billing_milestone_currency_invalid', 'Billing milestone currency must be a three-letter ISO currency code.');
+      }
+      const plannedIssueAt = payload.plannedIssueAt || payload.planned_issue_at;
+      const dueAt = payload.dueAt || payload.due_at;
+      const plannedTimestamp = Date.parse(plannedIssueAt);
+      const dueTimestamp = Date.parse(dueAt);
+      if (!plannedIssueAt || !Number.isFinite(plannedTimestamp)) {
+        throw ledgerInputError('billing_milestone_issue_date_invalid', 'Billing milestone planned issue date must be a valid date.');
+      }
+      if (!dueAt || !Number.isFinite(dueTimestamp) || dueTimestamp < plannedTimestamp) {
+        throw ledgerInputError('billing_milestone_due_date_invalid', 'Billing milestone due date must be valid and on or after the planned issue date.');
+      }
+      const activeStatuses = ['pending_approval', 'approved', 'invoicing', 'prepared', 'invoiced'];
+      const existing = this.db.prepare(`
+        SELECT * FROM billing_milestones
+        WHERE job_id = ? AND status IN (${activeStatuses.map(() => '?').join(', ')})
+        ORDER BY sequence_number ASC
+      `).all(jobId, ...activeStatuses).map(row => this.mapBillingMilestone(row));
+      const existingCurrency = existing[0]?.currency;
+      if (existingCurrency && existingCurrency !== currency) {
+        throw ledgerInputError('billing_milestone_currency_mismatch', 'All active billing milestones for a job must use the same currency.');
+      }
+      const plannedNet = roundMoney(existing.reduce((sum, milestone) => sum + milestone.amount, 0));
+      if (plannedNet + amount > contractValue + 0.01) {
+        throw ledgerInputError(
+          'billing_milestone_contract_exceeded',
+          'Active billing milestones cannot exceed the retained net contract value.',
+          { contractValue, plannedNet, requestedAmount: amount, availableAmount: roundMoney(Math.max(0, contractValue - plannedNet)) }
+        );
+      }
+      const latestSequence = normalizeNumber(this.db.prepare(`
+        SELECT MAX(sequence_number) AS sequence_number
+        FROM billing_milestones
+        WHERE job_id = ?
+      `).get(jobId)?.sequence_number, 0);
+      const sequenceInput = payload.sequenceNumber ?? payload.sequence_number;
+      const sequenceNumber = sequenceInput === undefined || sequenceInput === null || sequenceInput === ''
+        ? latestSequence + 1
+        : Math.round(Number(sequenceInput));
+      if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 1 || sequenceNumber > 10_000) {
+        throw ledgerInputError('billing_milestone_sequence_invalid', 'Billing milestone sequence must be an integer from 1 to 10,000.');
+      }
+      if (this.db.prepare('SELECT id FROM billing_milestones WHERE job_id = ? AND sequence_number = ?').get(jobId, sequenceNumber)) {
+        throw ledgerInputError('billing_milestone_sequence_conflict', 'This billing milestone sequence is already retained for the job.');
+      }
+
+      const id = makeId('milestone');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO billing_milestones (
+          id, job_id, invoice_id, sequence_number, title, status, currency, amount,
+          tax_rate, tax_amount, total, planned_issue_at, due_at, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        null,
+        sequenceNumber,
+        title,
+        'pending_approval',
+        currency,
+        amount,
+        taxRate,
+        taxAmount,
+        total,
+        new Date(plannedTimestamp).toISOString(),
+        new Date(dueTimestamp).toISOString(),
+        null,
+        toJson({
+          notes: normalizeText(payload.notes || payload.note, '') || null,
+          contractValueSnapshot: contractValue,
+          plannedNetBefore: plannedNet,
+          externalCommitments: 0
+        }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'billing_milestone',
+        targetId: id,
+        jobId,
+        approvalType: 'billing_schedule',
+        summary: `Approve billing milestone ${sequenceNumber}: ${title}`,
+        reason: 'The milestone controls planned client billing and requires approval before an invoice can be derived.',
+        data: { sequenceNumber, title, amount, taxRate, taxAmount, total, currency, plannedIssueAt: new Date(plannedTimestamp).toISOString(), dueAt: new Date(dueTimestamp).toISOString(), externalCommitments: 0 }
+      }, { actor: options.actor || 'Contractor.AI', audit: false });
+      this.db.prepare('UPDATE billing_milestones SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const milestone = this.mapBillingMilestone(this.db.prepare('SELECT * FROM billing_milestones WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'billing_milestone', entityId: id, jobId, action: 'create_billing_milestone', actor: options.actor || 'Contractor.AI', after: milestone });
+      }
+      return { ...milestone, approval };
+    });
+  }
+
   createInvoice(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       const job = this.requireJob(jobId);
+      const milestoneId = normalizeText(payload.billingMilestoneId || payload.billing_milestone_id || payload.milestoneId || payload.milestone_id, '');
+      const milestoneRow = milestoneId
+        ? this.db.prepare('SELECT * FROM billing_milestones WHERE id = ? AND job_id = ?').get(milestoneId, jobId)
+        : null;
+      if (milestoneId && !milestoneRow) {
+        throw ledgerInputError('billing_milestone_not_found', 'The selected billing milestone was not found for this job.');
+      }
+      const milestone = milestoneRow ? this.mapBillingMilestone(milestoneRow) : null;
+      if (milestone?.invoiceId) {
+        throw ledgerInputError('billing_milestone_already_invoiced', 'This billing milestone is already linked to an invoice.', { milestoneId, invoiceId: milestone.invoiceId });
+      }
+      if (milestone && milestone.status !== 'approved') {
+        throw ledgerInputError('billing_milestone_not_approved', 'A billing milestone must be approved and unused before an invoice can be derived.', { milestoneId, status: milestone.status });
+      }
       const quoteRow = payload.quoteId || payload.quote_id
         ? this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(payload.quoteId || payload.quote_id, jobId)
         : this.db.prepare("SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(jobId);
       const quote = quoteRow ? this.mapQuote(quoteRow) : null;
-      const amountInput = payload.amount ?? quote?.subtotal ?? 0;
+      if (milestone && payload.amount !== undefined && Math.abs(roundMoney(Number(payload.amount)) - milestone.amount) > 0.01) {
+        throw ledgerInputError('billing_milestone_invoice_mismatch', 'Invoice net amount must match the approved billing milestone.', { milestoneId, amount: milestone.amount });
+      }
+      const amountInput = milestone?.amount ?? payload.amount ?? quote?.subtotal ?? 0;
       const amount = roundMoney(Number(amountInput));
       if (!Number.isFinite(Number(amountInput)) || amount <= 0 || amount > 100_000_000) {
         throw ledgerInputError('invoice_amount_invalid', 'Invoice net amount must be greater than zero and no more than 100,000,000.');
       }
       const suppliedTax = payload.taxAmount ?? payload.tax_amount;
-      const taxRateInput = payload.taxRate ?? payload.tax_rate ?? quote?.taxRate
+      if (milestone && (payload.taxRate !== undefined || payload.tax_rate !== undefined)
+        && Math.abs(roundMoney(Number(payload.taxRate ?? payload.tax_rate)) - milestone.taxRate) > 0.001) {
+        throw ledgerInputError('billing_milestone_invoice_mismatch', 'Invoice VAT rate must match the approved billing milestone.', { milestoneId, taxRate: milestone.taxRate });
+      }
+      const taxRateInput = milestone?.taxRate ?? payload.taxRate ?? payload.tax_rate ?? quote?.taxRate
         ?? (suppliedTax !== undefined ? Number(suppliedTax) / amount * 100 : 21);
       const taxRate = roundMoney(Number(taxRateInput));
       if (!Number.isFinite(Number(taxRateInput)) || taxRate < 0 || taxRate > 100) {
@@ -11363,11 +11566,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (payload.total !== undefined && Math.abs(roundMoney(Number(payload.total)) - total) > 0.01) {
         throw ledgerInputError('invoice_total_mismatch', 'Invoice total must match the server-calculated net and VAT amounts.', { amount, taxAmount, total });
       }
-      const currency = normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase();
+      const currency = normalizeText(milestone?.currency || payload.currency || quote?.currency, 'EUR').toUpperCase();
       if (!/^[A-Z]{3}$/.test(currency)) {
         throw ledgerInputError('invoice_currency_invalid', 'Invoice currency must be a three-letter ISO currency code.');
       }
-      const dueAt = payload.dueAt || payload.due_at || null;
+      const dueAt = milestone?.dueAt || payload.dueAt || payload.due_at || null;
       if (dueAt && !Number.isFinite(Date.parse(dueAt))) {
         throw ledgerInputError('invoice_due_date_invalid', 'Invoice due date must be a valid date.');
       }
@@ -11405,7 +11608,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const purchaseOrderReference = field(payload.purchaseOrderReference ?? payload.purchase_order_reference, 'Purchase-order reference', 120);
       const quoteLines = quote && Math.abs(amount - quote.subtotal) <= 0.01 ? quote.lineItems : [];
       const lineItems = (quoteLines.length ? quoteLines : [{
-        description: field(payload.description ?? job.title, 'Invoice line description', 500) || 'Contractor services',
+        description: field(milestone?.title ?? payload.description ?? job.title, 'Invoice line description', 500) || 'Contractor services',
         quantity: 1,
         unitPrice: amount,
         costCode: null
@@ -11456,6 +11659,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           purchaseOrderReference: purchaseOrderReference || null,
           buyer,
           lineItems,
+          billingMilestoneId: milestone?.id || null,
           notes: field(payload.notes, 'Invoice notes', 4000) || null,
           transportStatus: 'not_configured'
         }),
@@ -11469,9 +11673,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvalType: 'invoice_issue',
         summary: `Approve invoice ${id} for ${total.toFixed(2)} ${currency}`,
         reason: 'Invoice issue packages and any structured export require approval before preparation or delivery.',
-        data: { amount, taxRate, taxAmount, total, currency, quoteId: quote?.id || null, structuredExportRequested }
+        data: { amount, taxRate, taxAmount, total, currency, quoteId: quote?.id || null, billingMilestoneId: milestone?.id || null, structuredExportRequested }
       }, { actor: options.actor || 'Contractor.AI', audit: false });
       this.db.prepare('UPDATE invoices SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      if (milestone) {
+        this.db.prepare("UPDATE billing_milestones SET invoice_id = ?, status = 'invoicing', updated_at = ? WHERE id = ? AND invoice_id IS NULL AND status = 'approved'")
+          .run(id, nowIso(), milestone.id);
+      }
       const invoice = this.mapInvoice(this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(id));
       if (options.audit !== false) {
         this.audit({ entityType: 'invoice', entityId: id, jobId, action: 'create_invoice', actor: options.actor || 'Contractor.AI', after: invoice });
@@ -13859,6 +14067,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const payloadPackage = {
         job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
         budgetLines: detail.budgetLines || [],
+        billingMilestones: detail.billingMilestones || [],
         purchaseOrders: detail.purchaseOrders || [],
         supplierInvoices: detail.supplierInvoices || [],
         supplierInvoicePayments: detail.supplierInvoicePayments || [],
@@ -13962,6 +14171,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const packagePayload = {
         job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
         budgetLines: detail.budgetLines || [],
+        billingMilestones: detail.billingMilestones || [],
         purchaseOrders: detail.purchaseOrders || [],
         supplierInvoices: detail.supplierInvoices || [],
         supplierInvoicePayments: detail.supplierInvoicePayments || [],
@@ -16757,6 +16967,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = ?, updated_at = ?
           WHERE id = ? AND status IN ('draft', 'pending_approval')
         `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'invoice') {
+        const invoice = this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(before.target_id);
+        if (invoice) {
+          const invoiceData = fromJson(invoice.data_json, {});
+          this.db.prepare(`
+            UPDATE invoices
+            SET status = ?, updated_at = ?
+            WHERE id = ? AND status IN ('draft', 'pending_approval', 'approved')
+          `).run(status, timestamp, before.target_id);
+          if (invoiceData.billingMilestoneId) {
+            this.db.prepare(`
+              UPDATE billing_milestones
+              SET invoice_id = NULL, status = 'approved', updated_at = ?
+              WHERE id = ? AND invoice_id = ? AND status = 'invoicing'
+            `).run(timestamp, invoiceData.billingMilestoneId, before.target_id);
+          }
+        }
+      } else if (before.target_type === 'billing_milestone') {
+        this.db.prepare(`
+          UPDATE billing_milestones
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(status, timestamp, before.target_id);
       } else if (before.target_type === 'change_order') {
         this.db.prepare(`
           UPDATE change_orders
@@ -16781,6 +17014,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = ?, updated_at = ?
           WHERE id = ? AND status = 'pending_confirmation'
         `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'budget_line') {
+        this.db.prepare("UPDATE budget_lines SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+          .run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'purchase_order') {
+        this.db.prepare("UPDATE purchase_orders SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+          .run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'draw_request') {
+        this.db.prepare("UPDATE draw_requests SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+          .run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'lien_waiver') {
+        this.db.prepare("UPDATE lien_waivers SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+          .run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'finance_handoff') {
+        this.db.prepare("UPDATE finance_handoffs SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+          .run(status, timestamp, before.target_id);
       }
 
       const after = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -17343,6 +17591,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
     } else if (targetType === 'invoice') {
       this.db.prepare("UPDATE invoices SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
+    } else if (targetType === 'billing_milestone') {
+      this.db.prepare("UPDATE billing_milestones SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+        .run(timestamp, targetId);
     } else if (targetType === 'credit_note') {
       this.db.prepare("UPDATE credit_notes SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'document') {
@@ -18500,6 +18751,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       draftInvoices: 0,
       openPayments: 0,
       receivedPayments: 0,
+      billingMilestones: 0,
+      dueBillingMilestones: 0,
       creditNotes: 0,
       pendingCreditNotes: 0,
       missingCosts: 0,
@@ -18537,7 +18790,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       supplierPaidValue: 0,
       pendingSupplierPaymentValue: 0,
       drawRequestValue: 0,
-      financeHandoffValue: 0
+      financeHandoffValue: 0,
+      plannedBillingValue: 0,
+      dueBillingValue: 0,
+      unplannedBillingValue: 0
     };
     for (const row of rows) {
       const status = normalizeStatus(row.financeStatus, 'stable');
@@ -18553,6 +18809,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.draftInvoices += normalizeNumber(row.counts?.draftInvoices, 0);
       summary.openPayments += normalizeNumber(row.counts?.openPayments, 0);
       summary.receivedPayments += normalizeNumber(row.counts?.receivedPayments, 0);
+      summary.billingMilestones += normalizeNumber(row.counts?.billingMilestones, 0);
+      summary.dueBillingMilestones += normalizeNumber(row.counts?.dueBillingMilestones, 0);
       summary.creditNotes += normalizeNumber(row.counts?.creditNotes, 0);
       summary.pendingCreditNotes += normalizeNumber(row.counts?.pendingCreditNotes, 0);
       summary.missingCosts += row.flags?.needsCosts ? 1 : 0;
@@ -18592,6 +18850,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.pendingSupplierPaymentValue += normalizeNumber(money.pendingSupplierPaymentValue, 0);
       summary.drawRequestValue += normalizeNumber(money.drawRequestValue, 0);
       summary.financeHandoffValue += normalizeNumber(money.financeHandoffValue, 0);
+      summary.plannedBillingValue += normalizeNumber(money.plannedBillingValue, 0);
+      summary.dueBillingValue += normalizeNumber(money.dueBillingValue, 0);
+      summary.unplannedBillingValue += normalizeNumber(money.unplannedBillingValue, 0);
     }
     return summary;
   }
@@ -18607,6 +18868,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'credit_note',
       'payment',
       'budget_line',
+      'billing_milestone',
       'purchase_order',
       'supplier_invoice',
       'supplier_invoice_payment',
@@ -18655,6 +18917,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const receivedPayments = (detail.payments || []).filter(payment => ['paid', 'received', 'settled'].includes(normalizeStatus(payment.status, '')));
         const writtenOffPayments = (detail.payments || []).filter(payment => normalizeStatus(payment.status, '') === 'written_off');
         const activeBudgetLines = (detail.budgetLines || []).filter(line => this.financeRecordOpen(line.status));
+        const activeBillingMilestones = (detail.billingMilestones || []).filter(milestone => this.financeRecordOpen(milestone.status));
+        const approvedBillingMilestones = activeBillingMilestones.filter(milestone => milestone.status === 'approved' && !milestone.invoiceId);
+        const dueBillingMilestones = approvedBillingMilestones.filter(milestone => this.financeDueOrOverdue(milestone.plannedIssueAt));
+        const nextBillingMilestone = dueBillingMilestones[0] || null;
         const openPurchaseOrders = (detail.purchaseOrders || []).filter(order => this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received']));
         const validSupplierInvoices = (detail.supplierInvoices || []).filter(invoice => this.financeRecordOpen(invoice.status, ['cancelled', 'canceled', 'rejected', 'void']));
         const pendingSupplierInvoices = validSupplierInvoices.filter(invoice => normalizeStatus(invoice.status, '') === 'pending_approval');
@@ -18712,11 +18978,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const pendingSupplierPaymentValue = pendingSupplierPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const drawRequestValue = openDrawRequests.reduce((sum, draw) => sum + normalizeNumber(draw.requestedAmount, 0), 0);
         const financeHandoffValue = activeHandoffs.reduce((sum, handoff) => sum + normalizeNumber(handoff.amount, 0), 0);
+        const plannedBillingValue = activeBillingMilestones.reduce((sum, milestone) => sum + normalizeNumber(milestone.amount, 0), 0);
+        const dueBillingValue = dueBillingMilestones.reduce((sum, milestone) => sum + normalizeNumber(milestone.amount, 0), 0);
         const budgetForecastValue = activeBudgetLines.reduce((sum, line) => sum + normalizeNumber(line.forecastAmount, 0), 0);
         const budgetActualValue = activeBudgetLines.reduce((sum, line) => sum + normalizeNumber(line.actualAmount, 0), 0);
         const netRevenueBasis = Math.max(contractValue, quotedNetValue, invoicedNetValue);
         const grossRevenueBasis = Math.max(contractValue, quotedGrossValue, invoiceValue);
-        const invoiceDraftAmount = Math.max(0, Math.max(contractValue, quotedNetValue) - invoicedNetValue);
+        const remainingInvoiceValue = Math.max(0, Math.max(contractValue, quotedNetValue) - invoicedNetValue);
+        const invoiceDraftAmount = nextBillingMilestone ? nextBillingMilestone.amount : remainingInvoiceValue;
         const progressedForFinance = completedStatuses.has(jobStatus) || normalizeNumber(detail.progressPercent, 0) >= 85;
         const startedForCosting = activeJobStatuses.has(jobStatus) && (normalizeNumber(detail.progressPercent, 0) >= 25 || completedStatuses.has(jobStatus));
         const hasFinancialActivity = activeInvoices.length
@@ -18726,6 +18995,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || expenses.length
           || timeLogs.length
           || activeBudgetLines.length
+          || activeBillingMilestones.length
           || openPurchaseOrders.length
           || validSupplierInvoices.length
           || paidSupplierPayments.length
@@ -18733,7 +19003,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || openLienWaivers.length;
         const missingCosts = startedForCosting && !expenses.length && !timeLogs.length && budgetActualValue <= 0;
         const missingBudget = activeJobStatuses.has(jobStatus) && netRevenueBasis >= 1000 && !activeBudgetLines.length;
-        const invoiceReady = progressedForFinance && invoiceDraftAmount > 1;
+        const invoiceReady = Boolean(nextBillingMilestone) || (progressedForFinance && invoiceDraftAmount > 1 && activeBillingMilestones.length === 0);
         const invoicePackageReady = packageReadyInvoices.length > 0;
         const untrackedReceivable = Boolean(nextReceivable)
           && !openPayments.some(payment => payment.invoiceId === nextReceivable.invoice.id)
@@ -18846,7 +19116,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           invoiceId: nextReceivable?.invoice.id || receivableInvoices[0]?.id || null,
           requiresApproval: false
         });
-        if (invoiceReady) nextActions.push({ type: 'draft_invoice', label: 'Draft approval-gated invoice', requiresApproval: true });
+        if (invoiceReady) nextActions.push({
+          type: 'draft_invoice',
+          label: nextBillingMilestone ? `Draft milestone ${nextBillingMilestone.sequenceNumber} invoice` : 'Draft approval-gated invoice',
+          billingMilestoneId: nextBillingMilestone?.id || null,
+          amount: nextBillingMilestone?.amount || invoiceDraftAmount,
+          taxRate: nextBillingMilestone?.taxRate ?? null,
+          dueAt: nextBillingMilestone?.dueAt || null,
+          requiresApproval: true
+        });
+        if (remainingInvoiceValue > 1 && plannedBillingValue < Math.max(contractValue, quotedNetValue) - 0.01) {
+          nextActions.push({
+            type: 'create_billing_milestone',
+            label: activeBillingMilestones.length ? 'Plan next billing milestone' : 'Create staged billing plan',
+            suggestedAmount: roundMoney(Math.max(0, Math.max(contractValue, quotedNetValue) - plannedBillingValue)),
+            nextSequenceNumber: activeBillingMilestones.reduce((maximum, milestone) => Math.max(maximum, milestone.sequenceNumber), 0) + 1,
+            requiresApproval: true
+          });
+        }
         if (missingCosts) nextActions.push({ type: 'record_time_expense', label: 'Record time logs and job expenses', requiresApproval: false });
         if (missingBudget) nextActions.push({ type: 'create_budget_line', label: 'Create budget and forecast control', requiresApproval: true });
         if (receivableInvoices.length && !openDrawRequests.length && invoiceValue >= 1000) nextActions.push({ type: 'create_draw_request', label: 'Prepare progress draw request', invoiceId: receivableInvoices[0].id, requiresApproval: true });
@@ -18891,6 +19178,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             dueOrOverduePayments: dueOrOverduePayments.length,
             receivedPayments: receivedPayments.length,
             budgetLines: activeBudgetLines.length,
+            billingMilestones: activeBillingMilestones.length,
+            approvedBillingMilestones: approvedBillingMilestones.length,
+            dueBillingMilestones: dueBillingMilestones.length,
             openPurchaseOrders: openPurchaseOrders.length,
             supplierInvoices: validSupplierInvoices.length,
             pendingSupplierInvoices: pendingSupplierInvoices.length,
@@ -18931,6 +19221,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             pendingSupplierPaymentValue,
             drawRequestValue,
             financeHandoffValue,
+            plannedBillingValue,
+            dueBillingValue,
+            unplannedBillingValue: roundMoney(Math.max(0, Math.max(contractValue, quotedNetValue) - plannedBillingValue)),
             budgetForecastValue,
             budgetActualValue,
             projectedMargin: netRevenueBasis - expenseValue - billableLaborValue - purchaseOrderValue - supplierInvoiceNetValue
@@ -18940,6 +19233,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             creditNote: validCreditNotes[0] || null,
             payment: openPayments[0] || receivedPayments[0] || null,
             budgetLine: activeBudgetLines[0] || null,
+            billingMilestone: nextBillingMilestone || approvedBillingMilestones[0] || activeBillingMilestones[0] || null,
             purchaseOrder: openPurchaseOrders[0] || null,
             supplierInvoice: validSupplierInvoices[0] || null,
             supplierInvoicePayment: pendingSupplierPayments[0] || paidSupplierPayments[0] || null,
@@ -20429,6 +20723,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       communications: this.db.prepare('SELECT * FROM communication_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCommunication(row)),
       timeLogs: this.db.prepare('SELECT * FROM time_logs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapTimeLog(row)),
       expenses: this.db.prepare('SELECT * FROM expenses WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapExpense(row)),
+      billingMilestones: this.db.prepare('SELECT * FROM billing_milestones WHERE job_id = ? ORDER BY sequence_number ASC, created_at ASC').all(jobId).map(row => this.mapBillingMilestone(row)),
       invoices: this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapInvoice(row)),
       creditNotes: this.db.prepare('SELECT * FROM credit_notes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCreditNote(row)),
       budgetLines: this.db.prepare('SELECT * FROM budget_lines WHERE job_id = ? ORDER BY cost_code ASC, created_at DESC').all(jobId).map(row => this.mapBudgetLine(row)),
@@ -20506,6 +20801,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       incident_records: 'status',
       site_access_logs: 'status',
       budget_lines: 'status',
+      billing_milestones: 'status',
       expenses: 'status',
       purchase_orders: 'status',
       supplier_invoices: 'status',
@@ -20606,7 +20902,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           requirementKey: requirement.key,
           actionTarget: capabilityRequirementActionTarget(requirement.key),
           label: `Add ${requirement.label}`,
-          requiresApproval: ['quote', 'assignment', 'tools', 'change_order', 'invoice', 'payment', 'draw', 'waiver', 'handoff', 'approval_audit'].includes(requirement.key),
+          requiresApproval: ['quote', 'assignment', 'tools', 'change_order', 'billing_milestone', 'invoice', 'payment', 'draw', 'waiver', 'handoff', 'approval_audit'].includes(requirement.key),
           reason: `${capability.label} is missing ${requirement.label}.`
         }))
       };
@@ -20635,6 +20931,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const clientName = normalizeText(jobDetail.client?.name || jobDetail.clientName, 'Client');
     const dueAt = payload.dueAt || payload.due_at || jobDetail.targetCompletion || futureIsoDate(3);
     const scheduledAt = payload.scheduledAt || payload.scheduled_at || jobDetail.scheduledStart || futureIsoDate(1);
+    const plannedBillingAt = payload.plannedIssueAt || payload.planned_issue_at || jobDetail.targetCompletion || dueAt;
+    const plannedBillingTimestamp = Date.parse(plannedBillingAt);
+    const billingDueAt = payload.billingDueAt || payload.billing_due_at || new Date(
+      (Number.isFinite(plannedBillingTimestamp) ? plannedBillingTimestamp : Date.now()) + (30 * 24 * 60 * 60 * 1000)
+    ).toISOString();
     const amount = normalizeNumber(payload.amount || jobDetail.contractValue || jobDetail.estimatedCost, 0);
     const source = `capability_gap:${capability.key || 'contractor_suite'}`;
     const playbook = this.resolveJobPlaybook(jobDetail, payload);
@@ -20997,6 +21298,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         dueAt: futureIsoDate(7),
         notes: base.notes
       },
+      billing_milestone: {
+        title: `${jobTitle} completion milestone`,
+        amount,
+        taxRate: normalizeNumber(payload.taxRate || payload.tax_rate, 21),
+        currency: 'EUR',
+        plannedIssueAt: plannedBillingAt,
+        dueAt: billingDueAt,
+        notes: base.notes
+      },
       recurring: {
         service: `${jobTitle} recurring service`,
         status: 'draft',
@@ -21143,6 +21453,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (key === 'incident') addCreated(action, this.createIncidentRecord(jobId, data, { actor }));
         if (key === 'site_access') addCreated(action, this.createSiteAccessLog(jobId, data, { actor }));
         if (key === 'budget') addCreated(action, this.createBudgetLine(jobId, data, { actor }));
+        if (key === 'billing_milestone') addCreated(action, this.createBillingMilestone(jobId, data, { actor }));
         if (key === 'expense') addCreated(action, this.addExpense(jobId, data, { actor }));
         if (key === 'purchase_order') addCreated(action, this.createPurchaseOrder(jobId, data, { actor }));
         if (key === 'invoice') addCreated(action, this.createInvoice(jobId, data, { actor }));
@@ -21373,6 +21684,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       blockedSiteAccess: activeCount('site_access_logs', "records.status = 'blocked' OR records.orientation_valid = 0"),
       openMobilizationApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('worker_orientation_completion', 'jha_approval', 'sds_current_review', 'site_access_clearance')"),
       budgetLines: activeCount('budget_lines'),
+      billingMilestones: activeCount('billing_milestones'),
+      dueBillingMilestones: activeCount('billing_milestones', "records.status = 'approved' AND records.invoice_id IS NULL AND records.planned_issue_at <= ?", [nowIso()]),
       purchaseOrders: activeCount('purchase_orders'),
       supplierInvoices: activeCount('supplier_invoices'),
       openSupplierInvoices: activeCount('supplier_invoices', "records.status IN ('pending_approval', 'approved', 'partially_paid')"),
@@ -21381,7 +21694,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       drawRequests: activeCount('draw_requests'),
       lienWaivers: activeCount('lien_waivers'),
       financeHandoffs: activeCount('finance_handoffs'),
-      openFinanceApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('budget_control', 'purchase_commitment', 'supplier_invoice_approval', 'supplier_payment_confirmation', 'draw_request_submission', 'lien_waiver_release', 'finance_handoff')"),
+      openFinanceApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('budget_control', 'billing_schedule', 'purchase_commitment', 'supplier_invoice_approval', 'supplier_payment_confirmation', 'draw_request_submission', 'lien_waiver_release', 'finance_handoff')"),
       draftInvoices: activeCount('invoices', "records.status IN ('draft', 'submitted')"),
       qualityChecks: activeCount('quality_checks'),
       safetyChecks: activeCount('safety_checks'),
@@ -21437,6 +21750,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       paymentFollowUpValue: activeSum('payments', 'amount', "records.status NOT IN ('paid', 'received', 'cancelled')"),
       procurementValue: activeSum('procurement_orders', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
       budgetValue: activeSum('budget_lines', 'budget_amount', "records.status NOT IN ('cancelled', 'rejected')"),
+      plannedBillingValue: activeSum('billing_milestones', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
       purchaseOrderValue: activeSum('purchase_orders', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
       supplierInvoiceValue: activeSum('supplier_invoices', 'total', "records.status NOT IN ('cancelled', 'rejected', 'void')"),
       supplierPaymentValue: activeSum('supplier_invoice_payments', 'amount', "records.status IN ('paid', 'confirmed', 'settled')"),
@@ -21471,6 +21785,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM sds_sheets records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('missing', 'requested', 'pending_approval', 'expired')), 0) AS sdsQueue,
         COALESCE((SELECT COUNT(*) FROM site_access_logs records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('blocked', 'requested', 'pending_approval') OR records.orientation_valid = 0), 0) AS siteAccessQueue,
         COALESCE((SELECT COUNT(*) FROM budget_lines records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval') OR records.forecast_amount > records.budget_amount), 0) AS budgetReviews,
+        COALESCE((SELECT COUNT(*) FROM billing_milestones records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval' OR (records.status = 'approved' AND records.invoice_id IS NULL AND records.planned_issue_at <= ?)), 0) AS billingMilestoneQueue,
         COALESCE((SELECT COUNT(*) FROM purchase_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS purchaseOrderQueue,
         COALESCE((SELECT COUNT(*) FROM supplier_invoices records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('pending_approval', 'approved', 'partially_paid')), 0) AS supplierInvoiceQueue,
         COALESCE((SELECT COUNT(*) FROM supplier_invoice_payments records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_confirmation'), 0) AS supplierPaymentQueue,
@@ -21483,7 +21798,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM worker_instructions records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS instructionDrafts,
         COALESCE((SELECT COUNT(*) FROM punch_items records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')), 0) AS punchQueue,
         COALESCE((SELECT COUNT(*) FROM warranty_claims records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'accepted', 'rejected', 'cancelled')), 0) AS warrantyQueue
-    `).get();
+    `).get(nowIso());
     const nextActions = this.nextActions();
     const capabilityMap = this.ledgerCapabilityCoverage();
     return {
@@ -21499,6 +21814,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         paymentFollowUpValue: normalizeNumber(money.paymentFollowUpValue, 0),
         procurementValue: normalizeNumber(money.procurementValue, 0),
         budgetValue: normalizeNumber(money.budgetValue, 0),
+        plannedBillingValue: normalizeNumber(money.plannedBillingValue, 0),
         purchaseOrderValue: normalizeNumber(money.purchaseOrderValue, 0),
         supplierInvoiceValue: normalizeNumber(money.supplierInvoiceValue, 0),
         supplierPaymentValue: normalizeNumber(money.supplierPaymentValue, 0),
@@ -21530,6 +21846,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         sdsQueue: normalizeNumber(workload.sdsQueue, 0),
         siteAccessQueue: normalizeNumber(workload.siteAccessQueue, 0),
         budgetReviews: normalizeNumber(workload.budgetReviews, 0),
+        billingMilestoneQueue: normalizeNumber(workload.billingMilestoneQueue, 0),
         purchaseOrderQueue: normalizeNumber(workload.purchaseOrderQueue, 0),
         supplierInvoiceQueue: normalizeNumber(workload.supplierInvoiceQueue, 0),
         supplierPaymentQueue: normalizeNumber(workload.supplierPaymentQueue, 0),
@@ -22025,6 +22342,30 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'create_budget_line', jobId: job.id, severity: 'medium', suggestedAmount: amount, message: `${job.title} needs a budget line so costs, commitments, and forecast can be tracked.` });
     }
 
+    const jobsWithoutBillingPlans = this.db.prepare(`
+      SELECT jobs.id, jobs.title, jobs.contract_value, jobs.target_completion
+      FROM jobs
+      LEFT JOIN billing_milestones
+        ON billing_milestones.job_id = jobs.id
+        AND billing_milestones.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+      WHERE jobs.status IN ('planned', 'scheduled', 'in_progress', 'completed')
+        AND jobs.contract_value > 0
+      GROUP BY jobs.id
+      HAVING COUNT(billing_milestones.id) = 0
+      ORDER BY jobs.updated_at DESC
+      LIMIT 5
+    `).all();
+    for (const job of jobsWithoutBillingPlans) {
+      actions.push({
+        type: 'create_billing_milestone',
+        jobId: job.id,
+        severity: 'medium',
+        suggestedAmount: normalizeNumber(job.contract_value, 0),
+        plannedIssueAt: job.target_completion || futureIsoDate(14),
+        message: `${job.title} needs an approval-gated billing milestone before staged invoicing can be controlled.`
+      });
+    }
+
     const procurementWithoutPurchaseOrders = this.db.prepare(`
       SELECT procurement_orders.id, procurement_orders.job_id, procurement_orders.supplier, procurement_orders.amount, jobs.title
       FROM procurement_orders
@@ -22051,6 +22392,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const invoiceReadyJobs = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.contract_value, jobs.estimated_cost,
+        billing_milestone.id AS billing_milestone_id,
+        billing_milestone.amount AS milestone_amount,
+        billing_milestone.tax_rate AS milestone_tax_rate,
+        billing_milestone.tax_amount AS milestone_tax_amount,
+        billing_milestone.total AS milestone_total,
+        billing_milestone.due_at AS milestone_due_at,
         (
           SELECT quotes.id FROM quotes
           WHERE quotes.job_id = jobs.id
@@ -22073,35 +22420,61 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           LIMIT 1
         ) AS quote_total
       FROM jobs
-      WHERE (jobs.status = 'completed' OR jobs.progress_percent >= 95)
-        AND NOT EXISTS (
-          SELECT 1 FROM invoices
-          WHERE invoices.job_id = jobs.id
-            AND invoices.status NOT IN ('cancelled', 'rejected', 'void')
+      LEFT JOIN billing_milestones AS billing_milestone
+        ON billing_milestone.id = (
+          SELECT candidate.id
+          FROM billing_milestones AS candidate
+          WHERE candidate.job_id = jobs.id
+            AND candidate.status = 'approved'
+            AND candidate.invoice_id IS NULL
+            AND candidate.planned_issue_at <= ?
+          ORDER BY candidate.planned_issue_at ASC, candidate.sequence_number ASC
+          LIMIT 1
         )
+      WHERE (jobs.status = 'completed' OR jobs.progress_percent >= 95)
         AND (
-          jobs.contract_value > 0
-          OR jobs.estimated_cost > 0
-          OR EXISTS (
-            SELECT 1 FROM quotes
-            WHERE quotes.job_id = jobs.id
-              AND quotes.status NOT IN ('cancelled', 'rejected', 'expired')
+          billing_milestone.id IS NOT NULL
+          OR (
+            jobs.contract_value <= 0
+            AND NOT EXISTS (
+              SELECT 1 FROM billing_milestones
+              WHERE billing_milestones.job_id = jobs.id
+                AND billing_milestones.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM invoices
+              WHERE invoices.job_id = jobs.id
+                AND invoices.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+            )
+            AND (
+              jobs.estimated_cost > 0
+              OR EXISTS (
+                SELECT 1 FROM quotes
+                WHERE quotes.job_id = jobs.id
+                  AND quotes.status NOT IN ('cancelled', 'rejected', 'expired')
+              )
+            )
           )
         )
       ORDER BY jobs.updated_at DESC
       LIMIT 5
-    `).all();
+    `).all(nowIso());
     for (const job of invoiceReadyJobs) {
-      const amount = normalizeNumber(job.quote_subtotal, normalizeNumber(job.contract_value, normalizeNumber(job.estimated_cost, 0)));
-      const total = normalizeNumber(job.quote_total, amount > 0 ? amount * 1.21 : 0);
+      const amount = normalizeNumber(job.milestone_amount, normalizeNumber(job.quote_subtotal, normalizeNumber(job.estimated_cost, 0)));
+      const total = normalizeNumber(job.milestone_total, normalizeNumber(job.quote_total, amount > 0 ? amount * 1.21 : 0));
       actions.push({
         type: 'draft_invoice',
         jobId: job.id,
-        quoteId: job.quote_id || null,
+        quoteId: job.billing_milestone_id ? null : (job.quote_id || null),
+        billingMilestoneId: job.billing_milestone_id || null,
+        taxRate: job.billing_milestone_id ? normalizeNumber(job.milestone_tax_rate, 0) : null,
+        dueAt: job.milestone_due_at || null,
         severity: 'high',
         suggestedAmount: amount,
         suggestedTotal: total,
-        message: `${job.title} is complete or nearly complete and needs an approval-gated invoice draft for ${total.toFixed(2)} EUR.`
+        message: job.billing_milestone_id
+          ? `${job.title} has an approved billing milestone due for an approval-gated invoice draft of ${total.toFixed(2)} EUR.`
+          : `${job.title} is complete or nearly complete and needs an approval-gated invoice draft for ${total.toFixed(2)} EUR.`
       });
     }
 
@@ -22447,6 +22820,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'request_sds',
       'create_site_access_gate',
       'create_budget_line',
+      'create_billing_milestone',
       'draft_invoice',
       'create_finance_handoff',
       'create_procurement_order',
@@ -23050,6 +23424,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           this.audit({ entityType: 'budget_line', entityId: budgetLine.id, jobId: action.jobId, action: 'autonomous_create_budget_line', actor, after: budgetLine });
         }
 
+        const billingMilestones = preview.filter(action => action.type === 'create_billing_milestone').slice(0, 3);
+        for (const action of billingMilestones) {
+          const amount = normalizeNumber(action.suggestedAmount, 0);
+          if (!(amount > 0)) {
+            blocked.push({
+              ...action,
+              status: 'blocked',
+              reason: 'A positive retained contract value is required before a billing milestone can be created.'
+            });
+            continue;
+          }
+          const plannedIssueAt = action.plannedIssueAt || futureIsoDate(14);
+          const plannedTimestamp = Date.parse(plannedIssueAt);
+          const dueAt = new Date((Number.isFinite(plannedTimestamp) ? plannedTimestamp : Date.now()) + (30 * 24 * 60 * 60 * 1000)).toISOString();
+          const milestone = this.createBillingMilestone(action.jobId, {
+            title: 'Contract completion billing milestone',
+            amount,
+            taxRate: 21,
+            currency: 'EUR',
+            plannedIssueAt,
+            dueAt,
+            notes: 'Autonomous internal billing-plan draft. Approval is required before any invoice can be derived.',
+            source: 'autonomous_cycle'
+          }, { actor, audit: false });
+          applied.push({ ...action, billingMilestoneId: milestone.id, approvalId: milestone.approvalId || milestone.approval?.id || null, status: 'pending_approval' });
+          this.audit({ entityType: 'billing_milestone', entityId: milestone.id, jobId: action.jobId, action: 'autonomous_create_billing_milestone', actor, after: milestone });
+        }
+
         const purchaseOrders = preview.filter(action => action.type === 'create_purchase_order').slice(0, 3);
         for (const action of purchaseOrders) {
           const procurement = this.db.prepare('SELECT * FROM procurement_orders WHERE id = ?').get(action.procurementOrderId);
@@ -23073,10 +23475,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           const total = normalizeNumber(action.suggestedTotal, amount > 0 ? amount * 1.21 : 0);
           const invoice = this.createInvoice(action.jobId, {
             quoteId: action.quoteId || null,
+            billingMilestoneId: action.billingMilestoneId || null,
             amount,
+            taxRate: action.taxRate ?? undefined,
             taxAmount: Math.max(0, total - amount),
             total,
-            dueAt: futureIsoDate(14),
+            dueAt: action.dueAt || futureIsoDate(14),
             peppolReady: true,
             notes: 'Autonomous invoice draft from completed work. Approval required before issuing, sending, or Peppol/UBL submission.',
             source: 'autonomous_cycle'
@@ -23576,6 +23980,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (siteAccessWithoutApproval) issues.push({ severity: 'warning', message: `${siteAccessWithoutApproval} site access clearance record(s) have no approval gate.` });
     const budgetLinesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM budget_lines WHERE status IN ('approved', 'locked', 'baseline') AND approval_id IS NULL").get().count || 0);
     if (budgetLinesWithoutApproval) issues.push({ severity: 'warning', message: `${budgetLinesWithoutApproval} approved budget line(s) have no approval gate.` });
+    const billingMilestonesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM billing_milestones WHERE status IN ('approved', 'invoicing', 'prepared', 'invoiced') AND approval_id IS NULL").get().count || 0);
+    if (billingMilestonesWithoutApproval) issues.push({ severity: 'error', message: `${billingMilestonesWithoutApproval} active billing milestone(s) have no approval gate.` });
+    const billingMilestoneInvoiceMismatch = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM billing_milestones
+      JOIN invoices ON invoices.id = billing_milestones.invoice_id
+      WHERE billing_milestones.job_id <> invoices.job_id
+        OR ABS(billing_milestones.amount - invoices.amount) > 0.01
+        OR ABS(billing_milestones.tax_amount - invoices.tax_amount) > 0.01
+        OR billing_milestones.currency <> invoices.currency
+    `).get().count || 0);
+    if (billingMilestoneInvoiceMismatch) issues.push({ severity: 'error', message: `${billingMilestoneInvoiceMismatch} billing milestone invoice link(s) no longer match their approved amounts.` });
+    const overplannedBillingJobs = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM (
+        SELECT jobs.id
+        FROM jobs
+        JOIN billing_milestones ON billing_milestones.job_id = jobs.id
+        WHERE billing_milestones.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+        GROUP BY jobs.id, jobs.contract_value
+        HAVING SUM(billing_milestones.amount) > jobs.contract_value + 0.01
+      ) overplanned
+    `).get().count || 0);
+    if (overplannedBillingJobs) issues.push({ severity: 'error', message: `${overplannedBillingJobs} job billing plan(s) exceed retained contract value.` });
     const purchaseOrdersWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM purchase_orders WHERE status IN ('approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued') AND approval_id IS NULL").get().count || 0);
     if (purchaseOrdersWithoutApproval) issues.push({ severity: 'warning', message: `${purchaseOrdersWithoutApproval} purchase order commitment(s) have no approval gate.` });
     const supplierInvoicesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM supplier_invoices WHERE status IN ('approved', 'partially_paid', 'paid') AND approval_id IS NULL").get().count || 0);
@@ -23654,6 +24081,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         sdsSheets: this.count('sds_sheets'),
         siteAccessLogs: this.count('site_access_logs'),
         budgetLines: this.count('budget_lines'),
+        billingMilestones: this.count('billing_milestones'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -24385,6 +24813,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapBillingMilestone(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      invoiceId: row.invoice_id,
+      sequenceNumber: Math.round(normalizeNumber(row.sequence_number, 0)),
+      title: row.title,
+      status: row.status,
+      currency: row.currency,
+      amount: normalizeNumber(row.amount, 0),
+      taxRate: normalizeNumber(row.tax_rate, 0),
+      taxAmount: normalizeNumber(row.tax_amount, 0),
+      total: normalizeNumber(row.total, 0),
+      plannedIssueAt: row.planned_issue_at,
+      dueAt: row.due_at,
+      approvalId: row.approval_id,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapInvoice(row) {
     return {
       id: row.id,
@@ -24834,6 +25285,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.total = mapped?.total ?? data.total ?? null;
       preview.amount = mapped?.amount ?? data.amount ?? null;
       preview.currency = mapped?.currency || 'EUR';
+    } else if (targetType === 'billing_milestone') {
+      const row = this.db.prepare('SELECT * FROM billing_milestones WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapBillingMilestone(row) : null;
+      primaryEffect = `Approve billing milestone ${mapped?.sequenceNumber || data.sequenceNumber || ''}${mapped ? ` for ${mapped.total.toFixed(2)} ${mapped.currency}` : ''}.`;
+      addEffect('Make the retained milestone available as the exact source for one approval-gated invoice draft.');
+      addSafeguard('Does not create, issue, deliver, or submit an invoice automatically.');
+      addSafeguard('Active milestone net value cannot exceed the retained contract value.');
+      riskLevel = 'high';
+      preview.sequenceNumber = mapped?.sequenceNumber ?? data.sequenceNumber ?? null;
+      preview.title = mapped?.title || data.title || null;
+      preview.amount = mapped?.amount ?? data.amount ?? null;
+      preview.total = mapped?.total ?? data.total ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.plannedIssueAt = mapped?.plannedIssueAt || data.plannedIssueAt || null;
+      preview.dueAt = mapped?.dueAt || data.dueAt || null;
     } else if (targetType === 'credit_note') {
       const row = this.db.prepare('SELECT * FROM credit_notes WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapCreditNote(row) : null;

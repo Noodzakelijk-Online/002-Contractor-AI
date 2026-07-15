@@ -20,7 +20,7 @@ async function request(baseUrl, route, options = {}) {
   return { response, body };
 }
 
-test('autonomous cycle drafts invoice for completed uninvoiced work behind approval gate', async t => {
+test('autonomous cycle plans approved contract billing before deriving an invoice', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -64,32 +64,73 @@ test('autonomous cycle drafts invoice for completed uninvoiced work behind appro
   });
   assert.equal(dryRun.response.status, 200);
   const previewAction = dryRun.body.preview.find(action =>
-    action.type === 'draft_invoice'
+    action.type === 'create_billing_milestone'
     && action.jobId === jobId
   );
   assert.ok(previewAction);
   assert.equal(previewAction.suggestedAmount, 2400);
-  assert.equal(previewAction.suggestedTotal, 2904);
+  assert.equal(dryRun.body.preview.some(action => action.type === 'draft_invoice' && action.jobId === jobId), false);
 
-  const cycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+  const milestoneCycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({
+      dryRun: false,
+      actor: 'autonomous-finance-test',
+      actionTypes: ['create_billing_milestone'],
+      jobIds: [jobId],
+      maxActions: 1,
+      now: '2026-07-15T10:00:00.000Z'
+    })
+  });
+  assert.equal(milestoneCycle.response.status, 200);
+  const milestoneApplied = milestoneCycle.body.applied.find(action =>
+    action.type === 'create_billing_milestone'
+    && action.jobId === jobId
+  );
+  assert.ok(milestoneApplied);
+  assert.equal(milestoneApplied.status, 'pending_approval');
+  assert.ok(milestoneApplied.billingMilestoneId);
+  assert.ok(milestoneApplied.approvalId);
+  assert.equal(milestoneCycle.body.summary.externalCommitments, 0);
+
+  const milestoneApproval = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(milestoneApplied.approvalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance QA', reason: 'Billing plan checked against the contract.' })
+  });
+  assert.equal(milestoneApproval.response.status, 200);
+
+  const invoicePreview = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({ dryRun: true, actionTypes: ['draft_invoice'], jobIds: [jobId], maxActions: 1 })
+  });
+  const invoicePreviewAction = invoicePreview.body.preview.find(action =>
+    action.type === 'draft_invoice'
+    && action.jobId === jobId
+  );
+  assert.ok(invoicePreviewAction);
+  assert.equal(invoicePreviewAction.billingMilestoneId, milestoneApplied.billingMilestoneId);
+  assert.equal(invoicePreviewAction.suggestedAmount, 2400);
+  assert.equal(invoicePreviewAction.suggestedTotal, 2904);
+
+  const invoiceCycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
     method: 'POST',
     body: JSON.stringify({
       dryRun: false,
       actor: 'autonomous-finance-test',
       actionTypes: ['draft_invoice'],
       jobIds: [jobId],
-      maxActions: 1
+      maxActions: 1,
+      now: '2026-07-15T11:00:00.000Z'
     })
   });
-  assert.equal(cycle.response.status, 200);
-  const applied = cycle.body.applied.find(action =>
-    action.type === 'draft_invoice'
-    && action.jobId === jobId
-  );
+  assert.equal(invoiceCycle.response.status, 200);
+  const applied = invoiceCycle.body.applied.find(action => action.type === 'draft_invoice' && action.jobId === jobId);
   assert.ok(applied);
   assert.equal(applied.status, 'drafted');
+  assert.equal(applied.billingMilestoneId, milestoneApplied.billingMilestoneId);
   assert.ok(applied.invoiceId);
   assert.ok(applied.approvalId);
+  assert.equal(invoiceCycle.body.summary.externalCommitments, 0);
 
   const detail = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}`);
   assert.equal(detail.response.status, 200);
@@ -99,9 +140,13 @@ test('autonomous cycle drafts invoice for completed uninvoiced work behind appro
   assert.equal(invoice.amount, 2400);
   assert.equal(invoice.taxAmount, 504);
   assert.equal(invoice.total, 2904);
+  assert.equal(invoice.data.billingMilestoneId, milestoneApplied.billingMilestoneId);
   assert.equal(invoice.data.peppolReady, true);
   assert.match(invoice.data.notes, /Approval required before issuing/);
   assert.equal(invoice.approvalId, applied.approvalId);
+  assert.equal(detail.body.job.billingMilestones[0].status, 'invoicing');
+  assert.equal(detail.body.job.billingMilestones[0].invoiceId, invoice.id);
+  assert.ok(detail.body.job.audit.some(event => event.action === 'autonomous_create_billing_milestone'));
   assert.ok(detail.body.job.audit.some(event => event.action === 'autonomous_draft_invoice'));
 
   const approvals = await request(baseUrl, '/api/ledger/approvals?status=pending&limit=100');

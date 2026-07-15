@@ -105,6 +105,17 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup supplier-payable constraints are incomplete: ${missingPayableIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('019_billing_milestones')) {
+        if (!retainedTables.has('billing_milestones')) {
+          throw new Error('Backup billing-milestone schema is incomplete: billing_milestones.');
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const milestoneIndexes = ['idx_billing_milestones_job_status', 'idx_billing_milestones_due'];
+        const missingMilestoneIndexes = milestoneIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingMilestoneIndexes.length) {
+          throw new Error(`Backup billing-milestone constraints are incomplete: ${missingMilestoneIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {
