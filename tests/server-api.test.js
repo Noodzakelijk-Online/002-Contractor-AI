@@ -396,8 +396,15 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(capabilityPreview.body.success, true);
   assert.equal(capabilityPreview.body.mode, 'preview');
   assert.equal(capabilityPreview.body.summary.externalCommitments, 0);
-  assert.ok(capabilityPreview.body.actions.length >= 2);
-  assert.ok(capabilityPreview.body.actions.some(action => action.requirementKey === 'site_visit'));
+  assert.equal(capabilityPreview.body.summary.safeDraftable, 1);
+  assert.equal(capabilityPreview.body.summary.manualRequired, 1);
+  assert.ok(capabilityPreview.body.actions.some(action =>
+    action.requirementKey === 'site_visit'
+    && action.safeDraftable === false
+    && action.blockedFromAutonomy === true
+    && action.payload === null
+  ));
+  assert.ok(capabilityPreview.body.actions.some(action => action.requirementKey === 'documents' && action.safeDraftable === true));
   assert.ok(capabilityPreview.body.actions.some(action => action.sourceVendors.includes('Procore') || action.sourceVendors.includes('Autodesk')));
   const previewCoverage = capabilityPreview.body.coverage.summary.averageCoverage;
 
@@ -409,11 +416,11 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(capabilityApply.body.success, true);
   assert.equal(capabilityApply.body.mode, 'applied');
   assert.equal(capabilityApply.body.summary.externalCommitments, 0);
-  assert.ok(capabilityApply.body.created.length >= 2);
-  assert.ok(capabilityApply.body.created.some(item => item.requirementKey === 'site_visit' && item.id));
+  assert.equal(capabilityApply.body.created.length, 1);
   assert.ok(capabilityApply.body.created.some(item => item.requirementKey === 'documents' && item.id));
+  assert.ok(capabilityApply.body.blocked.some(item => item.requirementKey === 'site_visit' && item.automationPolicy === 'manual_commitment'));
   assert.ok(capabilityApply.body.summary.averageCoverageAfter >= previewCoverage);
-  assert.ok(capabilityApply.body.job.siteVisits.length >= 1);
+  assert.equal(capabilityApply.body.job.siteVisits.length, 0);
   assert.ok(capabilityApply.body.job.documents.length >= 1);
   assert.ok(capabilityApply.body.job.audit.some(event => event.action === 'apply_capability_gap_plan'));
 
@@ -451,27 +458,21 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(contextualApply.response.status, 201);
   assert.equal(contextualApply.body.success, true);
   assert.equal(contextualApply.body.summary.externalCommitments, 0);
-  assert.ok(contextualApply.body.created.some(item => item.requirementKey === 'change_order'));
-  assert.ok(contextualApply.body.created.some(item => item.requirementKey === 'selection'));
-  assert.ok(contextualApply.body.created.some(item => item.requirementKey === 'incident'));
-  assert.ok(contextualApply.body.created.some(item => item.requirementKey === 'expense'));
+  assert.equal(contextualApply.body.created.length, 1);
   assert.ok(contextualApply.body.created.some(item => item.requirementKey === 'instructions'));
+  assert.deepEqual(
+    new Set(contextualApply.body.blocked.map(item => item.requirementKey)),
+    new Set(['change_order', 'selection', 'incident', 'expense'])
+  );
 
   const contextualDetail = contextualApply.body.job;
-  const contextualText = [
-    contextualDetail.changeOrders[0]?.title,
-    contextualDetail.changeOrders[0]?.scopeDelta,
-    contextualDetail.clientSelections[0]?.title,
-    contextualDetail.incidents[0]?.title,
-    contextualDetail.incidents[0]?.data?.description,
-    contextualDetail.expenses[0]?.notes,
-    contextualDetail.workerInstructions[0]?.body
-  ].join(' ');
-  assert.match(contextualText, /Contextual capability patio painting/);
+  assert.equal(contextualDetail.changeOrders.length, 0);
+  assert.equal(contextualDetail.clientSelections.length, 0);
+  assert.equal(contextualDetail.incidents.length, 0);
+  assert.equal(contextualDetail.expenses.length, 0);
+  const contextualText = contextualDetail.workerInstructions[0]?.body || '';
+  assert.match(contextualText, /Keizersgracht 10, Amsterdam/);
   assert.doesNotMatch(contextualText, /placeholder/i);
-  assert.match(contextualDetail.changeOrders[0].scopeDelta, /Robert approves/);
-  assert.ok(contextualDetail.clientSelections[0].options.length >= 3);
-  assert.ok(!contextualDetail.clientSelections[0].options.includes('Option A'));
   assert.match(contextualDetail.workerInstructions[0].body, /Stop and ask Robert/);
 
   const commandJob = await request(baseUrl, '/api/ledger/intake', {
@@ -501,32 +502,32 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(commandPlan.response.status, 200);
   assert.equal(commandPlan.body.success, true);
   assert.equal(commandPlan.body.summary.externalCommitments, 0);
-  const siteVisitCommand = commandPlan.body.actions.find(action =>
+  const safeCapabilityCommand = commandPlan.body.actions.find(action =>
     action.actionType === 'draft_capability_gap'
-    && action.requirementKey === 'site_visit'
+    && action.safeDraftable === true
     && action.jobId === commandJobId
   );
-  assert.ok(siteVisitCommand);
-  assert.equal(siteVisitCommand.safeDraftable, true);
+  assert.ok(safeCapabilityCommand);
+  assert.notEqual(safeCapabilityCommand.requirementKey, 'site_visit');
 
   const commandApply = await request(baseUrl, '/api/ledger/command-plan', {
     method: 'POST',
-    body: JSON.stringify({ actionIds: [siteVisitCommand.id], actor: 'command-plan-test', limit: 1 })
+    body: JSON.stringify({ actionIds: [safeCapabilityCommand.id], actor: 'command-plan-test', limit: 1 })
   });
   assert.equal(commandApply.response.status, 201);
   assert.equal(commandApply.body.success, true);
   assert.equal(commandApply.body.summary.externalCommitments, 0);
   assert.ok(commandApply.body.commandPlan);
-  assert.equal(commandApply.body.commandPlan.actions.some(action => action.id === siteVisitCommand.id), false);
+  assert.equal(commandApply.body.commandPlan.actions.some(action => action.id === safeCapabilityCommand.id), false);
   assert.ok(commandApply.body.applied.some(item =>
     item.type === 'draft_capability_gap'
     && item.jobId === commandJobId
-    && item.created.some(record => record.requirementKey === 'site_visit' && record.id)
+    && item.created.some(record => record.requirementKey === safeCapabilityCommand.requirementKey && record.id)
   ));
 
   const commandDetail = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(commandJobId)}`);
   assert.equal(commandDetail.response.status, 200);
-  assert.ok(commandDetail.body.job.siteVisits.length >= 1);
+  assert.equal(commandDetail.body.job.siteVisits.length, 0);
   assert.ok(commandDetail.body.job.audit.some(event => event.action === 'apply_today_command_plan'));
   assert.ok(commandDetail.body.job.audit.some(event => event.action === 'apply_capability_gap_plan'));
 

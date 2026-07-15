@@ -3976,6 +3976,153 @@ function AutomationControl({
   )
 }
 
+function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
+  const missingRequirements = useMemo(() => {
+    const byKey = new Map()
+    for (const capability of job.capabilities || EMPTY_LIST) {
+      for (const requirement of capability.requirements || EMPTY_LIST) {
+        if (requirement.covered || requirement.automationPolicy === 'informational') continue
+        const current = byKey.get(requirement.key)
+        if (current) {
+          current.capabilityLabels.push(capability.label)
+          continue
+        }
+        byKey.set(requirement.key, {
+          ...requirement,
+          capabilityLabels: [capability.label],
+        })
+      }
+    }
+    return [...byKey.values()]
+  }, [job.capabilities])
+  const safeGaps = missingRequirements.filter((requirement) => requirement.safeDraftable)
+  const manualGaps = missingRequirements.filter((requirement) => !requirement.safeDraftable)
+  const safeKeySignature = safeGaps.map((requirement) => requirement.key).join('|')
+  const [selectedKeys, setSelectedKeys] = useState([])
+
+  useEffect(() => {
+    const available = new Set(safeKeySignature.split('|').filter(Boolean))
+    setSelectedKeys((current) => current.filter((key) => available.has(key)))
+  }, [job.id, safeKeySignature])
+
+  function toggleRequirement(requirementKey) {
+    setSelectedKeys((current) =>
+      current.includes(requirementKey)
+        ? current.filter((key) => key !== requirementKey)
+        : [...current, requirementKey],
+    )
+  }
+
+  async function applySelected() {
+    if (!selectedKeys.length) return
+    const result = await onApply(selectedKeys)
+    if (result) setSelectedKeys([])
+  }
+
+  return (
+    <section className="job-workspace-section capability-setup-control" data-testid="capability-setup-control">
+      <div className="section-heading capability-setup-heading">
+        <Gauge size={18} />
+        <div>
+          <h3>Job setup coverage</h3>
+          <p>Prepare internal setup records while observed facts and commitments stay operator-controlled.</p>
+        </div>
+        {canCoordinate && safeGaps.length ? (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={submitting}
+            onClick={() => setSelectedKeys(selectedKeys.length === safeGaps.length ? [] : safeGaps.map((requirement) => requirement.key))}
+          >
+            <Check size={15} />
+            {selectedKeys.length === safeGaps.length ? 'Clear selection' : 'Select safe drafts'}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="capability-setup-metrics" aria-label="Job setup coverage summary">
+        <div>
+          <span>Coverage</span>
+          <strong>{job.capabilitySummary?.averageCoverage || 0}%</strong>
+        </div>
+        <div>
+          <span>Ready groups</span>
+          <strong>{job.capabilitySummary?.ready || 0} / {job.capabilities?.length || 0}</strong>
+        </div>
+        <div>
+          <span>Safe drafts</span>
+          <strong>{safeGaps.length}</strong>
+        </div>
+        <div>
+          <span>Manual gaps</span>
+          <strong>{manualGaps.length}</strong>
+        </div>
+      </div>
+
+      {safeGaps.length ? (
+        <fieldset className="capability-safe-drafts">
+          <legend>Internal setup drafts</legend>
+          {safeGaps.map((requirement) => (
+            <label className="capability-gap-option" key={requirement.key}>
+              <input
+                type="checkbox"
+                checked={selectedKeys.includes(requirement.key)}
+                disabled={!canCoordinate || submitting}
+                onChange={() => toggleRequirement(requirement.key)}
+              />
+              <span>
+                <strong>{requirement.label}</strong>
+                <small>{requirement.capabilityLabels.join(' / ')}</small>
+              </span>
+              <span className="tag tag-green">Draft only</span>
+            </label>
+          ))}
+        </fieldset>
+      ) : (
+        <p className="workflow-note" data-testid="capability-safe-complete">
+          All eligible internal setup scaffolds are retained for this job.
+        </p>
+      )}
+
+      {canCoordinate && safeGaps.length ? (
+        <div className="capability-setup-actions">
+          <span>{selectedKeys.length} selected</span>
+          <button
+            type="button"
+            className="primary-button"
+            data-testid="apply-capability-setup"
+            disabled={submitting || !selectedKeys.length}
+            onClick={applySelected}
+          >
+            <ClipboardList size={15} />
+            {submitting ? 'Retaining...' : 'Retain selected drafts'}
+          </button>
+        </div>
+      ) : null}
+
+      {manualGaps.length ? (
+        <details className="capability-manual-gaps">
+          <summary>
+            <LockKeyhole size={15} />
+            Manual evidence and commitments ({manualGaps.length})
+          </summary>
+          <div>
+            {manualGaps.map((requirement) => (
+              <article key={requirement.key} data-testid={`manual-capability-${requirement.key}`}>
+                <span>
+                  <strong>{requirement.label}</strong>
+                  <small>{requirement.automationReason}</small>
+                </span>
+                <span className="tag">{requirement.automationPolicy === 'manual_commitment' ? 'Verify commitment' : 'Source evidence'}</span>
+              </article>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </section>
+  )
+}
+
 function WorkPlanControl({
   job,
   canCoordinate,
@@ -6001,6 +6148,30 @@ function App() {
     setTaskActionNote('')
     setCommercialDraftMode(null)
     setCommercialAcceptance(null)
+  }
+
+  async function applyCapabilitySetup(requirementKeys) {
+    if (!selectedJobId || !canCoordinate || !requirementKeys.length) return null
+    setSubmitting(true)
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/capability-plan`, {
+        method: 'POST',
+        body: JSON.stringify({ requirementKeys }),
+      })
+      setSelectedJob(result.job)
+      await refresh()
+      const created = result.created?.length || 0
+      const blocked = result.blocked?.length || 0
+      notify(
+        `${created} internal setup draft${created === 1 ? '' : 's'} retained.${blocked ? ` ${blocked} manual gap${blocked === 1 ? '' : 's'} remained operator-controlled.` : ''}`,
+      )
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   function openCommercialDraft(mode) {
@@ -11102,6 +11273,14 @@ function App() {
                     onNewChangeOrder={() => openCommercialDraft('change_order')}
                     onRequestAcceptance={openCommercialAcceptance}
                     onOpenApprovals={openApprovals}
+                  />
+                ) : null}
+                {!fieldScoped ? (
+                  <CapabilitySetupControl
+                    job={selectedJob}
+                    canCoordinate={canCoordinate}
+                    submitting={submitting}
+                    onApply={applyCapabilitySetup}
                   />
                 ) : null}
                 <WorkPlanControl

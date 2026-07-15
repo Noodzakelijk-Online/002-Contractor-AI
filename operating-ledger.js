@@ -422,6 +422,84 @@ function capabilityRequirementActionTarget(requirementKey) {
   return targets[String(requirementKey || '')] || 'job_detail';
 }
 
+const CAPABILITY_SAFE_SCAFFOLD_REQUIREMENTS = new Set([
+  'quote',
+  'materials',
+  'tasks',
+  'schedule',
+  'submittal',
+  'documents',
+  'evidence',
+  'instructions',
+  'jha',
+  'permit',
+  'budget',
+  'communication',
+  'wkb'
+]);
+
+const CAPABILITY_INFORMATIONAL_REQUIREMENTS = new Set([
+  'job',
+  'intake',
+  'approval',
+  'approval_audit',
+  'audit'
+]);
+
+const CAPABILITY_MANUAL_COMMITMENT_REQUIREMENTS = new Set([
+  'site_visit',
+  'tools',
+  'equipment',
+  'assignment',
+  'orientation',
+  'site_access',
+  'inspection',
+  'change_order',
+  'rfi',
+  'transmittal',
+  'meeting',
+  'billing_milestone',
+  'purchase_order',
+  'handoff',
+  'selection',
+  'aftercare',
+  'recurring'
+]);
+
+function capabilityRequirementAutomation(requirementKey) {
+  const key = String(requirementKey || '').trim().toLowerCase();
+  if (CAPABILITY_INFORMATIONAL_REQUIREMENTS.has(key)) {
+    return {
+      automationPolicy: 'informational',
+      safeDraftable: false,
+      blockedFromAutonomy: true,
+      automationReason: 'Coverage is derived from retained ledger history; no setup record should be generated.'
+    };
+  }
+  if (CAPABILITY_SAFE_SCAFFOLD_REQUIREMENTS.has(key)) {
+    return {
+      automationPolicy: 'safe_scaffold',
+      safeDraftable: true,
+      blockedFromAutonomy: false,
+      automationReason: 'An internal draft can be prepared without asserting completed work or making an external commitment.'
+    };
+  }
+  if (CAPABILITY_MANUAL_COMMITMENT_REQUIREMENTS.has(key)) {
+    return {
+      automationPolicy: 'manual_commitment',
+      safeDraftable: false,
+      blockedFromAutonomy: true,
+      automationReason: 'An operator must verify the responsible party, timing, scope, or commercial consequence before retention.'
+    };
+  }
+  return {
+    automationPolicy: 'manual_evidence',
+    safeDraftable: false,
+    blockedFromAutonomy: true,
+    automationReason: 'This record must be based on observed work, source evidence, or a verified transaction.'
+  };
+}
+
 const JOB_OPERATING_PLAYBOOKS = [
   {
     key: 'garden_maintenance',
@@ -24426,6 +24504,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   describeCapabilityRequirement(requirement = {}, jobDetail = null) {
+    const automation = capabilityRequirementAutomation(requirement.key);
     if (jobDetail) {
       const value = jobDetail[requirement.detailKey];
       const allRecords = Array.isArray(value)
@@ -24445,6 +24524,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           : 0;
       return {
         ...requirement,
+        ...automation,
         count: records.length,
         openCount,
         covered: records.length > 0,
@@ -24456,6 +24536,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const openCount = count ? this.countOpenCapabilityRequirement(requirement) : 0;
     return {
       ...requirement,
+      ...automation,
       count,
       openCount,
       covered: count > 0,
@@ -24493,7 +24574,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actionTarget: capabilityRequirementActionTarget(requirement.key),
           label: `Add ${requirement.label}`,
           requiresApproval: ['quote', 'assignment', 'tools', 'change_order', 'billing_milestone', 'invoice', 'payment', 'draw', 'waiver', 'handoff', 'approval_audit'].includes(requirement.key),
-          reason: `${capability.label} is missing ${requirement.label}.`
+          reason: `${capability.label} is missing ${requirement.label}.`,
+          automationPolicy: requirement.automationPolicy,
+          safeDraftable: requirement.safeDraftable,
+          blockedFromAutonomy: requirement.blockedFromAutonomy,
+          automationReason: requirement.automationReason
         }))
       };
     });
@@ -24925,11 +25010,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const limit = safeLimit(payload.limit, 25, 100);
     const actions = [];
     const skipped = [];
+    const plannedRequirements = new Set();
 
     for (const capability of coverage.capabilities) {
       if (requestedCapabilities.length && !requestedCapabilities.includes(capability.key)) continue;
       for (const requirement of capability.requirements || []) {
         if (requestedRequirements.length && !requestedRequirements.includes(requirement.key)) continue;
+        if (plannedRequirements.has(requirement.key)) {
+          skipped.push({
+            capabilityKey: capability.key,
+            requirementKey: requirement.key,
+            label: requirement.label,
+            reason: 'duplicate_requirement',
+            count: requirement.count,
+            openCount: requirement.openCount
+          });
+          continue;
+        }
         if (requirement.covered && !(includeOpen && requirement.openCount > 0)) {
           skipped.push({
             capabilityKey: capability.key,
@@ -24941,7 +25038,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
           continue;
         }
-        if (['job', 'intake', 'approval', 'approval_audit', 'audit'].includes(requirement.key)) {
+        const automation = capabilityRequirementAutomation(requirement.key);
+        if (automation.automationPolicy === 'informational') {
           skipped.push({
             capabilityKey: capability.key,
             requirementKey: requirement.key,
@@ -24952,8 +25050,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
           continue;
         }
-        const actionPayload = this.capabilityGapPayload(detail, requirement, capability, payload);
-        if (!actionPayload) {
+        const actionPayload = automation.safeDraftable
+          ? this.capabilityGapPayload(detail, requirement, capability, payload)
+          : null;
+        if (automation.safeDraftable && !actionPayload) {
           skipped.push({
             capabilityKey: capability.key,
             requirementKey: requirement.key,
@@ -24965,30 +25065,38 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           continue;
         }
         actions.push({
-          type: `create_${requirement.key}`,
+          type: automation.safeDraftable ? `create_${requirement.key}` : `record_${requirement.key}`,
           capabilityKey: capability.key,
           capabilityLabel: capability.label,
           requirementKey: requirement.key,
-          label: `Create ${requirement.label}`,
+          requirementLabel: requirement.label,
+          label: automation.safeDraftable ? `Prepare ${requirement.label}` : `Record ${requirement.label} from verified input`,
           actionTarget: capabilityRequirementActionTarget(requirement.key),
           requiresApproval: ['quote', 'assignment', 'tools', 'equipment', 'change_order', 'invoice', 'payment', 'draw', 'waiver', 'handoff', 'communication'].includes(requirement.key),
+          ...automation,
+          blocked: automation.blockedFromAutonomy,
           sourceVendors: capability.vendors || [],
           sourceEvidence: capability.sourceEvidence || [],
           payload: actionPayload
         });
+        plannedRequirements.add(requirement.key);
       }
     }
 
+    actions.sort((left, right) => Number(right.safeDraftable) - Number(left.safeDraftable));
+    const limitedActions = actions.slice(0, limit);
     return {
       jobId,
       generatedAt: nowIso(),
       mode: 'preview',
       coverage,
-      actions: actions.slice(0, limit),
+      actions: limitedActions,
       skipped,
       summary: {
-        create: Math.min(actions.length, limit),
+        create: limitedActions.filter(action => action.safeDraftable).length,
         available: actions.length,
+        safeDraftable: limitedActions.filter(action => action.safeDraftable).length,
+        manualRequired: limitedActions.filter(action => !action.safeDraftable).length,
         skipped: skipped.length,
         approvalSafe: true,
         externalCommitments: 0,
@@ -25004,6 +25112,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const actor = options.actor || payload.actor || 'Contractor.AI';
       const preview = this.buildJobCapabilityPlan(jobId, payload);
       const created = [];
+      const blocked = preview.actions
+        .filter(action => !action.safeDraftable)
+        .map(action => ({
+          type: action.type,
+          capabilityKey: action.capabilityKey,
+          requirementKey: action.requirementKey,
+          requirementLabel: action.requirementLabel,
+          automationPolicy: action.automationPolicy,
+          reason: action.automationReason
+        }));
       const addCreated = (action, record) => {
         created.push({
           type: action.type,
@@ -25016,6 +25134,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       };
 
       for (const action of preview.actions) {
+        if (!action.safeDraftable) continue;
         const data = action.payload || {};
         const key = action.requirementKey;
         if (key === 'quote') addCreated(action, this.createQuote(jobId, data, { actor }));
@@ -25066,6 +25185,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         actor,
         after: {
           created,
+          blocked,
           skipped: preview.skipped,
           averageCoverageBefore: preview.coverage.summary.averageCoverage,
           externalCommitments: 0
@@ -25078,6 +25198,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ...preview,
         mode: 'applied',
         created,
+        blocked,
         job,
         coverageAfter: {
           summary: job.capabilitySummary,
@@ -25086,6 +25207,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         summary: {
           ...preview.summary,
           created: created.length,
+          blocked: blocked.length,
+          manualRequired: blocked.length,
           skipped: preview.skipped.length,
           averageCoverageAfter: job.capabilitySummary?.averageCoverage || preview.summary.averageCoverage
         }
@@ -26858,9 +26981,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             capabilityKey: action.capabilityKey,
             severity: action.requiresApproval ? 'high' : 'medium',
             requiresApproval: normalizeBoolean(action.requiresApproval, false),
-            safeDraftable: true,
+            safeDraftable: normalizeBoolean(action.safeDraftable, false),
+            blocked: normalizeBoolean(action.blockedFromAutonomy || action.blocked, false),
             message: `Draft missing ${action.requirementLabel || action.requirementKey} record for ${job.title}.`,
-            data: { target: action.target, sourceVendors: action.sourceVendors || [] }
+            data: {
+              target: action.actionTarget,
+              sourceVendors: action.sourceVendors || [],
+              automationPolicy: action.automationPolicy,
+              automationReason: action.automationReason
+            }
           });
         }
       }

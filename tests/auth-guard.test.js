@@ -484,6 +484,22 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(authorizedOfficeArchive.response.status, 409);
     assert.equal(authorizedOfficeArchive.body.error.code, 'job_archive_blocked_by_approvals');
 
+    const deniedFieldCapabilityPlan = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/capability-plan`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify({ mode: 'preview', requirementKeys: ['documents'] })
+    });
+    assert.equal(deniedFieldCapabilityPlan.response.status, 403);
+    assert.equal(deniedFieldCapabilityPlan.body.error.code, 'insufficient_role');
+    const officeCapabilityPreview = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/capability-plan`, {
+      method: 'POST',
+      headers: officeHeaders,
+      body: JSON.stringify({ mode: 'preview', requirementKeys: ['documents', 'incident'] })
+    });
+    assert.equal(officeCapabilityPreview.response.status, 201);
+    assert.ok(officeCapabilityPreview.body.actions.some(action => action.requirementKey === 'documents' && action.safeDraftable === true));
+    assert.ok(officeCapabilityPreview.body.actions.some(action => action.requirementKey === 'incident' && action.blockedFromAutonomy === true));
+
     const commandPlan = await request(baseUrl, `/api/ledger/command-plan?mode=safe&limit=100&jobId=${encodeURIComponent(intake.body.job.id)}`, { headers: ownerHeaders });
     assert.equal(commandPlan.response.status, 200);
     const capabilityCommand = commandPlan.body.actions.find(action => action.actionType === 'draft_capability_gap');

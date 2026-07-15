@@ -513,6 +513,51 @@
   .opportunity-modal .modal-actions button, .opportunity-activity-modal .modal-actions button { width: 100%; }
 }
 
+.capability-setup-control { display: grid; gap: 14px; min-width: 0; }
+.capability-setup-heading { align-items: center; }
+.capability-setup-heading > .secondary-button { flex: 0 0 auto; margin-left: auto; }
+.capability-setup-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dbe5e1; border-left: 3px solid #2e7060; }
+.capability-setup-metrics > div { display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border-right: 1px solid #e2e9e6; }
+.capability-setup-metrics > div:last-child { border-right: 0; }
+.capability-setup-metrics span { overflow-wrap: anywhere; color: #718079; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.capability-setup-metrics strong { color: #273d35; font-size: 15px; }
+.capability-safe-drafts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; margin: 0; padding: 12px; border: 1px solid #d6e2dd; }
+.capability-safe-drafts legend { padding: 0 5px; color: #40564e; font-size: 10px; font-weight: 750; }
+.capability-gap-option { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-width: 0; padding: 9px; background: #fff; border: 1px solid #dce6e2; cursor: pointer; }
+.capability-gap-option:focus-within { outline: 3px solid #99c9bc; outline-offset: -3px; }
+.capability-gap-option input { width: 16px; height: 16px; margin: 0; accent-color: #27705d; }
+.capability-gap-option > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.capability-gap-option strong, .capability-gap-option small { overflow-wrap: anywhere; }
+.capability-gap-option strong { color: #2c443a; font-size: 11px; }
+.capability-gap-option small { color: #6d7d76; font-size: 9px; font-weight: 500; }
+.capability-setup-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.capability-setup-actions > span { color: #687972; font-size: 10px; font-weight: 700; }
+.capability-manual-gaps { border: 1px solid #dce4e1; }
+.capability-manual-gaps summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; color: #4e625a; background: #f6f8f7; font-size: 11px; font-weight: 750; cursor: pointer; }
+.capability-manual-gaps summary::marker { color: #6b7c75; }
+.capability-manual-gaps > div { display: grid; border-top: 1px solid #dce4e1; }
+.capability-manual-gaps article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-width: 0; padding: 10px 12px; border-bottom: 1px solid #e3e9e6; }
+.capability-manual-gaps article:last-child { border-bottom: 0; }
+.capability-manual-gaps article > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.capability-manual-gaps strong, .capability-manual-gaps small { overflow-wrap: anywhere; }
+.capability-manual-gaps strong { color: #30463d; font-size: 11px; }
+.capability-manual-gaps small { color: #6b7a74; font-size: 9px; line-height: 1.45; }
+
+@media (max-width: 760px) {
+  .capability-setup-heading { align-items: flex-start; flex-wrap: wrap; }
+  .capability-setup-heading > .secondary-button { width: calc(100% - 28px); margin-left: 28px; }
+  .capability-setup-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .capability-setup-metrics > div:nth-child(2n) { border-right: 0; }
+  .capability-setup-metrics > div:nth-child(-n + 2) { border-bottom: 1px solid #e2e9e6; }
+  .capability-safe-drafts { grid-template-columns: minmax(0, 1fr); }
+  .capability-gap-option { grid-template-columns: 18px minmax(0, 1fr); }
+  .capability-gap-option > .tag { grid-column: 2; justify-self: start; }
+  .capability-manual-gaps article { grid-template-columns: minmax(0, 1fr); }
+  .capability-manual-gaps article > .tag { justify-self: start; }
+  .capability-setup-actions { align-items: stretch; flex-direction: column; }
+  .capability-setup-actions .primary-button { width: 100%; }
+}
+
 .project-controls { display: grid; gap: 14px; min-width: 0; }
 .project-controls-heading { align-items: center; }
 .project-controls-heading > .secondary-button { flex: 0 0 auto; margin-left: auto; }

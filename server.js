@@ -2125,7 +2125,7 @@ app.post('/api/ledger/jobs/:id/capability-plan', (req, res) => {
     const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
     const result = mode === 'preview'
       ? operatingLedger.buildJobCapabilityPlan(req.params.id, payload)
-      : operatingLedger.applyJobCapabilityPlan(req.params.id, payload, { actor: payload.actor || 'dashboard' });
+      : operatingLedger.applyJobCapabilityPlan(req.params.id, payload, { actor: actorFromRequest(req, payload.actor || 'dashboard') });
     return {
       success: true,
       ...result,

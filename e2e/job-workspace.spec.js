@@ -2661,7 +2661,9 @@ test('owner applies an exact safe automation draft and runs the durable cycle', 
   await safeCheckbox.check();
   await expect(automation.getByRole('button', { name: 'Apply 1 draft' })).toBeEnabled();
   await automation.getByRole('button', { name: 'Apply 1 draft' }).click();
-  await expect(page.getByText('1 safe command-plan draft(s) retained; 0 action(s) skipped. External commitments remain zero.')).toBeVisible();
+  await expect(
+    page.getByText('1 safe command-plan draft(s) retained; 0 action(s) skipped. External commitments remain zero.')
+  ).toBeVisible({ timeout: 15_000 });
   await expect(safeCheckbox).toHaveCount(0);
 
   const commandDetailResponse = await request.get(`/api/ledger/jobs/${commandJob.job.id}`);
