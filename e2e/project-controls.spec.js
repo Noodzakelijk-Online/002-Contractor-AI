@@ -128,6 +128,42 @@ test('operator manages RFIs, submittals, and approval-backed controlled revision
   await expect(secondDocumentRow.getByText('draft', { exact: true })).toBeVisible();
   await expect(firstDocumentRow.getByText('Current', { exact: true })).toBeVisible();
 
+  await controls.getByRole('tab', { name: /Transmittals/ }).click();
+  await controls.getByRole('button', { name: 'New transmittal' }).click();
+  const transmittalForm = controls.getByTestId('create-transmittal-form');
+  await transmittalForm.getByLabel('Transmittal subject').fill('Construction issue package');
+  await transmittalForm.getByLabel('Purpose').selectOption('for_construction');
+  await transmittalForm.getByLabel('Recipients').fill('Site supervisor <site@example.test>');
+  await transmittalForm.getByLabel(/A-101 \/ rev P01/).check();
+  await transmittalForm.getByLabel('Message').fill('Use the approved P01 revision until a later revision is approved.');
+  await transmittalForm.getByRole('button', { name: 'Prepare transmittal' }).click();
+  await expect(page.getByText('Transmittal package retained for approval. No files or messages were sent.')).toBeVisible();
+
+  detail = await jobDetail(request, intake.job.id);
+  const transmittal = detail.transmittals.find(record => record.subject === 'Construction issue package');
+  expect(transmittal).toBeTruthy();
+  const transmittalApproval = detail.approvals.find(item => item.targetType === 'document_transmittal' && item.targetId === transmittal.id && item.status === 'pending');
+  expect(transmittalApproval).toBeTruthy();
+  await approve(request, transmittalApproval.id, 'Current revision, recipient register, purpose, and package digest verified.');
+
+  workspace = await openJob(page, title);
+  controls = workspace.getByTestId('project-controls');
+  await controls.getByRole('tab', { name: /Transmittals/ }).click();
+  let transmittalRow = controls.locator('.project-control-row').filter({ hasText: 'Construction issue package' });
+  await transmittalRow.getByRole('button', { name: 'Record issue' }).click();
+  let transmittalReview = controls.getByTestId('project-control-review-form');
+  await transmittalReview.getByLabel('Delivery evidence reference').fill('provider-message:browser-project-controls');
+  await transmittalReview.getByRole('button', { name: 'Record transmittal issue' }).click();
+  await expect(page.getByText(/issue evidence retained/i)).toBeVisible();
+
+  transmittalRow = controls.locator('.project-control-row').filter({ hasText: 'Construction issue package' });
+  await transmittalRow.getByRole('button', { name: 'Record receipt' }).click();
+  transmittalReview = controls.getByTestId('project-control-review-form');
+  await transmittalReview.getByLabel('Acknowledgment evidence reference').fill('mail-receipt:browser-site-supervisor');
+  await transmittalReview.getByRole('button', { name: 'Record acknowledgment' }).click();
+  await expect(page.getByText(/is fully acknowledged/i)).toBeVisible();
+  await expect(transmittalRow.getByText('acknowledged', { exact: true })).toBeVisible();
+
   await page.setViewportSize({ width: 390, height: 844 });
   const geometry = await controls.evaluate(element => ({
     pageWidth: document.body.scrollWidth,

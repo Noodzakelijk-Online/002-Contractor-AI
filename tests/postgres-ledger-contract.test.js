@@ -926,13 +926,39 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(controlledDocuments.find(document => document.revision === 'P01').status, 'superseded');
     assert.equal(controlledDocuments.find(document => document.revision === 'P02').data.isCurrent, true);
 
+    const currentControlledDocument = controlledDocuments.find(document => document.revision === 'P02');
+    const hostedTransmittal = ledger.createDocumentTransmittal(job.id, {
+      subject: 'PostgreSQL construction issue',
+      purpose: 'for_construction',
+      documentIds: [currentControlledDocument.id],
+      recipients: [{ name: 'Hosted site supervisor', email: 'site@example.test' }]
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(hostedTransmittal.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted document snapshot and recipient register verified.'
+    });
+    const hostedIssuedTransmittal = ledger.recordDocumentTransmittalIssue(job.id, hostedTransmittal.transmittal.id, {
+      deliveryReference: 'hosted-provider:message-001'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedIssuedTransmittal.status, 'issued');
+    const hostedAcknowledgment = ledger.acknowledgeDocumentTransmittal(
+      job.id,
+      hostedIssuedTransmittal.id,
+      hostedIssuedTransmittal.receipts[0].id,
+      { evidenceReference: 'hosted-mail-receipt:001', acknowledgedBy: 'Hosted site supervisor' },
+      { actor: 'postgres_contract_test' }
+    );
+    assert.equal(hostedAcknowledgment.transmittal.status, 'acknowledged');
+
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
+    assert.ok(dashboard.metrics.documentTransmittals >= 1);
     assert.ok(Array.isArray(dashboard.nextActions));
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '022_controlled_document_revisions');
+    assert.equal(migrations.currentVersion, '023_document_transmittals');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1013,12 +1039,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('022_controlled_document_revisions'));
+  assert.deepEqual(versions, Array(4).fill('023_document_transmittals'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 22);
+    assert.equal(Number(migrationCount.count), 23);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

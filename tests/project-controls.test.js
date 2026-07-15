@@ -205,6 +205,74 @@ test('project-control API retains approval-gated document revisions and enforces
   ));
   assert.equal(detail.body.job.audit.some(event => event.actor === 'role:owner:spoofed'), false);
 
+  const supersededTransmittal = await request(baseUrl, `/api/ledger/jobs/${jobId}/document-transmittals`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      subject: 'Stale revision attempt',
+      purpose: 'for_construction',
+      documentIds: [firstFinal.id],
+      recipients: [{ name: 'Site supervisor', email: 'site@example.test' }]
+    })
+  });
+  assert.equal(supersededTransmittal.response.status, 400);
+  assert.equal(supersededTransmittal.body.error.code, 'transmittal_document_not_current');
+
+  const fieldTransmittalDenied = await request(baseUrl, `/api/ledger/jobs/${jobId}/document-transmittals`, tokens.field_worker.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      subject: 'Unauthorized distribution',
+      documentIds: [secondFinal.id],
+      recipients: [{ name: 'Site supervisor', email: 'site@example.test' }]
+    })
+  });
+  assert.equal(fieldTransmittalDenied.response.status, 403);
+
+  const transmittal = await request(baseUrl, `/api/ledger/jobs/${jobId}/document-transmittals`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      subject: 'Construction issue package',
+      purpose: 'for_construction',
+      dueAt: '2020-01-02',
+      message: 'Use the approved P02 revision for construction.',
+      documentIds: [secondFinal.id],
+      recipients: [{ name: 'Site supervisor', email: 'site@example.test' }],
+      actor: 'role:owner:spoofed'
+    })
+  });
+  assert.equal(transmittal.response.status, 201);
+  assert.equal(transmittal.body.transmittal.status, 'pending_approval');
+  assert.equal(transmittal.body.transmittal.data.createdBy, 'role:office_operator');
+  assert.equal(transmittal.body.externalDeliveryInitiated, false);
+
+  const prematureIssue = await request(baseUrl, `/api/ledger/jobs/${jobId}/document-transmittals/${transmittal.body.transmittal.id}/issue`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ deliveryReference: 'provider:premature' })
+  });
+  assert.equal(prematureIssue.response.status, 409);
+  assert.equal(prematureIssue.body.error.code, 'transmittal_approval_required');
+
+  const officeCannotApproveTransmittal = await request(baseUrl, `/api/ledger/approvals/${transmittal.body.approval.id}/resolve`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved' })
+  });
+  assert.equal(officeCannotApproveTransmittal.response.status, 403);
+  await resolveApproval(baseUrl, transmittal.body.approval.id, 'Current P02 revision, recipient, purpose, and package digest verified.');
+
+  const issuedTransmittal = await request(baseUrl, `/api/ledger/jobs/${jobId}/document-transmittals/${transmittal.body.transmittal.id}/issue`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ deliveryReference: 'provider-message:project-controls-001' })
+  });
+  assert.equal(issuedTransmittal.response.status, 200);
+  assert.equal(issuedTransmittal.body.transmittal.status, 'issued');
+  assert.equal(issuedTransmittal.body.externalDeliveryPerformedByContractorAI, false);
+  const receipt = issuedTransmittal.body.transmittal.receipts[0];
+  const acknowledged = await request(baseUrl, `/api/ledger/jobs/${jobId}/document-transmittals/${transmittal.body.transmittal.id}/receipts/${receipt.id}/acknowledge`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ evidenceReference: 'mail-receipt:site-supervisor', acknowledgedBy: receipt.recipientName })
+  });
+  assert.equal(acknowledged.response.status, 200);
+  assert.equal(acknowledged.body.transmittal.status, 'acknowledged');
+
   const overdueRfi = await request(baseUrl, `/api/ledger/jobs/${jobId}/rfis`, tokens.office_operator, {
     method: 'POST',
     body: JSON.stringify({
@@ -281,7 +349,7 @@ test('project-control API retains approval-gated document revisions and enforces
   const diagnostics = await request(baseUrl, '/api/readiness', tokens.owner);
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.ledger.valid, true);
-  assert.equal(diagnostics.body.ledger.migrations.currentVersion, '022_controlled_document_revisions');
+  assert.equal(diagnostics.body.ledger.migrations.currentVersion, '023_document_transmittals');
 });
 
 test('controlled document migration upgrades a 021 ledger without losing existing documents', t => {
@@ -311,7 +379,7 @@ test('controlled document migration upgrades a 021 ledger without losing existin
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '022_controlled_document_revisions');
+    assert.equal(upgraded.migrationStatus().currentVersion, '023_document_transmittals');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
     const columns = new Set(upgraded.db.prepare('PRAGMA table_info(documents)').all().map(column => column.name));
     for (const column of ['document_number', 'revision', 'discipline', 'effective_at', 'supersedes_document_id']) {

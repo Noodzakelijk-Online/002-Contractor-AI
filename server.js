@@ -2679,6 +2679,48 @@ app.post('/api/ledger/jobs/:id/controlled-document-revisions', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/document-transmittals', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createDocumentTransmittal(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/issue', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    transmittal: operatingLedger.recordDocumentTransmittalIssue(
+      req.params.id,
+      req.params.transmittalId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalDeliveryInitiated: false,
+    externalDeliveryPerformedByContractorAI: false
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/receipts/:receiptId/acknowledge', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.acknowledgeDocumentTransmittal(
+      req.params.id,
+      req.params.transmittalId,
+      req.params.receiptId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }));
+});
+
 app.post('/api/ledger/jobs/:id/time-logs', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
@@ -3842,6 +3884,9 @@ function validateOperationalExport(snapshot) {
       for (const key of ['rfis', 'submittals', 'controlledDocuments']) {
         if (!Array.isArray(snapshot.projectControls[key])) problems.push(`Export projectControls is missing the ${key} collection.`);
       }
+      if (snapshot.projectControls.transmittals !== undefined && !Array.isArray(snapshot.projectControls.transmittals)) {
+        problems.push('Export projectControls transmittals must be a collection when present.');
+      }
     }
   }
   const integrity = snapshot.integrity;
@@ -3879,6 +3924,7 @@ function validateOperationalExport(snapshot) {
       scheduleBaselines: snapshot.scheduleBaselines.length,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
       submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
+      transmittals: Array.isArray(snapshot.projectControls?.transmittals) ? snapshot.projectControls.transmittals.length : 0,
       controlledDocuments: Array.isArray(snapshot.projectControls?.controlledDocuments) ? snapshot.projectControls.controlledDocuments.length : 0,
       handoverPackages: snapshot.handoverPackages.length,
       approvals: snapshot.approvals.length,

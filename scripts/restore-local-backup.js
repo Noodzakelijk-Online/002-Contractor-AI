@@ -158,6 +158,50 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup preconstruction-pipeline constraints are incomplete: ${missingOpportunityIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('022_controlled_document_revisions')) {
+        const documentColumns = new Set(database.prepare('PRAGMA table_info(documents)').all().map(row => row.name));
+        const missingDocumentColumns = ['document_number', 'revision', 'discipline', 'effective_at', 'supersedes_document_id']
+          .filter(column => !documentColumns.has(column));
+        if (missingDocumentColumns.length) {
+          throw new Error(`Backup controlled-document columns are incomplete: ${missingDocumentColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const documentIndexes = [
+          'idx_documents_job_number_revision',
+          'idx_documents_controlled_current',
+          'idx_documents_single_candidate',
+          'idx_documents_supersedes'
+        ];
+        const missingDocumentIndexes = documentIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingDocumentIndexes.length) {
+          throw new Error(`Backup controlled-document constraints are incomplete: ${missingDocumentIndexes.join(', ')}.`);
+        }
+      }
+      if (appliedMigrations.has('023_document_transmittals')) {
+        const transmittalTables = ['transmittal_number_sequences', 'document_transmittals', 'transmittal_receipts'];
+        const missingTransmittalTables = transmittalTables.filter(table => !retainedTables.has(table));
+        if (missingTransmittalTables.length) {
+          throw new Error(`Backup document-transmittal schema is incomplete: ${missingTransmittalTables.join(', ')}.`);
+        }
+        const transmittalColumns = new Set(database.prepare('PRAGMA table_info(document_transmittals)').all().map(row => row.name));
+        const missingTransmittalColumns = ['transmittal_number', 'approval_id', 'documents_json', 'recipients_json', 'snapshot_hash', 'delivery_reference']
+          .filter(column => !transmittalColumns.has(column));
+        if (missingTransmittalColumns.length) {
+          throw new Error(`Backup document-transmittal columns are incomplete: ${missingTransmittalColumns.join(', ')}.`);
+        }
+        const receiptColumns = new Set(database.prepare('PRAGMA table_info(transmittal_receipts)').all().map(row => row.name));
+        const missingReceiptColumns = ['recipient_key', 'status', 'acknowledged_at', 'acknowledged_by', 'evidence_reference']
+          .filter(column => !receiptColumns.has(column));
+        if (missingReceiptColumns.length) {
+          throw new Error(`Backup transmittal-receipt columns are incomplete: ${missingReceiptColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const transmittalIndexes = ['idx_document_transmittals_job', 'idx_document_transmittals_status', 'idx_transmittal_receipts_due'];
+        const missingTransmittalIndexes = transmittalIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingTransmittalIndexes.length) {
+          throw new Error(`Backup document-transmittal constraints are incomplete: ${missingTransmittalIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

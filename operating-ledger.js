@@ -122,6 +122,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'change_order', label: 'Change control', table: 'change_orders', detailKey: 'changeOrders' },
     { key: 'rfi', label: 'RFI trail', table: 'rfi_records', detailKey: 'rfis' },
     { key: 'submittal', label: 'Submittals', table: 'submittal_records', detailKey: 'submittals' },
+    { key: 'transmittal', label: 'Document transmittals', table: 'document_transmittals', detailKey: 'transmittals' },
     { key: 'field_report', label: 'Daily field report', table: 'field_reports', detailKey: 'fieldReports' },
     { key: 'documents', label: 'Documents/photos', table: 'documents', detailKey: 'documents' },
     { key: 'closeout', label: 'Punch/closeout', table: 'punch_items', detailKey: 'punchItems' }
@@ -313,6 +314,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     change_order: 'change_order_form',
     rfi: 'rfi_form',
     submittal: 'submittal_form',
+    transmittal: 'transmittal_form',
     field_report: 'field_report_form',
     documents: 'document_form',
     closeout: 'closeout_form',
@@ -1769,6 +1771,62 @@ const LEDGER_SCHEMA_MIGRATIONS = [
             AND status IN ('draft', 'stored', 'needs_review', 'needs_update', 'expired', 'pending_approval');
         CREATE INDEX IF NOT EXISTS idx_documents_supersedes
           ON documents(supersedes_document_id);
+      `);
+    }
+  },
+  {
+    version: '023_document_transmittals',
+    description: 'Retain approval-backed controlled-document transmittals, issue evidence, and recipient acknowledgments.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS transmittal_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS document_transmittals (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          transmittal_number TEXT NOT NULL UNIQUE,
+          subject TEXT NOT NULL,
+          purpose TEXT NOT NULL DEFAULT 'for_information',
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          approval_id TEXT,
+          due_at TEXT,
+          issued_at TEXT,
+          delivery_reference TEXT,
+          documents_json TEXT NOT NULL DEFAULT '[]',
+          recipients_json TEXT NOT NULL DEFAULT '[]',
+          message TEXT,
+          snapshot_hash TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_transmittals_job
+          ON document_transmittals(job_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_transmittals_status
+          ON document_transmittals(status, due_at, updated_at);
+
+        CREATE TABLE IF NOT EXISTS transmittal_receipts (
+          id TEXT PRIMARY KEY,
+          transmittal_id TEXT NOT NULL REFERENCES document_transmittals(id) ON DELETE CASCADE,
+          recipient_key TEXT NOT NULL,
+          recipient_name TEXT NOT NULL,
+          recipient_email TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_issue',
+          due_at TEXT,
+          acknowledged_at TEXT,
+          acknowledged_by TEXT,
+          evidence_reference TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(transmittal_id, recipient_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_transmittal_receipts_due
+          ON transmittal_receipts(status, due_at, updated_at);
       `);
     }
   }
@@ -12368,6 +12426,375 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  allocateTransmittalReference(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('transmittal_date_invalid', 'Transmittal date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO transmittal_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE transmittal_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable transmittal number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'transmittal_number_allocation_failed';
+      throw error;
+    }
+    return `TRN-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  normalizeTransmittalRecipients(value) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 50) {
+      throw ledgerInputError('transmittal_recipients_invalid', 'A transmittal requires between 1 and 50 recipients.');
+    }
+    const seen = new Set();
+    return value.map((recipient, index) => {
+      if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)) {
+        throw ledgerInputError('transmittal_recipient_invalid', `Recipient ${index + 1} must contain a name and email address.`);
+      }
+      const name = normalizeText(recipient.name || recipient.recipientName || recipient.recipient_name, '');
+      const email = normalizeText(recipient.email || recipient.recipientEmail || recipient.recipient_email, '').toLowerCase();
+      if (name.length < 2 || name.length > 120) {
+        throw ledgerInputError('transmittal_recipient_invalid', `Recipient ${index + 1} name must contain 2 to 120 characters.`);
+      }
+      if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw ledgerInputError('transmittal_recipient_invalid', `Recipient ${index + 1} requires a valid email address.`);
+      }
+      if (seen.has(email)) {
+        throw ledgerInputError('transmittal_recipient_duplicate', `Recipient ${email} is listed more than once.`);
+      }
+      seen.add(email);
+      return { recipientKey: email, name, email };
+    });
+  }
+
+  documentTransmittalSnapshot(row) {
+    return {
+      transmittalNumber: row.transmittal_number,
+      subject: row.subject,
+      purpose: row.purpose,
+      dueAt: row.due_at || null,
+      message: row.message || null,
+      documents: fromJson(row.documents_json, []),
+      recipients: fromJson(row.recipients_json, [])
+    };
+  }
+
+  createDocumentTransmittal(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const subject = normalizeText(payload.subject || payload.title, '');
+      const message = normalizeText(payload.message || payload.notes, '');
+      const purpose = normalizeStatus(payload.purpose, 'for_information');
+      const allowedPurposes = new Set(['for_information', 'for_review', 'for_approval', 'for_construction', 'as_built']);
+      const dueAt = normalizeText(payload.dueAt || payload.due_at, '') || null;
+      if (subject.length < 3 || subject.length > 180) {
+        throw ledgerInputError('transmittal_subject_invalid', 'Transmittal subject must contain 3 to 180 characters.');
+      }
+      if (!allowedPurposes.has(purpose)) {
+        throw ledgerInputError('transmittal_purpose_invalid', `Transmittal purpose must be one of: ${[...allowedPurposes].join(', ')}.`);
+      }
+      if (message.length > 4000) {
+        throw ledgerInputError('transmittal_message_too_long', 'Transmittal message cannot exceed 4,000 characters.');
+      }
+      if (dueAt && Number.isNaN(Date.parse(dueAt.length === 10 ? `${dueAt}T23:59:59.999Z` : dueAt))) {
+        throw ledgerInputError('transmittal_due_date_invalid', 'Transmittal acknowledgment due date is invalid.');
+      }
+
+      const recipients = this.normalizeTransmittalRecipients(payload.recipients);
+      const documentIds = [...new Set(
+        (Array.isArray(payload.documentIds || payload.document_ids) ? payload.documentIds || payload.document_ids : [])
+          .map(value => normalizeText(value, ''))
+          .filter(Boolean)
+      )];
+      if (documentIds.length < 1 || documentIds.length > 100) {
+        throw ledgerInputError('transmittal_documents_invalid', 'A transmittal requires between 1 and 100 controlled document revisions.');
+      }
+      const placeholders = documentIds.map(() => '?').join(',');
+      const rows = this.db.prepare(`
+        SELECT * FROM documents
+        WHERE job_id = ? AND id IN (${placeholders})
+      `).all(jobId, ...documentIds);
+      if (rows.length !== documentIds.length) {
+        throw ledgerInputError('transmittal_document_missing', 'Every transmittal document must belong to the selected job.');
+      }
+      const documents = rows.map(row => {
+        const data = fromJson(row.data_json, {});
+        if (row.type !== 'controlled_document' || row.status !== 'approved' || data.isCurrent !== true) {
+          throw ledgerInputError(
+            'transmittal_document_not_current',
+            `${row.document_number || row.title} revision ${row.revision || '-'} is not the current approved controlled revision.`
+          );
+        }
+        return {
+          id: row.id,
+          title: row.title,
+          documentNumber: row.document_number,
+          revision: row.revision,
+          discipline: row.discipline || null,
+          effectiveAt: row.effective_at || null,
+          sourceReferenceHash: sha256Text(data.sourceReference || row.storage_ref || row.id)
+        };
+      }).sort((left, right) => (
+        String(left.documentNumber || '').localeCompare(String(right.documentNumber || ''))
+        || String(left.revision || '').localeCompare(String(right.revision || ''))
+      ));
+
+      const timestamp = nowIso();
+      const id = makeId('transmittal');
+      const transmittalNumber = this.allocateTransmittalReference(timestamp);
+      const snapshot = { transmittalNumber, subject, purpose, dueAt, message: message || null, documents, recipients };
+      const snapshotHash = sha256Json(snapshot);
+      this.db.prepare(`
+        INSERT INTO document_transmittals (
+          id, job_id, transmittal_number, subject, purpose, status, due_at,
+          documents_json, recipients_json, message, snapshot_hash, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        transmittalNumber,
+        subject,
+        purpose,
+        dueAt,
+        toJson(documents, []),
+        toJson(recipients, []),
+        message || null,
+        snapshotHash,
+        toJson({ createdBy: actor, externalDeliveryInitiated: false }),
+        timestamp,
+        timestamp
+      );
+      for (const recipient of recipients) {
+        const receiptId = `receipt_${sha256Text(`${id}\0${recipient.recipientKey}`).slice(0, 24)}`;
+        this.db.prepare(`
+          INSERT INTO transmittal_receipts (
+            id, transmittal_id, recipient_key, recipient_name, recipient_email, status, due_at, data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'pending_issue', ?, '{}', ?, ?)
+        `).run(receiptId, id, recipient.recipientKey, recipient.name, recipient.email, dueAt, timestamp, timestamp);
+      }
+      const approval = this.createApproval({
+        targetType: 'document_transmittal',
+        targetId: id,
+        jobId,
+        approvalType: 'document_transmittal_issue',
+        summary: `Approve ${transmittalNumber}: ${subject}`,
+        reason: 'A formal controlled-document distribution package requires approval before an operator can record issue evidence.',
+        data: {
+          transmittalNumber,
+          subject,
+          purpose,
+          dueAt,
+          documentCount: documents.length,
+          recipientCount: recipients.length,
+          documents,
+          recipients,
+          snapshotHash,
+          externalDeliveryInitiated: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE document_transmittals SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const transmittal = this.getDocumentTransmittal(id);
+      this.audit({
+        entityType: 'document_transmittal',
+        entityId: id,
+        jobId,
+        action: 'create_document_transmittal',
+        actor,
+        after: transmittal,
+        metadata: { approvalId: approval.id, snapshotHash, externalCommitments: 0, externalDeliveryInitiated: false }
+      });
+      return { transmittal, approval, approvalRequiredBeforeIssue: true, externalDeliveryInitiated: false };
+    });
+  }
+
+  getDocumentTransmittal(transmittalId, options = {}) {
+    const row = options.jobId
+      ? this.db.prepare('SELECT * FROM document_transmittals WHERE id = ? AND job_id = ?').get(transmittalId, options.jobId)
+      : this.db.prepare('SELECT * FROM document_transmittals WHERE id = ?').get(transmittalId);
+    if (!row) {
+      const error = new Error('Document transmittal not found');
+      error.statusCode = 404;
+      error.code = 'document_transmittal_not_found';
+      throw error;
+    }
+    return {
+      ...this.mapDocumentTransmittal(row),
+      receipts: this.db.prepare('SELECT * FROM transmittal_receipts WHERE transmittal_id = ? ORDER BY recipient_name, recipient_email')
+        .all(row.id)
+        .map(receipt => this.mapTransmittalReceipt(receipt))
+    };
+  }
+
+  recordDocumentTransmittalIssue(jobId, transmittalId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const before = this.getDocumentTransmittal(transmittalId, { jobId });
+      const deliveryReference = normalizeText(payload.deliveryReference || payload.delivery_reference || payload.evidenceReference || payload.evidence_reference, '');
+      if (deliveryReference.length < 3 || deliveryReference.length > 240) {
+        throw ledgerInputError('transmittal_delivery_evidence_required', 'Recorded issue requires a delivery evidence reference between 3 and 240 characters.');
+      }
+      if (['issued', 'partially_acknowledged', 'acknowledged'].includes(before.status)) {
+        if (before.deliveryReference === deliveryReference) return { ...before, replayed: true };
+        const error = new Error('This transmittal was already issued with different retained delivery evidence.');
+        error.statusCode = 409;
+        error.code = 'transmittal_already_issued';
+        throw error;
+      }
+      if (before.status !== 'approved') {
+        const error = new Error('The transmittal must be approved before issue evidence can be recorded.');
+        error.statusCode = 409;
+        error.code = 'transmittal_approval_required';
+        throw error;
+      }
+      const approval = before.approvalId
+        ? this.db.prepare("SELECT status FROM approvals WHERE id = ? AND target_type = 'document_transmittal'").get(before.approvalId)
+        : null;
+      if (approval?.status !== 'approved') {
+        const error = new Error('The retained transmittal approval is not resolved as approved.');
+        error.statusCode = 409;
+        error.code = 'transmittal_approval_invalid';
+        throw error;
+      }
+      const row = this.db.prepare('SELECT * FROM document_transmittals WHERE id = ?').get(transmittalId);
+      if (sha256Json(this.documentTransmittalSnapshot(row)) !== row.snapshot_hash) {
+        const error = new Error('The retained transmittal snapshot failed integrity verification.');
+        error.statusCode = 409;
+        error.code = 'transmittal_snapshot_integrity_failed';
+        throw error;
+      }
+      for (const document of before.documents) {
+        const current = this.db.prepare('SELECT status, data_json FROM documents WHERE id = ? AND job_id = ?').get(document.id, jobId);
+        if (!current || current.status !== 'approved' || fromJson(current.data_json, {}).isCurrent !== true) {
+          const error = new Error(`${document.documentNumber || document.title} revision ${document.revision || '-'} is no longer current. Prepare a new transmittal.`);
+          error.statusCode = 409;
+          error.code = 'transmittal_documents_stale';
+          throw error;
+        }
+      }
+      const issuedInput = normalizeText(payload.issuedAt || payload.issued_at, nowIso());
+      const issuedDate = new Date(issuedInput);
+      if (Number.isNaN(issuedDate.getTime()) || issuedDate.getTime() > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('transmittal_issued_at_invalid', 'Recorded issue date is invalid or in the future.');
+      }
+      const issuedAt = issuedDate.toISOString();
+      const timestamp = nowIso();
+      const data = { ...before.data, issuedBy: options.actor || 'Contractor.AI', externalDeliveryInitiated: false };
+      this.db.prepare(`
+        UPDATE document_transmittals
+        SET status = 'issued', issued_at = ?, delivery_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(issuedAt, deliveryReference, toJson(data), timestamp, transmittalId);
+      this.db.prepare(`
+        UPDATE transmittal_receipts
+        SET status = 'awaiting_acknowledgment', updated_at = ?
+        WHERE transmittal_id = ? AND status = 'pending_issue'
+      `).run(timestamp, transmittalId);
+      const after = this.getDocumentTransmittal(transmittalId, { jobId });
+      this.audit({
+        entityType: 'document_transmittal',
+        entityId: transmittalId,
+        jobId,
+        action: 'record_document_transmittal_issue',
+        actor: options.actor || 'Contractor.AI',
+        before,
+        after,
+        metadata: { deliveryReference, externalDeliveryInitiated: false, externalDeliveryPerformedByContractorAI: false }
+      });
+      return after;
+    });
+  }
+
+  acknowledgeDocumentTransmittal(jobId, transmittalId, receiptId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const transmittal = this.getDocumentTransmittal(transmittalId, { jobId });
+      if (!['issued', 'partially_acknowledged', 'acknowledged'].includes(transmittal.status)) {
+        const error = new Error('Transmittal receipt can be acknowledged only after issue evidence is retained.');
+        error.statusCode = 409;
+        error.code = 'transmittal_not_issued';
+        throw error;
+      }
+      const row = this.db.prepare('SELECT * FROM transmittal_receipts WHERE id = ? AND transmittal_id = ?').get(receiptId, transmittalId);
+      if (!row) {
+        const error = new Error('Transmittal recipient receipt not found');
+        error.statusCode = 404;
+        error.code = 'transmittal_receipt_not_found';
+        throw error;
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.reference, '');
+      const acknowledgedBy = normalizeText(payload.acknowledgedBy || payload.acknowledged_by || row.recipient_name, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) {
+        throw ledgerInputError('transmittal_acknowledgment_evidence_required', 'Acknowledgment requires an evidence reference between 3 and 240 characters.');
+      }
+      if (acknowledgedBy.length < 2 || acknowledgedBy.length > 120) {
+        throw ledgerInputError('transmittal_acknowledged_by_invalid', 'Acknowledged by must contain 2 to 120 characters.');
+      }
+      if (row.status === 'acknowledged') {
+        if (row.evidence_reference === evidenceReference && row.acknowledged_by === acknowledgedBy) {
+          return { transmittal, receipt: { ...this.mapTransmittalReceipt(row), replayed: true }, replayed: true };
+        }
+        const error = new Error('This recipient acknowledgment was already retained with different evidence.');
+        error.statusCode = 409;
+        error.code = 'transmittal_receipt_already_acknowledged';
+        throw error;
+      }
+      const acknowledgedInput = normalizeText(payload.acknowledgedAt || payload.acknowledged_at, nowIso());
+      const acknowledgedDate = new Date(acknowledgedInput);
+      if (
+        Number.isNaN(acknowledgedDate.getTime())
+        || acknowledgedDate.getTime() > Date.now() + 5 * 60 * 1000
+        || (transmittal.issuedAt && acknowledgedDate.getTime() < Date.parse(transmittal.issuedAt))
+      ) {
+        throw ledgerInputError('transmittal_acknowledged_at_invalid', 'Acknowledgment date must be valid, not future, and not before issue.');
+      }
+      const timestamp = nowIso();
+      const beforeReceipt = this.mapTransmittalReceipt(row);
+      this.db.prepare(`
+        UPDATE transmittal_receipts
+        SET status = 'acknowledged', acknowledged_at = ?, acknowledged_by = ?, evidence_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        acknowledgedDate.toISOString(),
+        acknowledgedBy,
+        evidenceReference,
+        toJson({ ...beforeReceipt.data, notes: normalizeText(payload.notes || payload.note, '') || null }),
+        timestamp,
+        receiptId
+      );
+      const remaining = Number(this.db.prepare(`
+        SELECT COUNT(*) AS count FROM transmittal_receipts
+        WHERE transmittal_id = ? AND status <> 'acknowledged'
+      `).get(transmittalId).count || 0);
+      this.db.prepare('UPDATE document_transmittals SET status = ?, updated_at = ? WHERE id = ?')
+        .run(remaining === 0 ? 'acknowledged' : 'partially_acknowledged', timestamp, transmittalId);
+      const receipt = this.mapTransmittalReceipt(this.db.prepare('SELECT * FROM transmittal_receipts WHERE id = ?').get(receiptId));
+      const after = this.getDocumentTransmittal(transmittalId, { jobId });
+      this.audit({
+        entityType: 'transmittal_receipt',
+        entityId: receiptId,
+        jobId,
+        action: 'acknowledge_document_transmittal',
+        actor: options.actor || 'Contractor.AI',
+        before: beforeReceipt,
+        after: receipt,
+        metadata: { transmittalId, transmittalNumber: transmittal.transmittalNumber, remainingAcknowledgments: remaining }
+      });
+      return { transmittal: after, receipt };
+    });
+  }
+
   getDocument(documentId) {
     const row = this.db.prepare('SELECT * FROM documents WHERE id = ?').get(String(documentId || ''));
     if (!row) {
@@ -12406,6 +12833,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return {
       rfis: query('rfi_records', 'created_at DESC').map(row => this.mapRfi(row)),
       submittals: query('submittal_records', 'created_at DESC').map(row => this.mapSubmittal(row)),
+      transmittals: (jobId
+        ? this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC LIMIT ?').all(jobId, limit)
+        : this.db.prepare('SELECT * FROM document_transmittals ORDER BY created_at DESC LIMIT ?').all(limit)
+      ).map(row => this.getDocumentTransmittal(row.id)),
       controlledDocuments: (jobId
         ? this.db.prepare(`
             SELECT * FROM documents
@@ -18453,6 +18884,35 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
           WHERE id = ? AND status = 'pending_approval'
         `).run(status, timestamp, timestamp, before.target_id);
+      } else if (before.target_type === 'document_transmittal') {
+        const transmittalData = fromJson(
+          this.db.prepare('SELECT data_json FROM document_transmittals WHERE id = ?').get(before.target_id)?.data_json,
+          {}
+        );
+        this.db.prepare(`
+          UPDATE document_transmittals
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...transmittalData,
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
+        this.db.prepare(`
+          UPDATE transmittal_receipts
+          SET status = 'cancelled', updated_at = ?
+          WHERE transmittal_id = ? AND status = 'pending_issue'
+        `).run(timestamp, before.target_id);
       } else if (before.target_type === 'payment') {
         const payment = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(before.target_id);
         if (payment && normalizeStatus(payment.status, '') === 'pending_confirmation') {
@@ -18881,6 +19341,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           updated_at = ?
         WHERE id = ?
       `).run(approvedStatus, approvedStatus, timestamp, approvedStatus, timestamp, timestamp, targetId);
+    } else if (targetType === 'document_transmittal') {
+      const transmittal = this.db.prepare('SELECT * FROM document_transmittals WHERE id = ?').get(targetId);
+      if (transmittal) {
+        if (sha256Json(this.documentTransmittalSnapshot(transmittal)) !== transmittal.snapshot_hash) {
+          const error = new Error('The retained transmittal snapshot failed integrity verification.');
+          error.statusCode = 409;
+          error.code = 'transmittal_snapshot_integrity_failed';
+          throw error;
+        }
+        const data = fromJson(transmittal.data_json, {});
+        this.db.prepare(`
+          UPDATE document_transmittals
+          SET status = 'approved', data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(toJson({ ...data, approvedAt: timestamp }), timestamp, targetId);
+      }
     } else if (targetType === 'client_selection_response') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const response = fromJson(approval?.data_json, {});
@@ -22310,6 +22786,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       fieldReports: this.db.prepare('SELECT * FROM field_reports WHERE job_id = ? ORDER BY report_date DESC, created_at DESC').all(jobId).map(row => this.mapFieldReport(row)),
       rfis: this.db.prepare('SELECT * FROM rfi_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRfi(row)),
       submittals: this.db.prepare('SELECT * FROM submittal_records WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapSubmittal(row)),
+      transmittals: this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC').all(jobId)
+        .map(row => this.getDocumentTransmittal(row.id)),
       clientSelections: this.db.prepare('SELECT * FROM client_selections WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapClientSelection(row)),
       permits: this.db.prepare('SELECT * FROM permit_records WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapPermit(row)),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
@@ -23313,6 +23791,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       openRfis: activeCount('rfi_records', "records.status IN ('open', 'pending', 'pending_approval')"),
       submittals: activeCount('submittal_records'),
       openSubmittals: activeCount('submittal_records', "records.status NOT IN ('approved', 'accepted', 'closed', 'cancelled', 'rejected')"),
+      documentTransmittals: activeCount('document_transmittals'),
+      pendingDocumentTransmittals: activeCount('document_transmittals', "records.status IN ('pending_approval', 'approved')"),
+      pendingTransmittalAcknowledgments: Number(this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM transmittal_receipts receipts
+        JOIN document_transmittals transmittals ON transmittals.id = receipts.transmittal_id
+        JOIN jobs ON jobs.id = transmittals.job_id
+        WHERE ${this.operationalJobStatusSql('jobs')}
+          AND receipts.status = 'awaiting_acknowledgment'
+      `).get().count || 0),
       clientSelections: activeCount('client_selections'),
       pendingClientSelections: activeCount('client_selections', "records.status NOT IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'cancelled', 'rejected')"),
       permitRecords: activeCount('permit_records'),
@@ -23422,6 +23910,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM field_reports records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS fieldReportDrafts,
         COALESCE((SELECT COUNT(*) FROM rfi_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('open', 'pending', 'pending_approval')), 0) AS rfiOpen,
         COALESCE((SELECT COUNT(*) FROM submittal_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'submitted', 'pending_review', 'pending_approval', 'revise_resubmit')), 0) AS submittalQueue,
+        COALESCE((SELECT COUNT(*) FROM document_transmittals records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('pending_approval', 'approved', 'issued', 'partially_acknowledged')), 0) AS transmittalQueue,
         COALESCE((SELECT COUNT(*) FROM client_selections records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('open', 'pending_client', 'pending_approval', 'overdue')), 0) AS selectionQueue,
         COALESCE((SELECT COUNT(*) FROM permit_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending', 'pending_approval', 'needs_renewal')), 0) AS permitReviews,
         COALESCE((SELECT COUNT(*) FROM inspection_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('scheduled', 'pending_approval', 'failed')), 0) AS inspectionReviews,
@@ -23792,6 +24281,54 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         dueAt: submittal.due_at,
         responsible: submittal.reviewer || submittal.responsible || null,
         message: `${submittal.job_title} submittal "${submittal.title}" is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue. Prepare an internal review follow-up draft without approving the package.`
+      });
+    }
+
+    const overdueTransmittalReceipts = this.db.prepare(`
+      SELECT receipts.*, transmittals.transmittal_number, transmittals.subject, jobs.id AS job_id, jobs.title AS job_title
+      FROM transmittal_receipts receipts
+      JOIN document_transmittals transmittals ON transmittals.id = receipts.transmittal_id
+      JOIN jobs ON jobs.id = transmittals.job_id
+      WHERE receipts.status = 'awaiting_acknowledgment'
+        AND receipts.due_at IS NOT NULL
+      ORDER BY receipts.due_at ASC, transmittals.created_at ASC
+      LIMIT 100
+    `).all();
+    const transmittalReceiptGroups = new Map();
+    for (const receipt of overdueTransmittalReceipts) {
+      const dueAt = String(receipt.due_at || '');
+      const dueAtMs = Date.parse(dueAt.length === 10 ? `${dueAt}T23:59:59.999Z` : dueAt);
+      if (!Number.isFinite(dueAtMs) || dueAtMs >= Date.now()) continue;
+      const group = transmittalReceiptGroups.get(receipt.transmittal_id) || {
+        transmittalId: receipt.transmittal_id,
+        transmittalNumber: receipt.transmittal_number,
+        subject: receipt.subject,
+        jobId: receipt.job_id,
+        jobTitle: receipt.job_title,
+        dueAt: receipt.due_at,
+        dueAtMs,
+        recipients: []
+      };
+      group.recipients.push({ name: receipt.recipient_name, email: receipt.recipient_email, receiptId: receipt.id });
+      transmittalReceiptGroups.set(receipt.transmittal_id, group);
+    }
+    for (const group of [...transmittalReceiptGroups.values()].slice(0, 20)) {
+      const existingFollowUp = this.db.prepare(`
+        SELECT id FROM communication_records
+        WHERE job_id = ? AND status NOT IN ('cancelled', 'rejected') AND data_json LIKE ?
+        LIMIT 1
+      `).get(group.jobId, `%"transmittalId":"${group.transmittalId}"%`);
+      if (existingFollowUp) continue;
+      const daysOverdue = Math.max(1, Math.ceil((Date.now() - group.dueAtMs) / (24 * 60 * 60 * 1000)));
+      actions.push({
+        type: 'draft_transmittal_ack_follow_up',
+        transmittalId: group.transmittalId,
+        transmittalNumber: group.transmittalNumber,
+        jobId: group.jobId,
+        dueAt: group.dueAt,
+        recipients: group.recipients,
+        severity: daysOverdue >= 3 ? 'high' : 'medium',
+        message: `${group.jobTitle} transmittal ${group.transmittalNumber} is awaiting ${group.recipients.length} acknowledgment${group.recipients.length === 1 ? '' : 's'} (${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue). Prepare an internal follow-up draft without sending it or changing receipt status.`
       });
     }
 
@@ -24589,7 +25126,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('jha') || type.includes('sds') || type.includes('access')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('jha') || type.includes('sds') || type.includes('access')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -24604,6 +25141,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_submittal',
       'draft_rfi_follow_up',
       'draft_submittal_follow_up',
+      'draft_transmittal_ack_follow_up',
       'request_client_selection',
       'draft_change_order',
       'create_permit_review',
@@ -25610,6 +26148,72 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         }
 
+        const transmittalFollowUps = preview
+          .filter(action => action.type === 'draft_transmittal_ack_follow_up')
+          .slice(0, 5);
+        for (const action of transmittalFollowUps) {
+          const row = this.db.prepare(`
+            SELECT * FROM document_transmittals
+            WHERE id = ? AND job_id = ? AND status IN ('issued', 'partially_acknowledged')
+          `).get(action.transmittalId, action.jobId);
+          if (!row) {
+            blocked.push({ ...action, status: 'blocked', reason: 'The issued transmittal is no longer awaiting acknowledgment.' });
+            continue;
+          }
+          const communicationId = `comm_${sha256Text(`${action.type}:${action.transmittalId}`).slice(0, 24)}`;
+          const recipients = Array.isArray(action.recipients) ? action.recipients : [];
+          const communication = this.addCommunication(action.jobId, {
+            channel: 'internal_review',
+            direction: 'outbound',
+            subject: `Transmittal acknowledgment follow-up: ${row.transmittal_number}`,
+            body: [
+              action.message,
+              `Pending recipients: ${recipients.map(recipient => `${recipient.name} <${recipient.email}>`).join(', ') || 'review the retained recipient register'}.`,
+              'Confirm current recipient details and the delivery channel before any follow-up is sent. This internal draft does not send a message or acknowledge a receipt.'
+            ].join('\n\n'),
+            status: 'draft',
+            requiresApproval: true,
+            recipient: recipients.map(recipient => recipient.email).filter(Boolean).join(', ') || null,
+            expectsReply: true,
+            replyBy: futureIsoDate(2),
+            followUpFor: action.transmittalId,
+            followUpSource: 'transmittal_ack_due_monitor',
+            data: {
+              transmittalId: action.transmittalId,
+              transmittalNumber: row.transmittal_number,
+              receiptIds: recipients.map(recipient => recipient.receiptId).filter(Boolean),
+              internalDraft: true,
+              externalDeliveryInitiated: false,
+              acknowledgmentChanged: false,
+              sourceDueAt: action.dueAt || null
+            }
+          }, { id: communicationId, actor, audit: false, ignoreExisting: true });
+          applied.push({
+            ...action,
+            communicationId: communication.id,
+            approvalId: communication.approvalId || communication.approval?.id || null,
+            status: communication.replayed ? 'replayed' : 'drafted',
+            externalDeliveryInitiated: false
+          });
+          if (!communication.replayed) {
+            this.audit({
+              entityType: 'communication',
+              entityId: communication.id,
+              jobId: action.jobId,
+              action: 'autonomous_draft_transmittal_ack_followup',
+              actor,
+              after: communication,
+              metadata: {
+                transmittalId: action.transmittalId,
+                receiptCount: recipients.length,
+                externalCommitments: 0,
+                externalDeliveryInitiated: false,
+                acknowledgmentChanged: false
+              }
+            });
+          }
+        }
+
         const permitRenewals = preview.filter(action => action.type === 'renew_permit').slice(0, 3);
         for (const action of permitRenewals) {
           const permit = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(action.permitId);
@@ -25977,6 +26581,53 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         )
     `).get().count || 0);
     if (invalidDocumentSupersession) issues.push({ severity: 'error', message: `${invalidDocumentSupersession} controlled document supersession link(s) are invalid.` });
+    const transmittalRows = this.db.prepare('SELECT * FROM document_transmittals ORDER BY created_at').all();
+    for (const transmittal of transmittalRows) {
+      if (sha256Json(this.documentTransmittalSnapshot(transmittal)) !== transmittal.snapshot_hash) {
+        issues.push({ severity: 'error', message: `Document transmittal ${transmittal.transmittal_number} failed retained snapshot integrity verification.` });
+      }
+      const recipients = fromJson(transmittal.recipients_json, []);
+      const receiptCount = Number(this.db.prepare('SELECT COUNT(*) AS count FROM transmittal_receipts WHERE transmittal_id = ?').get(transmittal.id).count || 0);
+      if (!Array.isArray(recipients) || recipients.length === 0 || receiptCount !== recipients.length) {
+        issues.push({ severity: 'error', message: `Document transmittal ${transmittal.transmittal_number} recipient snapshot does not match its receipt register.` });
+      }
+    }
+    const transmittalsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM document_transmittals transmittals
+      LEFT JOIN approvals ON approvals.id = transmittals.approval_id
+      WHERE transmittals.status IN ('approved', 'issued', 'partially_acknowledged', 'acknowledged')
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'document_transmittal' OR approvals.target_id <> transmittals.id
+        )
+    `).get().count || 0);
+    if (transmittalsWithoutApproval) issues.push({ severity: 'error', message: `${transmittalsWithoutApproval} approved or issued document transmittal(s) lack a matching approval decision.` });
+    const issuedTransmittalsWithoutEvidence = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM document_transmittals
+      WHERE status IN ('issued', 'partially_acknowledged', 'acknowledged')
+        AND (issued_at IS NULL OR LENGTH(TRIM(COALESCE(delivery_reference, ''))) < 3)
+    `).get().count || 0);
+    if (issuedTransmittalsWithoutEvidence) issues.push({ severity: 'error', message: `${issuedTransmittalsWithoutEvidence} issued document transmittal(s) lack delivery evidence.` });
+    const invalidTransmittalReceipts = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM transmittal_receipts
+      WHERE status = 'acknowledged'
+        AND (
+          acknowledged_at IS NULL OR LENGTH(TRIM(COALESCE(acknowledged_by, ''))) < 2
+          OR LENGTH(TRIM(COALESCE(evidence_reference, ''))) < 3
+        )
+    `).get().count || 0);
+    if (invalidTransmittalReceipts) issues.push({ severity: 'error', message: `${invalidTransmittalReceipts} document transmittal acknowledgment(s) lack required evidence.` });
+    const inconsistentAcknowledgedTransmittals = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM document_transmittals transmittals
+      WHERE transmittals.status = 'acknowledged'
+        AND EXISTS (
+          SELECT 1 FROM transmittal_receipts receipts
+          WHERE receipts.transmittal_id = transmittals.id AND receipts.status <> 'acknowledged'
+        )
+    `).get().count || 0);
+    if (inconsistentAcknowledgedTransmittals) issues.push({ severity: 'error', message: `${inconsistentAcknowledgedTransmittals} acknowledged document transmittal(s) still have an open recipient receipt.` });
     const selectionsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM client_selections WHERE status IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'ordered') AND approval_id IS NULL").get().count || 0);
     if (selectionsWithoutApproval) issues.push({ severity: 'warning', message: `${selectionsWithoutApproval} locked client selection(s) have no approval gate.` });
     const permitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM permit_records WHERE status IN ('active', 'approved', 'issued', 'submitted') AND approval_id IS NULL").get().count || 0);
@@ -26091,6 +26742,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         fieldReports: this.count('field_reports'),
         rfiRecords: this.count('rfi_records'),
         submittals: this.count('submittal_records'),
+        documentTransmittals: this.count('document_transmittals'),
+        transmittalReceipts: this.count('transmittal_receipts'),
         clientSelections: this.count('client_selections'),
         permitRecords: this.count('permit_records'),
         inspectionRecords: this.count('inspection_records'),
@@ -26513,6 +27166,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       approvedAt: row.approved_at,
       approvalId: row.approval_id,
       attachments: fromJson(row.attachments_json, []),
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapDocumentTransmittal(row) {
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      transmittalNumber: row.transmittal_number,
+      subject: row.subject,
+      purpose: row.purpose,
+      status: row.status,
+      approvalId: row.approval_id,
+      dueAt: row.due_at,
+      issuedAt: row.issued_at,
+      deliveryReference: row.delivery_reference,
+      documents: fromJson(row.documents_json, []),
+      recipients: fromJson(row.recipients_json, []),
+      message: row.message,
+      snapshotHash: row.snapshot_hash,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapTransmittalReceipt(row) {
+    return {
+      id: row.id,
+      transmittalId: row.transmittal_id,
+      recipientKey: row.recipient_key,
+      recipientName: row.recipient_name,
+      recipientEmail: row.recipient_email,
+      status: row.status,
+      dueAt: row.due_at,
+      acknowledgedAt: row.acknowledged_at,
+      acknowledgedBy: row.acknowledged_by,
+      evidenceReference: row.evidence_reference,
       data: fromJson(row.data_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -27292,6 +27985,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       if (Array.isArray(data.warnings) && data.warnings.length) preview.warnings = data.warnings.slice(0, 6);
       addSafeguard('Does not send client messages, publish crew instructions, order materials, clear site access, or approve safety evidence.');
+    } else if (targetType === 'document_transmittal') {
+      const row = this.db.prepare('SELECT * FROM document_transmittals WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapDocumentTransmittal(row) : null;
+      primaryEffect = `Approve controlled-document transmittal ${mapped?.transmittalNumber || data.transmittalNumber || ''}.`;
+      addEffect(`Authorize an operator to record issue evidence for ${mapped?.documents?.length || data.documentCount || 0} current controlled revision(s) to ${mapped?.recipients?.length || data.recipientCount || 0} retained recipient(s).`);
+      addSafeguard('Approval does not send files or messages. Issue remains blocked until an operator records real delivery evidence.');
+      addSafeguard('Every selected revision is rechecked as current immediately before issue, and acknowledgments require separate evidence per recipient.');
+      riskLevel = 'high';
+      preview.transmittalNumber = mapped?.transmittalNumber || data.transmittalNumber || null;
+      preview.subject = mapped?.subject || data.subject || null;
+      preview.purpose = mapped?.purpose || data.purpose || null;
+      preview.dueAt = mapped?.dueAt || data.dueAt || null;
+      preview.documents = mapped?.documents || data.documents || [];
+      preview.recipients = mapped?.recipients || data.recipients || [];
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'communication') {
       const message = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = message ? this.mapCommunication(message) : null;

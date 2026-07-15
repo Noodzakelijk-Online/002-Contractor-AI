@@ -7,6 +7,7 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
+const { verifySqliteBackupDatabase } = require('../scripts/restore-local-backup');
 
 function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -30,6 +31,20 @@ function createBackupLedger(file, title) {
   ledger.close();
   return job.id;
 }
+
+test('backup verification rejects a migration 023 ledger with missing transmittal constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-transmittal-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Transmittal schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_transmittal_receipts_due');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /document-transmittal constraints are incomplete: idx_transmittal_receipts_due/i
+  );
+});
 
 test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-restore safety copy', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-'));

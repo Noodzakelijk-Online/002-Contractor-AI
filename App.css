@@ -521,13 +521,21 @@
 .project-control-metrics > div:last-child { border-right: 0; }
 .project-control-metrics span { overflow-wrap: anywhere; color: #718079; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .project-control-metrics strong { color: #273d35; font-size: 15px; }
-.project-control-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); min-height: 34px; overflow: hidden; border: 1px solid #cfdcd6; border-radius: 6px; }
+.project-control-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 34px; overflow: hidden; border: 1px solid #cfdcd6; border-radius: 6px; }
 .project-control-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 34px; padding: 0 10px; color: #5d6f68; font: inherit; font-size: 11px; font-weight: 700; background: #fff; border: 0; border-right: 1px solid #dce5e1; cursor: pointer; }
 .project-control-tabs button:last-child { border-right: 0; }
 .project-control-tabs button:hover { background: #f1f6f4; }
 .project-control-tabs button.active { color: #fff; background: #286f5e; }
 .project-control-tabs button span { display: grid; min-width: 18px; height: 18px; place-items: center; color: inherit; background: rgb(255 255 255 / .18); border-radius: 4px; font-size: 9px; }
 .project-control-form { margin: 0; padding: 14px; background: #f7f9f8; border: 1px solid #dfe7e3; }
+.document-selection { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; margin: 0; padding: 12px; border: 1px solid #d6e2dd; }
+.document-selection legend { padding: 0 5px; color: #40564e; font-size: 10px; font-weight: 750; }
+.document-selection .checkbox-label { align-items: flex-start; min-width: 0; padding: 8px; background: #fff; border: 1px solid #e0e8e4; }
+.document-selection .checkbox-label span { display: grid; gap: 2px; min-width: 0; }
+.document-selection .checkbox-label strong, .document-selection .checkbox-label small { min-width: 0; overflow-wrap: anywhere; }
+.document-selection .checkbox-label strong { color: #304a40; font-size: 11px; }
+.document-selection .checkbox-label small { color: #6d7c76; font-size: 9px; font-weight: 500; }
+.document-selection .workflow-note { grid-column: 1 / -1; }
 .project-control-register { display: grid; border-top: 1px solid #dfe7e3; }
 .project-control-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; padding: 12px 0; border-bottom: 1px solid #e3eae7; }
 .project-control-copy { display: grid; gap: 4px; min-width: 0; }
@@ -551,6 +559,10 @@
   .project-control-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .project-control-metrics > div:nth-child(2) { border-right: 0; }
   .project-control-metrics > div:nth-child(-n + 2) { border-bottom: 1px solid #e2e9e6; }
+  .project-control-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .project-control-tabs button:nth-child(2) { border-right: 0; }
+  .project-control-tabs button:nth-child(-n + 2) { border-bottom: 1px solid #dce5e1; }
+  .document-selection { grid-template-columns: minmax(0, 1fr); }
   .project-control-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .project-control-actions { justify-content: flex-start; }
   .project-control-actions .secondary-button { flex: 1 1 130px; }
