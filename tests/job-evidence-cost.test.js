@@ -209,8 +209,9 @@ test('job command capture routes return refreshed dashboard summaries for eviden
   const euCompliance = detail.body.job.capabilities.find(capability => capability.key === 'eu-compliance');
   assert.ok(euCompliance);
   assert.ok(Number.isFinite(euCompliance.coverage));
-  assert.ok(euCompliance.requirements.some(requirement => requirement.key === 'wkb' && requirement.covered));
+  assert.ok(euCompliance.requirements.some(requirement => requirement.key === 'wkb' && !requirement.covered));
   assert.ok(euCompliance.recommendedActions.every(action => action.requirementKey && action.actionTarget));
+  assert.ok(euCompliance.recommendedActions.some(action => action.requirementKey === 'wkb' && action.actionTarget === 'client_handover_package'));
   assert.ok(euCompliance.recommendedActions.some(action =>
     ['permit_form', 'sds_form', 'site_access_form', 'approval_queue', 'audit_log'].includes(action.actionTarget)
   ));

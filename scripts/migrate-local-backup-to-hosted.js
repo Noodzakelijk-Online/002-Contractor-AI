@@ -194,11 +194,22 @@ function replaceRetainedReferences(value, replacements) {
   return value;
 }
 
-function rewriteRowReferences(row, columns, replacements) {
+const IMMUTABLE_ISSUE_PACKAGE_TYPES = new Set([
+  'quote_issue_package',
+  'invoice_issue_package',
+  'invoice_ubl_package',
+  'credit_note_issue_package',
+  'credit_note_ubl_package',
+  'handover_issue_package'
+]);
+
+function rewriteRowReferences(table, row, columns, replacements) {
   const rewritten = { ...row };
   if (typeof rewritten.storage_ref === 'string' && replacements.has(rewritten.storage_ref)) {
     rewritten.storage_ref = replacements.get(rewritten.storage_ref);
   }
+  const immutablePayload = table === 'documents' && IMMUTABLE_ISSUE_PACKAGE_TYPES.has(String(rewritten.type || '').toLowerCase());
+  if (immutablePayload) return rewritten;
   for (const column of columns.filter(name => name.endsWith('_json'))) {
     if (typeof rewritten[column] !== 'string' || !rewritten[column].trim()) continue;
     try {
@@ -454,7 +465,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       const targetColumns = await destinationColumns(client, table);
       const missingColumns = columns.filter(column => !targetColumns.includes(column));
       if (missingColumns.length) throw new Error(`Hosted table ${table} is missing columns: ${missingColumns.join(', ')}`);
-      const rows = sourceRowsByTable.get(table).map(row => rewriteRowReferences(row, columns, evidence.replacements));
+      const rows = sourceRowsByTable.get(table).map(row => rewriteRowReferences(table, row, columns, evidence.replacements));
       await insertRows(client, table, columns, rows);
       const destinationRows = (await client.query(
         `SELECT ${columns.map(quotedIdentifier).join(', ')} FROM ${quotedIdentifier(table)}`
@@ -506,7 +517,14 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
     const validationLedger = new ContractorOperatingLedger({ databaseUrl });
     try {
       const diagnostics = validationLedger.diagnose();
-      if (!diagnostics.valid) throw new Error(`Hosted ledger diagnostics reported ${diagnostics.issueCount} issue(s) after migration.`);
+      if (!diagnostics.valid) {
+        const issueSummary = (diagnostics.issues || [])
+          .slice(0, 5)
+          .map(issue => issue.message)
+          .filter(Boolean)
+          .join('; ');
+        throw new Error(`Hosted ledger diagnostics reported ${diagnostics.issueCount} issue(s) after migration.${issueSummary ? ` ${issueSummary}` : ''}`);
+      }
       const auditIntegrity = validationLedger.verifyAuditIntegrity();
       if (!auditIntegrity.valid) throw new Error('Hosted ledger audit chain failed verification after migration.');
       const receipt = validationLedger.listAudit({ entityType: 'operational_migration', limit: 100 })
