@@ -2721,6 +2721,76 @@ app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/receipts/:re
   }));
 });
 
+app.post('/api/ledger/jobs/:id/project-meetings', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    meeting: operatingLedger.createProjectMeeting(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/submit', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.submitProjectMeetingMinutes(req.params.id, req.params.meetingId, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalDeliveryInitiated: false
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/issue', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    meeting: operatingLedger.recordProjectMeetingIssue(
+      req.params.id,
+      req.params.meetingId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalDeliveryInitiated: false,
+    externalDeliveryPerformedByContractorAI: false
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/actions/:actionId/complete', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.completeProjectMeetingAction(
+      req.params.id,
+      req.params.meetingId,
+      req.params.actionId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/follow-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createProjectMeetingFollowUp(
+      req.params.id,
+      req.params.meetingId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/time-logs', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
@@ -3887,6 +3957,9 @@ function validateOperationalExport(snapshot) {
       if (snapshot.projectControls.transmittals !== undefined && !Array.isArray(snapshot.projectControls.transmittals)) {
         problems.push('Export projectControls transmittals must be a collection when present.');
       }
+      if (snapshot.projectControls.meetings !== undefined && !Array.isArray(snapshot.projectControls.meetings)) {
+        problems.push('Export projectControls meetings must be a collection when present.');
+      }
     }
   }
   const integrity = snapshot.integrity;
@@ -3925,6 +3998,7 @@ function validateOperationalExport(snapshot) {
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
       submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
       transmittals: Array.isArray(snapshot.projectControls?.transmittals) ? snapshot.projectControls.transmittals.length : 0,
+      meetings: Array.isArray(snapshot.projectControls?.meetings) ? snapshot.projectControls.meetings.length : 0,
       controlledDocuments: Array.isArray(snapshot.projectControls?.controlledDocuments) ? snapshot.projectControls.controlledDocuments.length : 0,
       handoverPackages: snapshot.handoverPackages.length,
       approvals: snapshot.approvals.length,

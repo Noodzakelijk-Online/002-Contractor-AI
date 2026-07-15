@@ -24,13 +24,13 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'project-execution',
     label: 'Project execution ledger',
     vendors: ['Procore', 'Autodesk', 'Buildertrend', 'Contractor Foreman'],
-    capabilities: ['jobs', 'tasks', 'schedule', 'site visits', 'change orders', 'RFIs', 'submittals', 'daily logs', 'photos', 'documents', 'punch and closeout'],
+    capabilities: ['jobs', 'tasks', 'schedule', 'site visits', 'change orders', 'RFIs', 'submittals', 'meeting minutes', 'daily logs', 'photos', 'documents', 'punch and closeout'],
     sourceEvidence: [
       'Procore lists project management, schedule, site diary, observations, submittals, photos, snag/punch and closeout-style execution tools.',
       'Buildertrend and Contractor Foreman emphasize schedules, change orders, daily logs, punch lists, work orders and document control.'
     ],
     serviceGroups: [
-      { name: 'Execution control', services: ['Job tasks', 'schedule plan', 'change control', 'RFI trail', 'submittal package'] },
+      { name: 'Execution control', services: ['Job tasks', 'schedule plan', 'change control', 'RFI trail', 'submittal package', 'meeting minutes and actions'] },
       { name: 'Evidence and closeout', services: ['Daily report', 'documents/photos', 'punch list', 'handover readiness'] }
     ]
   },
@@ -123,6 +123,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'rfi', label: 'RFI trail', table: 'rfi_records', detailKey: 'rfis' },
     { key: 'submittal', label: 'Submittals', table: 'submittal_records', detailKey: 'submittals' },
     { key: 'transmittal', label: 'Document transmittals', table: 'document_transmittals', detailKey: 'transmittals' },
+    { key: 'meeting', label: 'Meeting minutes and actions', table: 'project_meetings', detailKey: 'projectMeetings' },
     { key: 'field_report', label: 'Daily field report', table: 'field_reports', detailKey: 'fieldReports' },
     { key: 'documents', label: 'Documents/photos', table: 'documents', detailKey: 'documents' },
     { key: 'closeout', label: 'Punch/closeout', table: 'punch_items', detailKey: 'punchItems' }
@@ -315,6 +316,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     rfi: 'rfi_form',
     submittal: 'submittal_form',
     transmittal: 'transmittal_form',
+    meeting: 'project_meeting_form',
     field_report: 'field_report_form',
     documents: 'document_form',
     closeout: 'closeout_form',
@@ -1827,6 +1829,81 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
         CREATE INDEX IF NOT EXISTS idx_transmittal_receipts_due
           ON transmittal_receipts(status, due_at, updated_at);
+      `);
+    }
+  },
+  {
+    version: '024_project_meeting_minutes',
+    description: 'Retain approval-backed project meeting minutes, decisions, linked actions, follow-up carryover, and issue evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_meeting_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS project_meetings (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          meeting_number TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          meeting_type TEXT NOT NULL DEFAULT 'coordination',
+          status TEXT NOT NULL DEFAULT 'draft',
+          scheduled_at TEXT NOT NULL,
+          started_at TEXT,
+          ended_at TEXT,
+          location TEXT,
+          chair TEXT,
+          attendees_json TEXT NOT NULL DEFAULT '[]',
+          agenda_json TEXT NOT NULL DEFAULT '[]',
+          minutes_summary TEXT,
+          decisions_json TEXT NOT NULL DEFAULT '[]',
+          approval_id TEXT,
+          snapshot_hash TEXT,
+          issued_at TEXT,
+          delivery_reference TEXT,
+          follows_meeting_id TEXT REFERENCES project_meetings(id) ON DELETE SET NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_meetings_job
+          ON project_meetings(job_id, scheduled_at DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_project_meetings_status
+          ON project_meetings(status, scheduled_at, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_project_meetings_follows
+          ON project_meetings(follows_meeting_id);
+
+        CREATE TABLE IF NOT EXISTS meeting_action_items (
+          id TEXT PRIMARY KEY,
+          meeting_id TEXT NOT NULL REFERENCES project_meetings(id) ON DELETE CASCADE,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          item_number INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT,
+          owner_name TEXT NOT NULL,
+          due_at TEXT,
+          priority TEXT NOT NULL DEFAULT 'medium',
+          status TEXT NOT NULL DEFAULT 'proposed',
+          linked_task_id TEXT REFERENCES job_tasks(id) ON DELETE SET NULL,
+          completed_at TEXT,
+          completion_evidence TEXT,
+          carried_from_action_id TEXT REFERENCES meeting_action_items(id) ON DELETE RESTRICT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(meeting_id, item_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_meeting_actions_due
+          ON meeting_action_items(status, due_at, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_meeting_actions_meeting
+          ON meeting_action_items(meeting_id, item_number);
+        CREATE INDEX IF NOT EXISTS idx_meeting_actions_task
+          ON meeting_action_items(linked_task_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_actions_active_carryover
+          ON meeting_action_items(carried_from_action_id)
+          WHERE carried_from_action_id IS NOT NULL AND status <> 'cancelled';
       `);
     }
   }
@@ -8899,7 +8976,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   addTask(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
-    const id = makeId('task');
+    const id = normalizeText(options.id || payload.id, '') || makeId('task');
     const timestamp = nowIso();
     const schedule = normalizeTaskSchedule(payload);
     this.db.prepare(`
@@ -12824,6 +12901,579 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return rows.map(row => this.mapDocument(row));
   }
 
+  allocateProjectMeetingReference(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('project_meeting_date_invalid', 'Meeting date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO project_meeting_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE project_meeting_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable project meeting number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'project_meeting_number_allocation_failed';
+      throw error;
+    }
+    return `MTG-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  normalizeProjectMeetingDate(value, label, options = {}) {
+    const raw = normalizeText(value, '');
+    if (!raw) {
+      if (options.required) throw ledgerInputError('project_meeting_date_required', `${label} is required.`);
+      return null;
+    }
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) {
+      throw ledgerInputError('project_meeting_date_invalid', `${label} must be a valid date and time.`);
+    }
+    return parsed.toISOString();
+  }
+
+  normalizeProjectMeetingTextList(value, label, options = {}) {
+    const values = Array.isArray(value)
+      ? value
+      : String(value || '').split(/\r?\n/);
+    const normalized = values
+      .map(item => normalizeText(typeof item === 'object' && item !== null ? item.text || item.title || item.decision : item, ''))
+      .filter(Boolean);
+    const maxItems = options.maxItems || 100;
+    const maxLength = options.maxLength || 1000;
+    if (normalized.length > maxItems) {
+      throw ledgerInputError('project_meeting_list_too_long', `${label} cannot contain more than ${maxItems} items.`);
+    }
+    if (options.required && normalized.length < 1) {
+      throw ledgerInputError('project_meeting_list_required', `${label} requires at least one item.`);
+    }
+    const invalid = normalized.find(item => item.length > maxLength);
+    if (invalid) {
+      throw ledgerInputError('project_meeting_item_too_long', `${label} items cannot exceed ${maxLength} characters.`);
+    }
+    return normalized;
+  }
+
+  normalizeProjectMeetingAttendees(value) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
+      throw ledgerInputError('project_meeting_attendees_invalid', 'Meeting minutes require between 1 and 100 attendees.');
+    }
+    const seen = new Set();
+    return value.map((attendee, index) => {
+      const source = typeof attendee === 'string' ? { name: attendee } : attendee;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        throw ledgerInputError('project_meeting_attendee_invalid', `Attendee ${index + 1} must contain a name.`);
+      }
+      const name = normalizeText(source.name || source.attendeeName || source.attendee_name, '');
+      const email = normalizeText(source.email || source.attendeeEmail || source.attendee_email, '').toLowerCase();
+      const company = normalizeText(source.company || source.organization, '');
+      if (name.length < 2 || name.length > 120) {
+        throw ledgerInputError('project_meeting_attendee_invalid', `Attendee ${index + 1} name must contain 2 to 120 characters.`);
+      }
+      if (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        throw ledgerInputError('project_meeting_attendee_invalid', `Attendee ${index + 1} email address is invalid.`);
+      }
+      if (company.length > 120) {
+        throw ledgerInputError('project_meeting_attendee_invalid', `Attendee ${index + 1} company cannot exceed 120 characters.`);
+      }
+      const key = email || name.toLowerCase();
+      if (seen.has(key)) {
+        throw ledgerInputError('project_meeting_attendee_duplicate', `${name} is listed more than once.`);
+      }
+      seen.add(key);
+      return { name, email: email || null, company: company || null };
+    });
+  }
+
+  normalizeProjectMeetingActions(value, options = {}) {
+    if (value === undefined || value === null || value === '') return [];
+    if (!Array.isArray(value) || value.length > 100) {
+      throw ledgerInputError('project_meeting_actions_invalid', 'Meeting actions must be a collection of no more than 100 items.');
+    }
+    return value.map((action, index) => {
+      if (!action || typeof action !== 'object' || Array.isArray(action)) {
+        throw ledgerInputError('project_meeting_action_invalid', `Action ${index + 1} must contain a title and owner.`);
+      }
+      const title = normalizeText(action.title || action.action, '');
+      const description = normalizeText(action.description || action.notes, '');
+      const ownerName = normalizeText(action.ownerName || action.owner_name || action.owner, '');
+      const dueAt = this.normalizeProjectMeetingDate(action.dueAt || action.due_at, `Action ${index + 1} due date`);
+      if (title.length < 3 || title.length > 240) {
+        throw ledgerInputError('project_meeting_action_invalid', `Action ${index + 1} title must contain 3 to 240 characters.`);
+      }
+      if (ownerName.length < 2 || ownerName.length > 120) {
+        throw ledgerInputError('project_meeting_action_invalid', `Action ${index + 1} owner must contain 2 to 120 characters.`);
+      }
+      if (description.length > 4000) {
+        throw ledgerInputError('project_meeting_action_invalid', `Action ${index + 1} description cannot exceed 4,000 characters.`);
+      }
+      return {
+        title,
+        description: description || null,
+        ownerName,
+        dueAt,
+        priority: normalizePriority(action.priority),
+        carriedFromActionId: options.allowCarryover ? normalizeText(action.carriedFromActionId || action.carried_from_action_id, '') || null : null,
+        linkedTaskId: options.allowCarryover ? normalizeText(action.linkedTaskId || action.linked_task_id, '') || null : null
+      };
+    });
+  }
+
+  projectMeetingSnapshot(row, actionRows = null) {
+    const actions = (actionRows || this.db.prepare('SELECT * FROM meeting_action_items WHERE meeting_id = ? ORDER BY item_number').all(row.id))
+      .map(action => ({
+        itemNumber: Number(action.item_number ?? action.itemNumber),
+        title: action.title,
+        description: action.description || null,
+        ownerName: action.owner_name || action.ownerName,
+        dueAt: action.due_at || action.dueAt || null,
+        priority: action.priority,
+        carriedFromActionId: action.carried_from_action_id || action.carriedFromActionId || null
+      }));
+    return {
+      meetingNumber: row.meeting_number || row.meetingNumber,
+      title: row.title,
+      meetingType: row.meeting_type || row.meetingType,
+      scheduledAt: row.scheduled_at || row.scheduledAt,
+      startedAt: row.started_at || row.startedAt || null,
+      endedAt: row.ended_at || row.endedAt || null,
+      location: row.location || null,
+      chair: row.chair || null,
+      attendees: row.attendees_json ? fromJson(row.attendees_json, []) : row.attendees || [],
+      agenda: row.agenda_json ? fromJson(row.agenda_json, []) : row.agenda || [],
+      minutesSummary: row.minutes_summary || row.minutesSummary || null,
+      decisions: row.decisions_json ? fromJson(row.decisions_json, []) : row.decisions || [],
+      actions
+    };
+  }
+
+  createProjectMeeting(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const title = normalizeText(payload.title || payload.subject, '');
+      const meetingType = normalizeStatus(payload.meetingType || payload.meeting_type, 'coordination');
+      const allowedTypes = new Set(['coordination', 'progress', 'design', 'client', 'commercial', 'closeout', 'kickoff']);
+      const scheduledAt = this.normalizeProjectMeetingDate(payload.scheduledAt || payload.scheduled_at, 'Scheduled meeting date', { required: true });
+      const startedAt = this.normalizeProjectMeetingDate(payload.startedAt || payload.started_at, 'Meeting start');
+      const endedAt = this.normalizeProjectMeetingDate(payload.endedAt || payload.ended_at, 'Meeting end');
+      const location = normalizeText(payload.location, '');
+      const chair = normalizeText(payload.chair, '');
+      const minutesSummary = normalizeText(payload.minutesSummary || payload.minutes_summary || payload.summary, '');
+      if (title.length < 3 || title.length > 180) {
+        throw ledgerInputError('project_meeting_title_invalid', 'Meeting title must contain 3 to 180 characters.');
+      }
+      if (!allowedTypes.has(meetingType)) {
+        throw ledgerInputError('project_meeting_type_invalid', `Meeting type must be one of: ${[...allowedTypes].join(', ')}.`);
+      }
+      if (startedAt && endedAt && Date.parse(endedAt) < Date.parse(startedAt)) {
+        throw ledgerInputError('project_meeting_time_invalid', 'Meeting end cannot be before meeting start.');
+      }
+      if (location.length > 240 || chair.length > 120 || minutesSummary.length > 12000) {
+        throw ledgerInputError('project_meeting_text_invalid', 'Meeting location, chair, or minutes summary exceeds the retained text limit.');
+      }
+      const attendees = this.normalizeProjectMeetingAttendees(payload.attendees);
+      const agenda = this.normalizeProjectMeetingTextList(payload.agenda, 'Meeting agenda', { required: true, maxItems: 100, maxLength: 1000 });
+      const decisions = this.normalizeProjectMeetingTextList(payload.decisions, 'Meeting decisions', { maxItems: 100, maxLength: 2000 });
+      const actions = this.normalizeProjectMeetingActions(payload.actions || payload.actionItems || payload.action_items, {
+        allowCarryover: options.allowCarryover === true
+      });
+      const followsMeetingId = normalizeText(options.followsMeetingId || payload.followsMeetingId || payload.follows_meeting_id, '') || null;
+      if (followsMeetingId) {
+        const source = this.db.prepare('SELECT id, job_id FROM project_meetings WHERE id = ?').get(followsMeetingId);
+        if (!source || source.job_id !== jobId) {
+          throw ledgerInputError('project_meeting_followup_source_invalid', 'Follow-up meeting source must belong to the selected job.');
+        }
+      }
+      const timestamp = nowIso();
+      const id = makeId('meeting');
+      const meetingNumber = this.allocateProjectMeetingReference(scheduledAt);
+      this.db.prepare(`
+        INSERT INTO project_meetings (
+          id, job_id, meeting_number, title, meeting_type, status, scheduled_at, started_at, ended_at,
+          location, chair, attendees_json, agenda_json, minutes_summary, decisions_json, follows_meeting_id,
+          data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        meetingNumber,
+        title,
+        meetingType,
+        scheduledAt,
+        startedAt,
+        endedAt,
+        location || null,
+        chair || null,
+        toJson(attendees, []),
+        toJson(agenda, []),
+        minutesSummary || null,
+        toJson(decisions, []),
+        followsMeetingId,
+        toJson({
+          ...(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {}),
+          createdBy: actor,
+          externalDeliveryInitiated: false
+        }),
+        timestamp,
+        timestamp
+      );
+      actions.forEach((action, index) => {
+        this.db.prepare(`
+          INSERT INTO meeting_action_items (
+            id, meeting_id, job_id, item_number, title, description, owner_name, due_at, priority,
+            status, linked_task_id, carried_from_action_id, data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)
+        `).run(
+          makeId('meeting_action'),
+          id,
+          jobId,
+          index + 1,
+          action.title,
+          action.description,
+          action.ownerName,
+          action.dueAt,
+          action.priority,
+          action.linkedTaskId,
+          action.carriedFromActionId,
+          toJson({ source: action.carriedFromActionId ? 'meeting_carryover' : 'meeting_minutes' }),
+          timestamp,
+          timestamp
+        );
+      });
+      const meeting = this.getProjectMeeting(id);
+      this.audit({
+        entityType: 'project_meeting',
+        entityId: id,
+        jobId,
+        action: followsMeetingId ? 'create_project_meeting_followup' : 'create_project_meeting',
+        actor,
+        after: meeting,
+        metadata: { meetingNumber, actionCount: actions.length, followsMeetingId, externalCommitments: 0 }
+      });
+      return meeting;
+    });
+  }
+
+  getProjectMeeting(meetingId, options = {}) {
+    const row = options.jobId
+      ? this.db.prepare('SELECT * FROM project_meetings WHERE id = ? AND job_id = ?').get(meetingId, options.jobId)
+      : this.db.prepare('SELECT * FROM project_meetings WHERE id = ?').get(meetingId);
+    if (!row) {
+      const error = new Error('Project meeting not found');
+      error.statusCode = 404;
+      error.code = 'project_meeting_not_found';
+      throw error;
+    }
+    return {
+      ...this.mapProjectMeeting(row),
+      actions: this.db.prepare('SELECT * FROM meeting_action_items WHERE meeting_id = ? ORDER BY item_number')
+        .all(row.id)
+        .map(action => this.mapMeetingAction(action))
+    };
+  }
+
+  submitProjectMeetingMinutes(jobId, meetingId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const before = this.getProjectMeeting(meetingId, { jobId });
+      if (before.status === 'pending_approval') {
+        const pending = before.approvalId ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(before.approvalId) : null;
+        return { meeting: before, approval: pending ? this.mapApproval(pending) : null, replayed: true };
+      }
+      if (before.status !== 'draft') {
+        const error = new Error('Only draft project meeting minutes can be submitted for approval.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_not_draft';
+        throw error;
+      }
+      if (before.minutesSummary.trim().length < 4) {
+        throw ledgerInputError('project_meeting_minutes_required', 'Meeting minutes require a summary of at least 4 characters before approval.');
+      }
+      const row = this.db.prepare('SELECT * FROM project_meetings WHERE id = ?').get(meetingId);
+      const snapshot = this.projectMeetingSnapshot(row);
+      const snapshotHash = sha256Json(snapshot);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE project_meetings
+        SET status = 'pending_approval', snapshot_hash = ?, updated_at = ?
+        WHERE id = ? AND status = 'draft'
+      `).run(snapshotHash, timestamp, meetingId);
+      const approval = this.createApproval({
+        targetType: 'project_meeting_minutes',
+        targetId: meetingId,
+        jobId,
+        approvalType: 'project_meeting_minutes_issue',
+        summary: `Approve ${before.meetingNumber}: ${before.title}`,
+        reason: normalizeText(payload.reason || payload.notes, '') || 'Formal project minutes and assigned actions require approval before task activation or recorded distribution.',
+        data: {
+          meetingNumber: before.meetingNumber,
+          title: before.title,
+          attendeeCount: before.attendees.length,
+          decisionCount: before.decisions.length,
+          actionCount: before.actions.length,
+          snapshotHash,
+          snapshot,
+          externalDeliveryInitiated: false
+        }
+      }, { actor: options.actor || 'Contractor.AI', audit: false });
+      this.db.prepare('UPDATE project_meetings SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), meetingId);
+      const meeting = this.getProjectMeeting(meetingId, { jobId });
+      this.audit({
+        entityType: 'project_meeting',
+        entityId: meetingId,
+        jobId,
+        action: 'submit_project_meeting_minutes',
+        actor: options.actor || 'Contractor.AI',
+        before,
+        after: meeting,
+        metadata: { approvalId: approval.id, snapshotHash, actionCount: meeting.actions.length, externalCommitments: 0 }
+      });
+      return { meeting, approval, approvalRequiredBeforeIssue: true, externalDeliveryInitiated: false };
+    });
+  }
+
+  recordProjectMeetingIssue(jobId, meetingId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const before = this.getProjectMeeting(meetingId, { jobId });
+      const deliveryReference = normalizeText(payload.deliveryReference || payload.delivery_reference || payload.evidenceReference || payload.evidence_reference, '');
+      if (deliveryReference.length < 3 || deliveryReference.length > 240) {
+        throw ledgerInputError('project_meeting_delivery_evidence_required', 'Recorded minutes issue requires a delivery evidence reference between 3 and 240 characters.');
+      }
+      if (before.status === 'issued') {
+        if (before.deliveryReference === deliveryReference) return { ...before, replayed: true };
+        const error = new Error('These meeting minutes were already issued with different retained delivery evidence.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_already_issued';
+        throw error;
+      }
+      if (before.status !== 'approved') {
+        const error = new Error('Meeting minutes must be approved before issue evidence can be recorded.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_approval_required';
+        throw error;
+      }
+      const approval = before.approvalId
+        ? this.db.prepare("SELECT status FROM approvals WHERE id = ? AND target_type = 'project_meeting_minutes'").get(before.approvalId)
+        : null;
+      if (approval?.status !== 'approved') {
+        const error = new Error('The retained meeting-minutes approval is not resolved as approved.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_approval_invalid';
+        throw error;
+      }
+      const row = this.db.prepare('SELECT * FROM project_meetings WHERE id = ?').get(meetingId);
+      if (!row.snapshot_hash || sha256Json(this.projectMeetingSnapshot(row)) !== row.snapshot_hash) {
+        const error = new Error('The retained project meeting snapshot failed integrity verification.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_snapshot_integrity_failed';
+        throw error;
+      }
+      const issuedAt = this.normalizeProjectMeetingDate(payload.issuedAt || payload.issued_at || nowIso(), 'Meeting minutes issue date', { required: true });
+      if (Date.parse(issuedAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('project_meeting_issued_at_invalid', 'Meeting minutes issue date cannot be in the future.');
+      }
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE project_meetings
+        SET status = 'issued', issued_at = ?, delivery_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        issuedAt,
+        deliveryReference,
+        toJson({ ...before.data, issuedBy: options.actor || 'Contractor.AI', externalDeliveryInitiated: false }),
+        timestamp,
+        meetingId
+      );
+      const after = this.getProjectMeeting(meetingId, { jobId });
+      this.audit({
+        entityType: 'project_meeting',
+        entityId: meetingId,
+        jobId,
+        action: 'record_project_meeting_issue',
+        actor: options.actor || 'Contractor.AI',
+        before,
+        after,
+        metadata: { deliveryReference, externalDeliveryInitiated: false, externalDeliveryPerformedByContractorAI: false }
+      });
+      return after;
+    });
+  }
+
+  completeProjectMeetingAction(jobId, meetingId, actionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      this.getProjectMeeting(meetingId, { jobId });
+      const row = this.db.prepare('SELECT * FROM meeting_action_items WHERE id = ? AND meeting_id = ? AND job_id = ?')
+        .get(actionId, meetingId, jobId);
+      if (!row) {
+        const error = new Error('Meeting action item not found');
+        error.statusCode = 404;
+        error.code = 'meeting_action_not_found';
+        throw error;
+      }
+      const evidence = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.completionEvidence || payload.completion_evidence, '');
+      const completedBy = normalizeText(payload.completedBy || payload.completed_by || options.actor, '');
+      if (evidence.length < 3 || evidence.length > 500) {
+        throw ledgerInputError('meeting_action_evidence_required', 'Completing a meeting action requires an evidence reference between 3 and 500 characters.');
+      }
+      if (completedBy.length < 2 || completedBy.length > 120) {
+        throw ledgerInputError('meeting_action_completed_by_invalid', 'Completed by must contain 2 to 120 characters.');
+      }
+      if (row.status === 'completed') {
+        if (row.completion_evidence === evidence) return { meeting: this.getProjectMeeting(meetingId, { jobId }), action: { ...this.mapMeetingAction(row), replayed: true }, replayed: true };
+        const error = new Error('This meeting action was already completed with different retained evidence.');
+        error.statusCode = 409;
+        error.code = 'meeting_action_already_completed';
+        throw error;
+      }
+      if (row.status !== 'open') {
+        const error = new Error('Only an approved open meeting action can be completed.');
+        error.statusCode = 409;
+        error.code = 'meeting_action_not_open';
+        throw error;
+      }
+      const completedAt = this.normalizeProjectMeetingDate(payload.completedAt || payload.completed_at || nowIso(), 'Action completion date', { required: true });
+      if (Date.parse(completedAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('meeting_action_completed_at_invalid', 'Action completion date cannot be in the future.');
+      }
+      const before = this.mapMeetingAction(row);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE meeting_action_items
+        SET status = 'completed', completed_at = ?, completion_evidence = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        completedAt,
+        evidence,
+        toJson({ ...before.data, completedBy, completionNotes: normalizeText(payload.notes, '') || null }),
+        timestamp,
+        actionId
+      );
+      if (row.linked_task_id) {
+        const taskRow = this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(row.linked_task_id, jobId);
+        if (!taskRow) {
+          const error = new Error('The linked meeting action task no longer exists.');
+          error.statusCode = 409;
+          error.code = 'meeting_action_task_missing';
+          throw error;
+        }
+        if (!['completed', 'cancelled'].includes(taskRow.status)) {
+          const beforeTask = this.mapTask(taskRow);
+          this.db.prepare(`
+            UPDATE job_tasks
+            SET status = 'completed', completed_at = ?, data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(
+            completedAt,
+            toJson({ ...beforeTask.data, meetingActionCompletionEvidence: evidence, meetingActionId: actionId, completedBy }),
+            timestamp,
+            row.linked_task_id
+          );
+          this.audit({
+            entityType: 'task',
+            entityId: row.linked_task_id,
+            jobId,
+            action: 'complete_task_from_meeting_action',
+            actor: options.actor || completedBy,
+            before: beforeTask,
+            after: this.mapTask(this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(row.linked_task_id)),
+            metadata: { meetingId, meetingActionId: actionId, completionEvidence: evidence }
+          });
+        }
+      }
+      const action = this.mapMeetingAction(this.db.prepare('SELECT * FROM meeting_action_items WHERE id = ?').get(actionId));
+      this.audit({
+        entityType: 'meeting_action',
+        entityId: actionId,
+        jobId,
+        action: 'complete_project_meeting_action',
+        actor: options.actor || completedBy,
+        before,
+        after: action,
+        metadata: { meetingId, linkedTaskId: row.linked_task_id || null, completionEvidence: evidence }
+      });
+      return { meeting: this.getProjectMeeting(meetingId, { jobId }), action };
+    });
+  }
+
+  createProjectMeetingFollowUp(jobId, meetingId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const source = this.getProjectMeeting(meetingId, { jobId });
+      if (!['approved', 'issued'].includes(source.status)) {
+        const error = new Error('Follow-up meetings can be created only from approved or issued minutes.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_followup_source_not_approved';
+        throw error;
+      }
+      const requestedIds = new Set(
+        (Array.isArray(payload.actionIds || payload.action_ids) ? payload.actionIds || payload.action_ids : [])
+          .map(value => normalizeText(value, ''))
+          .filter(Boolean)
+      );
+      const candidates = source.actions.filter(action => action.status === 'open' && (!requestedIds.size || requestedIds.has(action.id)));
+      if (!candidates.length) {
+        throw ledgerInputError('project_meeting_followup_actions_required', 'A follow-up meeting requires at least one unresolved action item.');
+      }
+      if (requestedIds.size && requestedIds.size !== candidates.length) {
+        throw ledgerInputError('project_meeting_followup_actions_invalid', 'Every selected carry-forward action must be open on the source meeting.');
+      }
+      for (const action of candidates) {
+        const existing = this.db.prepare(`
+          SELECT id FROM meeting_action_items
+          WHERE carried_from_action_id = ? AND status <> 'cancelled'
+          LIMIT 1
+        `).get(action.id);
+        if (existing) {
+          const error = new Error('One or more selected actions are already retained on an active follow-up meeting.');
+          error.statusCode = 409;
+          error.code = 'project_meeting_action_already_carried';
+          throw error;
+        }
+      }
+      const scheduledAt = payload.scheduledAt || payload.scheduled_at;
+      const followUp = this.createProjectMeeting(jobId, {
+        title: normalizeText(payload.title, '') || `Follow-up: ${source.title}`,
+        meetingType: payload.meetingType || payload.meeting_type || source.meetingType,
+        scheduledAt,
+        location: payload.location === undefined ? source.location : payload.location,
+        chair: payload.chair === undefined ? source.chair : payload.chair,
+        attendees: Array.isArray(payload.attendees) ? payload.attendees : source.attendees,
+        agenda: this.normalizeProjectMeetingTextList(payload.agenda, 'Follow-up agenda', { maxItems: 100, maxLength: 1000 }).concat(
+          candidates.map(action => `Carry forward action ${action.itemNumber}: ${action.title}`)
+        ),
+        minutesSummary: normalizeText(payload.minutesSummary || payload.minutes_summary || payload.summary, ''),
+        decisions: this.normalizeProjectMeetingTextList(payload.decisions, 'Follow-up decisions', { maxItems: 100, maxLength: 2000 }),
+        actions: candidates.map(action => ({
+          title: action.title,
+          description: action.description,
+          ownerName: action.ownerName,
+          dueAt: action.dueAt,
+          priority: action.priority,
+          linkedTaskId: action.linkedTaskId,
+          carriedFromActionId: action.id
+        })),
+        data: { sourceMeetingNumber: source.meetingNumber }
+      }, {
+        actor: options.actor || 'Contractor.AI',
+        allowCarryover: true,
+        followsMeetingId: meetingId
+      });
+      return { meeting: followUp, carriedActionCount: candidates.length, sourceMeetingId: meetingId };
+    });
+  }
+
   listProjectControls(filters = {}) {
     const jobId = normalizeText(filters.jobId || filters.job_id, '');
     const limit = safeLimit(filters.limit, 1000, 5000);
@@ -12837,6 +13487,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ? this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC LIMIT ?').all(jobId, limit)
         : this.db.prepare('SELECT * FROM document_transmittals ORDER BY created_at DESC LIMIT ?').all(limit)
       ).map(row => this.getDocumentTransmittal(row.id)),
+      meetings: (jobId
+        ? this.db.prepare('SELECT * FROM project_meetings WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC LIMIT ?').all(jobId, limit)
+        : this.db.prepare('SELECT * FROM project_meetings ORDER BY scheduled_at DESC, created_at DESC LIMIT ?').all(limit)
+      ).map(row => this.getProjectMeeting(row.id)),
       controlledDocuments: (jobId
         ? this.db.prepare(`
             SELECT * FROM documents
@@ -18913,6 +19567,35 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = 'cancelled', updated_at = ?
           WHERE transmittal_id = ? AND status = 'pending_issue'
         `).run(timestamp, before.target_id);
+      } else if (before.target_type === 'project_meeting_minutes') {
+        const meetingData = fromJson(
+          this.db.prepare('SELECT data_json FROM project_meetings WHERE id = ?').get(before.target_id)?.data_json,
+          {}
+        );
+        this.db.prepare(`
+          UPDATE project_meetings
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...meetingData,
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
+        this.db.prepare(`
+          UPDATE meeting_action_items
+          SET status = 'cancelled', updated_at = ?
+          WHERE meeting_id = ? AND status = 'proposed'
+        `).run(timestamp, before.target_id);
       } else if (before.target_type === 'payment') {
         const payment = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(before.target_id);
         if (payment && normalizeStatus(payment.status, '') === 'pending_confirmation') {
@@ -19081,6 +19764,113 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       WHERE id = ?
     `).run(contractValue, toJson(data, {}), nowIso(), jobId);
     return { baseline, changeOrderNet, contractValue };
+  }
+
+  applyProjectMeetingApproval(meetingId, timestamp = nowIso()) {
+    const row = this.db.prepare('SELECT * FROM project_meetings WHERE id = ?').get(meetingId);
+    if (!row || row.status !== 'pending_approval') return null;
+    if (!row.snapshot_hash || sha256Json(this.projectMeetingSnapshot(row)) !== row.snapshot_hash) {
+      const error = new Error('The retained project meeting snapshot failed integrity verification.');
+      error.statusCode = 409;
+      error.code = 'project_meeting_snapshot_integrity_failed';
+      throw error;
+    }
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE target_type = 'project_meeting_minutes' AND target_id = ? AND status = 'approved'
+      ORDER BY resolved_at DESC, created_at DESC
+      LIMIT 1
+    `).get(meetingId);
+    if (!approval) {
+      const error = new Error('Approved meeting minutes require a retained approval resolution.');
+      error.statusCode = 409;
+      error.code = 'project_meeting_approval_missing';
+      throw error;
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const actions = this.db.prepare('SELECT * FROM meeting_action_items WHERE meeting_id = ? ORDER BY item_number').all(meetingId);
+    for (const action of actions) {
+      if (action.status !== 'proposed') {
+        const error = new Error('Meeting action state changed after minutes submission.');
+        error.statusCode = 409;
+        error.code = 'project_meeting_action_snapshot_changed';
+        throw error;
+      }
+      let taskId = action.linked_task_id;
+      if (action.carried_from_action_id) {
+        const source = this.db.prepare('SELECT * FROM meeting_action_items WHERE id = ? AND job_id = ?').get(action.carried_from_action_id, row.job_id);
+        if (!source || source.status !== 'open' || !source.linked_task_id || source.linked_task_id !== taskId) {
+          const error = new Error('A carried meeting action is no longer open with its retained linked task.');
+          error.statusCode = 409;
+          error.code = 'project_meeting_carryover_stale';
+          throw error;
+        }
+        const task = this.db.prepare('SELECT status FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, row.job_id);
+        if (!task || ['completed', 'cancelled'].includes(task.status)) {
+          const error = new Error('A carried meeting action task is no longer active.');
+          error.statusCode = 409;
+          error.code = 'project_meeting_carryover_task_stale';
+          throw error;
+        }
+        const sourceData = fromJson(source.data_json, {});
+        this.db.prepare(`
+          UPDATE meeting_action_items
+          SET status = 'carried_forward', data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'open'
+        `).run(toJson({ ...sourceData, carriedToMeetingId: meetingId, carriedToActionId: action.id }), timestamp, source.id);
+      } else {
+        taskId = `task_${sha256Text(`meeting_action:${action.id}`).slice(0, 24)}`;
+        const task = this.addTask(row.job_id, {
+          title: action.title,
+          description: [action.description, `Assigned by approved meeting minutes ${row.meeting_number}.`, `Owner: ${action.owner_name}.`]
+            .filter(Boolean)
+            .join('\n'),
+          status: 'open',
+          priority: action.priority,
+          durationHours: 1,
+          dueAt: action.due_at,
+          source: 'project_meeting_action',
+          data: { projectMeetingId: meetingId, meetingActionId: action.id, meetingNumber: row.meeting_number, ownerName: action.owner_name }
+        }, { id: taskId, actor, audit: false });
+        this.audit({
+          entityType: 'task',
+          entityId: task.id,
+          jobId: row.job_id,
+          action: 'create_task_from_project_meeting',
+          actor,
+          after: task,
+          metadata: { meetingId, meetingActionId: action.id, approvalId: approval.id }
+        });
+      }
+      this.db.prepare(`
+        UPDATE meeting_action_items
+        SET status = 'open', linked_task_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'proposed'
+      `).run(
+        taskId,
+        toJson({ ...fromJson(action.data_json, {}), activatedAt: timestamp, approvalId: approval.id }),
+        timestamp,
+        action.id
+      );
+    }
+    const before = this.mapProjectMeeting(row);
+    this.db.prepare(`
+      UPDATE project_meetings
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({ ...fromJson(row.data_json, {}), approvedAt: timestamp, approvedBy: actor }), timestamp, meetingId);
+    const after = this.getProjectMeeting(meetingId);
+    this.audit({
+      entityType: 'project_meeting',
+      entityId: meetingId,
+      jobId: row.job_id,
+      action: 'approve_project_meeting_minutes',
+      actor,
+      before,
+      after,
+      metadata: { approvalId: approval.id, activatedActionCount: actions.length, externalCommitments: 0 }
+    });
+    return after;
   }
 
   applyApprovalTarget(targetType, targetId) {
@@ -19357,6 +20147,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           WHERE id = ? AND status = 'pending_approval'
         `).run(toJson({ ...data, approvedAt: timestamp }), timestamp, targetId);
       }
+    } else if (targetType === 'project_meeting_minutes') {
+      this.applyProjectMeetingApproval(targetId, timestamp);
     } else if (targetType === 'client_selection_response') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const response = fromJson(approval?.data_json, {});
@@ -22788,6 +23580,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       submittals: this.db.prepare('SELECT * FROM submittal_records WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapSubmittal(row)),
       transmittals: this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC').all(jobId)
         .map(row => this.getDocumentTransmittal(row.id)),
+      projectMeetings: this.db.prepare('SELECT * FROM project_meetings WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId)
+        .map(row => this.getProjectMeeting(row.id)),
       clientSelections: this.db.prepare('SELECT * FROM client_selections WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapClientSelection(row)),
       permits: this.db.prepare('SELECT * FROM permit_records WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapPermit(row)),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
@@ -22892,6 +23686,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       change_orders: 'status',
       rfi_records: 'status',
       submittal_records: 'status',
+      project_meetings: 'status',
       field_reports: 'status',
       documents: 'status',
       punch_items: 'status',
@@ -23801,6 +24596,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         WHERE ${this.operationalJobStatusSql('jobs')}
           AND receipts.status = 'awaiting_acknowledgment'
       `).get().count || 0),
+      projectMeetings: activeCount('project_meetings'),
+      openMeetingActions: activeCount('meeting_action_items', "records.status = 'open'"),
+      overdueMeetingActions: activeCount('meeting_action_items', "records.status = 'open' AND records.due_at IS NOT NULL AND records.due_at <= ?", [nowIso()]),
       clientSelections: activeCount('client_selections'),
       pendingClientSelections: activeCount('client_selections', "records.status NOT IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'cancelled', 'rejected')"),
       permitRecords: activeCount('permit_records'),
@@ -23911,6 +24709,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM rfi_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('open', 'pending', 'pending_approval')), 0) AS rfiOpen,
         COALESCE((SELECT COUNT(*) FROM submittal_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'submitted', 'pending_review', 'pending_approval', 'revise_resubmit')), 0) AS submittalQueue,
         COALESCE((SELECT COUNT(*) FROM document_transmittals records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('pending_approval', 'approved', 'issued', 'partially_acknowledged')), 0) AS transmittalQueue,
+        COALESCE((SELECT COUNT(*) FROM meeting_action_items records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'open'), 0) AS meetingActionQueue,
         COALESCE((SELECT COUNT(*) FROM client_selections records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('open', 'pending_client', 'pending_approval', 'overdue')), 0) AS selectionQueue,
         COALESCE((SELECT COUNT(*) FROM permit_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending', 'pending_approval', 'needs_renewal')), 0) AS permitReviews,
         COALESCE((SELECT COUNT(*) FROM inspection_records records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('scheduled', 'pending_approval', 'failed')), 0) AS inspectionReviews,
@@ -23973,6 +24772,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         fieldReportDrafts: normalizeNumber(workload.fieldReportDrafts, 0),
         rfiOpen: normalizeNumber(workload.rfiOpen, 0),
         submittalQueue: normalizeNumber(workload.submittalQueue, 0),
+        transmittalQueue: normalizeNumber(workload.transmittalQueue, 0),
+        meetingActionQueue: normalizeNumber(workload.meetingActionQueue, 0),
         selectionQueue: normalizeNumber(workload.selectionQueue, 0),
         permitReviews: normalizeNumber(workload.permitReviews, 0),
         inspectionReviews: normalizeNumber(workload.inspectionReviews, 0),
@@ -24329,6 +25130,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         recipients: group.recipients,
         severity: daysOverdue >= 3 ? 'high' : 'medium',
         message: `${group.jobTitle} transmittal ${group.transmittalNumber} is awaiting ${group.recipients.length} acknowledgment${group.recipients.length === 1 ? '' : 's'} (${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue). Prepare an internal follow-up draft without sending it or changing receipt status.`
+      });
+    }
+
+    const overdueMeetingActions = this.db.prepare(`
+      SELECT actions.*, meetings.meeting_number, meetings.title AS meeting_title, jobs.title AS job_title
+      FROM meeting_action_items actions
+      JOIN project_meetings meetings ON meetings.id = actions.meeting_id
+      JOIN jobs ON jobs.id = actions.job_id
+      WHERE actions.status = 'open'
+        AND actions.due_at IS NOT NULL
+        AND actions.due_at <= ?
+        AND meetings.status IN ('approved', 'issued')
+      ORDER BY actions.due_at ASC, actions.updated_at ASC
+      LIMIT 25
+    `).all(nowIso());
+    for (const action of overdueMeetingActions) {
+      const communicationId = `comm_${sha256Text(`draft_meeting_action_follow_up:${action.id}`).slice(0, 24)}`;
+      if (this.db.prepare("SELECT id FROM communication_records WHERE id = ? AND status NOT IN ('cancelled', 'rejected')").get(communicationId)) continue;
+      const dueAtMs = Date.parse(String(action.due_at || '').length === 10 ? `${action.due_at}T23:59:59.999Z` : action.due_at);
+      const daysOverdue = Number.isFinite(dueAtMs) ? Math.max(1, Math.ceil((Date.now() - dueAtMs) / (24 * 60 * 60 * 1000))) : 1;
+      actions.push({
+        type: 'draft_meeting_action_follow_up',
+        meetingId: action.meeting_id,
+        meetingActionId: action.id,
+        meetingNumber: action.meeting_number,
+        jobId: action.job_id,
+        ownerName: action.owner_name,
+        dueAt: action.due_at,
+        severity: daysOverdue >= 3 ? 'high' : 'medium',
+        message: `${action.job_title} meeting action "${action.title}" from ${action.meeting_number} is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue. Prepare an internal owner follow-up draft without sending it or closing the action.`
       });
     }
 
@@ -25126,7 +25957,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('jha') || type.includes('sds') || type.includes('access')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -25142,6 +25973,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'draft_rfi_follow_up',
       'draft_submittal_follow_up',
       'draft_transmittal_ack_follow_up',
+      'draft_meeting_action_follow_up',
       'request_client_selection',
       'draft_change_order',
       'create_permit_review',
@@ -26214,6 +27046,76 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         }
 
+        const meetingActionFollowUps = preview
+          .filter(action => action.type === 'draft_meeting_action_follow_up')
+          .slice(0, 5);
+        for (const action of meetingActionFollowUps) {
+          const row = this.db.prepare(`
+            SELECT actions.*, meetings.meeting_number, meetings.title AS meeting_title
+            FROM meeting_action_items actions
+            JOIN project_meetings meetings ON meetings.id = actions.meeting_id
+            WHERE actions.id = ? AND actions.job_id = ? AND actions.status = 'open'
+              AND meetings.status IN ('approved', 'issued')
+          `).get(action.meetingActionId, action.jobId);
+          if (!row) {
+            blocked.push({ ...action, status: 'blocked', reason: 'The meeting action is no longer open on approved minutes.' });
+            continue;
+          }
+          const communicationId = `comm_${sha256Text(`${action.type}:${action.meetingActionId}`).slice(0, 24)}`;
+          const communication = this.addCommunication(action.jobId, {
+            channel: 'internal_review',
+            direction: 'outbound',
+            subject: `Meeting action follow-up: ${row.title}`,
+            body: [
+              action.message,
+              `Retained owner: ${row.owner_name}. Source minutes: ${row.meeting_number} / ${row.meeting_title}.`,
+              'Confirm current ownership, blocker, due date, and completion evidence before any follow-up is sent. This draft does not send a message, change the minutes, or close the linked task.'
+            ].join('\n\n'),
+            status: 'draft',
+            requiresApproval: true,
+            recipient: row.owner_name,
+            expectsReply: true,
+            replyBy: futureIsoDate(2),
+            followUpFor: row.id,
+            followUpSource: 'meeting_action_due_monitor',
+            data: {
+              meetingId: row.meeting_id,
+              meetingActionId: row.id,
+              meetingNumber: row.meeting_number,
+              linkedTaskId: row.linked_task_id || null,
+              internalDraft: true,
+              externalDeliveryInitiated: false,
+              actionStatusChanged: false,
+              sourceDueAt: row.due_at || null
+            }
+          }, { id: communicationId, actor, audit: false, ignoreExisting: true });
+          applied.push({
+            ...action,
+            communicationId: communication.id,
+            approvalId: communication.approvalId || communication.approval?.id || null,
+            status: communication.replayed ? 'replayed' : 'drafted',
+            externalDeliveryInitiated: false
+          });
+          if (!communication.replayed) {
+            this.audit({
+              entityType: 'communication',
+              entityId: communication.id,
+              jobId: action.jobId,
+              action: 'autonomous_draft_meeting_action_followup',
+              actor,
+              after: communication,
+              metadata: {
+                meetingId: row.meeting_id,
+                meetingActionId: row.id,
+                linkedTaskId: row.linked_task_id || null,
+                externalCommitments: 0,
+                externalDeliveryInitiated: false,
+                actionStatusChanged: false
+              }
+            });
+          }
+        }
+
         const permitRenewals = preview.filter(action => action.type === 'renew_permit').slice(0, 3);
         for (const action of permitRenewals) {
           const permit = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(action.permitId);
@@ -26628,6 +27530,58 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         )
     `).get().count || 0);
     if (inconsistentAcknowledgedTransmittals) issues.push({ severity: 'error', message: `${inconsistentAcknowledgedTransmittals} acknowledged document transmittal(s) still have an open recipient receipt.` });
+    const meetingRows = this.db.prepare(`
+      SELECT * FROM project_meetings
+      WHERE status IN ('pending_approval', 'approved', 'issued')
+      ORDER BY created_at
+    `).all();
+    for (const meeting of meetingRows) {
+      if (!meeting.snapshot_hash || sha256Json(this.projectMeetingSnapshot(meeting)) !== meeting.snapshot_hash) {
+        issues.push({ severity: 'error', message: `Project meeting ${meeting.meeting_number} failed retained snapshot integrity verification.` });
+      }
+    }
+    const meetingsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM project_meetings meetings
+      LEFT JOIN approvals ON approvals.id = meetings.approval_id
+      WHERE meetings.status IN ('approved', 'issued')
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'project_meeting_minutes' OR approvals.target_id <> meetings.id
+        )
+    `).get().count || 0);
+    if (meetingsWithoutApproval) issues.push({ severity: 'error', message: `${meetingsWithoutApproval} approved or issued project meeting record(s) lack a matching approval decision.` });
+    const issuedMeetingsWithoutEvidence = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM project_meetings
+      WHERE status = 'issued'
+        AND (issued_at IS NULL OR LENGTH(TRIM(COALESCE(delivery_reference, ''))) < 3)
+    `).get().count || 0);
+    if (issuedMeetingsWithoutEvidence) issues.push({ severity: 'error', message: `${issuedMeetingsWithoutEvidence} issued project meeting record(s) lack delivery evidence.` });
+    const invalidMeetingActionLinks = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM meeting_action_items actions
+      LEFT JOIN project_meetings meetings ON meetings.id = actions.meeting_id
+      LEFT JOIN job_tasks tasks ON tasks.id = actions.linked_task_id
+      WHERE actions.status IN ('open', 'completed', 'carried_forward')
+        AND (
+          meetings.id IS NULL OR meetings.job_id <> actions.job_id
+          OR actions.linked_task_id IS NULL OR tasks.id IS NULL OR tasks.job_id <> actions.job_id
+        )
+    `).get().count || 0);
+    if (invalidMeetingActionLinks) issues.push({ severity: 'error', message: `${invalidMeetingActionLinks} active meeting action(s) lack a same-job linked task.` });
+    const proposedActionsOnApprovedMeetings = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM meeting_action_items actions
+      JOIN project_meetings meetings ON meetings.id = actions.meeting_id
+      WHERE actions.status = 'proposed' AND meetings.status IN ('approved', 'issued')
+    `).get().count || 0);
+    if (proposedActionsOnApprovedMeetings) issues.push({ severity: 'error', message: `${proposedActionsOnApprovedMeetings} approved meeting action(s) were not activated.` });
+    const completedMeetingActionsWithoutEvidence = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM meeting_action_items
+      WHERE status = 'completed'
+        AND (completed_at IS NULL OR LENGTH(TRIM(COALESCE(completion_evidence, ''))) < 3)
+    `).get().count || 0);
+    if (completedMeetingActionsWithoutEvidence) issues.push({ severity: 'error', message: `${completedMeetingActionsWithoutEvidence} completed meeting action(s) lack completion evidence.` });
     const selectionsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM client_selections WHERE status IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'ordered') AND approval_id IS NULL").get().count || 0);
     if (selectionsWithoutApproval) issues.push({ severity: 'warning', message: `${selectionsWithoutApproval} locked client selection(s) have no approval gate.` });
     const permitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM permit_records WHERE status IN ('active', 'approved', 'issued', 'submitted') AND approval_id IS NULL").get().count || 0);
@@ -26744,6 +27698,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         submittals: this.count('submittal_records'),
         documentTransmittals: this.count('document_transmittals'),
         transmittalReceipts: this.count('transmittal_receipts'),
+        projectMeetings: this.count('project_meetings'),
+        meetingActionItems: this.count('meeting_action_items'),
         clientSelections: this.count('client_selections'),
         permitRecords: this.count('permit_records'),
         inspectionRecords: this.count('inspection_records'),
@@ -27206,6 +28162,56 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       acknowledgedAt: row.acknowledged_at,
       acknowledgedBy: row.acknowledged_by,
       evidenceReference: row.evidence_reference,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapProjectMeeting(row) {
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      meetingNumber: row.meeting_number,
+      title: row.title,
+      meetingType: row.meeting_type,
+      status: row.status,
+      scheduledAt: row.scheduled_at,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      location: row.location,
+      chair: row.chair,
+      attendees: fromJson(row.attendees_json, []),
+      agenda: fromJson(row.agenda_json, []),
+      minutesSummary: row.minutes_summary || '',
+      decisions: fromJson(row.decisions_json, []),
+      approvalId: row.approval_id,
+      snapshotHash: row.snapshot_hash,
+      issuedAt: row.issued_at,
+      deliveryReference: row.delivery_reference,
+      followsMeetingId: row.follows_meeting_id,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapMeetingAction(row) {
+    return {
+      id: row.id,
+      meetingId: row.meeting_id,
+      jobId: row.job_id,
+      itemNumber: Number(row.item_number || 0),
+      title: row.title,
+      description: row.description,
+      ownerName: row.owner_name,
+      dueAt: row.due_at,
+      priority: row.priority,
+      status: row.status,
+      linkedTaskId: row.linked_task_id,
+      completedAt: row.completed_at,
+      completionEvidence: row.completion_evidence,
+      carriedFromActionId: row.carried_from_action_id,
       data: fromJson(row.data_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -27999,6 +29005,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.dueAt = mapped?.dueAt || data.dueAt || null;
       preview.documents = mapped?.documents || data.documents || [];
       preview.recipients = mapped?.recipients || data.recipients || [];
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'project_meeting_minutes') {
+      const row = this.db.prepare('SELECT * FROM project_meetings WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.getProjectMeeting(row.id) : null;
+      primaryEffect = `Approve project meeting minutes ${mapped?.meetingNumber || data.meetingNumber || ''}.`;
+      addEffect(`Activate ${mapped?.actions?.length ?? data.actionCount ?? 0} assigned action item(s) as linked internal job tasks.`);
+      addEffect(`Retain ${mapped?.decisions?.length ?? data.decisionCount ?? 0} recorded decision(s) in the immutable meeting snapshot.`);
+      addSafeguard('Approval does not send minutes or messages. Distribution remains blocked until an operator records real delivery evidence.');
+      addSafeguard('Action tasks are created only after snapshot verification; follow-up carryover reuses the original task instead of duplicating work.');
+      riskLevel = 'high';
+      preview.meetingNumber = mapped?.meetingNumber || data.meetingNumber || null;
+      preview.title = mapped?.title || data.title || null;
+      preview.scheduledAt = mapped?.scheduledAt || data.snapshot?.scheduledAt || null;
+      preview.attendees = mapped?.attendees || data.snapshot?.attendees || [];
+      preview.decisions = mapped?.decisions || data.snapshot?.decisions || [];
+      preview.actions = mapped?.actions || data.snapshot?.actions || [];
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'communication') {
       const message = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(approval.targetId || approval.target_id);

@@ -68,7 +68,7 @@ test('audit events append to one durable hash chain across a local restart', t =
     assert.equal(afterRestart.valid, true);
     assert.equal(afterRestart.eventCount, 3);
     assert.equal(afterRestart.headHash, beforeRestart.headHash);
-    assert.equal(restarted.migrationStatus().currentVersion, '023_document_transmittals');
+    assert.equal(restarted.migrationStatus().currentVersion, '024_project_meeting_minutes');
   } finally {
     restarted.close();
   }
@@ -159,7 +159,7 @@ test('migration 012 deterministically chains retained pre-chain audit history', 
     const integrity = ledger.verifyAuditIntegrity();
     assert.equal(integrity.valid, true);
     assert.equal(integrity.eventCount, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '023_document_transmittals');
+    assert.equal(ledger.migrationStatus().currentVersion, '024_project_meeting_minutes');
     assert.deepEqual(
       ledger.db.prepare('SELECT sequence_number FROM audit_events ORDER BY sequence_number').all().map(row => Number(row.sequence_number)),
       [1, 2]

@@ -131,7 +131,7 @@ function orderedSourceTables(database, tables) {
     table,
     new Set(database.prepare(`PRAGMA foreign_key_list(${quotedIdentifier(table)})`).all()
       .map(row => safeIdentifier(row.table))
-      .filter(dependency => tableSet.has(dependency)))
+      .filter(dependency => dependency !== table && tableSet.has(dependency)))
   ]));
   const ordered = [];
   const pending = new Set(tables);
@@ -141,6 +141,37 @@ function orderedSourceTables(database, tables) {
     for (const table of ready) {
       ordered.push(table);
       pending.delete(table);
+    }
+  }
+  return ordered;
+}
+
+function orderedSelfReferentialRows(database, table, rows) {
+  const foreignKeys = database.prepare(`PRAGMA foreign_key_list(${quotedIdentifier(table)})`).all()
+    .filter(row => safeIdentifier(row.table) === table)
+    .map(row => ({ from: safeIdentifier(row.from), to: safeIdentifier(row.to) }));
+  if (!foreignKeys.length || rows.length < 2) return rows;
+
+  const dependencies = new Map(rows.map((row, index) => [index, new Set()]));
+  for (const [index, row] of rows.entries()) {
+    for (const foreignKey of foreignKeys) {
+      const reference = row[foreignKey.from];
+      if (reference === null || reference === undefined) continue;
+      const dependencyIndex = rows.findIndex(candidate => candidate[foreignKey.to] === reference);
+      if (dependencyIndex >= 0 && dependencyIndex !== index) dependencies.get(index).add(dependencyIndex);
+    }
+  }
+
+  const ordered = [];
+  const pending = new Set(rows.map((_, index) => index));
+  while (pending.size) {
+    const ready = [...pending].filter(index =>
+      [...dependencies.get(index)].every(dependencyIndex => !pending.has(dependencyIndex))
+    );
+    if (!ready.length) throw new Error(`Ledger table ${table} contains a self-referential foreign-key cycle.`);
+    for (const index of ready) {
+      ordered.push(rows[index]);
+      pending.delete(index);
     }
   }
   return ordered;
@@ -465,7 +496,11 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       const targetColumns = await destinationColumns(client, table);
       const missingColumns = columns.filter(column => !targetColumns.includes(column));
       if (missingColumns.length) throw new Error(`Hosted table ${table} is missing columns: ${missingColumns.join(', ')}`);
-      const rows = sourceRowsByTable.get(table).map(row => rewriteRowReferences(table, row, columns, evidence.replacements));
+      const rows = orderedSelfReferentialRows(
+        source,
+        table,
+        sourceRowsByTable.get(table).map(row => rewriteRowReferences(table, row, columns, evidence.replacements))
+      );
       await insertRows(client, table, columns, rows);
       const destinationRows = (await client.query(
         `SELECT ${columns.map(quotedIdentifier).join(', ')} FROM ${quotedIdentifier(table)}`
@@ -607,6 +642,7 @@ if (require.main === module) {
 
 module.exports = {
   migrateLocalBackupToHosted,
+  orderedSelfReferentialRows,
   orderedSourceTables,
   tableDigest,
   verifyBackupDirectory

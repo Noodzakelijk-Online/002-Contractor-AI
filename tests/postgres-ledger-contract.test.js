@@ -951,14 +951,44 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     );
     assert.equal(hostedAcknowledgment.transmittal.status, 'acknowledged');
 
+    const hostedMeeting = ledger.createProjectMeeting(job.id, {
+      title: 'PostgreSQL project coordination',
+      meetingType: 'coordination',
+      scheduledAt: '2026-07-15T09:00:00.000Z',
+      attendees: [{ name: 'Hosted project manager' }, { name: 'Hosted site supervisor' }],
+      agenda: ['Programme and retained design information'],
+      minutesSummary: 'The hosted team reviewed programme constraints and retained one assigned action.',
+      decisions: ['Continue with the approved controlled revision.'],
+      actions: [{ title: 'Confirm hosted delivery slot', ownerName: 'Hosted site supervisor', dueAt: '2020-01-01' }]
+    }, { actor: 'postgres_contract_test' });
+    const hostedMeetingSubmission = ledger.submitProjectMeetingMinutes(job.id, hostedMeeting.id);
+    ledger.resolveApproval(hostedMeetingSubmission.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted meeting snapshot, attendance, decision, and action verified.'
+    });
+    const hostedMeetingApproved = ledger.getProjectMeeting(hostedMeeting.id);
+    assert.equal(hostedMeetingApproved.status, 'approved');
+    assert.ok(hostedMeetingApproved.actions[0].linkedTaskId);
+    const hostedMeetingIssued = ledger.recordProjectMeetingIssue(job.id, hostedMeeting.id, {
+      deliveryReference: 'hosted-provider:meeting-minutes-001'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedMeetingIssued.status, 'issued');
+    const hostedMeetingAction = ledger.completeProjectMeetingAction(job.id, hostedMeeting.id, hostedMeetingApproved.actions[0].id, {
+      evidenceReference: 'hosted-evidence:delivery-slot',
+      completedBy: 'Hosted site supervisor'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedMeetingAction.action.status, 'completed');
+
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
     assert.ok(dashboard.metrics.documentTransmittals >= 1);
+    assert.ok(dashboard.metrics.projectMeetings >= 1);
     assert.ok(Array.isArray(dashboard.nextActions));
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '023_document_transmittals');
+    assert.equal(migrations.currentVersion, '024_project_meeting_minutes');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1039,12 +1069,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('023_document_transmittals'));
+  assert.deepEqual(versions, Array(4).fill('024_project_meeting_minutes'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 23);
+    assert.equal(Number(migrationCount.count), 24);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

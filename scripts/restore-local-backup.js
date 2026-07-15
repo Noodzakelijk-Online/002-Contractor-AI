@@ -202,6 +202,39 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup document-transmittal constraints are incomplete: ${missingTransmittalIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('024_project_meeting_minutes')) {
+        const meetingTables = ['project_meeting_number_sequences', 'project_meetings', 'meeting_action_items'];
+        const missingMeetingTables = meetingTables.filter(table => !retainedTables.has(table));
+        if (missingMeetingTables.length) {
+          throw new Error(`Backup project-meeting schema is incomplete: ${missingMeetingTables.join(', ')}.`);
+        }
+        const meetingColumns = new Set(database.prepare('PRAGMA table_info(project_meetings)').all().map(row => row.name));
+        const missingMeetingColumns = ['meeting_number', 'attendees_json', 'agenda_json', 'decisions_json', 'approval_id', 'snapshot_hash', 'delivery_reference', 'follows_meeting_id']
+          .filter(column => !meetingColumns.has(column));
+        if (missingMeetingColumns.length) {
+          throw new Error(`Backup project-meeting columns are incomplete: ${missingMeetingColumns.join(', ')}.`);
+        }
+        const actionColumns = new Set(database.prepare('PRAGMA table_info(meeting_action_items)').all().map(row => row.name));
+        const missingActionColumns = ['item_number', 'owner_name', 'linked_task_id', 'completion_evidence', 'carried_from_action_id']
+          .filter(column => !actionColumns.has(column));
+        if (missingActionColumns.length) {
+          throw new Error(`Backup meeting-action columns are incomplete: ${missingActionColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const meetingIndexes = [
+          'idx_project_meetings_job',
+          'idx_project_meetings_status',
+          'idx_project_meetings_follows',
+          'idx_meeting_actions_due',
+          'idx_meeting_actions_meeting',
+          'idx_meeting_actions_task',
+          'idx_meeting_actions_active_carryover'
+        ];
+        const missingMeetingIndexes = meetingIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingMeetingIndexes.length) {
+          throw new Error(`Backup project-meeting constraints are incomplete: ${missingMeetingIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

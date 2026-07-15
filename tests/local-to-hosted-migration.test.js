@@ -3,12 +3,18 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 const { spawnSync } = require('node:child_process');
 const { Client } = require('pg');
 const { ContractorOperatingLedger } = require('../operating-ledger');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
-const { migrateLocalBackupToHosted, verifyBackupDirectory } = require('../scripts/migrate-local-backup-to-hosted');
+const {
+  migrateLocalBackupToHosted,
+  orderedSelfReferentialRows,
+  orderedSourceTables,
+  verifyBackupDirectory
+} = require('../scripts/migrate-local-backup-to-hosted');
 
 const connectionString = process.env.CONTRACTOR_AI_POSTGRES_TEST_URL;
 
@@ -62,7 +68,7 @@ function createBackupFixture(t, suffix = 'success') {
     predecessorTaskId: job.tasks[0].id,
     successorTaskId: job.tasks[1].id
   }, { actor: 'migration_fixture' });
-  const scheduleBaseline = source.requestScheduleBaseline(job.id, {
+  let scheduleBaseline = source.requestScheduleBaseline(job.id, {
     plannedStart: '2026-07-20T08:00:00.000Z',
     reason: 'Retained local schedule migration fixture.'
   }, { actor: 'migration_fixture' });
@@ -202,6 +208,34 @@ function createBackupFixture(t, suffix = 'success') {
     reason: 'Migration handover quality evidence verified.'
   });
   const handover = source.prepareHandoverIssuePackage(job.id, {}, { actor: 'migration_fixture' });
+  const projectMeeting = source.createProjectMeeting(job.id, {
+    title: 'Migration project coordination',
+    meetingType: 'coordination',
+    scheduledAt: '2026-07-13T09:00:00.000Z',
+    attendees: [{ name: 'Migration project manager' }, { name: 'Migration site lead' }],
+    agenda: ['Hosted migration readiness'],
+    minutesSummary: 'The team reviewed local-to-hosted migration readiness and retained an assigned action.',
+    decisions: ['Proceed after the verified backup is complete.'],
+    actions: [{ title: 'Verify hosted readiness', ownerName: 'Migration project manager', dueAt: '2026-07-14' }]
+  }, { actor: 'migration_fixture' });
+  const projectMeetingSubmission = source.submitProjectMeetingMinutes(job.id, projectMeeting.id);
+  source.resolveApproval(projectMeetingSubmission.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration meeting snapshot, decision, and action verified.'
+  });
+  scheduleBaseline = source.requestScheduleBaseline(job.id, {
+    plannedStart: '2026-07-20T08:00:00.000Z',
+    reason: 'Meeting action task included in the retained hosted migration baseline.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(scheduleBaseline.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Updated migration work plan verified after meeting action approval.'
+  });
+  source.recordProjectMeetingIssue(job.id, projectMeeting.id, {
+    deliveryReference: `migration-meeting-receipt:${suffix}`
+  }, { actor: 'migration_fixture' });
   source.createOperatorSession({
     sessionIdHash: `local-session-${suffix}`,
     operatorId: 'local-owner',
@@ -237,7 +271,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, billingMilestone, controlledDocument, document, evidenceBytes, handover, job, localStorageRef, organization, scheduleBaseline, supplierInvoice, supplierPayment, taskDependency, tradePartner };
+  return { backupDir, backupId, billingMilestone, controlledDocument, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -287,6 +321,29 @@ test('hosted migration CLI requires an exact confirmation and safe backup id', (
   assert.match(traversal.stderr, /valid verified local backup id/i);
 });
 
+test('hosted migration orders self-referential follow-up rows without treating the table as a cycle', () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    database.exec(`
+      CREATE TABLE jobs (id TEXT PRIMARY KEY);
+      CREATE TABLE project_meetings (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id),
+        previous_meeting_id TEXT REFERENCES project_meetings(id)
+      );
+    `);
+    assert.deepEqual(orderedSourceTables(database, ['project_meetings', 'jobs']), ['jobs', 'project_meetings']);
+    const followUp = { id: 'meeting_follow_up', job_id: 'job_1', previous_meeting_id: 'meeting_original' };
+    const original = { id: 'meeting_original', job_id: 'job_1', previous_meeting_id: null };
+    assert.deepEqual(
+      orderedSelfReferentialRows(database, 'project_meetings', [followUp, original]),
+      [original, followUp]
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test('verified local backup migrates losslessly to empty PostgreSQL and private object storage', { skip: !connectionString }, async t => {
   const targetUrl = await createTestDatabase(t, 'success');
   const fixture = createBackupFixture(t, 'success');
@@ -304,7 +361,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '023_document_transmittals');
+  assert.equal(migration.migrationVersion, '024_project_meeting_minutes');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -315,6 +372,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   const hosted = new ContractorOperatingLedger({ databaseUrl: targetUrl });
   try {
     const detail = hosted.getJobDetail(fixture.job.id, { includeAudit: true });
+    const migratedMeeting = detail.projectMeetings.find(item => item.id === fixture.projectMeeting.id);
+    assert.equal(migratedMeeting.status, 'issued');
+    assert.equal(migratedMeeting.deliveryReference, `migration-meeting-receipt:success`);
+    assert.ok(migratedMeeting.actions[0].linkedTaskId);
     assert.equal(detail.contractValue, 987654321.123456);
     assert.ok(detail.documents.some(document =>
       document.id === fixture.controlledDocument.document.id

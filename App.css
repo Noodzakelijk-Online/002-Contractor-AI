@@ -516,12 +516,12 @@
 .project-controls { display: grid; gap: 14px; min-width: 0; }
 .project-controls-heading { align-items: center; }
 .project-controls-heading > .secondary-button { flex: 0 0 auto; margin-left: auto; }
-.project-control-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dbe5e1; border-left: 3px solid #2e7060; }
+.project-control-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid #dbe5e1; border-left: 3px solid #2e7060; }
 .project-control-metrics > div { display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border-right: 1px solid #e2e9e6; }
 .project-control-metrics > div:last-child { border-right: 0; }
 .project-control-metrics span { overflow-wrap: anywhere; color: #718079; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .project-control-metrics strong { color: #273d35; font-size: 15px; }
-.project-control-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 34px; overflow: hidden; border: 1px solid #cfdcd6; border-radius: 6px; }
+.project-control-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); min-height: 34px; overflow: hidden; border: 1px solid #cfdcd6; border-radius: 6px; }
 .project-control-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 34px; padding: 0 10px; color: #5d6f68; font: inherit; font-size: 11px; font-weight: 700; background: #fff; border: 0; border-right: 1px solid #dce5e1; cursor: pointer; }
 .project-control-tabs button:last-child { border-right: 0; }
 .project-control-tabs button:hover { background: #f1f6f4; }
@@ -536,6 +536,12 @@
 .document-selection .checkbox-label strong { color: #304a40; font-size: 11px; }
 .document-selection .checkbox-label small { color: #6d7c76; font-size: 9px; font-weight: 500; }
 .document-selection .workflow-note { grid-column: 1 / -1; }
+.meeting-action-editor { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 12px; border: 1px solid #d6e2dd; }
+.meeting-action-editor legend { padding: 0 5px; color: #40564e; font-size: 10px; font-weight: 750; }
+.meeting-action-draft { display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(140px, 1fr) minmax(120px, .7fr) minmax(100px, .6fr) minmax(180px, 1.4fr) 34px; align-items: end; gap: 8px; min-width: 0; padding: 10px; background: #fff; border: 1px solid #dde6e2; }
+.meeting-action-draft label { min-width: 0; }
+.meeting-action-draft .icon-button { margin-bottom: 1px; }
+.meeting-action-add { justify-self: start; }
 .project-control-register { display: grid; border-top: 1px solid #dfe7e3; }
 .project-control-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; padding: 12px 0; border-bottom: 1px solid #e3eae7; }
 .project-control-copy { display: grid; gap: 4px; min-width: 0; }
@@ -543,6 +549,13 @@
 .project-control-copy strong { min-width: 0; overflow-wrap: anywhere; color: #2a4037; font-size: 12px; }
 .project-control-copy small { overflow-wrap: anywhere; color: #6d7c76; font-size: 10px; }
 .project-control-copy p { margin: 0; overflow-wrap: anywhere; color: #526a61; font-size: 11px; line-height: 1.45; }
+.project-control-copy > .meeting-action-register { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 3px; }
+.meeting-action-chip { display: grid; gap: 2px; min-width: 0; padding: 7px 8px; background: #f4f7f6; border-left: 3px solid #9aaca5; }
+.meeting-action-chip strong { overflow-wrap: anywhere; color: #30483f; font-size: 10px; }
+.meeting-action-chip small { overflow-wrap: anywhere; color: #6c7b75; font-size: 9px; }
+.meeting-action-open { background: #fff8e9; border-left-color: #c38a27; }
+.meeting-action-completed { background: #edf7f2; border-left-color: #37846e; }
+.meeting-action-carried_forward { background: #eef4f7; border-left-color: #547f92; }
 .project-control-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; min-width: 0; }
 .project-control-actions .secondary-button { min-height: 31px; padding: 0 8px; font-size: 10px; }
 .project-control-review { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(180px, 1fr) minmax(240px, 1.5fr); align-items: end; gap: 10px; padding: 14px; background: #edf6f2; border: 1px solid #cfe2da; }
@@ -557,12 +570,18 @@
   .project-controls-heading { align-items: flex-start; flex-wrap: wrap; }
   .project-controls-heading > .secondary-button { width: calc(100% - 28px); margin-left: 28px; }
   .project-control-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .project-control-metrics > div:nth-child(2) { border-right: 0; }
-  .project-control-metrics > div:nth-child(-n + 2) { border-bottom: 1px solid #e2e9e6; }
+  .project-control-metrics > div:nth-child(2n) { border-right: 0; }
+  .project-control-metrics > div:nth-child(-n + 4) { border-bottom: 1px solid #e2e9e6; }
+  .project-control-metrics > div:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
   .project-control-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .project-control-tabs button:nth-child(2) { border-right: 0; }
-  .project-control-tabs button:nth-child(-n + 2) { border-bottom: 1px solid #dce5e1; }
+  .project-control-tabs button:nth-child(2n) { border-right: 0; }
+  .project-control-tabs button:nth-child(-n + 4) { border-bottom: 1px solid #dce5e1; }
+  .project-control-tabs button:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
   .document-selection { grid-template-columns: minmax(0, 1fr); }
+  .meeting-action-draft { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 34px; }
+  .meeting-action-draft label:first-child, .meeting-action-draft .meeting-action-description { grid-column: 1 / -1; }
+  .meeting-action-draft .icon-button { grid-column: 3; grid-row: 2; }
+  .project-control-copy > .meeting-action-register { grid-template-columns: minmax(0, 1fr); }
   .project-control-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .project-control-actions { justify-content: flex-start; }
   .project-control-actions .secondary-button { flex: 1 1 130px; }
