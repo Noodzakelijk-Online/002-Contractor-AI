@@ -366,6 +366,8 @@ function organizationDraft(profile = {}) {
     legalName: profile.legalName || '',
     tradingName: profile.tradingName || '',
     registrationNumber: profile.registrationNumber || '',
+    electronicAddressScheme: profile.data?.electronicAddressScheme || '',
+    electronicAddress: profile.data?.electronicAddress || '',
     vatNumber: profile.vatNumber || '',
     vatExempt: profile.data?.vatExempt === true,
     email: profile.email || '',
@@ -381,6 +383,26 @@ function organizationDraft(profile = {}) {
     defaultQuoteValidityDays: String(profile.defaultQuoteValidityDays || 30),
     quoteTerms: profile.data?.quoteTerms || '',
     notes: profile.data?.notes || ''
+  }
+}
+
+function emptyInvoiceDraft() {
+  return {
+    amount: '',
+    taxRate: '21',
+    dueAt: futureDateInput(14),
+    peppolReady: true,
+    buyerReference: '',
+    purchaseOrderReference: '',
+    buyerLegalName: '',
+    buyerRegistrationNumber: '',
+    buyerEndpointScheme: '0106',
+    buyerEndpointId: '',
+    buyerAddress: '',
+    buyerPostalCode: '',
+    buyerCity: '',
+    buyerCountry: 'NL',
+    notes: ''
   }
 }
 
@@ -719,7 +741,7 @@ function ResourcesWorkspace({ workforce, inventory, workers, workerSummary, tool
   </section>
 }
 
-function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting, onDraftInvoice, onAction, onOpenApprovals, onOpen }) {
+function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting, onDraftInvoice, onPrepareInvoice, onAction, onOpenApprovals, onOpen }) {
   const rows = finance?.jobs || EMPTY_LIST
   const summary = finance?.summary || {}
   return <section className="panel page-panel finance-workspace" data-testid="finance-workspace">
@@ -734,15 +756,20 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
       const job = jobs.find(candidate => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
       const canAct = canCoordinate && !item.flags?.approvalRequired
       const canDraftInvoice = canAct && item.flags?.invoiceReady && !item.counts?.draftInvoices
+      const prepareAction = canAct ? item.nextActions?.find(action => action.type === 'prepare_invoice_package') : null
+      const issuePackage = item.latest?.invoice?.data?.issuePackage
       const financeAction = canAct ? item.nextActions?.find(action => (
-        action.type !== 'review_finance_approval' && action.type !== 'draft_invoice'
+        action.type !== 'review_finance_approval' && action.type !== 'draft_invoice' && action.type !== 'prepare_invoice_package'
       )) : null
       const actionLabel = FINANCE_ACTION_LABELS[financeAction?.type]
       return <article className="finance-item" key={item.jobId}>
-        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Uninvoiced net <strong>{currency.format(item.money?.uninvoicedNetValue ?? item.money?.uninvoicedValue ?? 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
+        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Uninvoiced net <strong>{currency.format(item.money?.uninvoicedNetValue ?? item.money?.uninvoicedValue ?? 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
         <div className="finance-actions">
           {item.flags?.approvalRequired && canApprove ? <button className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ jobId: item.jobId, jobTitle: job.title, approvalId: item.nextActions?.find(action => action.approvalId)?.approvalId || null })}><ShieldCheck size={16} />Review approval</button> : null}
           {canDraftInvoice ? <button className="secondary-button" aria-label={`Draft invoice for ${job.title}`} disabled={submitting} onClick={() => onDraftInvoice(item)}><ReceiptEuro size={16} />Draft invoice</button> : null}
+          {prepareAction ? <button className="secondary-button" aria-label={`Prepare invoice package for ${job.title}`} disabled={submitting} onClick={() => onPrepareInvoice(item, prepareAction)}><PackageCheck size={16} />Prepare package</button> : null}
+          {issuePackage?.htmlDocumentId ? <a className="secondary-button" aria-label={`Download invoice for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.htmlDocumentId)}/issue-package`} download><FileDown size={16} />Invoice</a> : null}
+          {issuePackage?.ublDocumentId ? <a className="secondary-button" aria-label={`Download UBL for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.ublDocumentId)}/issue-package`} download><FileDown size={16} />UBL</a> : null}
           {financeAction && actionLabel ? <button className="secondary-button" aria-label={`${actionLabel} for ${job.title}`} disabled={submitting} onClick={() => onAction(item, financeAction)}><ClipboardCheck size={16} />{actionLabel}</button> : null}
           <button className="icon-button table-action" aria-label={`Open ${job.title}`} onClick={() => onOpen(job)}><ArrowUpRight size={16} /></button>
         </div>
@@ -1230,7 +1257,7 @@ function App() {
   const [tradePartnerRetirementReason, setTradePartnerRetirementReason] = useState('')
   const [organizationProfileDraft, setOrganizationProfileDraft] = useState(() => organizationDraft())
   const [invoiceJob, setInvoiceJob] = useState(null)
-  const [invoiceDraft, setInvoiceDraft] = useState({ amount: '', taxRate: '21', dueAt: futureDateInput(14), peppolReady: true, notes: '' })
+  const [invoiceDraft, setInvoiceDraft] = useState(() => emptyInvoiceDraft())
   const [financeAction, setFinanceAction] = useState(null)
   const [financeActionDraft, setFinanceActionDraft] = useState(emptyFinanceActionDraft)
   const [clientAction, setClientAction] = useState(null)
@@ -1677,7 +1704,7 @@ function App() {
       setOrganizationProfileDraft(organizationDraft(result.organization))
       await refresh()
       notify(result.organization.readiness.ready
-        ? 'Business identity retained and ready for controlled quote issue packages.'
+        ? 'Business identity retained and ready for controlled commercial packages.'
         : `Business identity retained. ${result.organization.readiness.missing.length} required item(s) remain.`)
     } catch (requestError) {
       setError(requestError.message)
@@ -3156,12 +3183,22 @@ function App() {
       const result = await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}`)
       const quote = result.job?.quotes?.find(candidate => !['cancelled', 'rejected', 'expired'].includes(candidate.status)) || result.job?.quotes?.[0]
       const amount = Math.max(0, Number(item.money?.invoiceDraftAmount ?? quote?.subtotal ?? item.money?.contractValue ?? 0))
+      const client = result.job?.client || {}
       setInvoiceJob(item)
       setInvoiceDraft({
+        ...emptyInvoiceDraft(),
         amount: amount ? amount.toFixed(2) : '',
         taxRate: quote?.taxRate != null ? String(quote.taxRate) : '21',
         dueAt: futureDateInput(14),
         peppolReady: true,
+        buyerLegalName: client.company || client.name || item.clientName || '',
+        buyerRegistrationNumber: client.data?.registrationNumber || '',
+        buyerEndpointScheme: client.data?.electronicAddressScheme || '0106',
+        buyerEndpointId: client.data?.electronicAddress || '',
+        buyerAddress: client.address || result.job?.address || '',
+        buyerPostalCode: client.data?.postalCode || '',
+        buyerCity: client.city || result.job?.city || '',
+        buyerCountry: client.country || result.job?.country || 'NL',
         notes: 'Approval-gated invoice draft prepared from retained quote or contract value. No invoice has been issued or sent.'
       })
     } catch (requestError) {
@@ -3173,7 +3210,7 @@ function App() {
 
   function closeInvoiceDraft() {
     setInvoiceJob(null)
-    setInvoiceDraft({ amount: '', taxRate: '21', dueAt: futureDateInput(14), peppolReady: true, notes: '' })
+    setInvoiceDraft(emptyInvoiceDraft())
   }
 
   async function createInvoiceDraft(event) {
@@ -3182,6 +3219,19 @@ function App() {
     const taxRate = Number(invoiceDraft.taxRate)
     if (!invoiceJob?.jobId || !Number.isFinite(amount) || amount <= 0 || !Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100 || !invoiceDraft.dueAt) {
       setError('Enter a positive invoice amount, a VAT rate from 0 to 100, and a due date.')
+      return
+    }
+    if (invoiceDraft.peppolReady && (
+      !invoiceDraft.buyerLegalName.trim()
+      || !invoiceDraft.buyerAddress.trim()
+      || !invoiceDraft.buyerPostalCode.trim()
+      || !invoiceDraft.buyerCity.trim()
+      || !/^[A-Za-z]{2}$/.test(invoiceDraft.buyerCountry.trim())
+      || !invoiceDraft.buyerEndpointScheme.trim()
+      || !invoiceDraft.buyerEndpointId.trim()
+      || (!invoiceDraft.buyerReference.trim() && !invoiceDraft.purchaseOrderReference.trim())
+    )) {
+      setError('Complete the buyer identity, address, electronic endpoint, and buyer or order reference for the requested UBL export.')
       return
     }
     const taxAmount = roundMoney(amount * taxRate / 100)
@@ -3198,12 +3248,43 @@ function App() {
           total,
           dueAt: new Date(`${invoiceDraft.dueAt}T23:59:59`).toISOString(),
           peppolReady: invoiceDraft.peppolReady,
+          structuredExportRequested: invoiceDraft.peppolReady,
+          buyerReference: invoiceDraft.buyerReference.trim(),
+          purchaseOrderReference: invoiceDraft.purchaseOrderReference.trim(),
+          buyerLegalName: invoiceDraft.buyerLegalName.trim(),
+          buyerRegistrationNumber: invoiceDraft.buyerRegistrationNumber.trim(),
+          buyerEndpointScheme: invoiceDraft.buyerEndpointScheme.trim(),
+          buyerEndpointId: invoiceDraft.buyerEndpointId.trim(),
+          buyerAddress: invoiceDraft.buyerAddress.trim(),
+          buyerPostalCode: invoiceDraft.buyerPostalCode.trim(),
+          buyerCity: invoiceDraft.buyerCity.trim(),
+          buyerCountry: invoiceDraft.buyerCountry.trim().toUpperCase(),
           notes: invoiceDraft.notes.trim(),
           actor: 'office_operator'
         })
       })
       notify(`Invoice draft retained for ${currency.format(total)}. Approval ${result.invoice?.approvalId ? 'is required before issue or delivery' : 'status needs review'}.`)
       closeInvoiceDraft()
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function prepareInvoicePackage(item, action) {
+    if (!item?.jobId || !action?.invoiceId) {
+      setError('The approved invoice is not linked to a retained finance row.')
+      return
+    }
+    setSubmitting(true)
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}/invoices/${encodeURIComponent(action.invoiceId)}/issue-package`, {
+        method: 'POST',
+        body: JSON.stringify({ actor: 'office_operator' })
+      })
+      notify(`Invoice ${result.issueReference} retained with ${result.structuredExportIncluded ? 'HTML and UBL attachments' : 'a human-readable attachment'}. Delivery still requires approval and a verified receipt.`)
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -3757,7 +3838,7 @@ function App() {
 
         {section === 'resources' && capabilities.resources ? <ResourcesWorkspace workforce={data.workforce} inventory={data.inventory} workers={workers} workerSummary={data.workerSummary} tools={tools} toolSummary={data.toolSummary} tradePartners={tradePartners} tradePartnerSummary={data.tradePartnerSummary} jobs={jobs} view={resourceView} onViewChange={setResourceView} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onPlan={openResourcePlan} onDraftInstruction={draftWorkerInstruction} onReviewCrewEvidence={reviewCrewEvidence} onPrepareLoading={prepareLoadingChecklist} onDraftProcurement={draftProcurementOrder} onAction={openResourceControl} onCreateWorker={() => openWorkerEditor()} onEditWorker={openWorkerEditor} onRetireWorker={openWorkerRetirement} onCreateEquipment={() => openEquipmentEditor()} onEditEquipment={openEquipmentEditor} onInspectEquipment={openEquipmentInspection} onMaintainEquipment={openEquipmentMaintenance} onRetireEquipment={openEquipmentRetirement} onCreatePartner={() => openTradePartnerEditor()} onEditPartner={openTradePartnerEditor} onRetirePartner={openTradePartnerRetirement} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
 
-        {section === 'finance' && capabilities.finance ? <FinanceWorkspace finance={data.finance} jobs={jobs} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onDraftInvoice={openInvoiceDraft} onAction={openFinanceControl} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
+        {section === 'finance' && capabilities.finance ? <FinanceWorkspace finance={data.finance} jobs={jobs} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onDraftInvoice={openInvoiceDraft} onPrepareInvoice={prepareInvoicePackage} onAction={openFinanceControl} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
 
         {section === 'clients' && capabilities.clientSuccess ? <ClientSuccessWorkspace clients={data.clients} jobs={jobs} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onPrepareCloseout={prepareClientCloseout} onDraftFollowup={draftClientFollowup} onDraftRecurring={draftRecurringPlan} onLifecycle={openClientLifecycle} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
 
@@ -3806,12 +3887,14 @@ function App() {
 
         {section === 'operations' && capabilities.maintenance && <section className="operations-grid">
           <section className="panel page-panel organization-profile-panel" data-testid="organization-profile-panel">
-            <div className="panel-heading"><div><h2>Business identity</h2><p>The legal and payment details captured in controlled quote issue packages.</p></div><span className={`status ${data.organization?.readiness?.ready ? 'status-ready' : 'status-attention'}`}>{data.organization?.readiness?.ready ? 'issue ready' : 'incomplete'}</span></div>
+            <div className="panel-heading"><div><h2>Business identity</h2><p>The legal, electronic, and payment details captured in controlled quote and invoice packages.</p></div><span className={`status ${data.organization?.readiness?.ready ? 'status-ready' : 'status-attention'}`}>{data.organization?.readiness?.ready ? 'issue ready' : 'incomplete'}</span></div>
             <form onSubmit={saveOrganizationProfile}>
               <div className="form-grid organization-profile-form">
                 <label>Legal name<input value={organizationProfileDraft.legalName} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, legalName: event.target.value })} /></label>
                 <label>Trading name<input value={organizationProfileDraft.tradingName} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, tradingName: event.target.value })} /></label>
                 <label>Registration number<input value={organizationProfileDraft.registrationNumber} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, registrationNumber: event.target.value })} placeholder="KVK or national registry number" /></label>
+                <label>Electronic address scheme<input value={organizationProfileDraft.electronicAddressScheme} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, electronicAddressScheme: event.target.value })} placeholder="0106 for KVK" /></label>
+                <label>Electronic address<input value={organizationProfileDraft.electronicAddress} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, electronicAddress: event.target.value })} placeholder="Defaults to KVK for Dutch entities" /></label>
                 <label>VAT number<input disabled={organizationProfileDraft.vatExempt} value={organizationProfileDraft.vatNumber} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, vatNumber: event.target.value })} /></label>
                 <label className="checkbox-label form-span"><input type="checkbox" checked={organizationProfileDraft.vatExempt} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, vatExempt: event.target.checked, vatNumber: event.target.checked ? '' : organizationProfileDraft.vatNumber })} />This legal entity is VAT exempt</label>
                 <label>Email<input type="email" value={organizationProfileDraft.email} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, email: event.target.value })} /></label>
@@ -4219,7 +4302,38 @@ function App() {
         </form>
       </section>
     </div> : null}
-    {invoiceJob ? <div className="modal-backdrop" role="presentation"><section className="modal invoice-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-draft-title" data-testid="invoice-draft-modal"><div className="modal-heading"><div><p className="eyebrow">Approval-gated finance</p><h2 id="invoice-draft-title">Draft invoice</h2><p>{invoiceJob.jobTitle} · {invoiceJob.clientName || 'Client not set'}</p></div><button className="icon-button" aria-label="Close invoice draft" onClick={closeInvoiceDraft}><X size={18} /></button></div><form onSubmit={createInvoiceDraft}><div className="form-grid"><label>Net amount (EUR)<input required type="number" min="0.01" step="0.01" value={invoiceDraft.amount} onChange={event => setInvoiceDraft({ ...invoiceDraft, amount: event.target.value })} /></label><label>VAT rate (%)<input required type="number" min="0" max="100" step="0.01" value={invoiceDraft.taxRate} onChange={event => setInvoiceDraft({ ...invoiceDraft, taxRate: event.target.value })} /></label><label>Due date<input required type="date" value={invoiceDraft.dueAt} onChange={event => setInvoiceDraft({ ...invoiceDraft, dueAt: event.target.value })} /></label><label className="checkbox-label"><input type="checkbox" checked={invoiceDraft.peppolReady} onChange={event => setInvoiceDraft({ ...invoiceDraft, peppolReady: event.target.checked })} />Prepare Peppol/UBL metadata</label><label className="form-span">Internal finance note<textarea value={invoiceDraft.notes} onChange={event => setInvoiceDraft({ ...invoiceDraft, notes: event.target.value })} /></label><div className="invoice-preview form-span" aria-label="Invoice calculation"><span>Net <strong>{currency.format(invoiceAmount)}</strong></span><span>VAT <strong>{currency.format(invoiceTaxAmount)}</strong></span><span>Total <strong>{currency.format(invoiceTotal)}</strong></span></div><p className="workflow-note form-span">This creates a retained draft and approval record only. It cannot issue, email, submit through Peppol, or collect this amount.</p></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={closeInvoiceDraft}>Cancel</button><button className="primary-button" disabled={submitting || invoiceAmount <= 0}><ReceiptEuro size={16} />{submitting ? 'Creating...' : 'Create approval-gated draft'}</button></div></form></section></div> : null}
+    {invoiceJob ? <div className="modal-backdrop" role="presentation">
+      <section className="modal invoice-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-draft-title" data-testid="invoice-draft-modal">
+        <div className="modal-heading">
+          <div><p className="eyebrow">Approval-gated finance</p><h2 id="invoice-draft-title">Draft invoice</h2><p>{invoiceJob.jobTitle} / {invoiceJob.clientName || 'Client not set'}</p></div>
+          <button className="icon-button" aria-label="Close invoice draft" onClick={closeInvoiceDraft}><X size={18} /></button>
+        </div>
+        <form onSubmit={createInvoiceDraft}>
+          <div className="form-grid">
+            <label>Net amount (EUR)<input required type="number" min="0.01" step="0.01" value={invoiceDraft.amount} onChange={event => setInvoiceDraft({ ...invoiceDraft, amount: event.target.value })} /></label>
+            <label>VAT rate (%)<input required type="number" min="0" max="100" step="0.01" value={invoiceDraft.taxRate} onChange={event => setInvoiceDraft({ ...invoiceDraft, taxRate: event.target.value })} /></label>
+            <label>Due date<input required type="date" value={invoiceDraft.dueAt} onChange={event => setInvoiceDraft({ ...invoiceDraft, dueAt: event.target.value })} /></label>
+            <label className="checkbox-label"><input type="checkbox" checked={invoiceDraft.peppolReady} onChange={event => setInvoiceDraft({ ...invoiceDraft, peppolReady: event.target.checked })} />Prepare Peppol BIS / UBL 2.1 export</label>
+            {invoiceDraft.peppolReady ? <>
+              <label>Buyer reference<input required={!invoiceDraft.purchaseOrderReference.trim()} value={invoiceDraft.buyerReference} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerReference: event.target.value })} placeholder="Reference supplied by the buyer" /></label>
+              <label>Purchase-order reference<input required={!invoiceDraft.buyerReference.trim()} value={invoiceDraft.purchaseOrderReference} onChange={event => setInvoiceDraft({ ...invoiceDraft, purchaseOrderReference: event.target.value })} /></label>
+              <label className="form-span">Buyer legal name<input required value={invoiceDraft.buyerLegalName} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerLegalName: event.target.value })} /></label>
+              <label>Buyer KVK / OIN<input value={invoiceDraft.buyerRegistrationNumber} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerRegistrationNumber: event.target.value })} /></label>
+              <label>Endpoint scheme<input required value={invoiceDraft.buyerEndpointScheme} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerEndpointScheme: event.target.value })} placeholder="0106 for KVK" /></label>
+              <label>Buyer electronic address<input required value={invoiceDraft.buyerEndpointId} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerEndpointId: event.target.value })} /></label>
+              <label className="form-span">Buyer street address<input required value={invoiceDraft.buyerAddress} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerAddress: event.target.value })} /></label>
+              <label>Buyer postal code<input required value={invoiceDraft.buyerPostalCode} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerPostalCode: event.target.value })} /></label>
+              <label>Buyer city<input required value={invoiceDraft.buyerCity} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerCity: event.target.value })} /></label>
+              <label>Buyer country<input required maxLength="2" value={invoiceDraft.buyerCountry} onChange={event => setInvoiceDraft({ ...invoiceDraft, buyerCountry: event.target.value.toUpperCase() })} /></label>
+            </> : null}
+            <label className="form-span">Internal finance note<textarea value={invoiceDraft.notes} onChange={event => setInvoiceDraft({ ...invoiceDraft, notes: event.target.value })} /></label>
+            <div className="invoice-preview form-span" aria-label="Invoice calculation"><span>Net <strong>{currency.format(invoiceAmount)}</strong></span><span>VAT <strong>{currency.format(invoiceTaxAmount)}</strong></span><span>Total <strong>{currency.format(invoiceTotal)}</strong></span></div>
+            <p className="workflow-note form-span">This creates a retained draft and approval record only. Structured export is generated after invoice approval; delivery and Peppol transport remain blocked until separately verified.</p>
+          </div>
+          <div className="modal-actions"><button type="button" className="secondary-button" onClick={closeInvoiceDraft}>Cancel</button><button className="primary-button" disabled={submitting || invoiceAmount <= 0}><ReceiptEuro size={16} />{submitting ? 'Creating...' : 'Create approval-gated draft'}</button></div>
+        </form>
+      </section>
+    </div> : null}
     {clientAction ? <div className="modal-backdrop" role="presentation">
       <section className="modal client-action-modal" role="dialog" aria-modal="true" aria-labelledby="client-action-title" data-testid="client-lifecycle-modal">
         <div className="modal-heading">

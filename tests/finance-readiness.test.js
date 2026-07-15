@@ -8,6 +8,7 @@ const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-fina
 process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
 process.env.LEDGER_DB_FILE = path.join(stateDirectory, 'ledger.sqlite');
 process.env.UPLOAD_DIR = path.join(stateDirectory, 'uploads');
+process.env.CONTRACTOR_AI_VERIFIED_INTEGRATIONS = 'finance_test_provider';
 
 const { ContractorOperatingLedger } = require('../operating-ledger');
 const app = require('../server');
@@ -154,6 +155,24 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   const baseUrl = `http://127.0.0.1:${port}`;
   const futureFollowUp = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
+  const organization = await request(baseUrl, '/api/ledger/organization', {
+    method: 'PUT',
+    body: JSON.stringify({
+      legalName: 'Finance Control Contractor B.V.',
+      registrationNumber: '12345678',
+      vatNumber: 'NL123456789B01',
+      email: 'finance-control@example.test',
+      address: 'Controlstraat 1',
+      postalCode: '3511 AA',
+      city: 'Utrecht',
+      country: 'NL',
+      iban: 'NL91ABNA0417164300',
+      defaultPaymentTermsDays: 30,
+      defaultQuoteValidityDays: 30
+    })
+  });
+  assert.equal(organization.response.status, 200);
+
   const intake = await request(baseUrl, '/api/ledger/intake', {
     method: 'POST',
     body: JSON.stringify({
@@ -191,7 +210,18 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
 
   const invoice = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices`, {
     method: 'POST',
-    body: JSON.stringify({ amount: 2400, taxAmount: 504, total: 2904, dueAt: futureFollowUp })
+    body: JSON.stringify({
+      amount: 2400,
+      taxRate: 21,
+      taxAmount: 504,
+      total: 2904,
+      dueAt: futureFollowUp,
+      structuredExportRequested: false,
+      buyerLegalName: 'Finance Control Client',
+      buyerAddress: 'Clientstraat 2',
+      buyerCity: 'Utrecht',
+      buyerCountry: 'NL'
+    })
   });
   assert.equal(invoice.response.status, 201);
   const invoiceApproval = await request(baseUrl, `/api/ledger/approvals/${invoice.body.invoice.approvalId}/resolve`, {
@@ -199,6 +229,21 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
     body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Invoice evidence checked.' })
   });
   assert.equal(invoiceApproval.response.status, 200);
+
+  const issuePackage = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoice.body.invoice.id}/issue-package`, {
+    method: 'POST', body: JSON.stringify({ actor: 'finance-control-test' })
+  });
+  assert.equal(issuePackage.response.status, 201);
+  const deliveryApproval = await request(baseUrl, `/api/ledger/approvals/${issuePackage.body.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Invoice attachment and recipient checked.' })
+  });
+  assert.equal(deliveryApproval.response.status, 200);
+  const delivery = await request(baseUrl, `/api/ledger/communications/${issuePackage.body.communication.id}/delivery-receipt`, {
+    method: 'POST',
+    body: JSON.stringify({ integration: 'finance_test_provider', providerMessageId: 'finance-control-message' })
+  });
+  assert.equal(delivery.response.status, 200);
 
   const untrackedQueue = await request(baseUrl, '/api/ledger/finance?mode=payment&limit=100');
   const untrackedJob = untrackedQueue.body.jobs.find(job => job.jobId === jobId);

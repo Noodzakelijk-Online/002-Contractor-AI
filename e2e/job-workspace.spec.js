@@ -17,6 +17,29 @@ async function createBrowserJob(request, title, overrides = {}) {
   return response.json();
 }
 
+async function ensureBrowserOrganization(request) {
+  const response = await request.put('/api/ledger/organization', {
+    data: {
+      legalName: 'Browser Contractor B.V.',
+      tradingName: 'Browser Contractor',
+      registrationNumber: '12345678',
+      vatNumber: 'NL123456789B01',
+      email: 'browser-office@example.test',
+      phone: '+31 30 123 45 67',
+      address: 'Browserstraat 10',
+      postalCode: '3511 AA',
+      city: 'Utrecht',
+      country: 'NL',
+      iban: 'NL91ABNA0417164300',
+      bic: 'ABNANL2A',
+      defaultPaymentTermsDays: 30,
+      defaultQuoteValidityDays: 30
+    }
+  });
+  expect(response.ok()).toBeTruthy();
+  return response.json();
+}
+
 async function ensureVerifiedTradePartner(request, name = 'Bouwmaat') {
   const listResponse = await request.get(`/api/ledger/trade-partners?includeRetired=true&search=${encodeURIComponent(name)}&limit=100`);
   expect(listResponse.ok()).toBeTruthy();
@@ -186,9 +209,11 @@ test('commercial control retains server totals and changes contract value only a
   await organizationPanel.getByLabel('Registered address').fill('Browserstraat 10');
   await organizationPanel.getByLabel('Postal code').fill('3511 AA');
   await organizationPanel.getByLabel('City').fill('Utrecht');
+  await organizationPanel.getByLabel('IBAN').fill('NL91ABNA0417164300');
+  await organizationPanel.getByLabel('BIC').fill('ABNANL2A');
   await organizationPanel.getByLabel('Quote terms').fill('Additional work requires a separately accepted scope change.');
   await organizationPanel.getByRole('button', { name: 'Save business identity' }).click();
-  await expect(page.getByText('Business identity retained and ready for controlled quote issue packages.')).toBeVisible();
+  await expect(page.getByText('Business identity retained and ready for controlled commercial packages.')).toBeVisible();
   await expect(organizationPanel.getByText('issue ready', { exact: true })).toBeVisible();
 
   const intake = await createBrowserJob(request, 'Browser commercial acceptance workflow', {
@@ -1670,7 +1695,8 @@ test('clients workspace prepares closeout and aftercare without delivery or book
   expect(mobileGeometry.workspaceWidth).toBeLessThanOrEqual(mobileGeometry.workspaceClientWidth);
 });
 
-test('finance workspace creates an approval-gated invoice draft without delivery', async ({ page, request }) => {
+test('finance workspace creates and prepares an approval-gated structured invoice without delivery', async ({ page, request }) => {
+  await ensureBrowserOrganization(request);
   const intake = await createBrowserJob(request, 'Browser finance closeout job', {
     status: 'completed',
     progressPercent: 100,
@@ -1691,6 +1717,12 @@ test('finance workspace creates an approval-gated invoice draft without delivery
   await expect(modal.getByRole('heading', { name: 'Draft invoice' })).toBeVisible();
   await expect(modal.getByLabel('Net amount (EUR)')).toHaveValue('3000.00');
   await expect(modal.getByLabel('VAT rate (%)')).toHaveValue('21');
+  await modal.getByLabel('Buyer reference').fill('BROWSER-BUYER-3000');
+  await modal.getByLabel('Buyer KVK / OIN').fill('87654321');
+  await modal.getByLabel('Buyer electronic address').fill('87654321');
+  await modal.getByLabel('Buyer street address').fill('Keizersgracht 10');
+  await modal.getByLabel('Buyer postal code').fill('1015 CC');
+  await modal.getByLabel('Buyer city').fill('Amsterdam');
   await modal.getByRole('button', { name: 'Create approval-gated draft' }).click();
   await expect(page.getByText(/Invoice draft retained/i)).toBeVisible();
 
@@ -1709,9 +1741,29 @@ test('finance workspace creates an approval-gated invoice draft without delivery
     expect.objectContaining({ id: detail.job.invoices[0].approvalId, targetType: 'invoice', approvalType: 'invoice_issue' })
   ]));
   await expect(finance.getByRole('button', { name: `Draft invoice for ${intake.job.title}` })).toHaveCount(0);
+
+  const invoiceApproval = await request.post(`/api/ledger/approvals/${detail.job.invoices[0].approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Structured invoice identity and totals checked.' }
+  });
+  expect(invoiceApproval.ok()).toBeTruthy();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  const row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await row.getByRole('button', { name: `Prepare invoice package for ${intake.job.title}` }).click();
+  await expect(page.getByText(/retained with HTML and UBL attachments/i)).toBeVisible();
+  await expect(row.getByRole('link', { name: `Download invoice for ${intake.job.title}` })).toBeVisible();
+  await expect(row.getByRole('link', { name: `Download UBL for ${intake.job.title}` })).toBeVisible();
+
+  const packagedDetailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  expect(packagedDetailResponse.ok()).toBeTruthy();
+  const packagedDetail = await packagedDetailResponse.json();
+  expect(packagedDetail.job.invoices[0].status).toBe('prepared');
+  expect(packagedDetail.job.invoices[0].data.issuePackage.issueReference).toMatch(/^INV-\d{4}-\d{6}$/);
+  expect(packagedDetail.job.documents.map(document => document.type)).toEqual(expect.arrayContaining(['invoice_issue_package', 'invoice_ubl_package']));
+  expect(packagedDetail.job.communications.find(communication => communication.data.source === 'invoice_issue_package')).toMatchObject({ status: 'draft' });
 });
 
 test('finance workspace operates costs, budgets, handoffs, receivables, draws and waiver requests', async ({ page, request }) => {
+  await ensureBrowserOrganization(request);
   const costJob = await createBrowserJob(request, 'Browser finance cost control job', {
     status: 'in_progress',
     progressPercent: 55,
@@ -1741,7 +1793,18 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   });
   expect(receivableBudget.ok()).toBeTruthy();
   const receivableInvoiceResponse = await request.post(`/api/ledger/jobs/${receivableJob.job.id}/invoices`, {
-    data: { amount: 3200, taxAmount: 672, total: 3872, dueAt: futureDueAt }
+    data: {
+      amount: 3200,
+      taxRate: 21,
+      taxAmount: 672,
+      total: 3872,
+      dueAt: futureDueAt,
+      structuredExportRequested: false,
+      buyerLegalName: 'Browser QA Client',
+      buyerAddress: 'Keizersgracht 10',
+      buyerCity: 'Amsterdam',
+      buyerCountry: 'NL'
+    }
   });
   expect(receivableInvoiceResponse.ok()).toBeTruthy();
   const receivableInvoice = await receivableInvoiceResponse.json();
@@ -1749,6 +1812,17 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Invoice evidence checked for browser finance controls.' }
   });
   expect(invoiceApproval.ok()).toBeTruthy();
+  const receivablePackageResponse = await request.post(`/api/ledger/jobs/${receivableJob.job.id}/invoices/${receivableInvoice.invoice.id}/issue-package`, { data: {} });
+  expect(receivablePackageResponse.ok()).toBeTruthy();
+  const receivablePackage = await receivablePackageResponse.json();
+  const receivableDeliveryApproval = await request.post(`/api/ledger/approvals/${receivablePackage.approval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Invoice recipient and retained attachment checked.' }
+  });
+  expect(receivableDeliveryApproval.ok()).toBeTruthy();
+  const receivableDelivery = await request.post(`/api/ledger/communications/${receivablePackage.communication.id}/delivery-receipt`, {
+    data: { integration: 'playwright_test_provider', providerMessageId: 'browser-receivable-message' }
+  });
+  expect(receivableDelivery.ok()).toBeTruthy();
   const receivableHandoffResponse = await request.post(`/api/ledger/jobs/${receivableJob.job.id}/finance-handoffs`, {
     data: { status: 'approved', targetSystem: 'FAB', notes: 'Browser pre-approved bookkeeping package.' }
   });

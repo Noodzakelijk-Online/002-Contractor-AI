@@ -788,6 +788,26 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function escapeXml(value) {
+  const xmlSafeText = Array.from(String(value ?? '')).filter(character => {
+    const codePoint = character.codePointAt(0);
+    return codePoint === 0x09 || codePoint === 0x0A || codePoint === 0x0D
+      || (codePoint >= 0x20 && codePoint <= 0xD7FF)
+      || (codePoint >= 0xE000 && codePoint <= 0xFFFD)
+      || (codePoint >= 0x10000 && codePoint <= 0x10FFFF);
+  }).join('');
+  return xmlSafeText
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function sha256Text(value) {
+  return crypto.createHash('sha256').update(String(value ?? ''), 'utf8').digest('hex');
+}
+
 function fromJson(value, fallback = {}) {
   if (value === null || value === undefined || value === '') {
     return fallback;
@@ -1362,6 +1382,19 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           default_quote_validity_days INTEGER NOT NULL DEFAULT 30,
           data_json TEXT NOT NULL DEFAULT '{}',
           created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+    }
+  },
+  {
+    version: '015_invoice_issue_packages',
+    description: 'Allocate durable invoice numbers and retain immutable human-readable and structured issue packages.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS invoice_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
       `);
@@ -2385,7 +2418,7 @@ class ContractorOperatingLedger {
       bic: '',
       defaultPaymentTermsDays: 30,
       defaultQuoteValidityDays: 30,
-      data: { vatExempt: false },
+      data: { vatExempt: false, electronicAddressScheme: '', electronicAddress: '' },
       createdAt: null,
       updatedAt: null
     };
@@ -2455,9 +2488,17 @@ class ContractorOperatingLedger {
       const data = {
         ...(before?.data || {}),
         vatExempt: normalizeBoolean(payload.vatExempt ?? payload.vat_exempt, false),
+        electronicAddressScheme: textField('electronicAddressScheme', 'Electronic address scheme', 20),
+        electronicAddress: textField('electronicAddress', 'Electronic address', 120),
         quoteTerms: textField('quoteTerms', 'Quote terms', 4000) || null,
         notes: textField('notes', 'Internal profile notes', 2000) || null
       };
+      if (data.electronicAddressScheme && !/^[0-9A-Za-z:._-]{2,20}$/.test(data.electronicAddressScheme)) {
+        throw ledgerInputError('organization_profile_invalid', 'Electronic address scheme contains unsupported characters.');
+      }
+      if (Boolean(data.electronicAddressScheme) !== Boolean(data.electronicAddress)) {
+        throw ledgerInputError('organization_profile_invalid', 'Electronic address scheme and address must be retained together.');
+      }
       const values = {
         legalName: textField('legalName', 'Legal name', 200),
         tradingName: textField('tradingName', 'Trading name', 200),
@@ -5730,6 +5771,508 @@ class ContractorOperatingLedger {
   <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source quote ${escapeHtml(quote.id)}</footer>
 </body>
 </html>`;
+  }
+
+  allocateInvoiceReference(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('invoice_issue_date_invalid', 'Invoice issue date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO invoice_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE invoice_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable invoice number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'invoice_number_allocation_failed';
+      throw error;
+    }
+    return `INV-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  prepareInvoiceIssuePackage(jobId, invoiceId, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(invoiceId, jobId);
+      if (!invoiceRow) {
+        const error = new Error('Invoice not found for this job.');
+        error.statusCode = 404;
+        error.code = 'invoice_not_found';
+        throw error;
+      }
+      const invoice = this.mapInvoice(invoiceRow);
+      const identityKey = crypto.createHash('sha256').update(`${jobId}\0${invoiceId}`, 'utf8').digest('hex');
+      const htmlDocumentId = `doc_invoice_${identityKey.slice(0, 24)}`;
+      const ublDocumentId = `doc_ubl_${identityKey.slice(0, 24)}`;
+      const communicationId = `comm_invoice_${identityKey.slice(0, 24)}`;
+      const retainedHtml = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(htmlDocumentId, jobId);
+
+      if (retainedHtml) {
+        const htmlPackage = this.getInvoiceIssueDocument(htmlDocumentId, { audit: false });
+        const structuredRequested = htmlPackage.document.data?.structuredExportIncluded === true;
+        const ublPackage = structuredRequested ? this.getInvoiceIssueDocument(ublDocumentId, { audit: false }) : null;
+        const communicationRow = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?').get(communicationId, jobId);
+        if (!communicationRow) {
+          const error = new Error('The retained invoice package is missing its controlled delivery draft.');
+          error.statusCode = 409;
+          error.code = 'invoice_issue_package_incomplete';
+          throw error;
+        }
+        const communication = this.mapCommunication(communicationRow);
+        const approvalRow = communication.approvalId
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(communication.approvalId)
+          : null;
+        return {
+          document: htmlPackage.document,
+          documents: [htmlPackage.document, ...(ublPackage ? [ublPackage.document] : [])],
+          htmlDocument: htmlPackage.document,
+          ublDocument: ublPackage?.document || null,
+          communication,
+          approval: approvalRow ? this.mapApproval(approvalRow) : null,
+          issueReference: htmlPackage.document.data.issueReference,
+          packageHash: htmlPackage.packageHash,
+          replayed: true,
+          deliveryMode: 'draft_only',
+          structuredExportIncluded: structuredRequested,
+          transportSubmitted: false,
+          notSent: !['sent', 'delivered'].includes(normalizeStatus(communication.status, 'draft')),
+          externalCommitments: 0
+        };
+      }
+
+      if (invoice.status !== 'approved') {
+        const error = new Error('Invoice must receive internal approval before an issue package can be prepared.');
+        error.statusCode = 409;
+        error.code = 'invoice_not_approved_for_issue';
+        throw error;
+      }
+      const organization = this.getOrganizationProfile();
+      if (!organization.readiness.ready) {
+        const error = new Error('Complete the business identity before preparing an invoice package.');
+        error.statusCode = 409;
+        error.code = 'organization_profile_incomplete';
+        error.details = { missing: organization.readiness.missing };
+        throw error;
+      }
+      if (!normalizeText(organization.iban)) {
+        const error = new Error('Retain the payment account before preparing an invoice package.');
+        error.statusCode = 409;
+        error.code = 'invoice_payment_account_missing';
+        throw error;
+      }
+      const client = this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(job.client_id));
+      const invoiceData = invoice.data || {};
+      const buyer = invoiceData.buyer || {
+        id: client?.id || null,
+        legalName: client?.company || client?.name || '',
+        contactName: client?.name || '',
+        email: client?.email || '',
+        vatNumber: client?.vatNumber || '',
+        registrationNumber: client?.data?.registrationNumber || '',
+        endpointScheme: client?.data?.electronicAddressScheme || '',
+        endpointId: client?.data?.electronicAddress || '',
+        address: client?.address || job.address || '',
+        postalCode: client?.data?.postalCode || '',
+        city: client?.city || job.city || '',
+        country: client?.country || job.country || 'NL'
+      };
+      const lineItems = Array.isArray(invoiceData.lineItems) && invoiceData.lineItems.length
+        ? invoiceData.lineItems
+        : [{ id: '1', description: job.title, quantity: 1, unitPrice: invoice.amount, lineAmount: invoice.amount, costCode: null }];
+      const structuredExportRequested = invoiceData.structuredExportRequested === true || invoiceData.peppolReady === true;
+      const structuredReadiness = this.assessInvoiceStructuredReadiness({
+        invoice: {
+          taxRate: invoiceData.taxRate,
+          buyerReference: invoiceData.buyerReference,
+          purchaseOrderReference: invoiceData.purchaseOrderReference
+        },
+        organization,
+        buyer,
+        lineItems
+      });
+      if (structuredExportRequested && !structuredReadiness.ready) {
+        const error = new Error('Complete the structured invoice fields before preparing the requested UBL package.');
+        error.statusCode = 409;
+        error.code = 'invoice_structured_export_incomplete';
+        error.details = { missing: structuredReadiness.missing };
+        throw error;
+      }
+      const basicMissing = [
+        ['buyer.legalName', 'Buyer legal name', buyer.legalName],
+        ['buyer.address', 'Buyer address', buyer.address],
+        ['buyer.city', 'Buyer city', buyer.city],
+        ['buyer.country', 'Buyer country', buyer.country],
+        ['dueAt', 'Invoice due date', invoice.dueAt]
+      ].filter(([, , value]) => !normalizeText(value)).map(([field, label]) => ({ field, label }));
+      if (basicMissing.length) {
+        const error = new Error('Complete the buyer and payment fields before preparing an invoice package.');
+        error.statusCode = 409;
+        error.code = 'invoice_issue_data_incomplete';
+        error.details = { missing: basicMissing };
+        throw error;
+      }
+
+      const preparedAt = nowIso();
+      const issueReference = this.allocateInvoiceReference(preparedAt);
+      const supplierEndpoint = this.organizationElectronicAddress(organization);
+      const snapshot = {
+        packageVersion: 1,
+        issueReference,
+        preparedAt,
+        issueDate: preparedAt.slice(0, 10),
+        preparedBy: options.actor || 'Contractor.AI',
+        structuredExportIncluded: structuredExportRequested,
+        structuredProfile: structuredExportRequested ? 'Peppol BIS Billing 3.0 / UBL 2.1' : null,
+        transportStatus: 'not_submitted',
+        organization: {
+          legalName: organization.legalName,
+          tradingName: organization.tradingName,
+          registrationNumber: organization.registrationNumber,
+          vatNumber: organization.vatNumber,
+          vatExempt: organization.data?.vatExempt === true,
+          electronicAddressScheme: supplierEndpoint.scheme,
+          electronicAddress: supplierEndpoint.id,
+          email: organization.email,
+          phone: organization.phone,
+          address: organization.address,
+          postalCode: organization.postalCode,
+          city: organization.city,
+          country: organization.country,
+          iban: organization.iban,
+          bic: organization.bic,
+          paymentTermsDays: organization.defaultPaymentTermsDays
+        },
+        buyer: { ...buyer },
+        job: {
+          id: job.id,
+          title: job.title,
+          description: job.description,
+          address: job.address,
+          city: job.city,
+          country: job.country
+        },
+        invoice: {
+          id: invoice.id,
+          quoteId: invoice.quoteId,
+          currency: invoice.currency,
+          amount: invoice.amount,
+          taxRate: normalizeNumber(invoiceData.taxRate, invoice.amount ? invoice.taxAmount / invoice.amount * 100 : 0),
+          taxAmount: invoice.taxAmount,
+          total: invoice.total,
+          dueAt: invoice.dueAt,
+          buyerReference: invoiceData.buyerReference || null,
+          purchaseOrderReference: invoiceData.purchaseOrderReference || null,
+          notes: invoiceData.notes || null,
+          lineItems
+        }
+      };
+      const packageHash = sha256Json(snapshot);
+      const html = this.renderInvoiceIssuePackageHtml(snapshot, packageHash);
+      const ubl = structuredExportRequested ? this.renderInvoiceUbl(snapshot, packageHash) : null;
+      const htmlDocument = this.addDocument(jobId, {
+        type: 'invoice_issue_package',
+        title: `Invoice ${issueReference}`,
+        filename: `${issueReference}.html`,
+        mimeType: 'text/html; charset=utf-8',
+        sizeBytes: Buffer.byteLength(html, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          format: 'html',
+          sourceRecordType: 'invoice',
+          sourceRecordId: invoiceId,
+          issueReference,
+          packageHash,
+          contentHash: sha256Text(html),
+          snapshot,
+          structuredExportIncluded: structuredExportRequested,
+          safeguards: { deliveryMode: 'draft_only', transportSubmitted: false, externalCommitments: 0 }
+        }
+      }, { actor: options.actor, audit: true, id: htmlDocumentId, ignoreExisting: true });
+      const ublDocument = ubl ? this.addDocument(jobId, {
+        type: 'invoice_ubl_package',
+        title: `UBL invoice ${issueReference}`,
+        filename: `${issueReference}.xml`,
+        mimeType: 'application/xml; charset=utf-8',
+        sizeBytes: Buffer.byteLength(ubl, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          format: 'ubl_2_1',
+          sourceRecordType: 'invoice',
+          sourceRecordId: invoiceId,
+          issueReference,
+          packageHash,
+          contentHash: sha256Text(ubl),
+          snapshot,
+          structuredExportIncluded: true,
+          structuredReadiness,
+          safeguards: { deliveryMode: 'draft_only', transportSubmitted: false, externalCommitments: 0 }
+        }
+      }, { actor: options.actor, audit: true, id: ublDocumentId, ignoreExisting: true }) : null;
+      const attachmentDocumentIds = [htmlDocumentId, ...(ublDocument ? [ublDocumentId] : [])];
+      const recipient = normalizeText(buyer.email, '') || null;
+      const communication = this.addCommunication(jobId, {
+        clientId: buyer.id,
+        channel: recipient ? 'email' : 'portal',
+        direction: 'outbound',
+        status: 'draft',
+        subject: `Invoice ${issueReference} - ${job.title}`,
+        body: `Dear ${buyer.contactName || buyer.legalName},\n\nPlease find invoice ${issueReference} for ${job.title}. The retained invoice package is attached.\n\nPayment is due by ${String(invoice.dueAt).slice(0, 10)}. Structured export preparation does not mean that a Peppol transport submission occurred.`,
+        recipient,
+        expectsReply: false,
+        requiresApproval: true,
+        data: {
+          source: 'invoice_issue_package',
+          sourceRecordId: invoiceId,
+          issueReference,
+          packageHash,
+          attachmentDocumentIds,
+          deliveryMode: 'draft_only',
+          structuredExportIncluded: structuredExportRequested,
+          transportSubmitted: false,
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: true, id: communicationId, ignoreExisting: true });
+      const updatedInvoiceData = {
+        ...invoiceData,
+        structuredReadiness,
+        issuePackage: {
+          issueReference,
+          packageHash,
+          htmlDocumentId,
+          ublDocumentId: ublDocument?.id || null,
+          communicationId: communication.id,
+          communicationApprovalId: communication.approvalId || communication.approval?.id || null,
+          preparedAt,
+          structuredExportIncluded: structuredExportRequested,
+          transportStatus: 'not_submitted'
+        }
+      };
+      this.db.prepare("UPDATE invoices SET status = 'prepared', data_json = ?, updated_at = ? WHERE id = ?")
+        .run(toJson(updatedInvoiceData), nowIso(), invoiceId);
+      this.audit({
+        entityType: 'invoice_issue_package',
+        entityId: htmlDocumentId,
+        jobId,
+        action: 'prepare_invoice_issue_package',
+        actor: options.actor || 'Contractor.AI',
+        after: {
+          invoiceId,
+          issueReference,
+          packageHash,
+          documentIds: attachmentDocumentIds,
+          communicationId: communication.id,
+          approvalId: communication.approvalId || communication.approval?.id || null,
+          structuredExportIncluded: structuredExportRequested,
+          transportSubmitted: false,
+          externalCommitments: 0
+        }
+      });
+      return {
+        document: htmlDocument,
+        documents: [htmlDocument, ...(ublDocument ? [ublDocument] : [])],
+        htmlDocument,
+        ublDocument,
+        communication,
+        approval: communication.approval || null,
+        issueReference,
+        packageHash,
+        replayed: false,
+        deliveryMode: 'draft_only',
+        structuredExportIncluded: structuredExportRequested,
+        transportSubmitted: false,
+        notSent: true,
+        externalCommitments: 0
+      };
+    });
+  }
+
+  getInvoiceIssueDocument(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (!['invoice_issue_package', 'invoice_ubl_package'].includes(document.type)) {
+      const error = new Error('Document is not a generated invoice issue package.');
+      error.statusCode = 409;
+      error.code = 'invoice_issue_package_required';
+      throw error;
+    }
+    const snapshot = document.data?.snapshot;
+    const retainedHash = normalizeText(document.data?.packageHash, '');
+    if (!snapshot || !retainedHash || sha256Json(snapshot) !== retainedHash) {
+      const error = new Error('The retained invoice package failed its snapshot checksum verification.');
+      error.statusCode = 409;
+      error.code = 'invoice_issue_package_integrity_failed';
+      throw error;
+    }
+    const content = document.type === 'invoice_ubl_package'
+      ? this.renderInvoiceUbl(snapshot, retainedHash)
+      : this.renderInvoiceIssuePackageHtml(snapshot, retainedHash);
+    if (!normalizeText(document.data?.contentHash, '') || sha256Text(content) !== document.data.contentHash) {
+      const error = new Error('The retained invoice package failed its content checksum verification.');
+      error.statusCode = 409;
+      error.code = 'invoice_issue_package_integrity_failed';
+      throw error;
+    }
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId: document.jobId,
+        action: 'download_invoice_issue_package',
+        actor: options.actor || 'authenticated_operator',
+        after: { issueReference: document.data.issueReference, packageHash: retainedHash, format: document.data.format }
+      });
+    }
+    return {
+      document,
+      content,
+      filename: document.filename || `${document.data.issueReference || 'invoice'}.${document.type === 'invoice_ubl_package' ? 'xml' : 'html'}`,
+      mimeType: document.mimeType || (document.type === 'invoice_ubl_package' ? 'application/xml; charset=utf-8' : 'text/html; charset=utf-8'),
+      packageHash: retainedHash
+    };
+  }
+
+  getIssuePackage(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (document.type === 'quote_issue_package') {
+      const issue = this.getQuoteIssuePackage(documentId, options);
+      return { ...issue, content: issue.html, mimeType: 'text/html; charset=utf-8' };
+    }
+    return this.getInvoiceIssueDocument(documentId, options);
+  }
+
+  renderInvoiceIssuePackageHtml(snapshot, packageHash) {
+    const supplier = snapshot.organization || {};
+    const buyer = snapshot.buyer || {};
+    const job = snapshot.job || {};
+    const invoice = snapshot.invoice || {};
+    const money = value => {
+      try {
+        return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: invoice.currency || 'EUR' }).format(Number(value || 0));
+      } catch {
+        return `${Number(value || 0).toFixed(2)} ${invoice.currency || 'EUR'}`;
+      }
+    };
+    const date = value => {
+      if (!value) return 'Not specified';
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value) : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const lines = (invoice.lineItems || []).map(item => `<tr><td>${escapeHtml(item.description)}</td><td class="number">${escapeHtml(item.quantity)}</td><td class="number">${escapeHtml(money(item.unitPrice))}</td><td class="number">${escapeHtml(money(item.lineAmount))}</td></tr>`).join('');
+    const supplierName = supplier.tradingName || supplier.legalName || 'Contractor';
+    const buyerAddress = [buyer.address, buyer.postalCode, buyer.city, buyer.country].filter(Boolean).map(escapeHtml).join(', ');
+    const supplierAddress = [supplier.address, supplier.postalCode, supplier.city, supplier.country].filter(Boolean).map(escapeHtml).join(', ');
+    const reference = invoice.buyerReference || invoice.purchaseOrderReference || 'Not retained';
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 920px; margin: 0 auto; padding: 42px; font-size: 14px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 32px; padding-bottom: 24px; border-bottom: 3px solid #176b57; }
+    h1 { margin: 0; color: #174d40; font-size: 30px; }
+    h2 { margin: 28px 0 10px; color: #23483d; font-size: 18px; }
+    p { margin: 4px 0; }
+    .muted { color: #64736e; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 26px; }
+    .party { padding: 16px 0; border-bottom: 1px solid #dce5e1; }
+    .party span { display: block; color: #6a7873; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    table { width: 100%; margin-top: 14px; border-collapse: collapse; }
+    th, td { padding: 11px 9px; border-bottom: 1px solid #dfe7e3; text-align: left; vertical-align: top; }
+    th { color: #53645e; background: #f2f6f4; font-size: 11px; text-transform: uppercase; }
+    .number { text-align: right; white-space: nowrap; }
+    .totals { width: min(390px, 100%); margin: 18px 0 0 auto; }
+    .totals div { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #e3e9e6; }
+    .totals .grand { padding-top: 12px; color: #174d40; font-size: 18px; font-weight: 700; border-bottom: 0; }
+    .payment { margin-top: 28px; padding: 17px; background: #f4f7f6; border-left: 4px solid #176b57; }
+    footer { margin-top: 38px; padding-top: 16px; color: #6c7975; border-top: 1px solid #dce5e1; font-size: 10px; overflow-wrap: anywhere; }
+    @media print { body { max-width: none; padding: 18mm; } }
+    @media (max-width: 650px) { body { padding: 22px; } header, .parties { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>Invoice</h1><p><strong>${escapeHtml(supplierName)}</strong></p><p>${supplierAddress}</p><p>${escapeHtml(supplier.email || supplier.phone || '')}</p></div><div class="reference"><strong>${escapeHtml(snapshot.issueReference)}</strong><p>Issued ${escapeHtml(date(snapshot.issueDate))}</p><p>Due ${escapeHtml(date(invoice.dueAt))}</p></div></header>
+  <section class="parties"><div class="party"><span>Bill to</span><strong>${escapeHtml(buyer.legalName)}</strong>${buyer.contactName && buyer.contactName !== buyer.legalName ? `<p>${escapeHtml(buyer.contactName)}</p>` : ''}<p>${buyerAddress}</p><p>${escapeHtml(buyer.email || '')}</p></div><div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${escapeHtml(job.address || '')}</p><p class="muted">Job ${escapeHtml(job.id)} &middot; Buyer reference ${escapeHtml(reference)}</p></div></section>
+  <h2>Invoice lines</h2>
+  <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit price</th><th class="number">Amount</th></tr></thead><tbody>${lines}</tbody></table>
+  <div class="totals"><div><span>Net</span><strong>${escapeHtml(money(invoice.amount))}</strong></div><div><span>VAT (${escapeHtml(invoice.taxRate)}%)</span><strong>${escapeHtml(money(invoice.taxAmount))}</strong></div><div class="grand"><span>Total due</span><strong>${escapeHtml(money(invoice.total))}</strong></div></div>
+  <section class="payment"><strong>Payment instructions</strong><p>Pay by ${escapeHtml(date(invoice.dueAt))} to IBAN ${escapeHtml(supplier.iban)}${supplier.bic ? `, BIC ${escapeHtml(supplier.bic)}` : ''}.</p><p>Use payment reference ${escapeHtml(snapshot.issueReference)}.</p>${invoice.notes ? `<p>${escapeHtml(invoice.notes)}</p>` : ''}<p>Structured export: ${snapshot.structuredExportIncluded ? 'UBL 2.1 prepared; transport not submitted.' : 'not requested.'}</p></section>
+  <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source invoice ${escapeHtml(invoice.id)}</footer>
+</body>
+</html>`;
+  }
+
+  renderInvoiceUbl(snapshot, packageHash) {
+    const supplier = snapshot.organization || {};
+    const buyer = snapshot.buyer || {};
+    const invoice = snapshot.invoice || {};
+    const currency = normalizeText(invoice.currency, 'EUR').toUpperCase();
+    const supplierLegalScheme = supplier.country === 'NL' ? supplier.electronicAddressScheme : supplier.electronicAddressScheme;
+    const buyerLegalId = buyer.registrationNumber || (['0106', '0190'].includes(buyer.endpointScheme) ? buyer.endpointId : '');
+    const amount = value => roundMoney(value).toFixed(2);
+    const quantity = value => String(normalizeNumber(value, 0)).replace(/\.0+$/, '');
+    const lines = (invoice.lineItems || []).map((item, index) => `
+  <cac:InvoiceLine>
+    <cbc:ID>${escapeXml(item.id || index + 1)}</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="C62">${escapeXml(quantity(item.quantity))}</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(item.lineAmount))}</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Name>${escapeXml(item.description)}</cbc:Name>
+      <cac:ClassifiedTaxCategory><cbc:ID>S</cbc:ID><cbc:Percent>${escapeXml(invoice.taxRate)}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price><cbc:PriceAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(item.unitPrice))}</cbc:PriceAmount><cbc:BaseQuantity unitCode="C62">1</cbc:BaseQuantity></cac:Price>
+  </cac:InvoiceLine>`).join('');
+    const documentReference = invoice.buyerReference
+      ? `  <cbc:BuyerReference>${escapeXml(invoice.buyerReference)}</cbc:BuyerReference>\n`
+      : `  <cac:OrderReference><cbc:ID>${escapeXml(invoice.purchaseOrderReference)}</cbc:ID></cac:OrderReference>\n`;
+    const note = invoice.notes ? `  <cbc:Note>${escapeXml(invoice.notes)}</cbc:Note>\n` : '';
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0</cbc:CustomizationID>
+  <cbc:ProfileID>urn:fdc:peppol.eu:2017:poacc:billing:01:1.0</cbc:ProfileID>
+  <cbc:ID>${escapeXml(snapshot.issueReference)}</cbc:ID>
+  <cbc:IssueDate>${escapeXml(snapshot.issueDate)}</cbc:IssueDate>
+  <cbc:DueDate>${escapeXml(String(invoice.dueAt).slice(0, 10))}</cbc:DueDate>
+  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>
+${note}  <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
+${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIIntegrity</cbc:ID><cbc:DocumentDescription>SHA-256 ${escapeXml(packageHash)}</cbc:DocumentDescription></cac:AdditionalDocumentReference>
+  <cac:AccountingSupplierParty><cac:Party>
+    <cbc:EndpointID schemeID="${escapeXml(supplier.electronicAddressScheme)}">${escapeXml(supplier.electronicAddress)}</cbc:EndpointID>
+    <cac:PartyIdentification><cbc:ID schemeID="${escapeXml(supplierLegalScheme)}">${escapeXml(supplier.registrationNumber)}</cbc:ID></cac:PartyIdentification>
+    <cac:PartyName><cbc:Name>${escapeXml(supplier.tradingName || supplier.legalName)}</cbc:Name></cac:PartyName>
+    <cac:PostalAddress><cbc:StreetName>${escapeXml(supplier.address)}</cbc:StreetName><cbc:CityName>${escapeXml(supplier.city)}</cbc:CityName><cbc:PostalZone>${escapeXml(supplier.postalCode)}</cbc:PostalZone><cac:Country><cbc:IdentificationCode>${escapeXml(supplier.country)}</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
+    <cac:PartyTaxScheme><cbc:CompanyID>${escapeXml(supplier.vatNumber)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    <cac:PartyLegalEntity><cbc:RegistrationName>${escapeXml(supplier.legalName)}</cbc:RegistrationName><cbc:CompanyID schemeID="${escapeXml(supplierLegalScheme)}">${escapeXml(supplier.registrationNumber)}</cbc:CompanyID></cac:PartyLegalEntity>
+    <cac:Contact><cbc:Name>${escapeXml(supplier.tradingName || supplier.legalName)}</cbc:Name>${supplier.phone ? `<cbc:Telephone>${escapeXml(supplier.phone)}</cbc:Telephone>` : ''}${supplier.email ? `<cbc:ElectronicMail>${escapeXml(supplier.email)}</cbc:ElectronicMail>` : ''}</cac:Contact>
+  </cac:Party></cac:AccountingSupplierParty>
+  <cac:AccountingCustomerParty><cac:Party>
+    <cbc:EndpointID schemeID="${escapeXml(buyer.endpointScheme)}">${escapeXml(buyer.endpointId)}</cbc:EndpointID>
+    <cac:PartyIdentification><cbc:ID schemeID="${escapeXml(buyer.endpointScheme)}">${escapeXml(buyerLegalId)}</cbc:ID></cac:PartyIdentification>
+    <cac:PartyName><cbc:Name>${escapeXml(buyer.legalName)}</cbc:Name></cac:PartyName>
+    <cac:PostalAddress><cbc:StreetName>${escapeXml(buyer.address)}</cbc:StreetName><cbc:CityName>${escapeXml(buyer.city)}</cbc:CityName><cbc:PostalZone>${escapeXml(buyer.postalCode)}</cbc:PostalZone><cac:Country><cbc:IdentificationCode>${escapeXml(buyer.country)}</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
+    ${buyer.vatNumber ? `<cac:PartyTaxScheme><cbc:CompanyID>${escapeXml(buyer.vatNumber)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>` : ''}
+    <cac:PartyLegalEntity><cbc:RegistrationName>${escapeXml(buyer.legalName)}</cbc:RegistrationName><cbc:CompanyID schemeID="${escapeXml(buyer.endpointScheme)}">${escapeXml(buyerLegalId)}</cbc:CompanyID></cac:PartyLegalEntity>
+  </cac:Party></cac:AccountingCustomerParty>
+  <cac:PaymentMeans><cbc:PaymentMeansCode name="SEPA credit transfer">58</cbc:PaymentMeansCode><cbc:PaymentID>${escapeXml(snapshot.issueReference)}</cbc:PaymentID><cac:PayeeFinancialAccount><cbc:ID>${escapeXml(supplier.iban)}</cbc:ID><cbc:Name>${escapeXml(supplier.legalName)}</cbc:Name>${supplier.bic ? `<cac:FinancialInstitutionBranch><cbc:ID>${escapeXml(supplier.bic)}</cbc:ID></cac:FinancialInstitutionBranch>` : ''}</cac:PayeeFinancialAccount></cac:PaymentMeans>
+  <cac:PaymentTerms><cbc:Note>Payment due by ${escapeXml(String(invoice.dueAt).slice(0, 10))}</cbc:Note></cac:PaymentTerms>
+  <cac:TaxTotal><cbc:TaxAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.taxAmount))}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.amount))}</cbc:TaxableAmount><cbc:TaxAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.taxAmount))}</cbc:TaxAmount><cac:TaxCategory><cbc:ID>S</cbc:ID><cbc:Percent>${escapeXml(invoice.taxRate)}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal></cac:TaxTotal>
+  <cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.amount))}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.amount))}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.total))}</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.total))}</cbc:PayableAmount></cac:LegalMonetaryTotal>${lines}
+</Invoice>`;
   }
 
   requestQuoteAcceptance(jobId, quoteId, payload = {}, options = {}) {
@@ -9060,31 +9603,65 @@ class ContractorOperatingLedger {
       throw error;
     }
     const communication = this.mapCommunication(row);
-    if (communication.data?.source !== 'quote_issue_package') return communication;
+    const source = communication.data?.source;
+    if (!['quote_issue_package', 'invoice_issue_package'].includes(source)) return communication;
 
     const attachmentIds = Array.isArray(communication.data?.attachmentDocumentIds)
       ? communication.data.attachmentDocumentIds.filter(Boolean)
       : [];
-    if (attachmentIds.length !== 1) {
+    if (source === 'quote_issue_package' && attachmentIds.length !== 1) {
       const error = new Error('The quote delivery draft must retain exactly one issue package attachment.');
       error.statusCode = 409;
       error.code = 'quote_issue_package_attachment_invalid';
       throw error;
     }
-    const issuePackage = this.getQuoteIssuePackage(attachmentIds[0], { audit: false });
-    if (issuePackage.document.jobId !== communication.jobId
-      || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
-      || issuePackage.packageHash !== communication.data?.packageHash) {
-      const error = new Error('The quote delivery draft no longer matches its retained issue package.');
+    if (source === 'quote_issue_package') {
+      const issuePackage = this.getQuoteIssuePackage(attachmentIds[0], { audit: false });
+      if (issuePackage.document.jobId !== communication.jobId
+        || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
+        || issuePackage.packageHash !== communication.data?.packageHash) {
+        const error = new Error('The quote delivery draft no longer matches its retained issue package.');
+        error.statusCode = 409;
+        error.code = 'quote_issue_package_attachment_mismatch';
+        throw error;
+      }
+      return communication;
+    }
+
+    const expectedCount = communication.data?.structuredExportIncluded === true ? 2 : 1;
+    if (attachmentIds.length !== expectedCount || new Set(attachmentIds).size !== expectedCount) {
+      const error = new Error(`The invoice delivery draft must retain exactly ${expectedCount} immutable package attachment${expectedCount === 1 ? '' : 's'}.`);
       error.statusCode = 409;
-      error.code = 'quote_issue_package_attachment_mismatch';
+      error.code = 'invoice_issue_package_attachment_invalid';
+      throw error;
+    }
+    const packages = attachmentIds.map(documentId => this.getInvoiceIssueDocument(documentId, { audit: false }));
+    const expectedTypes = communication.data?.structuredExportIncluded === true
+      ? new Set(['invoice_issue_package', 'invoice_ubl_package'])
+      : new Set(['invoice_issue_package']);
+    for (const issuePackage of packages) {
+      expectedTypes.delete(issuePackage.document.type);
+      if (issuePackage.document.jobId !== communication.jobId
+        || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
+        || issuePackage.packageHash !== communication.data?.packageHash) {
+        const error = new Error('The invoice delivery draft no longer matches its retained issue package.');
+        error.statusCode = 409;
+        error.code = 'invoice_issue_package_attachment_mismatch';
+        throw error;
+      }
+    }
+    if (expectedTypes.size) {
+      const error = new Error('The invoice delivery draft is missing a required issue package format.');
+      error.statusCode = 409;
+      error.code = 'invoice_issue_package_attachment_invalid';
       throw error;
     }
     return communication;
   }
 
   recordCommunicationDelivery(communicationId, payload = {}, options = {}) {
-    const row = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(String(communicationId || ''));
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(String(communicationId || ''));
     if (!row) {
       const error = new Error('Communication record not found');
       error.statusCode = 404;
@@ -9130,6 +9707,29 @@ class ContractorOperatingLedger {
       SET status = 'sent', sent_at = ?, data_json = ?, updated_at = ?
       WHERE id = ?
     `).run(sentAt, toJson(data), nowIso(), row.id);
+    if (existing.data?.source === 'invoice_issue_package' && existing.data?.sourceRecordId) {
+      const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?')
+        .get(existing.data.sourceRecordId, row.job_id);
+      if (!invoiceRow) {
+        const error = new Error('The delivered invoice communication is no longer linked to its source invoice.');
+        error.statusCode = 409;
+        error.code = 'invoice_issue_package_source_missing';
+        throw error;
+      }
+      const invoiceData = fromJson(invoiceRow.data_json, {});
+      const issuePackage = invoiceData.issuePackage || {};
+      this.db.prepare("UPDATE invoices SET status = 'sent', data_json = ?, updated_at = ? WHERE id = ?")
+        .run(toJson({
+          ...invoiceData,
+          issuePackage: {
+            ...issuePackage,
+            transportStatus: 'delivered_by_verified_integration',
+            deliveredAt: sentAt,
+            deliveryIntegration: integration,
+            providerMessageId: data.deliveryReceipt.providerMessageId
+          }
+        }), nowIso(), invoiceRow.id);
+    }
     const communication = this.mapCommunication(this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(row.id));
     this.audit({
       entityType: 'communication',
@@ -9141,7 +9741,8 @@ class ContractorOperatingLedger {
       after: communication,
       metadata: { integration, providerMessageId: data.deliveryReceipt.providerMessageId }
     });
-    return communication;
+      return communication;
+    });
   }
 
   addDocument(jobId, payload = {}, options = {}) {
@@ -9493,15 +10094,167 @@ class ContractorOperatingLedger {
     });
   }
 
+  organizationElectronicAddress(organization = {}) {
+    const configuredScheme = normalizeText(organization.data?.electronicAddressScheme, '');
+    const configuredAddress = normalizeText(organization.data?.electronicAddress, '');
+    if (configuredScheme && configuredAddress) {
+      return { scheme: configuredScheme, id: configuredAddress, derived: false };
+    }
+    if (normalizeText(organization.country, 'NL').toUpperCase() === 'NL' && normalizeText(organization.registrationNumber, '')) {
+      return { scheme: '0106', id: normalizeText(organization.registrationNumber), derived: true };
+    }
+    return { scheme: '', id: '', derived: false };
+  }
+
+  assessInvoiceStructuredReadiness({ invoice = {}, organization = {}, buyer = {}, lineItems = [] } = {}) {
+    const missing = [];
+    const add = (code, field, label) => {
+      if (!missing.some(item => item.code === code)) missing.push({ code, field, label });
+    };
+    const sellerEndpoint = this.organizationElectronicAddress(organization);
+    const sellerCountry = normalizeText(organization.country, '').toUpperCase();
+    const buyerCountry = normalizeText(buyer.country, '').toUpperCase();
+    const buyerScheme = normalizeText(buyer.endpointScheme, '');
+    const buyerEndpoint = normalizeText(buyer.endpointId, '');
+    const sellerVatExempt = organization.data?.vatExempt === true;
+
+    if (!normalizeText(organization.legalName)) add('seller_name_missing', 'organization.legalName', 'Seller legal name');
+    if (!normalizeText(organization.address)) add('seller_address_missing', 'organization.address', 'Seller street address');
+    if (!normalizeText(organization.postalCode)) add('seller_postal_code_missing', 'organization.postalCode', 'Seller postal code');
+    if (!normalizeText(organization.city)) add('seller_city_missing', 'organization.city', 'Seller city');
+    if (!/^[A-Z]{2}$/.test(sellerCountry)) add('seller_country_missing', 'organization.country', 'Seller country code');
+    if (!sellerEndpoint.scheme || !sellerEndpoint.id) add('seller_endpoint_missing', 'organization.electronicAddress', 'Seller electronic address');
+    if (sellerCountry === 'NL' && !['0106', '0190'].includes(sellerEndpoint.scheme)) {
+      add('seller_legal_scheme_invalid', 'organization.electronicAddressScheme', 'Seller KVK or OIN electronic address');
+    }
+    if (!normalizeText(organization.iban)) add('seller_payment_account_missing', 'organization.iban', 'Seller payment account');
+    if (!sellerVatExempt && !normalizeText(organization.vatNumber)) add('seller_vat_missing', 'organization.vatNumber', 'Seller VAT number');
+
+    if (!normalizeText(buyer.legalName)) add('buyer_name_missing', 'buyer.legalName', 'Buyer legal name');
+    if (!normalizeText(buyer.address)) add('buyer_address_missing', 'buyer.address', 'Buyer street address');
+    if (!normalizeText(buyer.postalCode)) add('buyer_postal_code_missing', 'buyer.postalCode', 'Buyer postal code');
+    if (!normalizeText(buyer.city)) add('buyer_city_missing', 'buyer.city', 'Buyer city');
+    if (!/^[A-Z]{2}$/.test(buyerCountry)) add('buyer_country_missing', 'buyer.country', 'Buyer country code');
+    if (!buyerScheme || !buyerEndpoint) add('buyer_endpoint_missing', 'buyer.endpointId', 'Buyer electronic address');
+    if (sellerCountry === 'NL' && buyerCountry === 'NL' && !['0106', '0190'].includes(buyerScheme)) {
+      add('buyer_legal_scheme_invalid', 'buyer.endpointScheme', 'Buyer KVK or OIN electronic address');
+    }
+    if (!normalizeText(invoice.buyerReference) && !normalizeText(invoice.purchaseOrderReference)) {
+      add('buyer_reference_missing', 'buyerReference', 'Buyer or purchase-order reference');
+    }
+    if (!(normalizeNumber(invoice.taxRate, -1) > 0) || sellerVatExempt) {
+      add('vat_category_unsupported', 'taxRate', 'Positive standard VAT rate for structured export');
+    }
+    if (!Array.isArray(lineItems) || !lineItems.length) add('invoice_lines_missing', 'lineItems', 'At least one invoice line');
+
+    return {
+      ready: missing.length === 0,
+      status: missing.length === 0 ? 'ready' : 'incomplete',
+      profile: 'peppol_bis_billing_3',
+      syntax: 'ubl_2_1',
+      transportConfigured: false,
+      sellerEndpoint,
+      missing,
+      missingFields: missing.map(item => item.field)
+    };
+  }
+
   createInvoice(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
-      this.requireJob(jobId);
-      const quote = payload.quoteId || payload.quote_id
+      const job = this.requireJob(jobId);
+      const quoteRow = payload.quoteId || payload.quote_id
         ? this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(payload.quoteId || payload.quote_id, jobId)
         : this.db.prepare("SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(jobId);
-      const amount = normalizeNumber(payload.amount, quote?.subtotal || 0);
-      const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, quote?.tax_amount || amount * 0.21);
-      const total = normalizeNumber(payload.total, quote?.total || amount + taxAmount);
+      const quote = quoteRow ? this.mapQuote(quoteRow) : null;
+      const amountInput = payload.amount ?? quote?.subtotal ?? 0;
+      const amount = roundMoney(Number(amountInput));
+      if (!Number.isFinite(Number(amountInput)) || amount <= 0 || amount > 100_000_000) {
+        throw ledgerInputError('invoice_amount_invalid', 'Invoice net amount must be greater than zero and no more than 100,000,000.');
+      }
+      const suppliedTax = payload.taxAmount ?? payload.tax_amount;
+      const taxRateInput = payload.taxRate ?? payload.tax_rate ?? quote?.taxRate
+        ?? (suppliedTax !== undefined ? Number(suppliedTax) / amount * 100 : 21);
+      const taxRate = roundMoney(Number(taxRateInput));
+      if (!Number.isFinite(Number(taxRateInput)) || taxRate < 0 || taxRate > 100) {
+        throw ledgerInputError('invoice_tax_rate_invalid', 'Invoice VAT rate must be between 0 and 100.');
+      }
+      const taxAmount = roundMoney(amount * taxRate / 100);
+      const total = roundMoney(amount + taxAmount);
+      if (suppliedTax !== undefined && Math.abs(roundMoney(Number(suppliedTax)) - taxAmount) > 0.01) {
+        throw ledgerInputError('invoice_total_mismatch', 'Invoice VAT amount must match the server-calculated net amount and VAT rate.', { amount, taxRate, taxAmount });
+      }
+      if (payload.total !== undefined && Math.abs(roundMoney(Number(payload.total)) - total) > 0.01) {
+        throw ledgerInputError('invoice_total_mismatch', 'Invoice total must match the server-calculated net and VAT amounts.', { amount, taxAmount, total });
+      }
+      const currency = normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) {
+        throw ledgerInputError('invoice_currency_invalid', 'Invoice currency must be a three-letter ISO currency code.');
+      }
+      const dueAt = payload.dueAt || payload.due_at || null;
+      if (dueAt && !Number.isFinite(Date.parse(dueAt))) {
+        throw ledgerInputError('invoice_due_date_invalid', 'Invoice due date must be a valid date.');
+      }
+      const client = this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(job.client_id));
+      const clientData = client?.data || {};
+      const field = (value, label, maxLength = 200) => {
+        const normalized = normalizeText(value, '');
+        if (normalized.length > maxLength) throw ledgerInputError('invoice_buyer_invalid', `${label} cannot exceed ${maxLength} characters.`);
+        return normalized;
+      };
+      const buyer = {
+        id: client?.id || null,
+        legalName: field(payload.buyerLegalName ?? payload.buyer_legal_name ?? client?.company ?? client?.name, 'Buyer legal name'),
+        contactName: field(payload.buyerContactName ?? payload.buyer_contact_name ?? client?.name, 'Buyer contact name'),
+        email: field(payload.buyerEmail ?? payload.buyer_email ?? client?.email, 'Buyer email', 254).toLowerCase(),
+        vatNumber: field(payload.buyerVatNumber ?? payload.buyer_vat_number ?? client?.vatNumber, 'Buyer VAT number', 80).toUpperCase(),
+        registrationNumber: field(payload.buyerRegistrationNumber ?? payload.buyer_registration_number ?? clientData.registrationNumber, 'Buyer registration number', 80).toUpperCase(),
+        endpointScheme: field(payload.buyerEndpointScheme ?? payload.buyer_endpoint_scheme ?? clientData.electronicAddressScheme, 'Buyer electronic address scheme', 20),
+        endpointId: field(payload.buyerEndpointId ?? payload.buyer_endpoint_id ?? clientData.electronicAddress, 'Buyer electronic address', 120),
+        address: field(payload.buyerAddress ?? payload.buyer_address ?? client?.address ?? job.address, 'Buyer street address', 300),
+        postalCode: field(payload.buyerPostalCode ?? payload.buyer_postal_code ?? clientData.postalCode, 'Buyer postal code', 30).toUpperCase(),
+        city: field(payload.buyerCity ?? payload.buyer_city ?? client?.city ?? job.city, 'Buyer city', 120),
+        country: field(payload.buyerCountry ?? payload.buyer_country ?? client?.country ?? job.country ?? 'NL', 'Buyer country', 2).toUpperCase()
+      };
+      if (buyer.country && !/^[A-Z]{2}$/.test(buyer.country)) {
+        throw ledgerInputError('invoice_buyer_invalid', 'Buyer country must be a two-letter country code.');
+      }
+      if (Boolean(buyer.endpointScheme) !== Boolean(buyer.endpointId)) {
+        throw ledgerInputError('invoice_buyer_invalid', 'Buyer electronic address scheme and address must be retained together.');
+      }
+      if (buyer.endpointScheme && !/^[0-9A-Za-z:._-]{2,20}$/.test(buyer.endpointScheme)) {
+        throw ledgerInputError('invoice_buyer_invalid', 'Buyer electronic address scheme contains unsupported characters.');
+      }
+      const buyerReference = field(payload.buyerReference ?? payload.buyer_reference, 'Buyer reference', 120);
+      const purchaseOrderReference = field(payload.purchaseOrderReference ?? payload.purchase_order_reference, 'Purchase-order reference', 120);
+      const quoteLines = quote && Math.abs(amount - quote.subtotal) <= 0.01 ? quote.lineItems : [];
+      const lineItems = (quoteLines.length ? quoteLines : [{
+        description: field(payload.description ?? job.title, 'Invoice line description', 500) || 'Contractor services',
+        quantity: 1,
+        unitPrice: amount,
+        costCode: null
+      }]).map((item, index) => ({
+        id: String(index + 1),
+        description: field(item.description, `Invoice line ${index + 1} description`, 500) || `Invoice line ${index + 1}`,
+        quantity: normalizeNumber(item.quantity, 1),
+        unitPrice: roundMoney(item.unitPrice),
+        lineAmount: roundMoney(normalizeNumber(item.quantity, 1) * normalizeNumber(item.unitPrice, 0)),
+        costCode: field(item.costCode, `Invoice line ${index + 1} cost code`, 80) || null
+      }));
+      if (lineItems.some(item => !(item.quantity > 0) || item.unitPrice < 0)
+        || Math.abs(roundMoney(lineItems.reduce((sum, item) => sum + item.lineAmount, 0)) - amount) > 0.01) {
+        throw ledgerInputError('invoice_lines_invalid', 'Invoice lines must be positive and add up to the invoice net amount.');
+      }
+      const structuredExportRequested = normalizeBoolean(
+        payload.structuredExportRequested ?? payload.structured_export_requested ?? payload.peppolRequested ?? payload.peppolReady,
+        false
+      );
+      const organization = this.getOrganizationProfile();
+      const structuredReadiness = this.assessInvoiceStructuredReadiness({
+        invoice: { taxRate, buyerReference, purchaseOrderReference },
+        organization,
+        buyer,
+        lineItems
+      });
       const id = makeId('invoice');
       const timestamp = nowIso();
       this.db.prepare(`
@@ -9511,13 +10264,24 @@ class ContractorOperatingLedger {
         id,
         jobId,
         quote?.id || null,
-        normalizeStatus(payload.status, 'draft'),
-        normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase(),
+        'draft',
+        currency,
         amount,
         taxAmount,
         total,
-        payload.dueAt || payload.due_at || null,
-        toJson({ peppolReady: payload.peppolReady === true, notes: payload.notes || null }),
+        dueAt,
+        toJson({
+          taxRate,
+          peppolReady: structuredExportRequested,
+          structuredExportRequested,
+          structuredReadiness,
+          buyerReference: buyerReference || null,
+          purchaseOrderReference: purchaseOrderReference || null,
+          buyer,
+          lineItems,
+          notes: field(payload.notes, 'Invoice notes', 4000) || null,
+          transportStatus: 'not_configured'
+        }),
         timestamp,
         timestamp
       );
@@ -9526,9 +10290,9 @@ class ContractorOperatingLedger {
         targetId: id,
         jobId,
         approvalType: 'invoice_issue',
-        summary: `Approve invoice ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency || quote?.currency, 'EUR').toUpperCase()}`,
-        reason: 'Invoices and Peppol/UBL submissions require approval before issue.',
-        data: { total, quoteId: quote?.id || null }
+        summary: `Approve invoice ${id} for ${total.toFixed(2)} ${currency}`,
+        reason: 'Invoice issue packages and any structured export require approval before preparation or delivery.',
+        data: { amount, taxRate, taxAmount, total, currency, quoteId: quote?.id || null, structuredExportRequested }
       }, { actor: options.actor || 'Contractor.AI', audit: false });
       this.db.prepare('UPDATE invoices SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
       const invoice = this.mapInvoice(this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(id));
@@ -15554,6 +16318,7 @@ class ContractorOperatingLedger {
   classifyFinanceReadiness(flags = {}) {
     if (flags.approvalRequired) return 'approval_required';
     if (flags.paymentFollowUp) return 'payment_follow_up';
+    if (flags.invoicePackageReady) return 'invoice_ready';
     if (flags.invoiceReady) return 'invoice_ready';
     if (flags.handoffReady) return 'handoff_ready';
     if (flags.needsCosts) return 'needs_costs';
@@ -15666,10 +16431,18 @@ class ContractorOperatingLedger {
           normalizeStatus(approval.status, 'pending') === 'pending'
           && financeTargetTypes.has(normalizeStatus(approval.targetType, ''))
         );
+        const invoiceDeliveryApprovals = (detail.communications || [])
+          .filter(communication => communication.data?.source === 'invoice_issue_package' && communication.approvalId)
+          .map(communication => (detail.approvals || []).find(approval => approval.id === communication.approvalId))
+          .filter(approval => approval && normalizeStatus(approval.status, 'pending') === 'pending');
+        const pendingFinanceApprovals = [...financeApprovals, ...invoiceDeliveryApprovals]
+          .filter((approval, index, all) => all.findIndex(candidate => candidate.id === approval.id) === index);
         const validInvoices = (detail.invoices || []).filter(invoice => this.financeRecordOpen(invoice.status));
         const activeInvoices = validInvoices.filter(invoice => this.financeRecordOpen(invoice.status, activeInvoiceStatuses));
-        const draftInvoices = activeInvoices.filter(invoice => ['draft', 'submitted', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')));
-        const issueableInvoices = activeInvoices.filter(invoice => ['approved', 'sent', 'submitted'].includes(normalizeStatus(invoice.status, 'draft')));
+        const draftInvoices = activeInvoices.filter(invoice => ['draft', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')));
+        const packageReadyInvoices = activeInvoices.filter(invoice => normalizeStatus(invoice.status, 'draft') === 'approved' && !invoice.data?.issuePackage);
+        const preparedInvoices = activeInvoices.filter(invoice => normalizeStatus(invoice.status, 'draft') === 'prepared');
+        const receivableInvoices = activeInvoices.filter(invoice => ['sent', 'submitted'].includes(normalizeStatus(invoice.status, 'draft')));
         const openPayments = (detail.payments || []).filter(payment => this.financeRecordOpen(payment.status, activePaymentClosedStatuses));
         const dueOrOverduePayments = openPayments.filter(payment => this.financeDueOrOverdue(payment.dueAt));
         const paymentsDueForFollowUp = openPayments.filter(payment => {
@@ -15696,6 +16469,7 @@ class ContractorOperatingLedger {
         const quotedGrossValue = normalizeNumber(latestQuote?.total, quotedNetValue);
         const contractValue = normalizeNumber(detail.contractValue, normalizeNumber(detail.estimatedCost, 0));
         const invoiceValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
+        const receivableInvoiceValue = receivableInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
         const invoicedNetValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.amount, 0), 0);
         const receivedValue = receivedPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const openPaymentValue = openPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
@@ -15721,15 +16495,16 @@ class ContractorOperatingLedger {
         const missingCosts = startedForCosting && !expenses.length && !timeLogs.length && budgetActualValue <= 0;
         const missingBudget = activeJobStatuses.has(jobStatus) && netRevenueBasis >= 1000 && !activeBudgetLines.length;
         const invoiceReady = progressedForFinance && invoiceDraftAmount > 1;
-        const untrackedReceivable = issueableInvoices.length > 0
+        const invoicePackageReady = packageReadyInvoices.length > 0;
+        const untrackedReceivable = receivableInvoices.length > 0
           && openPayments.length === 0
-          && Math.max(0, invoiceValue - receivedValue) > 1;
+          && Math.max(0, receivableInvoiceValue - receivedValue) > 1;
         const paymentFollowUp = paymentsDueForFollowUp.length > 0 || untrackedReceivable;
         const handoffMissing = hasFinancialActivity && !activeHandoffs.length;
         const handoffReady = !missingCosts
           && !missingBudget
           && (handoffMissing || activeHandoffs.some(handoff => ['draft', 'ready'].includes(normalizeStatus(handoff.status, 'draft'))));
-        const approvalRequired = financeApprovals.length > 0
+        const approvalRequired = pendingFinanceApprovals.length > 0
           || activeInvoices.some(invoice => invoice.approvalId && ['draft', 'submitted', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')))
           || openPayments.some(payment => payment.approvalId && ['pending_confirmation', 'pending_approval'].includes(normalizeStatus(payment.status, '')))
           || openPurchaseOrders.some(order => order.approvalId && ['pending_approval', 'ready_to_order'].includes(normalizeStatus(order.status, '')))
@@ -15740,6 +16515,8 @@ class ContractorOperatingLedger {
           approvalRequired,
           paymentFollowUp,
           invoiceReady,
+          invoicePackageReady,
+          invoicePrepared: preparedInvoices.length > 0,
           handoffReady,
           needsCosts: missingCosts || missingBudget,
           missingCosts,
@@ -15748,18 +16525,24 @@ class ContractorOperatingLedger {
         };
         const financeStatus = this.classifyFinanceReadiness(flags);
         const nextActions = [];
-        if (approvalRequired) nextActions.push({ type: 'review_finance_approval', label: 'Review finance approval gates', approvalId: financeApprovals[0]?.id || null, requiresApproval: false });
+        if (approvalRequired) nextActions.push({ type: 'review_finance_approval', label: 'Review finance approval gates', approvalId: pendingFinanceApprovals[0]?.id || null, requiresApproval: false });
+        if (invoicePackageReady) nextActions.push({
+          type: 'prepare_invoice_package',
+          label: 'Prepare immutable invoice issue package',
+          invoiceId: packageReadyInvoices[0].id,
+          requiresApproval: false
+        });
         if (paymentFollowUp) nextActions.push({
           type: 'record_payment_follow_up',
           label: 'Record payment follow-up or confirmation',
           paymentId: paymentsDueForFollowUp[0]?.id || openPayments[0]?.id || null,
-          invoiceId: issueableInvoices[0]?.id || null,
+          invoiceId: receivableInvoices[0]?.id || null,
           requiresApproval: false
         });
-        if (invoiceReady) nextActions.push({ type: 'draft_invoice', label: 'Draft invoice or Peppol/UBL package', requiresApproval: true });
+        if (invoiceReady) nextActions.push({ type: 'draft_invoice', label: 'Draft approval-gated invoice', requiresApproval: true });
         if (missingCosts) nextActions.push({ type: 'record_time_expense', label: 'Record time logs and job expenses', requiresApproval: false });
         if (missingBudget) nextActions.push({ type: 'create_budget_line', label: 'Create budget and forecast control', requiresApproval: true });
-        if (issueableInvoices.length && !openDrawRequests.length && invoiceValue >= 1000) nextActions.push({ type: 'create_draw_request', label: 'Prepare progress draw request', invoiceId: issueableInvoices[0].id, requiresApproval: true });
+        if (receivableInvoices.length && !openDrawRequests.length && invoiceValue >= 1000) nextActions.push({ type: 'create_draw_request', label: 'Prepare progress draw request', invoiceId: receivableInvoices[0].id, requiresApproval: true });
         if (openPayments.some(payment => normalizeNumber(payment.amount, 0) >= 1000) && !openLienWaivers.length) nextActions.push({ type: 'request_lien_waiver', label: 'Prepare lien waiver request before payment closeout', paymentId: openPayments.find(payment => normalizeNumber(payment.amount, 0) >= 1000)?.id || null, requiresApproval: false });
         if (handoffReady) nextActions.push({ type: 'prepare_finance_handoff', label: 'Prepare FAB/bookkeeping handoff package', handoffId: activeHandoffs[0]?.id || null, requiresApproval: true });
         const primaryAction = nextActions[0]?.label || 'Finance records are stable.';
@@ -15789,7 +16572,10 @@ class ContractorOperatingLedger {
             expenses: expenses.length,
             invoices: validInvoices.length,
             draftInvoices: draftInvoices.length,
-            issueableInvoices: issueableInvoices.length,
+            issueableInvoices: packageReadyInvoices.length,
+            packageReadyInvoices: packageReadyInvoices.length,
+            preparedInvoices: preparedInvoices.length,
+            receivableInvoices: receivableInvoices.length,
             openPayments: openPayments.length,
             dueOrOverduePayments: dueOrOverduePayments.length,
             receivedPayments: receivedPayments.length,
@@ -15798,7 +16584,7 @@ class ContractorOperatingLedger {
             openDrawRequests: openDrawRequests.length,
             openLienWaivers: openLienWaivers.length,
             financeHandoffs: activeHandoffs.length,
-            pendingApprovals: financeApprovals.length
+            pendingApprovals: pendingFinanceApprovals.length
           },
           money: {
             contractValue,
@@ -15810,7 +16596,7 @@ class ContractorOperatingLedger {
             invoiceDraftAmount,
             uninvoicedValue: Math.max(0, grossRevenueBasis - invoiceValue),
             uninvoicedNetValue: invoiceDraftAmount,
-            unpaidValue: Math.max(openPaymentValue, Math.max(0, invoiceValue - receivedValue)),
+            unpaidValue: Math.max(openPaymentValue, Math.max(0, receivableInvoiceValue - receivedValue)),
             receivedValue,
             expenseValue,
             billableLaborValue,
@@ -15841,8 +16627,8 @@ class ContractorOperatingLedger {
       if (mode === 'payment') return row.flags?.paymentFollowUp === true;
       if (mode === 'payment_followup') return row.flags?.paymentFollowUp === true;
       if (mode === 'payment_follow_up') return row.flags?.paymentFollowUp === true;
-      if (mode === 'invoice') return row.flags?.invoiceReady === true;
-      if (mode === 'invoice_ready') return row.flags?.invoiceReady === true;
+      if (mode === 'invoice') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true;
+      if (mode === 'invoice_ready') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true;
       if (mode === 'handoff') return row.flags?.handoffReady === true;
       if (mode === 'handoff_ready') return row.flags?.handoffReady === true;
       if (mode === 'costs') return row.flags?.needsCosts === true;

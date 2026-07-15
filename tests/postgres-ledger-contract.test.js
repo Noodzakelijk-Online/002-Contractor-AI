@@ -783,7 +783,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '014_organization_profile');
+    assert.equal(migrations.currentVersion, '015_invoice_issue_packages');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -864,12 +864,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('014_organization_profile'));
+  assert.deepEqual(versions, Array(4).fill('015_invoice_issue_packages'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 14);
+    assert.equal(Number(migrationCount.count), 15);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1008,6 +1008,8 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
       postalCode: '1012 AB',
       city: 'Amsterdam',
       country: 'NL',
+      iban: 'NL91ABNA0417164300',
+      bic: 'ABNANL2A',
       defaultPaymentTermsDays: 30,
       defaultQuoteValidityDays: 30
     }, { actor: 'postgres_commercial_test' });
@@ -1047,6 +1049,35 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     assert.equal(detail.quotes.find(item => item.id === quote.id).status, 'accepted');
     assert.equal(detail.changeOrders.find(item => item.id === changeOrder.id).status, 'accepted');
     assert.ok(detail.audit.some(event => event.action === 'accept_change_order_contract'));
+
+    const invoice = ledger.createInvoice(job.id, {
+      amount: 1125,
+      taxRate: 21,
+      dueAt: '2026-08-14T12:00:00.000Z',
+      structuredExportRequested: true,
+      buyerReference: `PG-${marker}`,
+      buyerLegalName: `Postgres Buyer ${marker} B.V.`,
+      buyerRegistrationNumber: String(marker).slice(-8),
+      buyerEndpointScheme: '0106',
+      buyerEndpointId: String(marker).slice(-8),
+      buyerAddress: 'Buyer contract street 21',
+      buyerPostalCode: '3011 AA',
+      buyerCity: 'Rotterdam',
+      buyerCountry: 'NL'
+    }, { actor: 'postgres_commercial_test' });
+    assert.equal(invoice.total, 1361.25);
+    assert.equal(invoice.structuredReadiness.ready, true);
+    ledger.resolveApproval(invoice.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    const invoicePackage = ledger.prepareInvoiceIssuePackage(job.id, invoice.id, { actor: 'postgres_commercial_test' });
+    assert.match(invoicePackage.invoiceReference, /^INV-\d{4}-\d{6}$/);
+    assert.equal(invoicePackage.documents.length, 2);
+    assert.equal(invoicePackage.communication.status, 'draft');
+    assert.equal(invoicePackage.externalCommitments, 0);
+    assert.equal(ledger.prepareInvoiceIssuePackage(job.id, invoice.id).replayed, true);
+    const retainedFormats = invoicePackage.documents.map(document => (
+      ledger.getInvoiceIssueDocument(document.id, { audit: false }).format
+    ));
+    assert.deepEqual(retainedFormats.sort(), ['html', 'ubl']);
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

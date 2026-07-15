@@ -212,7 +212,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '014_organization_profile');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '015_invoice_issue_packages');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -287,6 +287,13 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.communications.outboundDraftOnly, true);
   assert.equal(capabilities.body.capabilities.communications.deliveryReceiptApprovalRequired, true);
   assert.equal(capabilities.body.capabilities.communications.verifiedIntegrationCount, 0);
+  assert.equal(capabilities.body.capabilities.invoicing.serverCalculatedTotals, true);
+  assert.equal(capabilities.body.capabilities.invoicing.durableNumbering, true);
+  assert.equal(capabilities.body.capabilities.invoicing.immutableHtmlPackage, true);
+  assert.equal(capabilities.body.capabilities.invoicing.ubl21Export, true);
+  assert.equal(capabilities.body.capabilities.invoicing.structuredReadinessChecks, true);
+  assert.equal(capabilities.body.capabilities.invoicing.networkSubmission, false);
+  assert.equal(capabilities.body.capabilities.invoicing.deliveryReceiptApprovalRequired, true);
   assert.equal(capabilities.body.capabilities.automation.ledgerOnly, true);
   assert.equal(capabilities.body.capabilities.automation.coordination, 'durable_compare_and_swap_lease');
   assert.equal(capabilities.body.capabilities.automation.multiReplicaSafe, true);

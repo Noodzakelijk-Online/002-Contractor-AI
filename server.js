@@ -1865,22 +1865,22 @@ app.get('/api/ledger/documents/:id/content', async (req, res) => {
 
 app.get('/api/ledger/documents/:id/issue-package', (req, res) => {
   try {
-    const issuePackage = operatingLedger.getQuoteIssuePackage(req.params.id, {
+    const issuePackage = operatingLedger.getIssuePackage(req.params.id, {
       actor: actorFromRequest(req, 'authenticated_operator')
     });
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Content-Length', String(Buffer.byteLength(issuePackage.html, 'utf8')));
+    res.setHeader('Content-Type', issuePackage.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(Buffer.byteLength(issuePackage.content, 'utf8')));
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(issuePackage.filename)}`);
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    return res.end(issuePackage.html);
+    return res.end(issuePackage.content);
   } catch (error) {
     return sendError(
       req,
       res,
       error.statusCode || 500,
-      error.code || 'quote_issue_package_download_failed',
-      error.statusCode ? error.message : 'Unable to prepare the retained quote package for download.',
+      error.code || 'issue_package_download_failed',
+      error.statusCode ? error.message : 'Unable to prepare the retained issue package for download.',
       serializeError(error)
     );
   }
@@ -2583,6 +2583,22 @@ app.post('/api/ledger/jobs/:id/invoices', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/invoices/:invoiceId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareInvoiceIssuePackage(
+      req.params.id,
+      req.params.invoiceId,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/quality-checks', (req, res) => {
@@ -4196,6 +4212,16 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         outboundDraftOnly: true,
         deliveryReceiptApprovalRequired: true,
         verifiedIntegrationCount: verifiedIntegrationIds.size
+      },
+      invoicing: {
+        serverCalculatedTotals: true,
+        durableNumbering: true,
+        immutableHtmlPackage: true,
+        ubl21Export: true,
+        peppolProfile: 'billing_3',
+        structuredReadinessChecks: true,
+        networkSubmission: false,
+        deliveryReceiptApprovalRequired: true
       },
       automation: {
         ledgerOnly: true,
