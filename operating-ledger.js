@@ -1399,6 +1399,17 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
       `);
     }
+  },
+  {
+    version: '016_receivable_reconciliation',
+    description: 'Reserve unique invoice payment references and reconcile approved receipts and write-offs against invoice balances.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE payments ADD COLUMN reconciliation_key TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_reconciliation_key ON payments(reconciliation_key);
+        CREATE INDEX IF NOT EXISTS idx_payments_invoice_status ON payments(invoice_id, status);
+      `);
+    }
   }
 ];
 
@@ -11390,57 +11401,216 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     });
   }
 
+  paymentReconciliationKey(invoiceId, reference) {
+    const normalizedReference = normalizeText(reference, '').toLowerCase().replace(/\s+/g, ' ');
+    return invoiceId && normalizedReference ? sha256Text(`${invoiceId}\0${normalizedReference}`) : null;
+  }
+
+  getInvoiceReconciliation(invoiceId, options = {}) {
+    const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
+    if (!invoiceRow) {
+      const error = new Error('Invoice not found');
+      error.statusCode = 404;
+      error.code = 'invoice_not_found';
+      throw error;
+    }
+    const excludedPaymentId = options.excludePaymentId || null;
+    const payments = this.db.prepare('SELECT * FROM payments WHERE invoice_id = ? ORDER BY created_at ASC').all(invoiceId)
+      .filter(row => row.id !== excludedPaymentId);
+    let receivedAmount = 0;
+    let writtenOffAmount = 0;
+    let pendingAmount = 0;
+    for (const row of payments) {
+      const status = normalizeStatus(row.status, '');
+      const amount = roundMoney(row.amount);
+      if (['paid', 'received', 'settled'].includes(status)) receivedAmount = roundMoney(receivedAmount + amount);
+      if (status === 'written_off') writtenOffAmount = roundMoney(writtenOffAmount + amount);
+      if (status === 'pending_confirmation') {
+        const requestedStatus = normalizeStatus(fromJson(row.data_json, {}).requestedStatus, '');
+        if (['paid', 'received', 'settled', 'written_off'].includes(requestedStatus)) {
+          pendingAmount = roundMoney(pendingAmount + amount);
+        }
+      }
+    }
+    const invoiceTotal = roundMoney(invoiceRow.total);
+    const outstandingAmount = roundMoney(Math.max(0, invoiceTotal - receivedAmount - writtenOffAmount));
+    const availableAmount = roundMoney(Math.max(0, outstandingAmount - pendingAmount));
+    return {
+      invoiceId,
+      currency: invoiceRow.currency,
+      invoiceTotal,
+      receivedAmount,
+      writtenOffAmount,
+      pendingAmount,
+      outstandingAmount,
+      availableAmount,
+      settled: outstandingAmount <= 0.01
+    };
+  }
+
+  assertPaymentReconciliation(invoiceRow, payload = {}, options = {}) {
+    if (!invoiceRow) {
+      throw ledgerInputError('invoice_required_for_payment_confirmation', 'Payment confirmation requires a retained invoice.');
+    }
+    const invoiceStatus = normalizeStatus(invoiceRow.status, 'draft');
+    if (!['prepared', 'sent', 'submitted', 'partially_paid'].includes(invoiceStatus)) {
+      throw ledgerInputError('invoice_not_payable', 'Payment can only be confirmed after the immutable invoice issue package is prepared.', { invoiceId: invoiceRow.id, invoiceStatus });
+    }
+    const amount = roundMoney(Number(payload.amount));
+    if (!Number.isFinite(Number(payload.amount)) || amount <= 0) {
+      throw ledgerInputError('payment_amount_invalid', 'Payment amount must be greater than zero.');
+    }
+    const currency = normalizeText(payload.currency || invoiceRow.currency, 'EUR').toUpperCase();
+    if (currency !== normalizeText(invoiceRow.currency, 'EUR').toUpperCase()) {
+      throw ledgerInputError('payment_currency_mismatch', 'Payment currency must match the retained invoice currency.', { invoiceCurrency: invoiceRow.currency, paymentCurrency: currency });
+    }
+    const reference = normalizeText(payload.reference || payload.paymentReference || payload.payment_reference, '');
+    if (!reference) {
+      throw ledgerInputError('payment_reference_required', 'Payment confirmation requires a retained payment or write-off reference.');
+    }
+    if (reference.length > 240) {
+      throw ledgerInputError('payment_reference_invalid', 'Payment reference cannot exceed 240 characters.');
+    }
+    const reconciliation = this.getInvoiceReconciliation(invoiceRow.id, { excludePaymentId: options.excludePaymentId });
+    if (amount - reconciliation.availableAmount > 0.01) {
+      throw ledgerInputError('payment_exceeds_invoice_balance', 'Payment or write-off amount exceeds the invoice balance available for confirmation.', {
+        invoiceId: invoiceRow.id,
+        requestedAmount: amount,
+        outstandingAmount: reconciliation.outstandingAmount,
+        pendingAmount: reconciliation.pendingAmount,
+        availableAmount: reconciliation.availableAmount
+      });
+    }
+    const reconciliationKey = this.paymentReconciliationKey(invoiceRow.id, reference);
+    const duplicate = this.db.prepare('SELECT id, status FROM payments WHERE reconciliation_key = ? AND id <> ?').get(reconciliationKey, options.excludePaymentId || '');
+    if (duplicate) {
+      const error = new Error('This payment reference is already retained for the invoice.');
+      error.statusCode = 409;
+      error.code = 'duplicate_payment_reference';
+      error.details = { invoiceId: invoiceRow.id, paymentId: duplicate.id, status: duplicate.status };
+      throw error;
+    }
+    return { amount, currency, reference, reconciliationKey, reconciliation };
+  }
+
+  reconcileInvoiceReceivable(invoiceId, options = {}) {
+    const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
+    if (!invoiceRow) return null;
+    const before = this.mapInvoice(invoiceRow);
+    const reconciliation = this.getInvoiceReconciliation(invoiceId);
+    let status = normalizeStatus(invoiceRow.status, 'approved');
+    const reconciledAmount = roundMoney(reconciliation.receivedAmount + reconciliation.writtenOffAmount);
+    if (reconciliation.settled) {
+      status = reconciliation.writtenOffAmount > 0 ? 'settled' : 'paid';
+    } else if (reconciledAmount > 0) {
+      status = 'partially_paid';
+    }
+    const timestamp = options.timestamp || nowIso();
+    const data = fromJson(invoiceRow.data_json, {});
+    const nextData = {
+      ...data,
+      reconciliation: {
+        ...reconciliation,
+        status,
+        lastPaymentId: options.lastPaymentId || data.reconciliation?.lastPaymentId || null,
+        updatedAt: timestamp
+      }
+    };
+    this.db.prepare('UPDATE invoices SET status = ?, data_json = ?, updated_at = ? WHERE id = ?')
+      .run(status, toJson(nextData), timestamp, invoiceId);
+    const after = this.mapInvoice(this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId));
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'invoice',
+        entityId: invoiceId,
+        jobId: invoiceRow.job_id,
+        action: 'reconcile_invoice_receivable',
+        actor: options.actor || 'approval',
+        before,
+        after,
+        metadata: { paymentId: options.lastPaymentId || null, reconciliation }
+      });
+    }
+    return { ...reconciliation, status };
+  }
+
   recordPayment(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const invoice = payload.invoiceId || payload.invoice_id
-        ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(payload.invoiceId || payload.invoice_id, jobId)
+      const requestedInvoiceId = payload.invoiceId || payload.invoice_id || null;
+      const invoice = requestedInvoiceId
+        ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(requestedInvoiceId, jobId)
         : this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
+      if (requestedInvoiceId && !invoice) {
+        const error = new Error('Invoice not found for this job');
+        error.statusCode = 404;
+        error.code = 'invoice_not_found';
+        throw error;
+      }
       const id = makeId('payment');
       const timestamp = nowIso();
       const requestedStatus = normalizeStatus(payload.status, invoice?.status === 'approved' ? 'awaiting_payment' : 'awaiting_invoice_approval');
-      const needsApproval = payload.requiresApproval === true || ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus);
+      const confirmation = ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus);
+      if (confirmation && !requestedInvoiceId) {
+        throw ledgerInputError('invoice_required_for_payment_confirmation', 'Payment confirmation requires an explicit retained invoice ID.');
+      }
+      const needsApproval = payload.requiresApproval === true || confirmation;
       const status = needsApproval ? 'pending_confirmation' : requestedStatus;
-      const amount = normalizeNumber(payload.amount, invoice?.total || 0);
+      const defaultAmount = invoice ? this.getInvoiceReconciliation(invoice.id).availableAmount : 0;
+      const amount = roundMoney(normalizeNumber(payload.amount, defaultAmount));
+      const currency = normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase();
       const reference = normalizeText(payload.reference || payload.paymentReference || payload.payment_reference, '');
       if (!(amount > 0)) {
-        const error = new Error('Payment amount must be greater than zero');
-        error.statusCode = 400;
-        throw error;
+        throw ledgerInputError('payment_amount_invalid', 'Payment amount must be greater than zero.');
       }
-      if (needsApproval && !reference) {
-        const error = new Error('Payment confirmation requires a retained payment reference');
-        error.statusCode = 400;
-        throw error;
+      if (invoice && !confirmation && amount - roundMoney(invoice.total) > 0.01) {
+        throw ledgerInputError('payment_exceeds_invoice_total', 'Expected payment amount cannot exceed the retained invoice total.', { invoiceId: invoice.id, invoiceTotal: roundMoney(invoice.total), requestedAmount: amount });
       }
+      const control = confirmation
+        ? this.assertPaymentReconciliation(invoice, { ...payload, amount, currency, reference })
+        : { amount, currency, reference, reconciliationKey: null, reconciliation: invoice ? this.getInvoiceReconciliation(invoice.id) : null };
 
-      this.db.prepare(`
-        INSERT INTO payments (id, job_id, invoice_id, status, currency, amount, due_at, paid_at, method, reference, data_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        id,
-        jobId,
-        invoice?.id || payload.invoiceId || payload.invoice_id || null,
-        status,
-        normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase(),
-        amount,
-        payload.dueAt || payload.due_at || invoice?.due_at || futureIsoDate(14),
-        payload.paidAt || payload.paid_at || null,
-        payload.method || null,
-        reference || null,
-        toJson({
-          notes: payload.notes || null,
-          followUpChannel: payload.followUpChannel || 'portal',
-          reminderSentAt: payload.reminderSentAt || null,
-          nextFollowUpAt: payload.nextFollowUpAt || payload.next_follow_up_at || payload.dueAt || payload.due_at || invoice?.due_at || null,
-          followUpHistory: [],
-          externalDelivery: false,
-          requestedStatus
-        }),
-        timestamp,
-        timestamp
-      );
+      try {
+        this.db.prepare(`
+          INSERT INTO payments (id, job_id, invoice_id, status, currency, amount, due_at, paid_at, method, reference, approval_id, reconciliation_key, data_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          jobId,
+          invoice?.id || null,
+          status,
+          control.currency,
+          control.amount,
+          payload.dueAt || payload.due_at || invoice?.due_at || futureIsoDate(14),
+          payload.paidAt || payload.paid_at || null,
+          payload.method || null,
+          control.reference || null,
+          null,
+          control.reconciliationKey,
+          toJson({
+            notes: payload.notes || null,
+            followUpChannel: payload.followUpChannel || 'portal',
+            reminderSentAt: payload.reminderSentAt || null,
+            nextFollowUpAt: payload.nextFollowUpAt || payload.next_follow_up_at || payload.dueAt || payload.due_at || invoice?.due_at || null,
+            followUpHistory: [],
+            externalDelivery: false,
+            requestedStatus,
+            previousStatus: null,
+            reconciliationAtRequest: control.reconciliation
+          }),
+          timestamp,
+          timestamp
+        );
+      } catch (error) {
+        if (control.reconciliationKey && /unique|duplicate/i.test(String(error?.message))) {
+          const conflict = new Error('This payment reference is already retained for the invoice.');
+          conflict.statusCode = 409;
+          conflict.code = 'duplicate_payment_reference';
+          throw conflict;
+        }
+        throw error;
+      }
 
       let approval = null;
       if (needsApproval) {
@@ -11449,16 +11619,16 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           targetId: id,
           jobId,
           approvalType: 'payment_confirmation',
-          summary: `Confirm payment status ${requestedStatus} for ${amount.toFixed(2)} ${normalizeText(payload.currency || invoice?.currency, 'EUR').toUpperCase()}`,
-          reason: 'Payment state changes affect financial records and require human confirmation.',
-          data: { requestedStatus, amount, invoiceId: invoice?.id || null }
+          summary: `Confirm payment status ${requestedStatus} for ${control.amount.toFixed(2)} ${control.currency}`,
+          reason: 'Payment and write-off state changes affect the invoice balance and require human confirmation.',
+          data: { requestedStatus, amount: control.amount, currency: control.currency, invoiceId: invoice?.id || null, reference: control.reference, reconciliation: control.reconciliation }
         }, { actor, audit: false });
         this.db.prepare('UPDATE payments SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
       }
 
       const payment = this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(id));
       if (options.audit !== false) {
-        this.audit({ entityType: 'payment', entityId: id, jobId, action: 'record_payment_followup', actor, after: payment });
+        this.audit({ entityType: 'payment', entityId: id, jobId, action: confirmation ? 'request_payment_confirmation' : 'record_payment_followup', actor, after: payment });
       }
       return { ...payment, approval };
     });
@@ -11491,14 +11661,22 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     const nextFollowUpAt = payload.nextFollowUpAt || payload.next_follow_up_at || payload.dueAt || payload.due_at || futureIsoDate(7);
 
     return this.transaction(() => {
+      const requestedInvoiceId = payload.invoiceId || payload.invoice_id || null;
       let row = paymentId
         ? this.db.prepare('SELECT * FROM payments WHERE id = ? AND job_id = ?').get(paymentId, jobId)
-        : this.db.prepare(`
-          SELECT * FROM payments
-          WHERE job_id = ? AND status NOT IN ('paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void', 'written_off')
-          ORDER BY due_at ASC, created_at DESC
-          LIMIT 1
-        `).get(jobId);
+        : requestedInvoiceId
+          ? this.db.prepare(`
+            SELECT * FROM payments
+            WHERE job_id = ? AND invoice_id = ? AND status NOT IN ('paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void', 'written_off')
+            ORDER BY due_at ASC, created_at DESC
+            LIMIT 1
+          `).get(jobId, requestedInvoiceId)
+          : this.db.prepare(`
+            SELECT * FROM payments
+            WHERE job_id = ? AND status NOT IN ('paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void', 'written_off')
+            ORDER BY due_at ASC, created_at DESC
+            LIMIT 1
+          `).get(jobId);
 
       if (!row) {
         const created = this.recordPayment(jobId, {
@@ -11576,34 +11754,67 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
 
       let approval = null;
       let status = requestedStatus === 'follow_up_recorded' ? row.status : requestedStatus;
+      let confirmationControl = null;
       if (confirmation) {
+        const invoiceId = row.invoice_id || requestedInvoiceId;
+        const invoice = invoiceId ? this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(invoiceId, jobId) : null;
+        const confirmationAmount = roundMoney(normalizeNumber(payload.amount, row.amount));
+        confirmationControl = this.assertPaymentReconciliation(invoice, {
+          ...payload,
+          amount: confirmationAmount,
+          currency: row.currency,
+          reference
+        }, { excludePaymentId: row.id });
         status = 'pending_confirmation';
         approval = this.createApproval({
           targetType: 'payment',
           targetId: row.id,
           jobId,
           approvalType: 'payment_confirmation',
-          summary: `Confirm payment status ${requestedStatus} for ${normalizeNumber(row.amount, 0).toFixed(2)} ${row.currency}`,
-          reason: 'Payment state changes affect financial records and require human confirmation.',
-          data: { requestedStatus, amount: normalizeNumber(row.amount, 0), invoiceId: row.invoice_id || null, reference }
+          summary: `Confirm payment status ${requestedStatus} for ${confirmationControl.amount.toFixed(2)} ${confirmationControl.currency}`,
+          reason: 'Payment and write-off state changes affect the invoice balance and require human confirmation.',
+          data: { requestedStatus, amount: confirmationControl.amount, currency: confirmationControl.currency, invoiceId: invoice.id, reference, reconciliation: confirmationControl.reconciliation }
         }, { actor, audit: false });
+        nextData.previousStatus = normalizeStatus(row.status, 'awaiting_payment');
+        nextData.previousPaymentState = {
+          status: normalizeStatus(row.status, 'awaiting_payment'),
+          amount: roundMoney(row.amount),
+          paidAt: row.paid_at || null,
+          method: row.method || null,
+          reference: row.reference || null,
+          reconciliationKey: row.reconciliation_key || null
+        };
+        nextData.reconciliationAtRequest = confirmationControl.reconciliation;
       }
 
-      this.db.prepare(`
-        UPDATE payments
-        SET status = ?, due_at = ?, method = ?, reference = ?, approval_id = ?, data_json = ?, updated_at = ?
-        WHERE id = ? AND job_id = ?
-      `).run(
-        status,
-        confirmation ? row.due_at : nextFollowUpAt,
-        payload.method || row.method,
-        reference || row.reference,
-        approval?.id || row.approval_id,
-        toJson(nextData),
-        timestamp,
-        row.id,
-        jobId
-      );
+      try {
+        this.db.prepare(`
+          UPDATE payments
+          SET status = ?, amount = ?, due_at = ?, paid_at = ?, method = ?, reference = ?, approval_id = ?, reconciliation_key = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND job_id = ?
+        `).run(
+          status,
+          confirmationControl?.amount ?? row.amount,
+          confirmation ? row.due_at : nextFollowUpAt,
+          payload.paidAt || payload.paid_at || row.paid_at,
+          payload.method || row.method,
+          reference || row.reference,
+          approval?.id || row.approval_id,
+          confirmationControl?.reconciliationKey || row.reconciliation_key,
+          toJson(nextData),
+          timestamp,
+          row.id,
+          jobId
+        );
+      } catch (error) {
+        if (confirmationControl?.reconciliationKey && /unique|duplicate/i.test(String(error?.message))) {
+          const conflict = new Error('This payment reference is already retained for the invoice.');
+          conflict.statusCode = 409;
+          conflict.code = 'duplicate_payment_reference';
+          throw conflict;
+        }
+        throw error;
+      }
 
       const payment = this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(row.id));
       if (options.audit !== false) {
@@ -14772,6 +14983,40 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           SET status = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
           WHERE id = ? AND status = 'pending_approval'
         `).run(status, timestamp, timestamp, before.target_id);
+      } else if (before.target_type === 'payment') {
+        const payment = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(before.target_id);
+        if (payment && normalizeStatus(payment.status, '') === 'pending_confirmation') {
+          const data = fromJson(payment.data_json, {});
+          const previousPaymentState = data.previousPaymentState && typeof data.previousPaymentState === 'object'
+            ? data.previousPaymentState
+            : null;
+          const previousStatus = normalizeStatus(previousPaymentState?.status || data.previousStatus, '');
+          const restoredStatus = previousStatus && previousStatus !== 'pending_confirmation' ? previousStatus : status;
+          this.db.prepare(`
+            UPDATE payments
+            SET status = ?, amount = ?, paid_at = ?, method = ?, reference = ?, reconciliation_key = ?, data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(
+            restoredStatus,
+            previousPaymentState?.amount ?? payment.amount,
+            previousPaymentState ? previousPaymentState.paidAt : payment.paid_at,
+            previousPaymentState ? previousPaymentState.method : payment.method,
+            previousPaymentState ? previousPaymentState.reference : payment.reference,
+            previousPaymentState?.reconciliationKey || null,
+            toJson({
+              ...data,
+              confirmationDecision: {
+                status,
+                approvalId,
+                resolvedAt: timestamp,
+                resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+                reason: payload.reason || payload.notes || null
+              }
+            }),
+            timestamp,
+            before.target_id
+          );
+        }
       } else if (before.target_type === 'quote') {
         this.db.prepare(`
           UPDATE quotes
@@ -15453,11 +15698,16 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       this.db.prepare('UPDATE warranty_claims SET status = ?, resolved_at = COALESCE(resolved_at, ?), updated_at = ? WHERE id = ?')
         .run(approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'payment') {
-      const payment = this.db.prepare('SELECT data_json FROM payments WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(payment?.data_json, {}).requestedStatus, 'received');
+      const payment = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(targetId);
+      const data = fromJson(payment?.data_json, {});
+      const requestedStatus = normalizeStatus(data.requestedStatus, 'received');
       const approvedStatus = ['paid', 'received', 'settled', 'written_off'].includes(requestedStatus)
         ? requestedStatus
         : 'received';
+      const approval = payment?.approval_id
+        ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(payment.approval_id)
+        : null;
+      const before = payment ? this.mapPayment(payment) : null;
       this.db.prepare(`
         UPDATE payments
         SET status = ?,
@@ -15465,6 +15715,35 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           updated_at = ?
         WHERE id = ?
       `).run(approvedStatus, approvedStatus, timestamp, timestamp, targetId);
+      const reconciliation = payment?.invoice_id
+        ? this.reconcileInvoiceReceivable(payment.invoice_id, {
+          lastPaymentId: targetId,
+          timestamp,
+          actor: approval?.resolved_by || approval?.requested_by || 'approval'
+        })
+        : null;
+      this.db.prepare('UPDATE payments SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson({
+        ...data,
+        confirmationDecision: {
+          status: 'approved',
+          approvalId: payment?.approval_id || null,
+          resolvedAt: timestamp,
+          resolvedBy: approval?.resolved_by || null
+        },
+        reconciliation
+      }), timestamp, targetId);
+      if (payment) {
+        this.audit({
+          entityType: 'payment',
+          entityId: targetId,
+          jobId: payment.job_id,
+          action: approvedStatus === 'written_off' ? 'approve_invoice_write_off' : 'approve_payment_reconciliation',
+          actor: approval?.resolved_by || approval?.requested_by || 'approval',
+          before,
+          after: this.mapPayment(this.db.prepare('SELECT * FROM payments WHERE id = ?').get(targetId)),
+          metadata: { invoiceId: payment.invoice_id || null, reconciliation }
+        });
+      }
     } else if (targetType === 'budget_line') {
       const budgetLine = this.db.prepare('SELECT data_json FROM budget_lines WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(budgetLine?.data_json, {}).requestedStatus, 'approved');
@@ -16317,7 +16596,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
 
   classifyFinanceReadiness(flags = {}) {
     if (flags.approvalRequired) return 'approval_required';
-    if (flags.paymentFollowUp) return 'payment_follow_up';
+    if (flags.paymentOutstanding || flags.paymentFollowUp) return 'payment_follow_up';
     if (flags.invoicePackageReady) return 'invoice_ready';
     if (flags.invoiceReady) return 'invoice_ready';
     if (flags.handoffReady) return 'handoff_ready';
@@ -16331,6 +16610,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       matching,
       approvalRequired: 0,
       invoiceReady: 0,
+      paymentOutstanding: 0,
       paymentFollowUp: 0,
       handoffReady: 0,
       needsCosts: 0,
@@ -16356,6 +16636,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       uninvoicedNetValue: 0,
       unpaidValue: 0,
       receivedValue: 0,
+      writtenOffValue: 0,
+      pendingPaymentValue: 0,
       expenseValue: 0,
       billableLaborValue: 0,
       purchaseOrderValue: 0,
@@ -16367,6 +16649,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       if (status === 'approval_required') summary.approvalRequired += 1;
       if (status === 'invoice_ready') summary.invoiceReady += 1;
       if (status === 'payment_follow_up') summary.paymentFollowUp += 1;
+      if (row.flags?.paymentOutstanding) summary.paymentOutstanding += 1;
       if (status === 'handoff_ready') summary.handoffReady += 1;
       if (status === 'needs_costs') summary.needsCosts += 1;
       if (status === 'stable') summary.stable += 1;
@@ -16392,6 +16675,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       summary.uninvoicedNetValue += normalizeNumber(money.uninvoicedNetValue, 0);
       summary.unpaidValue += normalizeNumber(money.unpaidValue, 0);
       summary.receivedValue += normalizeNumber(money.receivedValue, 0);
+      summary.writtenOffValue += normalizeNumber(money.writtenOffValue, 0);
+      summary.pendingPaymentValue += normalizeNumber(money.pendingPaymentValue, 0);
       summary.expenseValue += normalizeNumber(money.expenseValue, 0);
       summary.billableLaborValue += normalizeNumber(money.billableLaborValue, 0);
       summary.purchaseOrderValue += normalizeNumber(money.purchaseOrderValue, 0);
@@ -16442,7 +16727,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         const draftInvoices = activeInvoices.filter(invoice => ['draft', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')));
         const packageReadyInvoices = activeInvoices.filter(invoice => normalizeStatus(invoice.status, 'draft') === 'approved' && !invoice.data?.issuePackage);
         const preparedInvoices = activeInvoices.filter(invoice => normalizeStatus(invoice.status, 'draft') === 'prepared');
-        const receivableInvoices = activeInvoices.filter(invoice => ['sent', 'submitted'].includes(normalizeStatus(invoice.status, 'draft')));
+        const receivableInvoices = activeInvoices.filter(invoice => ['sent', 'submitted', 'partially_paid'].includes(normalizeStatus(invoice.status, 'draft')));
         const openPayments = (detail.payments || []).filter(payment => this.financeRecordOpen(payment.status, activePaymentClosedStatuses));
         const dueOrOverduePayments = openPayments.filter(payment => this.financeDueOrOverdue(payment.dueAt));
         const paymentsDueForFollowUp = openPayments.filter(payment => {
@@ -16450,6 +16735,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           return this.financeDueOrOverdue(paymentData.nextFollowUpAt || payment.dueAt);
         });
         const receivedPayments = (detail.payments || []).filter(payment => ['paid', 'received', 'settled'].includes(normalizeStatus(payment.status, '')));
+        const writtenOffPayments = (detail.payments || []).filter(payment => normalizeStatus(payment.status, '') === 'written_off');
         const activeBudgetLines = (detail.budgetLines || []).filter(line => this.financeRecordOpen(line.status));
         const openPurchaseOrders = (detail.purchaseOrders || []).filter(order => this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received']));
         const openDrawRequests = (detail.drawRequests || []).filter(draw => this.financeRecordOpen(draw.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'funded']));
@@ -16469,10 +16755,17 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         const quotedGrossValue = normalizeNumber(latestQuote?.total, quotedNetValue);
         const contractValue = normalizeNumber(detail.contractValue, normalizeNumber(detail.estimatedCost, 0));
         const invoiceValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
-        const receivableInvoiceValue = receivableInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
+        const invoiceReconciliations = receivableInvoices.map(invoice => ({ invoice, ...this.getInvoiceReconciliation(invoice.id) }));
+        const nextReceivable = invoiceReconciliations.find(item => item.availableAmount > 1) || null;
+        const receivableOutstandingValue = roundMoney(invoiceReconciliations.reduce((sum, item) => sum + item.outstandingAmount, 0));
+        const pendingPaymentValue = roundMoney(invoiceReconciliations.reduce((sum, item) => sum + item.pendingAmount, 0));
         const invoicedNetValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.amount, 0), 0);
         const receivedValue = receivedPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
-        const openPaymentValue = openPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
+        const writtenOffValue = writtenOffPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
+        const receivableInvoiceIds = new Set(receivableInvoices.map(invoice => invoice.id));
+        const unmatchedOpenPaymentValue = openPayments
+          .filter(payment => !payment.invoiceId || !receivableInvoiceIds.has(payment.invoiceId))
+          .reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const purchaseOrderValue = openPurchaseOrders.reduce((sum, order) => sum + normalizeNumber(order.amount, 0), 0);
         const drawRequestValue = openDrawRequests.reduce((sum, draw) => sum + normalizeNumber(draw.requestedAmount, 0), 0);
         const financeHandoffValue = activeHandoffs.reduce((sum, handoff) => sum + normalizeNumber(handoff.amount, 0), 0);
@@ -16496,9 +16789,10 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         const missingBudget = activeJobStatuses.has(jobStatus) && netRevenueBasis >= 1000 && !activeBudgetLines.length;
         const invoiceReady = progressedForFinance && invoiceDraftAmount > 1;
         const invoicePackageReady = packageReadyInvoices.length > 0;
-        const untrackedReceivable = receivableInvoices.length > 0
-          && openPayments.length === 0
-          && Math.max(0, receivableInvoiceValue - receivedValue) > 1;
+        const untrackedReceivable = Boolean(nextReceivable)
+          && !openPayments.some(payment => payment.invoiceId === nextReceivable.invoice.id)
+          && nextReceivable.availableAmount > 1;
+        const paymentOutstanding = receivableOutstandingValue > 1;
         const paymentFollowUp = paymentsDueForFollowUp.length > 0 || untrackedReceivable;
         const handoffMissing = hasFinancialActivity && !activeHandoffs.length;
         const handoffReady = !missingCosts
@@ -16513,6 +16807,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           || activeHandoffs.some(handoff => handoff.approvalId && ['pending_approval', 'submitted', 'ready_to_export'].includes(normalizeStatus(handoff.status, '')));
         const flags = {
           approvalRequired,
+          paymentOutstanding,
           paymentFollowUp,
           invoiceReady,
           invoicePackageReady,
@@ -16532,11 +16827,21 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           invoiceId: packageReadyInvoices[0].id,
           requiresApproval: false
         });
+        if (nextReceivable) nextActions.push({
+          type: 'record_payment_reconciliation',
+          label: 'Record received payment or write-off',
+          paymentId: openPayments.find(payment => payment.invoiceId === nextReceivable.invoice.id)?.id || null,
+          invoiceId: nextReceivable.invoice.id,
+          outstandingAmount: nextReceivable.outstandingAmount,
+          availableAmount: nextReceivable.availableAmount,
+          pendingAmount: nextReceivable.pendingAmount,
+          requiresApproval: true
+        });
         if (paymentFollowUp) nextActions.push({
           type: 'record_payment_follow_up',
           label: 'Record payment follow-up or confirmation',
           paymentId: paymentsDueForFollowUp[0]?.id || openPayments[0]?.id || null,
-          invoiceId: receivableInvoices[0]?.id || null,
+          invoiceId: nextReceivable?.invoice.id || receivableInvoices[0]?.id || null,
           requiresApproval: false
         });
         if (invoiceReady) nextActions.push({ type: 'draft_invoice', label: 'Draft approval-gated invoice', requiresApproval: true });
@@ -16596,8 +16901,10 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
             invoiceDraftAmount,
             uninvoicedValue: Math.max(0, grossRevenueBasis - invoiceValue),
             uninvoicedNetValue: invoiceDraftAmount,
-            unpaidValue: Math.max(openPaymentValue, Math.max(0, receivableInvoiceValue - receivedValue)),
+            unpaidValue: roundMoney(receivableOutstandingValue + unmatchedOpenPaymentValue),
             receivedValue,
+            writtenOffValue,
+            pendingPaymentValue,
             expenseValue,
             billableLaborValue,
             purchaseOrderValue,
@@ -16624,7 +16931,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     const matchesMode = row => {
       if (mode === 'all') return true;
       if (mode === 'approval') return row.flags?.approvalRequired === true;
-      if (mode === 'payment') return row.flags?.paymentFollowUp === true;
+      if (mode === 'payment') return row.flags?.paymentOutstanding === true || row.flags?.paymentFollowUp === true;
       if (mode === 'payment_followup') return row.flags?.paymentFollowUp === true;
       if (mode === 'payment_follow_up') return row.flags?.paymentFollowUp === true;
       if (mode === 'invoice') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true;
@@ -21888,6 +22195,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       method: row.method,
       reference: row.reference,
       approvalId: row.approval_id,
+      reconciliationKey: row.reconciliation_key || null,
       data: fromJson(row.data_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -22290,11 +22598,20 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       preview.tradePartnerId = data.tradePartnerId || null;
       preview.partnerCompliance = data.partnerCompliance || null;
     } else if (targetType === 'payment') {
-      primaryEffect = 'Approve payment confirmation.';
-      addEffect('Record the payment as received/settled.');
+      const requestedStatus = normalizeStatus(data.requestedStatus, 'received');
+      primaryEffect = requestedStatus === 'written_off' ? 'Approve invoice balance write-off.' : 'Approve payment reconciliation.';
+      addEffect(`${requestedStatus === 'written_off' ? 'Write off' : 'Record'} ${normalizeNumber(data.amount, 0).toFixed(2)} ${data.currency || 'EUR'} against the retained invoice.`);
+      if (data.reconciliation) {
+        const remaining = roundMoney(Math.max(0, normalizeNumber(data.reconciliation.outstandingAmount, 0) - normalizeNumber(data.amount, 0)));
+        addEffect(remaining > 0 ? `Leave ${remaining.toFixed(2)} ${data.currency || 'EUR'} outstanding after approval.` : 'Settle the remaining retained invoice balance after approval.');
+      }
       addSafeguard('Does not move funds or contact the client automatically.');
       riskLevel = 'high';
       preview.amount = data.amount || null;
+      preview.currency = data.currency || 'EUR';
+      preview.invoiceId = data.invoiceId || null;
+      preview.reference = data.reference || null;
+      preview.reconciliation = data.reconciliation || null;
     } else if (['quality_check', 'safety_check', 'inspection_record', 'observation_record', 'incident_record', 'safety_meeting', 'worker_orientation', 'jha_record', 'sds_sheet', 'site_access_log'].includes(targetType)) {
       primaryEffect = `Approve ${ledgerApprovalHumanTarget(targetType)} evidence.`;
       addEffect('Move the field, safety, access, or quality record to its approved/completed state.');

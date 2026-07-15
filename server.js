@@ -2628,6 +2628,19 @@ app.post('/api/ledger/jobs/:id/payments', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/invoices/:invoiceId/payments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPayment(req.params.id, {
+      ...(req.body || {}),
+      invoiceId: req.params.invoiceId
+    }, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ mode: 'payment', limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/payments/follow-up', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,

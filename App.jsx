@@ -50,6 +50,7 @@ const FIELD_ASSURANCE_REVIEW_PRIORITY = [
   'complete_orientation'
 ]
 const FINANCE_ACTION_LABELS = {
+  record_payment_reconciliation: 'Record payment',
   record_payment_follow_up: 'Payment follow-up',
   prepare_finance_handoff: 'Finance handoff',
   record_time_expense: 'Record costs',
@@ -244,6 +245,8 @@ function emptyFinanceActionDraft() {
     rate: '52',
     expenseAmount: '',
     dueAt: futureDateInput(7),
+    paidAt: futureDateInput(0),
+    method: 'bank_transfer',
     reference: '',
     vendor: '',
     category: 'materials',
@@ -758,19 +761,19 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
       const canDraftInvoice = canAct && item.flags?.invoiceReady && !item.counts?.draftInvoices
       const prepareAction = canAct ? item.nextActions?.find(action => action.type === 'prepare_invoice_package') : null
       const issuePackage = item.latest?.invoice?.data?.issuePackage
-      const financeAction = canAct ? item.nextActions?.find(action => (
+      const financeActions = canAct ? item.nextActions?.filter(action => (
         action.type !== 'review_finance_approval' && action.type !== 'draft_invoice' && action.type !== 'prepare_invoice_package'
-      )) : null
-      const actionLabel = FINANCE_ACTION_LABELS[financeAction?.type]
+          && FINANCE_ACTION_LABELS[action.type]
+      )).slice(0, 3) : EMPTY_LIST
       return <article className="finance-item" key={item.jobId}>
-        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Uninvoiced net <strong>{currency.format(item.money?.uninvoicedNetValue ?? item.money?.uninvoicedValue ?? 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
+        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Received <strong>{currency.format(item.money?.receivedValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.money?.writtenOffValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.writtenOffValue)} written off</span> : null}{item.money?.pendingPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingPaymentValue)} pending</span> : null}{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
         <div className="finance-actions">
           {item.flags?.approvalRequired && canApprove ? <button className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ jobId: item.jobId, jobTitle: job.title, approvalId: item.nextActions?.find(action => action.approvalId)?.approvalId || null })}><ShieldCheck size={16} />Review approval</button> : null}
           {canDraftInvoice ? <button className="secondary-button" aria-label={`Draft invoice for ${job.title}`} disabled={submitting} onClick={() => onDraftInvoice(item)}><ReceiptEuro size={16} />Draft invoice</button> : null}
           {prepareAction ? <button className="secondary-button" aria-label={`Prepare invoice package for ${job.title}`} disabled={submitting} onClick={() => onPrepareInvoice(item, prepareAction)}><PackageCheck size={16} />Prepare package</button> : null}
           {issuePackage?.htmlDocumentId ? <a className="secondary-button" aria-label={`Download invoice for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.htmlDocumentId)}/issue-package`} download><FileDown size={16} />Invoice</a> : null}
           {issuePackage?.ublDocumentId ? <a className="secondary-button" aria-label={`Download UBL for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.ublDocumentId)}/issue-package`} download><FileDown size={16} />UBL</a> : null}
-          {financeAction && actionLabel ? <button className="secondary-button" aria-label={`${actionLabel} for ${job.title}`} disabled={submitting} onClick={() => onAction(item, financeAction)}><ClipboardCheck size={16} />{actionLabel}</button> : null}
+          {financeActions.map(action => <button className="secondary-button" key={`${action.type}-${action.invoiceId || action.paymentId || item.jobId}`} aria-label={`${FINANCE_ACTION_LABELS[action.type]} for ${job.title}`} disabled={submitting} onClick={() => onAction(item, action)}><ClipboardCheck size={16} />{FINANCE_ACTION_LABELS[action.type]}</button>)}
           <button className="icon-button table-action" aria-label={`Open ${job.title}`} onClick={() => onOpen(job)}><ArrowUpRight size={16} /></button>
         </div>
       </article>
@@ -3298,7 +3301,7 @@ function App() {
       setError('The finance action is not linked to a supported ledger workflow.')
       return
     }
-    const paymentAmount = Number(item.latest?.payment?.amount || item.money?.unpaidValue || item.latest?.invoice?.total || 0)
+    const paymentAmount = Number(action.availableAmount || action.outstandingAmount || item.money?.unpaidValue || item.latest?.payment?.amount || item.latest?.invoice?.total || 0)
     const contractAmount = Number(item.money?.contractValue || item.money?.quotedNetValue || 0)
     const drawAmount = Number(item.latest?.invoice?.total || item.money?.invoiceValue || item.money?.unpaidValue || 0)
     const amount = action.type === 'create_budget_line'
@@ -3309,6 +3312,7 @@ function App() {
     setFinanceAction({ item, action, label: FINANCE_ACTION_LABELS[action.type] })
     setFinanceActionDraft({
       ...emptyFinanceActionDraft(),
+      outcome: action.type === 'record_payment_reconciliation' ? 'received' : 'follow_up_recorded',
       amount: amount > 0 ? amount.toFixed(2) : '',
       forecastAmount: contractAmount > 0 ? contractAmount.toFixed(2) : '',
       dueAt: futureDateInput(7),
@@ -3337,7 +3341,28 @@ function App() {
 
     let route = ''
     let body = {}
-    if (type === 'record_payment_follow_up') {
+    if (type === 'record_payment_reconciliation') {
+      if (!(financeControlAmount > 0) || !financeAction.action.invoiceId || !reference) {
+        setError('Record a positive settlement amount, retained invoice, and payment or authority reference.')
+        return
+      }
+      const availableAmount = Number(financeAction.action.availableAmount || financeAction.action.outstandingAmount || 0)
+      if (availableAmount > 0 && financeControlAmount - availableAmount > 0.01) {
+        setError(`The settlement amount cannot exceed the available invoice balance of ${currency.format(availableAmount)}.`)
+        return
+      }
+      route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/invoices/${encodeURIComponent(financeAction.action.invoiceId)}/payments`
+      body = {
+        status: financeActionDraft.outcome,
+        amount: roundMoney(financeControlAmount),
+        paidAt: financeActionDraft.outcome === 'received' && financeActionDraft.paidAt
+          ? new Date(`${financeActionDraft.paidAt}T12:00:00`).toISOString()
+          : null,
+        method: financeActionDraft.outcome === 'received' ? financeActionDraft.method : 'write_off',
+        reference,
+        notes
+      }
+    } else if (type === 'record_payment_follow_up') {
       if (!(financeControlAmount > 0) || !financeActionDraft.dueAt) {
         setError('Record a positive receivable amount and the next follow-up date.')
         return
@@ -3457,7 +3482,9 @@ function App() {
     setSubmitting(true)
     try {
       const result = await api(route, { method: 'POST', body: JSON.stringify({ ...body, actor: 'office_operator' }) })
-      if (type === 'record_payment_follow_up') {
+      if (type === 'record_payment_reconciliation') {
+        notify('Payment reconciliation retained for approver review. The invoice balance is unchanged until approval and no funds moved.')
+      } else if (type === 'record_payment_follow_up') {
         notify(result.payment?.approvalId
           ? 'Payment outcome retained for approver confirmation. No funds moved and no client message was sent.'
           : 'Internal payment follow-up retained. No reminder or external message was sent.')
@@ -4375,8 +4402,16 @@ function App() {
             <div className="field-record-context form-span">
               <span>Ledger context</span>
               <strong>{formatStatus(financeAction.item.financeStatus)}</strong>
-              <p>Contract {currency.format(financeAction.item.money?.contractValue || 0)} / unpaid {currency.format(financeAction.item.money?.unpaidValue || 0)}</p>
+              <p>Contract {currency.format(financeAction.item.money?.contractValue || 0)} / unpaid {currency.format(financeAction.item.money?.unpaidValue || 0)} / received {currency.format(financeAction.item.money?.receivedValue || 0)}</p>
             </div>
+
+            {financeAction.action.type === 'record_payment_reconciliation' ? <>
+              <label>Reconciliation type<select value={financeActionDraft.outcome} onChange={event => setFinanceActionDraft({ ...financeActionDraft, outcome: event.target.value })}><option value="received">Payment received</option><option value="written_off">Approved write-off request</option></select></label>
+              <label>Settlement amount (EUR)<input required type="number" min="0.01" max={financeAction.action.availableAmount || financeAction.action.outstandingAmount || undefined} step="0.01" value={financeActionDraft.amount} onChange={event => setFinanceActionDraft({ ...financeActionDraft, amount: event.target.value })} /></label>
+              {financeActionDraft.outcome === 'received' ? <><label>Received date<input required type="date" value={financeActionDraft.paidAt} onChange={event => setFinanceActionDraft({ ...financeActionDraft, paidAt: event.target.value })} /></label><label>Payment method<select value={financeActionDraft.method} onChange={event => setFinanceActionDraft({ ...financeActionDraft, method: event.target.value })}><option value="bank_transfer">Bank transfer</option><option value="card">Card</option><option value="cash">Cash</option><option value="direct_debit">Direct debit</option><option value="other">Other retained evidence</option></select></label></> : null}
+              <label className="form-span">Payment or authority reference<input required maxLength={240} value={financeActionDraft.reference} onChange={event => setFinanceActionDraft({ ...financeActionDraft, reference: event.target.value })} placeholder="Bank statement ID or approved write-off authority" /></label>
+              <p className="workflow-note form-span">Available to reconcile: {currency.format(financeAction.action.availableAmount || financeAction.action.outstandingAmount || 0)}. Approval updates the invoice to partially paid, paid, or settled; duplicate references and overpayments are refused.</p>
+            </> : null}
 
             {financeAction.action.type === 'record_payment_follow_up' ? <>
               <label>Outcome<select value={financeActionDraft.outcome} onChange={event => setFinanceActionDraft({ ...financeActionDraft, outcome: event.target.value })}><option value="follow_up_recorded">Internal collection note</option><option value="received">Confirm payment received</option><option value="written_off">Request write-off</option></select></label>

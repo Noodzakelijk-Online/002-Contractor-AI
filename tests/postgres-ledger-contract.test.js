@@ -783,7 +783,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '015_invoice_issue_packages');
+    assert.equal(migrations.currentVersion, '016_receivable_reconciliation');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -864,12 +864,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('015_invoice_issue_packages'));
+  assert.deepEqual(versions, Array(4).fill('016_receivable_reconciliation'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 15);
+    assert.equal(Number(migrationCount.count), 16);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1078,6 +1078,50 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
       ledger.getInvoiceIssueDocument(document.id, { audit: false }).document.data.format
     ));
     assert.deepEqual(retainedFormats.sort(), ['html', 'ubl_2_1']);
+    const partialReceipt = ledger.recordPayment(job.id, {
+      invoiceId: invoice.id,
+      status: 'received',
+      amount: 500,
+      method: 'bank_transfer',
+      reference: `PG-BANK-500-${marker}`,
+      notes: 'PostgreSQL partial receipt contract proof.'
+    }, { actor: 'postgres_commercial_test' });
+    assert.equal(partialReceipt.status, 'pending_confirmation');
+    assert.throws(
+      () => ledger.recordPayment(job.id, {
+        invoiceId: invoice.id,
+        status: 'received',
+        amount: 100,
+        reference: ` pg-bank-500-${marker} `
+      }),
+      error => error.code === 'duplicate_payment_reference' && error.statusCode === 409
+    );
+    assert.throws(
+      () => ledger.recordPayment(job.id, {
+        invoiceId: invoice.id,
+        status: 'received',
+        amount: 862,
+        reference: `PG-BANK-OVER-${marker}`
+      }),
+      error => error.code === 'payment_exceeds_invoice_balance' && error.details.availableAmount === 861.25
+    );
+    ledger.resolveApproval(partialReceipt.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    let reconciledInvoice = ledger.getJobDetail(job.id, { includeAudit: false }).invoices.find(item => item.id === invoice.id);
+    assert.equal(reconciledInvoice.status, 'partially_paid');
+    assert.equal(reconciledInvoice.data.reconciliation.outstandingAmount, 861.25);
+    const finalWriteOff = ledger.recordPayment(job.id, {
+      invoiceId: invoice.id,
+      status: 'written_off',
+      amount: 861.25,
+      reference: `PG-WRITE-OFF-${marker}`,
+      notes: 'PostgreSQL retained write-off authority proof.'
+    }, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(finalWriteOff.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    reconciledInvoice = ledger.getJobDetail(job.id, { includeAudit: false }).invoices.find(item => item.id === invoice.id);
+    assert.equal(reconciledInvoice.status, 'settled');
+    assert.equal(reconciledInvoice.data.reconciliation.receivedAmount, 500);
+    assert.equal(reconciledInvoice.data.reconciliation.writtenOffAmount, 861.25);
+    assert.equal(reconciledInvoice.data.reconciliation.outstandingAmount, 0);
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

@@ -272,7 +272,15 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   const paymentId = initialFollowUp.body.payment.id;
 
   const clearedQueue = await request(baseUrl, '/api/ledger/finance?mode=payment&limit=100');
-  assert.equal(clearedQueue.body.jobs.some(job => job.jobId === jobId), false);
+  const trackedReceivable = clearedQueue.body.jobs.find(job => job.jobId === jobId);
+  assert.ok(trackedReceivable);
+  assert.equal(trackedReceivable.flags.paymentOutstanding, true);
+  assert.equal(trackedReceivable.flags.paymentFollowUp, false);
+  assert.ok(trackedReceivable.nextActions.some(action => (
+    action.type === 'record_payment_reconciliation'
+    && action.paymentId === paymentId
+    && action.availableAmount === 2904
+  )));
 
   const repeatedFollowUp = await request(baseUrl, `/api/ledger/jobs/${jobId}/payments/${paymentId}/follow-up`, {
     method: 'POST',
@@ -286,6 +294,31 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   assert.equal(repeatedFollowUp.body.payment.id, paymentId);
   assert.equal(repeatedFollowUp.body.payment.data.followUpHistory.length, 2);
   assert.equal(repeatedFollowUp.body.job.payments.length, 1);
+
+  const rejectedReceipt = await request(baseUrl, `/api/ledger/jobs/${jobId}/payments/${paymentId}/follow-up`, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'received',
+      amount: 1000,
+      reference: 'REJECTED-BANK-MATCH-1',
+      method: 'bank_transfer',
+      notes: 'Candidate bank match retained for approver review.'
+    })
+  });
+  assert.equal(rejectedReceipt.response.status, 201);
+  assert.equal(rejectedReceipt.body.payment.status, 'pending_confirmation');
+  assert.equal(rejectedReceipt.body.payment.amount, 1000);
+  const rejectedReceiptDecision = await request(baseUrl, `/api/ledger/approvals/${rejectedReceipt.body.payment.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'rejected', resolvedBy: 'Finance Control QA', reason: 'Bank match belonged to another invoice.' })
+  });
+  assert.equal(rejectedReceiptDecision.response.status, 200);
+  const restoredPaymentDetail = await request(baseUrl, `/api/ledger/jobs/${jobId}`);
+  const restoredPayment = restoredPaymentDetail.body.job.payments.find(payment => payment.id === paymentId);
+  assert.equal(restoredPayment.status, 'awaiting_payment');
+  assert.equal(restoredPayment.amount, 2904);
+  assert.equal(restoredPayment.reference, null);
+  assert.equal(restoredPayment.reconciliationKey, null);
 
   const writeOff = await request(baseUrl, `/api/ledger/jobs/${jobId}/payments/${paymentId}/follow-up`, {
     method: 'POST',
@@ -308,6 +341,9 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   const writtenOffPayment = writtenOffDetail.body.job.payments.find(payment => payment.id === paymentId);
   assert.equal(writtenOffPayment.status, 'written_off');
   assert.equal(writtenOffPayment.paidAt, null);
+  assert.equal(writtenOffDetail.body.job.invoices.find(item => item.id === invoice.body.invoice.id).status, 'settled');
+  const settledQueue = await request(baseUrl, '/api/ledger/finance?mode=payment&limit=100');
+  assert.equal(settledQueue.body.jobs.some(job => job.jobId === jobId), false);
 
   const draftHandoff = await request(baseUrl, `/api/ledger/jobs/${jobId}/finance-handoffs`, {
     method: 'POST',
@@ -371,4 +407,151 @@ test('finance handoff creation rolls back when approval persistence fails', () =
   } finally {
     ledger.close();
   }
+});
+
+test('invoice payment reconciliation reserves balances and rejects duplicate references and overpayments', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const organization = await request(baseUrl, '/api/ledger/organization', {
+    method: 'PUT',
+    body: JSON.stringify({
+      legalName: 'Reconciliation Contractor B.V.',
+      registrationNumber: '12345678',
+      vatNumber: 'NL123456789B01',
+      email: 'reconciliation@example.test',
+      address: 'Ledgerstraat 1',
+      postalCode: '3511 AA',
+      city: 'Utrecht',
+      country: 'NL',
+      iban: 'NL91ABNA0417164300'
+    })
+  });
+  assert.equal(organization.response.status, 200);
+
+  const intake = await request(baseUrl, '/api/ledger/intake', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Partial receivable reconciliation',
+      client: {
+        name: 'Reconciliation Client',
+        email: 'client-reconciliation@example.test',
+        address: 'Klantstraat 10',
+        city: 'Utrecht',
+        country: 'NL'
+      },
+      address: 'Klantstraat 10',
+      city: 'Utrecht',
+      country: 'NL',
+      status: 'completed',
+      progressPercent: 100,
+      contractValue: 1000,
+      assignAutomatically: false
+    })
+  });
+  assert.equal(intake.response.status, 201);
+  const jobId = intake.body.job.id;
+  const invoice = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices`, {
+    method: 'POST',
+    body: JSON.stringify({
+      amount: 1000,
+      taxRate: 21,
+      taxAmount: 210,
+      total: 1210,
+      dueAt: '2026-08-15T12:00:00.000Z',
+      buyerAddress: 'Klantstraat 10',
+      buyerCity: 'Utrecht',
+      buyerCountry: 'NL'
+    })
+  });
+  assert.equal(invoice.response.status, 201);
+  const invoiceId = invoice.body.invoice.id;
+  const invoiceApproval = await request(baseUrl, `/api/ledger/approvals/${invoice.body.invoice.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Receivable approver', reason: 'Invoice approved for matching.' })
+  });
+  assert.equal(invoiceApproval.response.status, 200);
+
+  const prematurePayment = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 500, reference: 'BANK-MATCH-BEFORE-PACKAGE' })
+  });
+  assert.equal(prematurePayment.response.status, 400);
+  assert.equal(prematurePayment.body.error.code, 'invoice_not_payable');
+
+  const issuePackage = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/issue-package`, {
+    method: 'POST',
+    body: JSON.stringify({ actor: 'Receivable operator' })
+  });
+  assert.equal(issuePackage.response.status, 201);
+  assert.equal(issuePackage.body.issueReference.startsWith('INV-'), true);
+  assert.equal(issuePackage.body.job.invoices.find(item => item.id === invoiceId).status, 'prepared');
+
+  const partial = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 500, method: 'bank_transfer', reference: 'BANK-MATCH-500', notes: 'Partial bank receipt.' })
+  });
+  assert.equal(partial.response.status, 201);
+  assert.equal(partial.body.payment.status, 'pending_confirmation');
+  assert.equal(partial.body.payment.data.reconciliationAtRequest.availableAmount, 1210);
+
+  const pendingQueue = await request(baseUrl, '/api/ledger/finance?mode=approval&limit=100');
+  const pendingRow = pendingQueue.body.jobs.find(job => job.jobId === jobId);
+  assert.ok(pendingRow);
+  assert.equal(pendingRow.money.unpaidValue, 500);
+  assert.equal(pendingRow.counts.pendingApprovals, 2);
+
+  const duplicatePending = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 100, reference: ' bank-match-500 ', notes: 'Duplicate candidate.' })
+  });
+  assert.equal(duplicatePending.response.status, 409);
+  assert.equal(duplicatePending.body.error.code, 'duplicate_payment_reference');
+
+  const overReserved = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 711, reference: 'BANK-MATCH-OVER', notes: 'Amount exceeds unreserved balance.' })
+  });
+  assert.equal(overReserved.response.status, 400);
+  assert.equal(overReserved.body.error.code, 'payment_exceeds_invoice_balance');
+  assert.equal(overReserved.body.error.details.availableAmount, 710);
+
+  const partialApproval = await request(baseUrl, `/api/ledger/approvals/${partial.body.payment.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Receivable approver', reason: 'Bank statement match verified.' })
+  });
+  assert.equal(partialApproval.response.status, 200);
+  let detail = await request(baseUrl, `/api/ledger/jobs/${jobId}`);
+  let reconciledInvoice = detail.body.job.invoices.find(item => item.id === invoiceId);
+  assert.equal(reconciledInvoice.status, 'partially_paid');
+  assert.equal(reconciledInvoice.data.reconciliation.receivedAmount, 500);
+  assert.equal(reconciledInvoice.data.reconciliation.outstandingAmount, 710);
+
+  const duplicateApproved = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 100, reference: 'BANK-MATCH-500', notes: 'Duplicate approved reference.' })
+  });
+  assert.equal(duplicateApproved.response.status, 409);
+
+  const finalReceipt = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 710, method: 'bank_transfer', reference: 'BANK-MATCH-710', notes: 'Final bank receipt.' })
+  });
+  assert.equal(finalReceipt.response.status, 201);
+  const finalApproval = await request(baseUrl, `/api/ledger/approvals/${finalReceipt.body.payment.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Receivable approver', reason: 'Final bank statement match verified.' })
+  });
+  assert.equal(finalApproval.response.status, 200);
+  detail = await request(baseUrl, `/api/ledger/jobs/${jobId}`);
+  reconciledInvoice = detail.body.job.invoices.find(item => item.id === invoiceId);
+  assert.equal(reconciledInvoice.status, 'paid');
+  assert.equal(reconciledInvoice.data.reconciliation.receivedAmount, 1210);
+  assert.equal(reconciledInvoice.data.reconciliation.outstandingAmount, 0);
+  assert.equal(detail.body.job.payments.filter(payment => payment.status === 'received').length, 2);
+
+  const settledQueue = await request(baseUrl, '/api/ledger/finance?mode=payment&limit=100');
+  assert.equal(settledQueue.body.jobs.some(job => job.jobId === jobId), false);
 });

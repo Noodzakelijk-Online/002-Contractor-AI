@@ -289,6 +289,22 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
+  const organization = await request(baseUrl, '/api/ledger/organization', {
+    method: 'PUT',
+    body: JSON.stringify({
+      legalName: 'Server API Contractor B.V.',
+      registrationNumber: '12345678',
+      vatNumber: 'NL123456789B01',
+      email: 'server-api@example.test',
+      address: 'Ledgerstraat 1',
+      postalCode: '1011 AA',
+      city: 'Amsterdam',
+      country: 'NL',
+      iban: 'NL91ABNA0417164300'
+    })
+  });
+  assert.equal(organization.response.status, 200);
+
   const dashboardBefore = await request(baseUrl, '/api/ledger/dashboard');
   assert.equal(dashboardBefore.response.status, 200);
   const startingJobCount = dashboardBefore.body.dashboard.metrics.jobs;
@@ -561,7 +577,15 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
 
   const invoice = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices`, {
     method: 'POST',
-    body: JSON.stringify({ amount: 2300, taxAmount: 483, total: 2783, peppolReady: true })
+    body: JSON.stringify({
+      amount: 2300,
+      taxAmount: 483,
+      total: 2783,
+      dueAt: '2026-08-15T12:00:00.000Z',
+      buyerAddress: 'Prinsengracht 1',
+      buyerCity: 'Amsterdam',
+      buyerCountry: 'NL'
+    })
   });
   assert.equal(invoice.response.status, 201);
   assert.ok(invoice.body.invoice.approvalId);
@@ -1213,7 +1237,27 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(safetyReview.response.status, 201);
   assert.ok(safetyReview.body.safetyCheck.approvalId);
 
-  const paymentReceived = await request(baseUrl, `/api/ledger/jobs/${jobId}/payments`, {
+  const payableInvoiceApproval = await request(baseUrl, `/api/ledger/approvals/${invoice.body.invoice.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Test', reason: 'Invoice approved before payment matching.' })
+  });
+  assert.equal(payableInvoiceApproval.response.status, 200);
+
+  const payableInvoicePackage = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoice.body.invoice.id}/issue-package`, {
+    method: 'POST',
+    body: JSON.stringify({ actor: 'Finance Test' })
+  });
+  assert.equal(payableInvoicePackage.response.status, 201);
+  assert.equal(payableInvoicePackage.body.job.invoices.find(item => item.id === invoice.body.invoice.id).status, 'prepared');
+
+  const ambiguousPayment = await request(baseUrl, `/api/ledger/jobs/${jobId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'received', amount: 2783, method: 'bank_transfer', reference: 'REG-PAY-1' })
+  });
+  assert.equal(ambiguousPayment.response.status, 400);
+  assert.equal(ambiguousPayment.body.error.code, 'invoice_required_for_payment_confirmation');
+
+  const paymentReceived = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices/${invoice.body.invoice.id}/payments`, {
     method: 'POST',
     body: JSON.stringify({ status: 'received', amount: 2783, method: 'bank_transfer', reference: 'REG-PAY-1' })
   });

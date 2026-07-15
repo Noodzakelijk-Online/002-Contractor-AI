@@ -1910,6 +1910,34 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   await page.getByRole('button', { name: 'Refresh data' }).click();
 
   receivableRow = finance.locator('.finance-item').filter({ hasText: receivableJob.job.title });
+  await receivableRow.getByRole('button', { name: `Record payment for ${receivableJob.job.title}` }).click();
+  control = page.getByTestId('finance-control-modal');
+  await expect(control.getByRole('heading', { name: 'Record payment' })).toBeVisible();
+  await expect(control.getByLabel('Settlement amount (EUR)')).toHaveValue('3872.00');
+  await control.getByLabel('Settlement amount (EUR)').fill('1000');
+  await control.getByLabel('Payment or authority reference').fill('BROWSER-BANK-MATCH-1000');
+  await control.getByLabel('Internal evidence and notes').fill('Partial receipt matched to the retained bank statement and invoice package.');
+  await control.getByRole('button', { name: 'Request approver review' }).click();
+  await expect(page.getByText('Payment reconciliation retained for approver review. The invoice balance is unchanged until approval and no funds moved.')).toBeVisible();
+
+  receivableDetailResponse = await request.get(`/api/ledger/jobs/${receivableJob.job.id}`);
+  expect(receivableDetailResponse.ok()).toBeTruthy();
+  receivableDetail = await receivableDetailResponse.json();
+  const pendingReceipt = receivableDetail.job.payments.find(payment => payment.reference === 'BROWSER-BANK-MATCH-1000');
+  expect(pendingReceipt).toMatchObject({ status: 'pending_confirmation', amount: 1000, invoiceId: receivableInvoice.invoice.id });
+  const receiptApproval = await request.post(`/api/ledger/approvals/${pendingReceipt.approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Partial bank receipt matched.' }
+  });
+  expect(receiptApproval.ok()).toBeTruthy();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  receivableDetailResponse = await request.get(`/api/ledger/jobs/${receivableJob.job.id}`);
+  receivableDetail = await receivableDetailResponse.json();
+  expect(receivableDetail.job.invoices.find(invoice => invoice.id === receivableInvoice.invoice.id)).toMatchObject({
+    status: 'partially_paid',
+    data: { reconciliation: { receivedAmount: 1000, outstandingAmount: 2872 } }
+  });
+
+  receivableRow = finance.locator('.finance-item').filter({ hasText: receivableJob.job.title });
   await receivableRow.getByRole('button', { name: `Waiver request for ${receivableJob.job.title}` }).click();
   control = page.getByTestId('finance-control-modal');
   await expect(control.getByRole('heading', { name: 'Waiver request' })).toBeVisible();
@@ -1938,7 +1966,7 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   receivableDetail = await receivableDetailResponse.json();
   expect(receivableDetail.job.drawRequests[0].status).toBe('approved');
   expect(receivableDetail.job.lienWaivers).toHaveLength(1);
-  expect(receivableDetail.job.lienWaivers[0]).toMatchObject({ status: 'requested', supplier: 'Bouwmaat', amount: 3872 });
+  expect(receivableDetail.job.lienWaivers[0]).toMatchObject({ status: 'requested', supplier: 'Bouwmaat', amount: 2872 });
 
   const mobileGeometry = await page.evaluate(() => {
     const workspace = document.querySelector('[data-testid="finance-workspace"]');
