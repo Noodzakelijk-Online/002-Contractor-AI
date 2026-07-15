@@ -783,7 +783,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '013_audit_history_queries');
+    assert.equal(migrations.currentVersion, '014_organization_profile');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -864,7 +864,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('013_audit_history_queries'));
+  assert.deepEqual(versions, Array(4).fill('014_organization_profile'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -998,6 +998,26 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     assert.equal(quote.subtotal, 1000);
     assert.equal(quote.total, 1210);
     ledger.resolveApproval(quote.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    assert.equal(ledger.getJobDetail(job.id).contractValue, 400);
+    const organization = ledger.updateOrganizationProfile({
+      legalName: `Postgres Contractor ${marker} B.V.`,
+      registrationNumber: String(marker).slice(-8),
+      vatNumber: `NL${String(marker).slice(-9)}B01`,
+      email: `postgres-${marker}@example.test`,
+      address: 'Hosted ledger street 14',
+      postalCode: '1012 AB',
+      city: 'Amsterdam',
+      country: 'NL',
+      defaultPaymentTermsDays: 30,
+      defaultQuoteValidityDays: 30
+    }, { actor: 'postgres_commercial_test' });
+    assert.equal(organization.readiness.ready, true);
+    const issuePackage = ledger.prepareQuoteIssuePackage(job.id, quote.id, { actor: 'postgres_commercial_test' });
+    assert.equal(issuePackage.document.type, 'quote_issue_package');
+    assert.equal(issuePackage.communication.status, 'draft');
+    assert.equal(issuePackage.externalCommitments, 0);
+    assert.equal(ledger.prepareQuoteIssuePackage(job.id, quote.id).replayed, true);
+    assert.match(ledger.getQuoteIssuePackage(issuePackage.document.id, { audit: false }).html, new RegExp(issuePackage.packageHash));
     assert.equal(ledger.getJobDetail(job.id).contractValue, 400);
     const quoteAcceptance = ledger.requestQuoteAcceptance(job.id, quote.id, {
       acceptedAt: '2026-07-14T12:00:00.000Z',

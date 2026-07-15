@@ -767,6 +767,27 @@ function toJson(value, fallback = {}) {
   return JSON.stringify(input ?? fallback);
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sha256Json(value) {
+  return crypto.createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function fromJson(value, fallback = {}) {
   if (value === null || value === undefined || value === '') {
     return fallback;
@@ -1314,6 +1335,35 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_audit_action_sequence ON audit_events(action, sequence_number DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_actor_sequence ON audit_events(actor, sequence_number DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_created_sequence ON audit_events(created_at, sequence_number DESC);
+      `);
+    }
+  },
+  {
+    version: '014_organization_profile',
+    description: 'Retain the contractor identity used to prepare controlled commercial issue packages.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS organization_profile (
+          profile_id TEXT PRIMARY KEY,
+          legal_name TEXT,
+          trading_name TEXT,
+          registration_number TEXT,
+          vat_number TEXT,
+          email TEXT,
+          phone TEXT,
+          website TEXT,
+          address TEXT,
+          postal_code TEXT,
+          city TEXT,
+          country TEXT NOT NULL DEFAULT 'NL',
+          iban TEXT,
+          bic TEXT,
+          default_payment_terms_days INTEGER NOT NULL DEFAULT 30,
+          default_quote_validity_days INTEGER NOT NULL DEFAULT 30,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
       `);
     }
   }
@@ -2314,6 +2364,150 @@ class ContractorOperatingLedger {
       applied,
       pending: LEDGER_SCHEMA_MIGRATIONS.filter(migration => !applied.some(entry => entry.version === migration.version)).map(migration => migration.version)
     };
+  }
+
+  getOrganizationProfile() {
+    const row = this.db.prepare('SELECT * FROM organization_profile WHERE profile_id = ?').get('primary');
+    const profile = row ? this.mapOrganizationProfile(row) : {
+      profileId: 'primary',
+      legalName: '',
+      tradingName: '',
+      registrationNumber: '',
+      vatNumber: '',
+      email: '',
+      phone: '',
+      website: '',
+      address: '',
+      postalCode: '',
+      city: '',
+      country: 'NL',
+      iban: '',
+      bic: '',
+      defaultPaymentTermsDays: 30,
+      defaultQuoteValidityDays: 30,
+      data: { vatExempt: false },
+      createdAt: null,
+      updatedAt: null
+    };
+    return { ...profile, readiness: this.assessOrganizationProfile(profile) };
+  }
+
+  assessOrganizationProfile(profile = {}) {
+    const missing = [];
+    if (!normalizeText(profile.legalName)) missing.push({ field: 'legalName', label: 'Legal name' });
+    if (!normalizeText(profile.registrationNumber)) missing.push({ field: 'registrationNumber', label: 'Registration number' });
+    if (!normalizeText(profile.vatNumber) && profile.data?.vatExempt !== true) {
+      missing.push({ field: 'vatNumber', label: 'VAT number or VAT exemption' });
+    }
+    if (!normalizeText(profile.address)) missing.push({ field: 'address', label: 'Registered address' });
+    if (!normalizeText(profile.postalCode)) missing.push({ field: 'postalCode', label: 'Postal code' });
+    if (!normalizeText(profile.city)) missing.push({ field: 'city', label: 'City' });
+    if (!normalizeText(profile.country)) missing.push({ field: 'country', label: 'Country' });
+    if (!normalizeText(profile.email) && !normalizeText(profile.phone)) {
+      missing.push({ field: 'contact', label: 'Email or phone' });
+    }
+    return {
+      ready: missing.length === 0,
+      status: missing.length === 0 ? 'ready' : 'incomplete',
+      missing,
+      missingFields: missing.map(item => item.field)
+    };
+  }
+
+  updateOrganizationProfile(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const beforeRow = this.db.prepare('SELECT * FROM organization_profile WHERE profile_id = ?').get('primary');
+      const before = beforeRow ? this.mapOrganizationProfile(beforeRow) : null;
+      const textField = (key, label, maxLength) => {
+        const value = normalizeText(payload[key], '');
+        if (value.length > maxLength) throw ledgerInputError('organization_profile_invalid', `${label} cannot exceed ${maxLength} characters.`);
+        return value;
+      };
+      const email = textField('email', 'Email', 254).toLowerCase();
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw ledgerInputError('organization_profile_invalid', 'Email must be a valid address.');
+      }
+      const website = textField('website', 'Website', 300);
+      if (website) {
+        let parsed;
+        try {
+          parsed = new URL(website);
+        } catch {
+          throw ledgerInputError('organization_profile_invalid', 'Website must be a valid HTTPS or HTTP URL.');
+        }
+        if (!['https:', 'http:'].includes(parsed.protocol)) {
+          throw ledgerInputError('organization_profile_invalid', 'Website must be a valid HTTPS or HTTP URL.');
+        }
+      }
+      const country = textField('country', 'Country', 2).toUpperCase() || 'NL';
+      if (!/^[A-Z]{2}$/.test(country)) {
+        throw ledgerInputError('organization_profile_invalid', 'Country must be a two-letter country code.');
+      }
+      const defaultPaymentTermsDays = Number(payload.defaultPaymentTermsDays ?? payload.default_payment_terms_days ?? 30);
+      const defaultQuoteValidityDays = Number(payload.defaultQuoteValidityDays ?? payload.default_quote_validity_days ?? 30);
+      if (!Number.isInteger(defaultPaymentTermsDays) || defaultPaymentTermsDays < 1 || defaultPaymentTermsDays > 365) {
+        throw ledgerInputError('organization_profile_invalid', 'Default payment terms must be between 1 and 365 days.');
+      }
+      if (!Number.isInteger(defaultQuoteValidityDays) || defaultQuoteValidityDays < 1 || defaultQuoteValidityDays > 365) {
+        throw ledgerInputError('organization_profile_invalid', 'Default quote validity must be between 1 and 365 days.');
+      }
+      const timestamp = nowIso();
+      const data = {
+        ...(before?.data || {}),
+        vatExempt: normalizeBoolean(payload.vatExempt ?? payload.vat_exempt, false),
+        quoteTerms: textField('quoteTerms', 'Quote terms', 4000) || null,
+        notes: textField('notes', 'Internal profile notes', 2000) || null
+      };
+      const values = {
+        legalName: textField('legalName', 'Legal name', 200),
+        tradingName: textField('tradingName', 'Trading name', 200),
+        registrationNumber: textField('registrationNumber', 'Registration number', 80).toUpperCase(),
+        vatNumber: textField('vatNumber', 'VAT number', 80).toUpperCase(),
+        email,
+        phone: textField('phone', 'Phone', 60),
+        website,
+        address: textField('address', 'Address', 300),
+        postalCode: textField('postalCode', 'Postal code', 30).toUpperCase(),
+        city: textField('city', 'City', 120),
+        country,
+        iban: textField('iban', 'IBAN', 60).replace(/\s+/g, '').toUpperCase(),
+        bic: textField('bic', 'BIC', 20).replace(/\s+/g, '').toUpperCase()
+      };
+      this.db.prepare(`
+        INSERT INTO organization_profile (
+          profile_id, legal_name, trading_name, registration_number, vat_number, email, phone, website,
+          address, postal_code, city, country, iban, bic, default_payment_terms_days,
+          default_quote_validity_days, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(profile_id) DO UPDATE SET
+          legal_name = excluded.legal_name, trading_name = excluded.trading_name,
+          registration_number = excluded.registration_number, vat_number = excluded.vat_number,
+          email = excluded.email, phone = excluded.phone, website = excluded.website,
+          address = excluded.address, postal_code = excluded.postal_code, city = excluded.city,
+          country = excluded.country, iban = excluded.iban, bic = excluded.bic,
+          default_payment_terms_days = excluded.default_payment_terms_days,
+          default_quote_validity_days = excluded.default_quote_validity_days,
+          data_json = excluded.data_json, updated_at = excluded.updated_at
+      `).run(
+        'primary', values.legalName, values.tradingName, values.registrationNumber, values.vatNumber,
+        values.email, values.phone, values.website, values.address, values.postalCode, values.city,
+        values.country, values.iban, values.bic, defaultPaymentTermsDays, defaultQuoteValidityDays,
+        toJson(data), before?.createdAt || timestamp, timestamp
+      );
+      const after = this.getOrganizationProfile();
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'organization_profile',
+          entityId: 'primary',
+          action: before ? 'update_organization_profile' : 'create_organization_profile',
+          actor: options.actor || 'Contractor.AI',
+          before,
+          after,
+          metadata: { readyForCommercialIssue: after.readiness.ready, externalCommitments: 0 }
+        });
+      }
+      return after;
+    });
   }
 
   createOperatorSession(input = {}) {
@@ -5236,6 +5430,306 @@ class ContractorOperatingLedger {
       }
       return quote;
     });
+  }
+
+  prepareQuoteIssuePackage(jobId, quoteId, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const quoteRow = this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(quoteId, jobId);
+      if (!quoteRow) {
+        const error = new Error('Quote not found for this job');
+        error.statusCode = 404;
+        error.code = 'quote_not_found';
+        throw error;
+      }
+      const quote = this.mapQuote(quoteRow);
+      const identityKey = crypto.createHash('sha256').update(`${jobId}\0${quoteId}`, 'utf8').digest('hex');
+      const documentId = `doc_quote_${identityKey.slice(0, 24)}`;
+      const communicationId = `comm_quote_${identityKey.slice(0, 24)}`;
+      const retainedDocumentRow = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+      let snapshot;
+      let packageHash;
+      let issueReference;
+
+      if (retainedDocumentRow) {
+        const retained = this.getQuoteIssuePackage(documentId, { audit: false });
+        snapshot = retained.document.data.snapshot;
+        packageHash = retained.document.data.packageHash;
+        issueReference = retained.document.data.issueReference;
+      } else {
+        if (!['approved', 'accepted'].includes(quote.status)) {
+          const error = new Error('Quote must receive internal approval before an issue package can be prepared.');
+          error.statusCode = 409;
+          error.code = 'quote_not_approved_for_issue';
+          throw error;
+        }
+        const organization = this.getOrganizationProfile();
+        if (!organization.readiness.ready) {
+          const error = new Error('Complete the business identity before preparing a client quote package.');
+          error.statusCode = 409;
+          error.code = 'organization_profile_incomplete';
+          error.details = { missing: organization.readiness.missing };
+          throw error;
+        }
+        const client = this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(job.client_id));
+        const preparedAt = nowIso();
+        issueReference = `Q-${String(quote.createdAt || preparedAt).slice(0, 10).replace(/-/g, '')}-${identityKey.slice(0, 8).toUpperCase()}`;
+        snapshot = {
+          packageVersion: 1,
+          issueReference,
+          preparedAt,
+          preparedBy: options.actor || 'Contractor.AI',
+          organization: {
+            legalName: organization.legalName,
+            tradingName: organization.tradingName,
+            registrationNumber: organization.registrationNumber,
+            vatNumber: organization.vatNumber,
+            vatExempt: organization.data?.vatExempt === true,
+            email: organization.email,
+            phone: organization.phone,
+            website: organization.website,
+            address: organization.address,
+            postalCode: organization.postalCode,
+            city: organization.city,
+            country: organization.country,
+            iban: organization.iban,
+            bic: organization.bic,
+            paymentTermsDays: organization.defaultPaymentTermsDays,
+            quoteTerms: organization.data?.quoteTerms || null
+          },
+          client: {
+            id: client.id,
+            name: client.name,
+            company: client.company,
+            email: client.email,
+            phone: client.phone,
+            address: client.address,
+            city: client.city,
+            country: client.country
+          },
+          job: {
+            id: job.id,
+            title: job.title,
+            description: job.description,
+            address: job.address,
+            city: job.city,
+            country: job.country
+          },
+          quote: {
+            id: quote.id,
+            statusAtIssue: quote.status,
+            currency: quote.currency,
+            subtotal: quote.subtotal,
+            taxRate: quote.taxRate,
+            taxAmount: quote.taxAmount,
+            total: quote.total,
+            validUntil: quote.validUntil,
+            notes: quote.data?.notes || null,
+            lineItems: quote.lineItems
+          }
+        };
+        packageHash = sha256Json(snapshot);
+      }
+
+      const html = this.renderQuoteIssuePackageHtml(snapshot, packageHash);
+      const filename = `${issueReference.replace(/[^A-Za-z0-9._-]/g, '-')}.html`;
+      const document = this.addDocument(jobId, {
+        type: 'quote_issue_package',
+        title: `Quote ${issueReference}`,
+        filename,
+        mimeType: 'text/html; charset=utf-8',
+        sizeBytes: Buffer.byteLength(html, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          sourceRecordType: 'quote',
+          sourceRecordId: quoteId,
+          issueReference,
+          packageHash,
+          snapshot,
+          safeguards: {
+            deliveryMode: 'draft_only',
+            clientAcceptanceRequired: true,
+            contractValueChanged: false,
+            externalCommitments: 0
+          }
+        }
+      }, { actor: options.actor, audit: true, id: documentId, ignoreExisting: true });
+      const recipient = snapshot.client.email || null;
+      const communication = this.addCommunication(jobId, {
+        clientId: snapshot.client.id,
+        channel: recipient ? 'email' : 'portal',
+        direction: 'outbound',
+        status: 'draft',
+        subject: `Quote ${issueReference} - ${snapshot.job.title}`,
+        body: `Dear ${snapshot.client.name},\n\nPlease review quote ${issueReference} for ${snapshot.job.title}. The retained issue package is attached for your review.\n\nClient acceptance is recorded separately; receiving this package does not itself change the contract value.`,
+        recipient,
+        expectsReply: true,
+        requiresApproval: true,
+        data: {
+          source: 'quote_issue_package',
+          sourceRecordId: quoteId,
+          issueReference,
+          packageHash,
+          attachmentDocumentIds: [documentId],
+          deliveryMode: 'draft_only',
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: true, id: communicationId, ignoreExisting: true });
+
+      const replayed = document.replayed === true && communication.replayed === true;
+      if (!replayed) {
+        this.audit({
+          entityType: 'quote_issue_package',
+          entityId: documentId,
+          jobId,
+          action: 'prepare_quote_issue_package',
+          actor: options.actor || 'Contractor.AI',
+          after: {
+            documentId,
+            communicationId,
+            approvalId: communication.approvalId,
+            quoteId,
+            issueReference,
+            packageHash,
+            externalCommitments: 0
+          },
+          metadata: { deliveryMode: 'draft_only', contractValueChanged: false }
+        });
+      }
+      return {
+        document: this.getDocument(documentId),
+        communication,
+        approval: communication.approval || null,
+        issueReference,
+        packageHash,
+        replayed,
+        deliveryMode: 'draft_only',
+        notSent: true,
+        clientAcceptanceRequired: true,
+        externalCommitments: 0
+      };
+    });
+  }
+
+  getQuoteIssuePackage(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (document.type !== 'quote_issue_package') {
+      const error = new Error('Document is not a generated quote issue package.');
+      error.statusCode = 409;
+      error.code = 'quote_issue_package_required';
+      throw error;
+    }
+    const snapshot = document.data?.snapshot;
+    const retainedHash = normalizeText(document.data?.packageHash, '');
+    if (!snapshot || !retainedHash || sha256Json(snapshot) !== retainedHash) {
+      const error = new Error('The retained quote package failed its checksum verification.');
+      error.statusCode = 409;
+      error.code = 'quote_issue_package_integrity_failed';
+      throw error;
+    }
+    const html = this.renderQuoteIssuePackageHtml(snapshot, retainedHash);
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId: document.jobId,
+        action: 'download_quote_issue_package',
+        actor: options.actor || 'authenticated_operator',
+        after: { issueReference: document.data.issueReference, packageHash: retainedHash }
+      });
+    }
+    return {
+      document,
+      html,
+      filename: document.filename || `${document.data.issueReference || 'quote'}.html`,
+      packageHash: retainedHash
+    };
+  }
+
+  renderQuoteIssuePackageHtml(snapshot, packageHash) {
+    const organization = snapshot.organization || {};
+    const client = snapshot.client || {};
+    const job = snapshot.job || {};
+    const quote = snapshot.quote || {};
+    const money = value => {
+      try {
+        return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: quote.currency || 'EUR' }).format(Number(value || 0));
+      } catch {
+        return `${Number(value || 0).toFixed(2)} ${quote.currency || 'EUR'}`;
+      }
+    };
+    const date = value => {
+      if (!value) return 'Not specified';
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value) : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const lines = (quote.lineItems || []).map(item => `
+      <tr>
+        <td>${escapeHtml(item.description)}</td>
+        <td class="number">${escapeHtml(item.quantity)}</td>
+        <td class="number">${escapeHtml(money(item.unitPrice))}</td>
+        <td class="number">${escapeHtml(money(Number(item.quantity || 0) * Number(item.unitPrice || 0)))}</td>
+      </tr>`).join('');
+    const organizationName = organization.tradingName || organization.legalName || 'Contractor';
+    const organizationContact = [organization.email, organization.phone, organization.website].filter(Boolean).map(escapeHtml).join(' &middot; ');
+    const registration = [
+      organization.registrationNumber ? `Registration ${escapeHtml(organization.registrationNumber)}` : null,
+      organization.vatExempt ? 'VAT exempt' : organization.vatNumber ? `VAT ${escapeHtml(organization.vatNumber)}` : null
+    ].filter(Boolean).join(' &middot; ');
+    const clientAddress = [client.address, client.city, client.country].filter(Boolean).map(escapeHtml).join(', ');
+    const siteAddress = [job.address, job.city, job.country].filter(Boolean).map(escapeHtml).join(', ');
+    const payment = [organization.iban ? `IBAN ${escapeHtml(organization.iban)}` : null, organization.bic ? `BIC ${escapeHtml(organization.bic)}` : null].filter(Boolean).join(' &middot; ');
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 920px; margin: 0 auto; padding: 42px; font-size: 14px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 32px; padding-bottom: 24px; border-bottom: 3px solid #176b57; }
+    h1 { margin: 0; font-size: 30px; color: #174d40; }
+    h2 { margin: 28px 0 10px; font-size: 18px; color: #23483d; }
+    p { margin: 4px 0; }
+    .muted { color: #64736e; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 26px; }
+    .party { padding: 16px 0; border-bottom: 1px solid #dce5e1; }
+    .party span { display: block; color: #6a7873; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    table { width: 100%; margin-top: 14px; border-collapse: collapse; }
+    th, td { padding: 11px 9px; border-bottom: 1px solid #dfe7e3; text-align: left; vertical-align: top; }
+    th { color: #53645e; background: #f2f6f4; font-size: 11px; text-transform: uppercase; }
+    .number { text-align: right; white-space: nowrap; }
+    .totals { width: min(390px, 100%); margin: 18px 0 0 auto; }
+    .totals div { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #e3e9e6; }
+    .totals .grand { padding-top: 12px; color: #174d40; font-size: 18px; font-weight: 700; border-bottom: 0; }
+    .terms { margin-top: 28px; padding: 17px; background: #f4f7f6; border-left: 4px solid #176b57; }
+    footer { margin-top: 38px; padding-top: 16px; color: #6c7975; border-top: 1px solid #dce5e1; font-size: 10px; overflow-wrap: anywhere; }
+    @media print { body { max-width: none; padding: 18mm; } }
+    @media (max-width: 650px) { body { padding: 22px; } header, .parties { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>${escapeHtml(organizationName)}</h1><p>${escapeHtml(organization.address)}, ${escapeHtml(organization.postalCode)} ${escapeHtml(organization.city)}, ${escapeHtml(organization.country)}</p><p class="muted">${registration}</p><p class="muted">${organizationContact}</p></div>
+    <div class="reference"><span class="muted">Quote</span><strong>${escapeHtml(snapshot.issueReference)}</strong><p>Prepared ${escapeHtml(date(snapshot.preparedAt))}</p><p>Valid until ${escapeHtml(date(quote.validUntil))}</p></div>
+  </header>
+  <section class="parties">
+    <div class="party"><span>Prepared for</span><strong>${escapeHtml(client.company || client.name)}</strong>${client.company && client.name ? `<p>${escapeHtml(client.name)}</p>` : ''}<p>${clientAddress || 'Address not retained'}</p><p>${escapeHtml(client.email || client.phone || '')}</p></div>
+    <div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${siteAddress || 'Site address not retained'}</p><p class="muted">Job reference ${escapeHtml(job.id)}</p></div>
+  </section>
+  <h2>Scope and pricing</h2>
+  ${job.description ? `<p>${escapeHtml(job.description)}</p>` : ''}
+  <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit price</th><th class="number">Amount</th></tr></thead><tbody>${lines}</tbody></table>
+  <div class="totals"><div><span>Subtotal</span><strong>${escapeHtml(money(quote.subtotal))}</strong></div><div><span>VAT (${escapeHtml(quote.taxRate)}%)</span><strong>${escapeHtml(money(quote.taxAmount))}</strong></div><div class="grand"><span>Total</span><strong>${escapeHtml(money(quote.total))}</strong></div></div>
+  <section class="terms"><strong>Commercial terms</strong><p>Payment term: ${escapeHtml(organization.paymentTermsDays || 30)} days.</p>${payment ? `<p>${payment}</p>` : ''}${quote.notes ? `<p>${escapeHtml(quote.notes)}</p>` : ''}${organization.quoteTerms ? `<p>${escapeHtml(organization.quoteTerms)}</p>` : ''}<p>Client acceptance is recorded separately and is not implied by receipt of this package.</p></section>
+  <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source quote ${escapeHtml(quote.id)}</footer>
+</body>
+</html>`;
   }
 
   requestQuoteAcceptance(jobId, quoteId, payload = {}, options = {}) {
@@ -8489,7 +8983,7 @@ class ContractorOperatingLedger {
   addCommunication(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       const job = this.requireJob(jobId);
-      const id = makeId('comm');
+      const id = options.id || makeId('comm');
       const actor = options.actor || 'Contractor.AI';
       const timestamp = nowIso();
       const direction = normalizeStatus(payload.direction, 'outbound');
@@ -8503,8 +8997,8 @@ class ContractorOperatingLedger {
         followUpFor: payload.followUpFor || payload.follow_up_for || null,
         followUpSource: payload.followUpSource || payload.follow_up_source || null
       };
-      this.db.prepare(`
-        INSERT INTO communication_records (id, job_id, client_id, channel, direction, subject, body, status, sent_at, data_json, created_at, updated_at)
+      const inserted = this.db.prepare(`
+        ${options.ignoreExisting ? 'INSERT OR IGNORE' : 'INSERT'} INTO communication_records (id, job_id, client_id, channel, direction, subject, body, status, sent_at, data_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
@@ -8521,6 +9015,15 @@ class ContractorOperatingLedger {
         timestamp
       );
 
+      if (options.ignoreExisting && Number(inserted.changes || 0) === 0) {
+        const existing = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?').get(id, jobId);
+        if (!existing) throw new Error('The retained communication could not be loaded after an idempotent insert.');
+        const existingApproval = existing.approval_id
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existing.approval_id)
+          : null;
+        return { ...this.mapCommunication(existing), approval: existingApproval ? this.mapApproval(existingApproval) : null, replayed: true };
+      }
+
       let approval = null;
       if (requiresApproval) {
         approval = this.createApproval({
@@ -8530,7 +9033,12 @@ class ContractorOperatingLedger {
           approvalType: 'external_communication',
           summary: `Approve ${payload.channel || 'portal'} update before sending`,
           reason: 'External communication must be approved before it can be sent.',
-          data: { subject: payload.subject || null, channel: payload.channel || 'portal' }
+          data: {
+            subject: payload.subject || null,
+            channel: payload.channel || 'portal',
+            recipient: communicationData.recipient,
+            attachmentDocumentIds: communicationData.attachmentDocumentIds || []
+          }
         }, { actor, audit: false });
         this.db.prepare('UPDATE communication_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
       }
@@ -8541,6 +9049,38 @@ class ContractorOperatingLedger {
       }
       return { ...communication, approval };
     });
+  }
+
+  verifyCommunicationAttachments(communicationId) {
+    const row = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(String(communicationId || ''));
+    if (!row) {
+      const error = new Error('Communication record not found');
+      error.statusCode = 404;
+      error.code = 'communication_not_found';
+      throw error;
+    }
+    const communication = this.mapCommunication(row);
+    if (communication.data?.source !== 'quote_issue_package') return communication;
+
+    const attachmentIds = Array.isArray(communication.data?.attachmentDocumentIds)
+      ? communication.data.attachmentDocumentIds.filter(Boolean)
+      : [];
+    if (attachmentIds.length !== 1) {
+      const error = new Error('The quote delivery draft must retain exactly one issue package attachment.');
+      error.statusCode = 409;
+      error.code = 'quote_issue_package_attachment_invalid';
+      throw error;
+    }
+    const issuePackage = this.getQuoteIssuePackage(attachmentIds[0], { audit: false });
+    if (issuePackage.document.jobId !== communication.jobId
+      || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
+      || issuePackage.packageHash !== communication.data?.packageHash) {
+      const error = new Error('The quote delivery draft no longer matches its retained issue package.');
+      error.statusCode = 409;
+      error.code = 'quote_issue_package_attachment_mismatch';
+      throw error;
+    }
+    return communication;
   }
 
   recordCommunicationDelivery(communicationId, payload = {}, options = {}) {
@@ -8564,6 +9104,7 @@ class ContractorOperatingLedger {
       error.code = 'communication_approval_required';
       throw error;
     }
+    this.verifyCommunicationAttachments(row.id);
 
     const existing = this.mapCommunication(row);
     if (['sent', 'delivered'].includes(normalizeStatus(existing.status, ''))) return existing;
@@ -8605,10 +9146,10 @@ class ContractorOperatingLedger {
 
   addDocument(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
-    const id = makeId('doc');
+    const id = options.id || makeId('doc');
     const timestamp = nowIso();
-    this.db.prepare(`
-      INSERT INTO documents (id, job_id, type, title, filename, mime_type, size_bytes, storage_ref, status, data_json, created_at, updated_at)
+    const inserted = this.db.prepare(`
+      ${options.ignoreExisting ? 'INSERT OR IGNORE' : 'INSERT'} INTO documents (id, job_id, type, title, filename, mime_type, size_bytes, storage_ref, status, data_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
@@ -8620,10 +9161,15 @@ class ContractorOperatingLedger {
       Math.max(0, Math.round(normalizeNumber(payload.sizeBytes || payload.size_bytes || payload.size, 0))),
       payload.storageRef || payload.storage_ref || payload.url || null,
       normalizeStatus(payload.status, 'stored'),
-      toJson({ tags: payload.tags || [], analysis: payload.analysis || null }),
+      toJson({ ...(payload.data || {}), tags: payload.tags || payload.data?.tags || [], analysis: payload.analysis || payload.data?.analysis || null }),
       timestamp,
       timestamp
     );
+    if (options.ignoreExisting && Number(inserted.changes || 0) === 0) {
+      const existing = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(id, jobId);
+      if (!existing) throw new Error('The retained document could not be loaded after an idempotent insert.');
+      return { ...this.mapDocument(existing), replayed: true };
+    }
     const document = this.mapDocument(this.db.prepare('SELECT * FROM documents WHERE id = ?').get(id));
     if (options.audit !== false) {
       this.audit({ entityType: 'document', entityId: id, jobId, action: 'store_document', actor: options.actor || 'Contractor.AI', after: document });
@@ -13833,6 +14379,7 @@ class ContractorOperatingLedger {
       this.db.prepare('UPDATE permit_records SET status = ?, issued_at = COALESCE(issued_at, ?), updated_at = ? WHERE id = ?')
         .run(approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'communication') {
+      this.verifyCommunicationAttachments(targetId);
       this.db.prepare("UPDATE communication_records SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'client_portal_access') {
       const access = this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(targetId);
@@ -19741,6 +20288,7 @@ class ContractorOperatingLedger {
       counts: {
         clients: this.count('clients'),
         tradePartners: this.count('trade_partners'),
+        organizationProfiles: this.count('organization_profile'),
         jobs: this.count('jobs'),
         approvals: this.count('approvals'),
         siteVisits: this.count('site_visits'),
@@ -19795,6 +20343,31 @@ class ContractorOperatingLedger {
       vatNumber: row.vat_number,
       preferredLanguage: row.preferred_language,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOrganizationProfile(row) {
+    if (!row) return null;
+    return {
+      profileId: row.profile_id,
+      legalName: row.legal_name || '',
+      tradingName: row.trading_name || '',
+      registrationNumber: row.registration_number || '',
+      vatNumber: row.vat_number || '',
+      email: row.email || '',
+      phone: row.phone || '',
+      website: row.website || '',
+      address: row.address || '',
+      postalCode: row.postal_code || '',
+      city: row.city || '',
+      country: row.country || 'NL',
+      iban: row.iban || '',
+      bic: row.bic || '',
+      defaultPaymentTermsDays: normalizeNumber(row.default_payment_terms_days, 30),
+      defaultQuoteValidityDays: normalizeNumber(row.default_quote_validity_days, 30),
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

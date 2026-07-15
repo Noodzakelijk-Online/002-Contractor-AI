@@ -361,6 +361,29 @@ function emptyEquipmentMaintenanceDraft() {
   }
 }
 
+function organizationDraft(profile = {}) {
+  return {
+    legalName: profile.legalName || '',
+    tradingName: profile.tradingName || '',
+    registrationNumber: profile.registrationNumber || '',
+    vatNumber: profile.vatNumber || '',
+    vatExempt: profile.data?.vatExempt === true,
+    email: profile.email || '',
+    phone: profile.phone || '',
+    website: profile.website || '',
+    address: profile.address || '',
+    postalCode: profile.postalCode || '',
+    city: profile.city || '',
+    country: profile.country || 'NL',
+    iban: profile.iban || '',
+    bic: profile.bic || '',
+    defaultPaymentTermsDays: String(profile.defaultPaymentTermsDays || 30),
+    defaultQuoteValidityDays: String(profile.defaultQuoteValidityDays || 30),
+    quoteTerms: profile.data?.quoteTerms || '',
+    notes: profile.data?.notes || ''
+  }
+}
+
 function roundMoney(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100
 }
@@ -752,7 +775,27 @@ function CommercialControl({ job, canCoordinate, canApprove, submitting, onNewQu
         {quotes.length ? <div className="activity-list commercial-list">{quotes.map(quote => {
           const issueApproval = pendingFor('quote', quote.id)
           const acceptanceApproval = pendingFor('quote_acceptance', quote.id)
-          return <div className="activity-row commercial-row" key={quote.id} data-testid={`commercial-quote-${quote.id}`}><div className="commercial-record"><div><strong>{currency.format(quote.subtotal || 0)} net</strong><span className={`status status-${quote.status}`}>{formatStatus(quote.status)}</span></div><small>{quote.lineItems?.length || 0} line item{quote.lineItems?.length === 1 ? '' : 's'} · VAT {quote.taxRate || 0}% · gross {currency.format(quote.total || 0)}</small><small>Valid until {formatDate(quote.validUntil)}{quote.data?.acceptance?.evidenceReference ? ` · evidence ${quote.data.acceptance.evidenceReference}` : ''}</small></div><div className="commercial-row-actions">{issueApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: issueApproval.id })}><ShieldCheck size={15} />Review quote</button> : null}{acceptanceApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: acceptanceApproval.id })}><ShieldCheck size={15} />Verify acceptance</button> : null}{quote.status === 'approved' && canCoordinate && !acceptanceApproval ? <button type="button" className="primary-button" disabled={submitting} onClick={() => onRequestAcceptance('quote', quote)}><Check size={15} />Record acceptance</button> : null}</div></div>
+          const issuePackage = job.documents?.find(document => document.type === 'quote_issue_package' && document.data?.sourceRecordId === quote.id)
+          const deliveryDraft = issuePackage
+            ? job.communications?.find(communication => communication.data?.source === 'quote_issue_package' && communication.data?.sourceRecordId === quote.id)
+            : null
+          const deliveryApproval = deliveryDraft ? pendingFor('communication', deliveryDraft.id) : null
+          const canPrepare = ['approved', 'accepted'].includes(quote.status) && canCoordinate && !issuePackage
+          return <div className="activity-row commercial-row" key={quote.id} data-testid={`commercial-quote-${quote.id}`}>
+            <div className="commercial-record">
+              <div><strong>{currency.format(quote.subtotal || 0)} net</strong><span className={`status status-${quote.status}`}>{formatStatus(quote.status)}</span></div>
+              <small>{quote.lineItems?.length || 0} line item{quote.lineItems?.length === 1 ? '' : 's'} · VAT {quote.taxRate || 0}% · gross {currency.format(quote.total || 0)}</small>
+              <small>Valid until {formatDate(quote.validUntil)}{issuePackage ? ` · package ${issuePackage.data?.issueReference || 'retained'}` : ''}{quote.data?.acceptance?.evidenceReference ? ` · evidence ${quote.data.acceptance.evidenceReference}` : ''}</small>
+            </div>
+            <div className="commercial-row-actions">
+              {issueApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: issueApproval.id })}><ShieldCheck size={15} />Review quote</button> : null}
+              {canPrepare ? <button type="button" className="secondary-button" data-testid={`prepare-quote-package-${quote.id}`} disabled={submitting} title="Prepare an immutable quote package and approval-gated delivery draft" onClick={() => onRequestAcceptance('issue_package', quote)}><FileDown size={15} />Prepare issue package</button> : null}
+              {issuePackage ? <a className="secondary-button" data-testid={`download-quote-package-${quote.id}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.id)}/issue-package`} download><FileDown size={15} />Download package</a> : null}
+              {deliveryApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: deliveryApproval.id })}><ShieldCheck size={15} />Review delivery</button> : null}
+              {acceptanceApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: acceptanceApproval.id })}><ShieldCheck size={15} />Verify acceptance</button> : null}
+              {quote.status === 'approved' && canCoordinate && !acceptanceApproval ? <button type="button" className="primary-button" disabled={submitting} onClick={() => onRequestAcceptance('quote', quote)}><Check size={15} />Record acceptance</button> : null}
+            </div>
+          </div>
         })}</div> : <p className="workflow-note">No retained estimate exists for this job.</p>}
       </section>
       <section aria-labelledby="change-ledger-title"><div className="commercial-list-heading"><h4 id="change-ledger-title">Scope changes</h4><span>{changeOrders.length}</span></div>
@@ -1185,6 +1228,7 @@ function App() {
   const [tradePartnerDraft, setTradePartnerDraft] = useState(emptyTradePartnerDraft)
   const [tradePartnerRetirement, setTradePartnerRetirement] = useState(null)
   const [tradePartnerRetirementReason, setTradePartnerRetirementReason] = useState('')
+  const [organizationProfileDraft, setOrganizationProfileDraft] = useState(() => organizationDraft())
   const [invoiceJob, setInvoiceJob] = useState(null)
   const [invoiceDraft, setInvoiceDraft] = useState({ amount: '', taxRate: '21', dueAt: futureDateInput(14), peppolReady: true, notes: '' })
   const [financeAction, setFinanceAction] = useState(null)
@@ -1265,17 +1309,19 @@ function App() {
           commandPlan: null,
           backups: [],
           archivedJobs: [],
-          operationsCapabilities: null
+          operationsCapabilities: null,
+          organization: null
         })
         return
       }
-      const [dashboardResult, approvalsResult, dispatchResult, workforceResult, workersResult, toolsResult, inventoryResult, partnersResult, financeResult, clientsResult, fieldResult, schedulerResult] = await Promise.all([
+      const [dashboardResult, approvalsResult, dispatchResult, workforceResult, workersResult, toolsResult, inventoryResult, partnersResult, financeResult, clientsResult, fieldResult, schedulerResult, organizationResult] = await Promise.all([
         api('/api/ledger/dashboard'), api('/api/ledger/approvals?status=pending&limit=100'),
         api('/api/ledger/dispatch?limit=100'), api('/api/ledger/workforce?limit=100'),
         api('/api/ledger/workers?limit=500'), api('/api/ledger/tools?limit=500'), api('/api/ledger/inventory?limit=100'), api('/api/ledger/trade-partners?includeRetired=true&limit=200'), api('/api/ledger/finance?limit=100'),
         api('/api/ledger/client-success?limit=100'), api('/api/ledger/field-assurance?limit=100'),
-        api('/api/ledger/scheduler').catch(() => null)
+        api('/api/ledger/scheduler').catch(() => null), api('/api/ledger/organization')
       ])
+      setOrganizationProfileDraft(organizationDraft(organizationResult.organization))
       const [backupResult, capabilitiesResult, commandPlanResult, archivedJobsResult] = operator.capabilities.maintenance
         ? await Promise.all([
             api('/api/operations/backups').catch(() => ({ backups: [] })),
@@ -1307,7 +1353,8 @@ function App() {
         commandPlan: commandPlanResult,
         backups: backupResult.backups || [],
         archivedJobs: archivedJobsResult.jobs || [],
-        operationsCapabilities: capabilitiesResult
+        operationsCapabilities: capabilitiesResult,
+        organization: organizationResult.organization
       })
     } catch (requestError) {
       if (requestError.status === 401 || requestError.code === 'authentication_required') {
@@ -1608,6 +1655,30 @@ function App() {
     try {
       const result = await api('/api/operations/restore/validate', { method: 'POST', body: JSON.stringify({ backupId }) })
       notify(`Backup ${result.verification.backupId} passed ${result.verification.checkedFiles} file checks and the SQLite restore check.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function saveOrganizationProfile(event) {
+    event.preventDefault()
+    setSubmitting(true)
+    try {
+      const result = await api('/api/ledger/organization', {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...organizationProfileDraft,
+          defaultPaymentTermsDays: Number(organizationProfileDraft.defaultPaymentTermsDays),
+          defaultQuoteValidityDays: Number(organizationProfileDraft.defaultQuoteValidityDays)
+        })
+      })
+      setOrganizationProfileDraft(organizationDraft(result.organization))
+      await refresh()
+      notify(result.organization.readiness.ready
+        ? 'Business identity retained and ready for controlled quote issue packages.'
+        : `Business identity retained. ${result.organization.readiness.missing.length} required item(s) remain.`)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -1959,7 +2030,31 @@ function App() {
     }
   }
 
+  async function prepareQuoteIssuePackage(quote) {
+    if (!selectedJobId || !quote?.id) return
+    setSubmitting(true)
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/quotes/${encodeURIComponent(quote.id)}/issue-package`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      })
+      setSelectedJob(result.job)
+      await refresh()
+      notify(result.replayed
+        ? `Quote package ${result.issueReference} is already retained with its delivery approval.`
+        : `Quote package ${result.issueReference} retained. Delivery remains blocked until its separate approval is resolved.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function openCommercialAcceptance(type, record) {
+    if (type === 'issue_package') {
+      prepareQuoteIssuePackage(record)
+      return
+    }
     commercialDialogOpenerRef.current = document.activeElement
     setCommercialAcceptance({ type, record })
     setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
@@ -3710,6 +3805,33 @@ function App() {
         </section>}
 
         {section === 'operations' && capabilities.maintenance && <section className="operations-grid">
+          <section className="panel page-panel organization-profile-panel" data-testid="organization-profile-panel">
+            <div className="panel-heading"><div><h2>Business identity</h2><p>The legal and payment details captured in controlled quote issue packages.</p></div><span className={`status ${data.organization?.readiness?.ready ? 'status-ready' : 'status-attention'}`}>{data.organization?.readiness?.ready ? 'issue ready' : 'incomplete'}</span></div>
+            <form onSubmit={saveOrganizationProfile}>
+              <div className="form-grid organization-profile-form">
+                <label>Legal name<input value={organizationProfileDraft.legalName} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, legalName: event.target.value })} /></label>
+                <label>Trading name<input value={organizationProfileDraft.tradingName} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, tradingName: event.target.value })} /></label>
+                <label>Registration number<input value={organizationProfileDraft.registrationNumber} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, registrationNumber: event.target.value })} placeholder="KVK or national registry number" /></label>
+                <label>VAT number<input disabled={organizationProfileDraft.vatExempt} value={organizationProfileDraft.vatNumber} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, vatNumber: event.target.value })} /></label>
+                <label className="checkbox-label form-span"><input type="checkbox" checked={organizationProfileDraft.vatExempt} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, vatExempt: event.target.checked, vatNumber: event.target.checked ? '' : organizationProfileDraft.vatNumber })} />This legal entity is VAT exempt</label>
+                <label>Email<input type="email" value={organizationProfileDraft.email} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, email: event.target.value })} /></label>
+                <label>Phone<input value={organizationProfileDraft.phone} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, phone: event.target.value })} /></label>
+                <label className="form-span">Website<input type="url" value={organizationProfileDraft.website} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, website: event.target.value })} placeholder="https://" /></label>
+                <label className="form-span">Registered address<input value={organizationProfileDraft.address} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, address: event.target.value })} /></label>
+                <label>Postal code<input value={organizationProfileDraft.postalCode} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, postalCode: event.target.value })} /></label>
+                <label>City<input value={organizationProfileDraft.city} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, city: event.target.value })} /></label>
+                <label>Country code<input required maxLength="2" value={organizationProfileDraft.country} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, country: event.target.value.toUpperCase() })} /></label>
+                <label>IBAN<input value={organizationProfileDraft.iban} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, iban: event.target.value })} /></label>
+                <label>BIC<input value={organizationProfileDraft.bic} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, bic: event.target.value })} /></label>
+                <label>Payment terms (days)<input required type="number" min="1" max="365" value={organizationProfileDraft.defaultPaymentTermsDays} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, defaultPaymentTermsDays: event.target.value })} /></label>
+                <label>Quote validity default (days)<input required type="number" min="1" max="365" value={organizationProfileDraft.defaultQuoteValidityDays} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, defaultQuoteValidityDays: event.target.value })} /></label>
+                <label className="form-span">Quote terms<textarea value={organizationProfileDraft.quoteTerms} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, quoteTerms: event.target.value })} placeholder="Commercial terms shown on every new issue package." /></label>
+                <label className="form-span">Internal notes<textarea value={organizationProfileDraft.notes} onChange={event => setOrganizationProfileDraft({ ...organizationProfileDraft, notes: event.target.value })} /></label>
+              </div>
+              {data.organization?.readiness?.missing?.length ? <p className="organization-profile-missing"><TriangleAlert size={15} />Required before quote issue: {data.organization.readiness.missing.map(item => item.label).join(', ')}.</p> : <p className="organization-profile-ready"><ShieldCheck size={15} />Identity is ready. Each package still requires an internally approved quote and a separate delivery approval.</p>}
+              <div className="modal-actions"><button className="primary-button" disabled={submitting}><Building2 size={16} />{submitting ? 'Saving...' : 'Save business identity'}</button></div>
+            </form>
+          </section>
           <AutomationControl commandPlan={data.commandPlan} scheduler={data.scheduler} jobs={jobs} view={commandPlanView} selectedIds={selectedCommandIds} submitting={submitting} onViewChange={setCommandPlanView} onToggle={toggleCommandSelection} onSelectVisible={setSelectedCommandIds} onApply={applySelectedCommands} onRun={runCycle} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} />
           <section className="panel page-panel">
             <div className="panel-heading"><div><h2>Runtime readiness</h2><p>Local-first operational health and EU-hosting prerequisites.</p></div><span className={`status ${data.readiness?.status === 'ready' ? 'status-ready' : 'status-attention'}`}>{data.readiness?.status || 'local ready'}</span></div>

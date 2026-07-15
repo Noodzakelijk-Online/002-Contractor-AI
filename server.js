@@ -1811,6 +1811,25 @@ app.get('/api/ledger/dashboard', (req, res) => {
   }));
 });
 
+app.get('/api/ledger/organization', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    organization: operatingLedger.getOrganizationProfile()
+  }));
+});
+
+app.put('/api/ledger/organization', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can change the retained business identity.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    organization: operatingLedger.updateOrganizationProfile(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }));
+});
+
 app.get('/api/ledger/weather', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -1841,6 +1860,29 @@ app.get('/api/ledger/documents/:id/content', async (req, res) => {
     return res.end(evidence);
   } catch (error) {
     return sendError(req, res, error.statusCode || 500, error.code || (error.statusCode ? 'not_found' : 'evidence_download_failed'), error.statusCode ? error.message : 'Unable to retrieve the retained evidence file.', serializeError(error));
+  }
+});
+
+app.get('/api/ledger/documents/:id/issue-package', (req, res) => {
+  try {
+    const issuePackage = operatingLedger.getQuoteIssuePackage(req.params.id, {
+      actor: actorFromRequest(req, 'authenticated_operator')
+    });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Length', String(Buffer.byteLength(issuePackage.html, 'utf8')));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(issuePackage.filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.end(issuePackage.html);
+  } catch (error) {
+    return sendError(
+      req,
+      res,
+      error.statusCode || 500,
+      error.code || 'quote_issue_package_download_failed',
+      error.statusCode ? error.message : 'Unable to prepare the retained quote package for download.',
+      serializeError(error)
+    );
   }
 });
 
@@ -2015,6 +2057,21 @@ app.post('/api/ledger/jobs/:id/quote', (req, res) => {
     quote: operatingLedger.createQuote(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/quotes/:quoteId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareQuoteIssuePackage(
+      req.params.id,
+      req.params.quoteId,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/quotes/:quoteId/acceptance', (req, res) => {
@@ -3442,6 +3499,7 @@ function operationalExport() {
     restorable: false,
     runtime: runtimeConfiguration(),
     dashboard,
+    organization: operatingLedger.getOrganizationProfile(),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
@@ -4022,6 +4080,7 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
   const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
   const localSQLite = runtime.mode === 'local' && runtime.databaseMode === 'sqlite';
   const hostedPostgres = runtime.mode === 'hosted' && runtime.databaseMode === 'postgres';
+  const organization = operatingLedger.getOrganizationProfile();
   return res.json({
     status,
     localFirst: true,
@@ -4070,6 +4129,16 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
           serialized: true,
           mechanism: runtime.databaseMode === 'postgres' ? 'postgres_advisory_lock' : 'sqlite_write_transaction'
         }
+      },
+      commercialIssue: {
+        available: organization.readiness.ready,
+        organizationStatus: organization.readiness.status,
+        missingFields: organization.readiness.missingFields,
+        packageFormat: 'html',
+        integrity: 'sha256',
+        deliveryMode: 'approval_gated_draft',
+        clientAcceptanceRequired: true,
+        externalCommitments: 0
       },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,

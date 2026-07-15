@@ -80,6 +80,18 @@ function createBackupFixture(t, suffix = 'success') {
     verificationReference: `Migration fixture registry check ${suffix}`,
     verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
   }, { actor: 'migration_fixture' });
+  const organization = source.updateOrganizationProfile({
+    legalName: `Migration Contractor ${suffix} B.V.`,
+    registrationNumber: '44332211',
+    vatNumber: 'NL987654321B01',
+    email: `migration-${suffix}@example.test`,
+    address: 'Migrationstraat 1',
+    postalCode: '3511 AA',
+    city: 'Utrecht',
+    country: 'NL',
+    defaultPaymentTermsDays: 30,
+    defaultQuoteValidityDays: 30
+  }, { actor: 'migration_fixture' });
   source.createOperatorSession({
     sessionIdHash: `local-session-${suffix}`,
     operatorId: 'local-owner',
@@ -115,7 +127,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, document, evidenceBytes, job, localStorageRef, tradePartner };
+  return { backupDir, backupId, document, evidenceBytes, job, localStorageRef, organization, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -182,7 +194,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '013_audit_history_queries');
+  assert.equal(migration.migrationVersion, '014_organization_profile');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -205,6 +217,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPartner.name, fixture.tradePartner.name);
     assert.equal(migratedPartner.compliance.status, 'verified');
     assert.equal(migratedPartner.data.verificationReference, fixture.tradePartner.data.verificationReference);
+    const migratedOrganization = hosted.getOrganizationProfile();
+    assert.equal(migratedOrganization.legalName, fixture.organization.legalName);
+    assert.equal(migratedOrganization.registrationNumber, fixture.organization.registrationNumber);
+    assert.equal(migratedOrganization.readiness.ready, true);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM operator_sessions').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);

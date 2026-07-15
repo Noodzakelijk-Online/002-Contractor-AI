@@ -173,6 +173,24 @@ test('office operator can review job planning and create a client draft without 
 });
 
 test('commercial control retains server totals and changes contract value only after verified client acceptance', async ({ page, request }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await page.getByRole('button', { name: 'Operations' }).click();
+  const organizationPanel = page.getByTestId('organization-profile-panel');
+  await expect(organizationPanel.getByRole('heading', { name: 'Business identity' })).toBeVisible();
+  await organizationPanel.getByLabel('Legal name').fill('Browser Contractor B.V.');
+  await organizationPanel.getByLabel('Trading name').fill('Browser Contractor');
+  await organizationPanel.getByLabel('Registration number').fill('12345678');
+  await organizationPanel.getByLabel('VAT number').fill('NL123456789B01');
+  await organizationPanel.getByLabel('Email').fill('browser-office@example.test');
+  await organizationPanel.getByLabel('Registered address').fill('Browserstraat 10');
+  await organizationPanel.getByLabel('Postal code').fill('3511 AA');
+  await organizationPanel.getByLabel('City').fill('Utrecht');
+  await organizationPanel.getByLabel('Quote terms').fill('Additional work requires a separately accepted scope change.');
+  await organizationPanel.getByRole('button', { name: 'Save business identity' }).click();
+  await expect(page.getByText('Business identity retained and ready for controlled quote issue packages.')).toBeVisible();
+  await expect(organizationPanel.getByText('issue ready', { exact: true })).toBeVisible();
+
   const intake = await createBrowserJob(request, 'Browser commercial acceptance workflow', {
     service: 'Interior renovation',
     estimatedCost: 0
@@ -227,6 +245,28 @@ test('commercial control retains server totals and changes contract value only a
   quoteRow = commercial.getByTestId(`commercial-quote-${quote.id}`);
   await expect(quoteRow.getByText('approved', { exact: true })).toBeVisible();
   await expect(commercial.getByLabel('Accepted commercial value')).toContainText(/Accepted contract net€\s*0/);
+  await quoteRow.getByRole('button', { name: 'Prepare issue package' }).click();
+  await expect(page.getByText(/Quote package Q-.* retained\. Delivery remains blocked/i)).toBeVisible();
+  await expect(quoteRow.getByRole('link', { name: 'Download package' })).toBeVisible();
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  const quotePackage = detail.job.documents.find(item => item.type === 'quote_issue_package' && item.data?.sourceRecordId === quote.id);
+  const deliveryDraft = detail.job.communications.find(item => item.data?.source === 'quote_issue_package' && item.data?.sourceRecordId === quote.id);
+  expect(quotePackage).toBeTruthy();
+  expect(deliveryDraft).toMatchObject({ status: 'draft', sentAt: null });
+  expect(detail.job.contractValue).toBe(0);
+  await quoteRow.getByRole('button', { name: 'Review delivery' }).click();
+  await approveQueueItem(page, page.locator('.approval-item'), 'Quote attachment, recipient, and delivery wording verified.');
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  quoteRow = commercial.getByTestId(`commercial-quote-${quote.id}`);
+  await expect(quoteRow.getByRole('link', { name: 'Download package' })).toHaveAttribute('href', `/api/ledger/documents/${quotePackage.id}/issue-package`);
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.communications.find(item => item.id === deliveryDraft.id)).toMatchObject({ status: 'approved', sentAt: null });
+  expect(detail.job.contractValue).toBe(0);
   await quoteRow.getByRole('button', { name: 'Record acceptance' }).click();
   const quoteAcceptanceModal = page.getByTestId('commercial-acceptance-modal');
   await quoteAcceptanceModal.getByLabel('Evidence reference').fill('signed-quote-browser-001');
