@@ -1069,13 +1069,13 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     assert.equal(invoice.data.structuredReadiness.ready, true);
     ledger.resolveApproval(invoice.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
     const invoicePackage = ledger.prepareInvoiceIssuePackage(job.id, invoice.id, { actor: 'postgres_commercial_test' });
-    assert.match(invoicePackage.invoiceReference, /^INV-\d{4}-\d{6}$/);
+    assert.match(invoicePackage.issueReference, /^INV-\d{4}-\d{6}$/);
     assert.equal(invoicePackage.documents.length, 2);
     assert.equal(invoicePackage.communication.status, 'draft');
     assert.equal(invoicePackage.externalCommitments, 0);
     assert.equal(ledger.prepareInvoiceIssuePackage(job.id, invoice.id).replayed, true);
     const retainedFormats = invoicePackage.documents.map(document => (
-      ledger.getInvoiceIssueDocument(document.id, { audit: false }).format
+      ledger.getInvoiceIssueDocument(document.id, { audit: false }).document.data.format
     ));
     assert.deepEqual(retainedFormats.sort(), ['html', 'ubl']);
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
