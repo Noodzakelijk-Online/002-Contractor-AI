@@ -531,6 +531,50 @@ function emptyOpportunityActivityDraft() {
   }
 }
 
+function emptyRfiDraft() {
+  return {
+    title: '',
+    question: '',
+    responsible: '',
+    discipline: 'general',
+    dueAt: futureDateInput(3),
+  }
+}
+
+function emptySubmittalDraft() {
+  return {
+    title: '',
+    packageName: '',
+    material: '',
+    responsible: '',
+    reviewer: '',
+    dueAt: futureDateInput(7),
+    attachments: '',
+  }
+}
+
+function emptyControlledDocumentDraft() {
+  return {
+    title: '',
+    documentNumber: '',
+    revision: 'P01',
+    discipline: 'general',
+    purpose: 'construction',
+    sourceReference: '',
+    revisionReason: '',
+  }
+}
+
+function emptyProjectControlReview() {
+  return {
+    type: '',
+    record: null,
+    status: '',
+    notes: '',
+    reference: '',
+  }
+}
+
 function roundMoney(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100
 }
@@ -2675,6 +2719,201 @@ function ClientSuccessWorkspace({
           />
         ) : null}
       </div>
+    </section>
+  )
+}
+
+function ProjectControls({
+  job,
+  canCoordinate,
+  canApprove,
+  submitting,
+  onCreate,
+  onTransition,
+  onOpenApprovals,
+}) {
+  const [view, setView] = useState('rfi')
+  const [creating, setCreating] = useState(false)
+  const [rfiDraft, setRfiDraft] = useState(emptyRfiDraft)
+  const [submittalDraft, setSubmittalDraft] = useState(emptySubmittalDraft)
+  const [documentDraft, setDocumentDraft] = useState(emptyControlledDocumentDraft)
+  const [review, setReview] = useState(emptyProjectControlReview)
+  const rfis = job.rfis || EMPTY_LIST
+  const submittals = job.submittals || EMPTY_LIST
+  const documents = (job.documents || EMPTY_LIST).filter((document) => document.type === 'controlled_document')
+  const pendingApprovals = job.approvals?.filter((approval) => approval.status === 'pending') || EMPTY_LIST
+  const records = view === 'rfi' ? rfis : view === 'submittal' ? submittals : documents
+  const activeRfis = rfis.filter((record) => !['answered', 'resolved', 'closed', 'rejected'].includes(record.status)).length
+  const activeSubmittals = submittals.filter((record) => !['approved', 'accepted', 'closed', 'rejected'].includes(record.status)).length
+  const currentDocuments = documents.filter((record) => record.status === 'approved' && record.data?.isCurrent !== false).length
+  const pendingFor = (type, recordId) => {
+    const targetType = type === 'rfi' ? 'rfi_record' : type === 'submittal' ? 'submittal_record' : 'document'
+    return pendingApprovals.find((approval) => approval.targetType === targetType && approval.targetId === recordId)
+  }
+
+  function selectView(nextView) {
+    setView(nextView)
+    setCreating(false)
+    setReview(emptyProjectControlReview())
+  }
+
+  async function submitCreate(event) {
+    event.preventDefault()
+    const draft = view === 'rfi' ? rfiDraft : view === 'submittal' ? submittalDraft : documentDraft
+    const result = await onCreate(view, draft)
+    if (!result) return
+    if (view === 'rfi') setRfiDraft(emptyRfiDraft())
+    else if (view === 'submittal') setSubmittalDraft(emptySubmittalDraft())
+    else setDocumentDraft(emptyControlledDocumentDraft())
+    setCreating(false)
+  }
+
+  async function submitReview(event) {
+    event.preventDefault()
+    if (!review.record) return
+    const payload = { status: review.status, notes: review.notes.trim() }
+    if (review.type === 'rfi') payload.response = review.notes.trim()
+    if (review.type === 'document') payload.verificationReference = review.reference.trim()
+    const result = await onTransition(review.type, review.record, payload)
+    if (result) setReview(emptyProjectControlReview())
+  }
+
+  function openReview(type, record, status) {
+    setCreating(false)
+    setReview({
+      type,
+      record,
+      status,
+      notes: type === 'submittal' && status === 'submitted' ? 'Package retained and ready for technical review.' : '',
+      reference: '',
+    })
+  }
+
+  const reviewLabel = review.type === 'rfi'
+    ? 'Request answer approval'
+    : review.type === 'document'
+      ? 'Request revision approval'
+      : review.status === 'submitted'
+        ? 'Mark submitted'
+        : 'Request submittal approval'
+
+  return (
+    <section className="job-workspace-section project-controls" data-testid="project-controls">
+      <div className="section-heading project-controls-heading">
+        <ClipboardList size={18} />
+        <div>
+          <h3>Project controls</h3>
+          <p>Raise design questions, review material packages, and keep one approval-backed current document revision.</p>
+        </div>
+        {canCoordinate ? (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={submitting}
+            aria-expanded={creating}
+            onClick={() => {
+              setReview(emptyProjectControlReview())
+              setCreating((current) => !current)
+            }}
+          >
+            <Plus size={15} />
+            New {view === 'rfi' ? 'RFI' : view === 'submittal' ? 'submittal' : 'revision'}
+          </button>
+        ) : null}
+      </div>
+      <div className="project-control-metrics" aria-label="Project control status">
+        <div><span>Open RFIs</span><strong>{activeRfis}</strong></div>
+        <div><span>Submittal queue</span><strong>{activeSubmittals}</strong></div>
+        <div><span>Current revisions</span><strong>{currentDocuments}</strong></div>
+        <div><span>Pending decisions</span><strong>{pendingApprovals.filter((approval) => ['rfi_record', 'submittal_record', 'document'].includes(approval.targetType)).length}</strong></div>
+      </div>
+      <div className="segmented-control project-control-tabs" role="tablist" aria-label="Project control register">
+        {[
+          ['rfi', 'RFIs', rfis.length],
+          ['submittal', 'Submittals', submittals.length],
+          ['document', 'Documents', documents.length],
+        ].map(([key, label, count]) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === key}
+            className={view === key ? 'active' : ''}
+            key={key}
+            onClick={() => selectView(key)}
+          >
+            {label}<span>{count}</span>
+          </button>
+        ))}
+      </div>
+      {creating && view === 'rfi' ? (
+        <form className="project-control-form form-grid compact-form" data-testid="create-rfi-form" onSubmit={submitCreate}>
+          <label className="form-span">RFI subject<input required minLength="2" value={rfiDraft.title} onChange={(event) => setRfiDraft({ ...rfiDraft, title: event.target.value })} placeholder="Decision needed before work continues" /></label>
+          <label className="form-span">Question<textarea required minLength="4" value={rfiDraft.question} onChange={(event) => setRfiDraft({ ...rfiDraft, question: event.target.value })} placeholder="State the condition, requested decision, and affected work." /></label>
+          <label>Responsible<input value={rfiDraft.responsible} onChange={(event) => setRfiDraft({ ...rfiDraft, responsible: event.target.value })} placeholder="Designer, client, or project lead" /></label>
+          <label>Discipline<select value={rfiDraft.discipline} onChange={(event) => setRfiDraft({ ...rfiDraft, discipline: event.target.value })}><option value="general">General</option><option value="architectural">Architectural</option><option value="structural">Structural</option><option value="mechanical">Mechanical</option><option value="electrical">Electrical</option><option value="civil">Civil</option></select></label>
+          <label>Response due<input required type="date" value={rfiDraft.dueAt} onChange={(event) => setRfiDraft({ ...rfiDraft, dueAt: event.target.value })} /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />Retain RFI</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+        </form>
+      ) : null}
+      {creating && view === 'submittal' ? (
+        <form className="project-control-form form-grid compact-form" data-testid="create-submittal-form" onSubmit={submitCreate}>
+          <label className="form-span">Submittal title<input required minLength="2" value={submittalDraft.title} onChange={(event) => setSubmittalDraft({ ...submittalDraft, title: event.target.value })} placeholder="Product data, sample, or shop drawing package" /></label>
+          <label>Package / spec section<input value={submittalDraft.packageName} onChange={(event) => setSubmittalDraft({ ...submittalDraft, packageName: event.target.value })} placeholder="09 91 00 / finishes" /></label>
+          <label>Material<input value={submittalDraft.material} onChange={(event) => setSubmittalDraft({ ...submittalDraft, material: event.target.value })} placeholder="Retained material name" /></label>
+          <label>Responsible<input value={submittalDraft.responsible} onChange={(event) => setSubmittalDraft({ ...submittalDraft, responsible: event.target.value })} placeholder="Supplier or project team" /></label>
+          <label>Reviewer<input value={submittalDraft.reviewer} onChange={(event) => setSubmittalDraft({ ...submittalDraft, reviewer: event.target.value })} placeholder="Technical reviewer" /></label>
+          <label>Decision due<input required type="date" value={submittalDraft.dueAt} onChange={(event) => setSubmittalDraft({ ...submittalDraft, dueAt: event.target.value })} /></label>
+          <label className="form-span">Attachment references<input value={submittalDraft.attachments} onChange={(event) => setSubmittalDraft({ ...submittalDraft, attachments: event.target.value })} placeholder="Comma-separated retained document references" /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />Retain submittal</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+        </form>
+      ) : null}
+      {creating && view === 'document' ? (
+        <form className="project-control-form form-grid compact-form" data-testid="create-controlled-document-form" onSubmit={submitCreate}>
+          <label className="form-span">Document title<input required minLength="2" value={documentDraft.title} onChange={(event) => setDocumentDraft({ ...documentDraft, title: event.target.value })} placeholder="Construction floor plan" /></label>
+          <label>Document number<input required minLength="2" value={documentDraft.documentNumber} onChange={(event) => setDocumentDraft({ ...documentDraft, documentNumber: event.target.value })} placeholder="A-101" /></label>
+          <label>Revision<input required value={documentDraft.revision} onChange={(event) => setDocumentDraft({ ...documentDraft, revision: event.target.value })} placeholder="P01" /></label>
+          <label>Discipline<select value={documentDraft.discipline} onChange={(event) => setDocumentDraft({ ...documentDraft, discipline: event.target.value })}><option value="general">General</option><option value="architectural">Architectural</option><option value="structural">Structural</option><option value="mechanical">Mechanical</option><option value="electrical">Electrical</option><option value="civil">Civil</option></select></label>
+          <label>Purpose<select value={documentDraft.purpose} onChange={(event) => setDocumentDraft({ ...documentDraft, purpose: event.target.value })}><option value="construction">For construction</option><option value="review">For review</option><option value="coordination">For coordination</option><option value="record">Record / as-built</option></select></label>
+          <label className="form-span">Retained file or source reference<input required minLength="3" value={documentDraft.sourceReference} onChange={(event) => setDocumentDraft({ ...documentDraft, sourceReference: event.target.value })} placeholder="Private storage object, evidence ID, or controlled source reference" /></label>
+          <label className="form-span">Revision reason<input value={documentDraft.revisionReason} onChange={(event) => setDocumentDraft({ ...documentDraft, revisionReason: event.target.value })} placeholder="Required when this document number already has a revision" /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />Retain revision</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+        </form>
+      ) : null}
+      <div className="project-control-register" role="tabpanel">
+        {records.length ? records.map((record) => {
+          const pending = pendingFor(view, record.id)
+          const isRfiOpen = view === 'rfi' && !['answered', 'resolved', 'closed', 'rejected', 'pending_approval'].includes(record.status)
+          const isSubmittalDraft = view === 'submittal' && record.status === 'draft'
+          const isSubmittalReview = view === 'submittal' && ['submitted', 'pending_review', 'revise_resubmit'].includes(record.status)
+          const isDocumentReview = view === 'document' && ['draft', 'stored', 'needs_review', 'needs_update', 'expired'].includes(record.status)
+          return (
+            <article className="project-control-row" key={record.id} data-testid={`project-control-${view}-${record.id}`}>
+              <div className="project-control-copy">
+                <div><strong>{record.title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span>{view === 'document' && record.status === 'approved' && record.data?.isCurrent !== false ? <span className="tag tag-green">Current</span> : null}</div>
+                <small>{view === 'rfi' ? `${formatStatus(record.data?.discipline || 'general')} / due ${formatDate(record.dueAt)}` : view === 'submittal' ? `${record.packageName || record.data?.material || 'Package'} / due ${formatDate(record.dueAt)}` : `${record.documentNumber || 'Unnumbered'} / rev ${record.revision || '-'} / ${formatStatus(record.discipline || 'general')}`}</small>
+                {view === 'rfi' ? <p>{record.response || record.question || 'Question details not retained.'}</p> : null}
+                {view === 'document' ? <p>{record.data?.revisionReason || record.data?.sourceReference || 'Controlled source retained.'}</p> : null}
+              </div>
+              <div className="project-control-actions">
+                {pending && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review decision</button> : null}
+                {canCoordinate && !pending && isRfiOpen ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('rfi', record, 'answered')}><MessageSquareText size={14} />Answer</button> : null}
+                {canCoordinate && !pending && isSubmittalDraft ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('submittal', record, 'submitted')}><FileUp size={14} />Submit</button> : null}
+                {canCoordinate && !pending && isSubmittalReview ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('submittal', record, 'approved')}><ShieldCheck size={14} />Request approval</button> : null}
+                {canCoordinate && !pending && isDocumentReview ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('document', record, 'approved')}><ShieldCheck size={14} />Review revision</button> : null}
+              </div>
+            </article>
+          )
+        }) : <p className="workflow-note">No {view === 'rfi' ? 'RFIs' : view === 'submittal' ? 'submittals' : 'controlled document revisions'} have been retained for this job.</p>}
+      </div>
+      {review.record ? (
+        <form className="project-control-review" data-testid="project-control-review-form" onSubmit={submitReview}>
+          <div><strong>{reviewLabel}</strong><small>{review.record.title} / target {formatStatus(review.status)}</small></div>
+          {review.type === 'document' ? <label>Review reference<input required minLength="3" value={review.reference} onChange={(event) => setReview({ ...review, reference: event.target.value })} placeholder="Checker record or retained review evidence" /></label> : null}
+          <label>{review.type === 'rfi' ? 'Response and evidence' : 'Review evidence'}<textarea required minLength="4" value={review.notes} onChange={(event) => setReview({ ...review, notes: event.target.value })} placeholder="Record the technical basis and evidence for this status change." /></label>
+          <div className="form-actions"><button className="primary-button" disabled={submitting || review.notes.trim().length < 4 || (review.type === 'document' && review.reference.trim().length < 3)}><ShieldCheck size={15} />{reviewLabel}</button><button type="button" className="secondary-button" onClick={() => setReview(emptyProjectControlReview())}>Cancel</button></div>
+        </form>
+      ) : null}
+      {!canCoordinate ? <p className="workflow-note">Field access is read-only for project controls. Design responses and revision status remain office-controlled.</p> : null}
     </section>
   )
 }
@@ -5381,6 +5620,75 @@ function App() {
       })
       setSelectedJob(result.job)
       notify(result.idempotent ? 'The same work-plan baseline is already pending.' : 'Work-plan baseline added to the approval queue.')
+      await refresh()
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function createProjectControl(type, draft) {
+    if (!selectedJobId || !canCoordinate) return null
+    const routes = {
+      rfi: 'rfis',
+      submittal: 'submittals',
+      document: 'controlled-document-revisions',
+    }
+    const route = routes[type]
+    if (!route) return null
+    const payload = type === 'submittal'
+      ? {
+          ...draft,
+          status: 'draft',
+          attachments: String(draft.attachments || '').split(',').map((value) => value.trim()).filter(Boolean),
+        }
+      : { ...draft, status: type === 'rfi' ? 'open' : 'draft' }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/${route}`, {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, actor: 'office_operator' }),
+      })
+      setSelectedJob(result.job)
+      notify(
+        type === 'rfi'
+          ? 'RFI retained in the project decision trail.'
+          : type === 'submittal'
+            ? 'Submittal draft retained for technical review.'
+            : 'Controlled revision retained. The prior approved revision remains current until approval.',
+      )
+      await refresh()
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function transitionProjectControl(type, record, payload) {
+    if (!selectedJobId || !record?.id || !canCoordinate) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/lifecycle/${encodeURIComponent(type)}/${encodeURIComponent(record.id)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ ...payload, actor: 'office_operator' }),
+        },
+      )
+      setSelectedJob(result.job)
+      notify(
+        result.approvalRequired
+          ? `${record.title} is retained for explicit approval. No field or external reliance was created.`
+          : `${record.title} is now ${formatStatus(payload.status)}.`,
+      )
       await refresh()
       return result
     } catch (requestError) {
@@ -9803,9 +10111,22 @@ function App() {
                   {selectedJob?.city ? ` · ${selectedJob.city}` : ''}
                 </p>
               </div>
-              <button className="icon-button" aria-label="Close job workspace" onClick={closeJobWorkspace}>
-                <X size={18} />
-              </button>
+              <div className="modal-heading-actions">
+                {selectedJob && canCoordinate ? (
+                  <button
+                    className="secondary-button job-resource-button"
+                    type="button"
+                    aria-label="Open resource planner"
+                    onClick={() => setShowResourcePlanner(true)}
+                  >
+                    <Users size={16} />
+                    Resources
+                  </button>
+                ) : null}
+                <button className="icon-button" aria-label="Close job workspace" onClick={closeJobWorkspace}>
+                  <X size={18} />
+                </button>
+              </div>
             </div>
             {selectedJobLoading || !selectedJob ? (
               <div className="loading job-workspace-loading">
@@ -9863,6 +10184,15 @@ function App() {
                   onCancelDependency={cancelJobTaskDependency}
                   onCalculate={calculateJobWorkPlan}
                   onRequestBaseline={requestJobScheduleBaseline}
+                  onOpenApprovals={openApprovals}
+                />
+                <ProjectControls
+                  job={selectedJob}
+                  canCoordinate={canCoordinate}
+                  canApprove={capabilities.approvals === true}
+                  submitting={submitting}
+                  onCreate={createProjectControl}
+                  onTransition={transitionProjectControl}
                   onOpenApprovals={openApprovals}
                 />
                 {canCoordinate ? (
@@ -12341,12 +12671,6 @@ function App() {
             </form>
           </section>
         </div>
-      ) : null}
-      {selectedJob && canCoordinate ? (
-        <button className="resource-launcher" type="button" aria-label="Open resource planner" onClick={() => setShowResourcePlanner(true)}>
-          <Users size={17} />
-          Resources
-        </button>
       ) : null}
       {showResourcePlanner && selectedJob ? (
         <div className="modal-backdrop resource-backdrop" role="presentation">

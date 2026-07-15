@@ -879,13 +879,60 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(ledger.listOpportunityActivities({ opportunityId: opportunity.id }).length, 1);
     assert.ok(ledger.opportunityForecast().summary.weightedValue >= 26400);
 
+    const controlledP01 = ledger.createControlledDocumentRevision(job.id, {
+      documentNumber: 'PG-A-101',
+      revision: 'P01',
+      title: 'PostgreSQL construction plan',
+      discipline: 'architectural',
+      sourceReference: 's3://postgres-contract/PG-A-101-P01.pdf'
+    }, { actor: 'postgres_contract_test' });
+    const controlledP01Review = ledger.transitionLifecycleRecord(job.id, 'document', controlledP01.document.id, {
+      status: 'approved',
+      verificationReference: 'postgres-check-P01',
+      notes: 'Hosted source and drawing checks retained.'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(controlledP01Review.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'P01 hosted source and checker record verified.'
+    });
+    const controlledP02 = ledger.createControlledDocumentRevision(job.id, {
+      documentNumber: 'PG-A-101',
+      revision: 'P02',
+      title: 'PostgreSQL construction plan',
+      discipline: 'architectural',
+      sourceReference: 's3://postgres-contract/PG-A-101-P02.pdf',
+      revisionReason: 'Hosted coordination revision.'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(controlledP02.document.supersedesDocumentId, controlledP01.document.id);
+    assert.throws(() => ledger.createControlledDocumentRevision(job.id, {
+      documentNumber: 'PG-A-101',
+      revision: 'P02',
+      title: 'Duplicate hosted revision',
+      sourceReference: 's3://postgres-contract/duplicate.pdf',
+      revisionReason: 'Duplicate check.'
+    }), /already exists/i);
+    const controlledP02Review = ledger.transitionLifecycleRecord(job.id, 'document', controlledP02.document.id, {
+      status: 'approved',
+      verificationReference: 'postgres-check-P02',
+      notes: 'Hosted revision and supersession checked.'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(controlledP02Review.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'P02 hosted source and supersession verified.'
+    });
+    const controlledDocuments = ledger.getJobDetail(job.id).documents.filter(document => document.documentNumber === 'PG-A-101');
+    assert.equal(controlledDocuments.find(document => document.revision === 'P01').status, 'superseded');
+    assert.equal(controlledDocuments.find(document => document.revision === 'P02').data.isCurrent, true);
+
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
     assert.ok(Array.isArray(dashboard.nextActions));
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '021_preconstruction_opportunities');
+    assert.equal(migrations.currentVersion, '022_controlled_document_revisions');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -966,12 +1013,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('021_preconstruction_opportunities'));
+  assert.deepEqual(versions, Array(4).fill('022_controlled_document_revisions'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 21);
+    assert.equal(Number(migrationCount.count), 22);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

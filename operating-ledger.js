@@ -1747,6 +1747,30 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunity_activities_idempotency ON opportunity_activities(idempotency_key) WHERE idempotency_key IS NOT NULL;
       `);
     }
+  },
+  {
+    version: '022_controlled_document_revisions',
+    description: 'Retain project document numbers, revisions, disciplines, effective dates, and approval-gated supersession links.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE documents ADD COLUMN document_number TEXT;
+        ALTER TABLE documents ADD COLUMN revision TEXT;
+        ALTER TABLE documents ADD COLUMN discipline TEXT;
+        ALTER TABLE documents ADD COLUMN effective_at TEXT;
+        ALTER TABLE documents ADD COLUMN supersedes_document_id TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_job_number_revision
+          ON documents(job_id, document_number, revision)
+          WHERE document_number IS NOT NULL AND revision IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_documents_controlled_current
+          ON documents(job_id, document_number, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_single_candidate
+          ON documents(job_id, document_number)
+          WHERE type = 'controlled_document'
+            AND status IN ('draft', 'stored', 'needs_review', 'needs_update', 'expired', 'pending_approval');
+        CREATE INDEX IF NOT EXISTS idx_documents_supersedes
+          ON documents(supersedes_document_id);
+      `);
+    }
   }
 ];
 
@@ -12150,19 +12174,40 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     this.requireJob(jobId);
     const id = options.id || makeId('doc');
     const timestamp = nowIso();
+    const documentType = normalizeText(payload.type, 'document');
+    const documentNumber = normalizeText(payload.documentNumber || payload.document_number, '') || null;
+    const revision = normalizeText(payload.revision, '') || null;
+    const discipline = normalizeStatus(payload.discipline, '') || null;
+    const effectiveAt = payload.effectiveAt || payload.effective_at || null;
+    const supersedesDocumentId = payload.supersedesDocumentId || payload.supersedes_document_id || null;
+    if (options.controlledRevision !== true && (documentType === 'controlled_document' || documentNumber || revision || supersedesDocumentId)) {
+      const error = new Error('Controlled document metadata must use the controlled revision workflow');
+      error.statusCode = 400;
+      error.code = 'controlled_document_workflow_required';
+      throw error;
+    }
     const inserted = this.db.prepare(`
-      ${options.ignoreExisting ? 'INSERT OR IGNORE' : 'INSERT'} INTO documents (id, job_id, type, title, filename, mime_type, size_bytes, storage_ref, status, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ${options.ignoreExisting ? 'INSERT OR IGNORE' : 'INSERT'} INTO documents (
+        id, job_id, type, title, filename, mime_type, size_bytes, storage_ref, status,
+        document_number, revision, discipline, effective_at, supersedes_document_id,
+        data_json, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       jobId,
-      normalizeText(payload.type, 'document'),
+      documentType,
       normalizeText(payload.title || payload.filename || payload.name, 'Document'),
       payload.filename || payload.name || null,
       payload.mimeType || payload.mime_type || null,
       Math.max(0, Math.round(normalizeNumber(payload.sizeBytes || payload.size_bytes || payload.size, 0))),
       payload.storageRef || payload.storage_ref || payload.url || null,
       normalizeStatus(payload.status, 'stored'),
+      documentNumber,
+      revision,
+      discipline,
+      effectiveAt,
+      supersedesDocumentId,
       toJson({ ...(payload.data || {}), tags: payload.tags || payload.data?.tags || [], analysis: payload.analysis || payload.data?.analysis || null }),
       timestamp,
       timestamp
@@ -12177,6 +12222,150 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.audit({ entityType: 'document', entityId: id, jobId, action: 'store_document', actor: options.actor || 'Contractor.AI', after: document });
     }
     return document;
+  }
+
+  createControlledDocumentRevision(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const documentNumber = normalizeText(payload.documentNumber || payload.document_number, '').toUpperCase();
+      const revision = normalizeText(payload.revision, '').toUpperCase();
+      const title = normalizeText(payload.title, '');
+      const discipline = normalizeStatus(payload.discipline, 'general');
+      const sourceReference = normalizeText(
+        payload.sourceReference || payload.source_reference || payload.fileReference || payload.file_reference,
+        ''
+      );
+      const revisionReason = normalizeText(payload.revisionReason || payload.revision_reason, '');
+      const requestedStatus = normalizeStatus(payload.status, 'draft');
+
+      if (documentNumber.length < 2 || documentNumber.length > 80) {
+        const error = new Error('Controlled document number must contain 2 to 80 characters');
+        error.statusCode = 400;
+        error.code = 'controlled_document_number_invalid';
+        throw error;
+      }
+      if (revision.length < 1 || revision.length > 40) {
+        const error = new Error('Controlled document revision must contain 1 to 40 characters');
+        error.statusCode = 400;
+        error.code = 'controlled_document_revision_invalid';
+        throw error;
+      }
+      if (title.length < 2 || title.length > 180) {
+        const error = new Error('Controlled document title must contain 2 to 180 characters');
+        error.statusCode = 400;
+        error.code = 'controlled_document_title_invalid';
+        throw error;
+      }
+      if (sourceReference.length < 3 || sourceReference.length > 300) {
+        const error = new Error('A retained file or source reference is required for a controlled document revision');
+        error.statusCode = 400;
+        error.code = 'controlled_document_source_required';
+        throw error;
+      }
+      if (!['draft', 'stored', 'needs_review'].includes(requestedStatus)) {
+        const error = new Error('Controlled document revisions must be created as draft, stored, or needs review');
+        error.statusCode = 400;
+        error.code = 'controlled_document_status_invalid';
+        throw error;
+      }
+
+      const duplicate = this.db.prepare(`
+        SELECT id FROM documents
+        WHERE job_id = ? AND document_number = ? AND revision = ?
+        LIMIT 1
+      `).get(jobId, documentNumber, revision);
+      if (duplicate) {
+        const error = new Error(`Revision ${revision} already exists for controlled document ${documentNumber}`);
+        error.statusCode = 409;
+        error.code = 'controlled_document_revision_exists';
+        throw error;
+      }
+
+      const explicitSupersedesId = payload.supersedesDocumentId || payload.supersedes_document_id || null;
+      const priorRows = this.db.prepare(`
+        SELECT * FROM documents
+        WHERE job_id = ? AND document_number = ?
+        ORDER BY COALESCE(effective_at, updated_at, created_at) DESC, created_at DESC
+      `).all(jobId, documentNumber);
+      const activeCandidate = priorRows.find(row => !['approved', 'superseded', 'archived', 'rejected'].includes(normalizeStatus(row.status, 'draft')));
+      if (activeCandidate) {
+        const error = new Error(`Resolve revision ${activeCandidate.revision || activeCandidate.id} before creating another candidate for ${documentNumber}`);
+        error.statusCode = 409;
+        error.code = 'controlled_document_candidate_exists';
+        throw error;
+      }
+      const currentPrior = priorRows.find(row => (
+        normalizeStatus(row.status, 'stored') === 'approved'
+        && fromJson(row.data_json, {}).isCurrent === true
+      )) || priorRows.find(row => normalizeStatus(row.status, 'stored') === 'approved') || null;
+      const explicitPrior = explicitSupersedesId
+        ? priorRows.find(row => String(row.id) === String(explicitSupersedesId))
+        : null;
+      if (explicitSupersedesId && !explicitPrior) {
+        const error = new Error('The superseded revision must belong to the same job and controlled document number');
+        error.statusCode = 409;
+        error.code = 'controlled_document_supersedes_mismatch';
+        throw error;
+      }
+      if (explicitPrior && currentPrior && explicitPrior.id !== currentPrior.id) {
+        const error = new Error('A new controlled revision must supersede the currently approved revision');
+        error.statusCode = 409;
+        error.code = 'controlled_document_supersedes_not_current';
+        throw error;
+      }
+      const prior = explicitPrior || currentPrior || priorRows[0] || null;
+      if (prior && revisionReason.length < 3) {
+        const error = new Error('A revision reason is required when replacing a controlled document revision');
+        error.statusCode = 400;
+        error.code = 'controlled_document_revision_reason_required';
+        throw error;
+      }
+
+      const document = this.addDocument(jobId, {
+        type: 'controlled_document',
+        title,
+        filename: payload.filename || payload.name || null,
+        mimeType: payload.mimeType || payload.mime_type || null,
+        sizeBytes: payload.sizeBytes || payload.size_bytes || payload.size || 0,
+        storageRef: payload.storageRef || payload.storage_ref || null,
+        status: requestedStatus,
+        documentNumber,
+        revision,
+        discipline,
+        supersedesDocumentId: prior?.id || null,
+        data: {
+          ...(payload.data || {}),
+          controlledDocument: true,
+          purpose: normalizeStatus(payload.purpose, 'construction'),
+          sourceReference,
+          revisionReason: revisionReason || null,
+          candidateCurrent: true,
+          isCurrent: false,
+          createdBy: actor
+        }
+      }, { actor, audit: false, controlledRevision: true });
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId,
+        action: 'create_controlled_document_revision',
+        actor,
+        after: document,
+        metadata: {
+          documentNumber,
+          revision,
+          supersedesDocumentId: prior?.id || null,
+          approvalRequiredBeforeCurrent: true,
+          externalCommitments: 0
+        }
+      });
+      return {
+        document,
+        supersedes: prior ? this.mapDocument(prior) : null,
+        approvalRequiredBeforeCurrent: true
+      };
+    });
   }
 
   getDocument(documentId) {
@@ -12206,6 +12395,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           LIMIT ?
         `).all(limit);
     return rows.map(row => this.mapDocument(row));
+  }
+
+  listProjectControls(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const limit = safeLimit(filters.limit, 1000, 5000);
+    const query = (table, orderBy) => jobId
+      ? this.db.prepare(`SELECT * FROM ${table} WHERE job_id = ? ORDER BY ${orderBy} LIMIT ?`).all(jobId, limit)
+      : this.db.prepare(`SELECT * FROM ${table} ORDER BY ${orderBy} LIMIT ?`).all(limit);
+    return {
+      rfis: query('rfi_records', 'created_at DESC').map(row => this.mapRfi(row)),
+      submittals: query('submittal_records', 'created_at DESC').map(row => this.mapSubmittal(row)),
+      controlledDocuments: (jobId
+        ? this.db.prepare(`
+            SELECT * FROM documents
+            WHERE job_id = ? AND type = 'controlled_document'
+            ORDER BY document_number ASC, created_at DESC
+            LIMIT ?
+          `).all(jobId, limit)
+        : this.db.prepare(`
+            SELECT * FROM documents
+            WHERE type = 'controlled_document'
+            ORDER BY job_id ASC, document_number ASC, created_at DESC
+            LIMIT ?
+          `).all(limit)
+      ).map(row => this.mapDocument(row))
+    };
   }
 
   addTimeLog(jobId, payload = {}, options = {}) {
@@ -15678,6 +15893,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         allowedStatuses: new Set(['draft', 'submitted', 'pending_review', 'revise_resubmit', 'approved', 'rejected', 'closed']),
         approvalStatuses: new Set(['approved', 'rejected', 'closed']),
         terminalStatuses: new Set(['approved', 'rejected', 'closed']),
+        validate(row, requestedStatus) {
+          if (this.approvalStatuses.has(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
+            const error = new Error('Submittal review evidence is required before approval, rejection, or closure');
+            error.statusCode = 400;
+            error.code = 'submittal_review_evidence_required';
+            throw error;
+          }
+        },
         update(row, next) {
           const requestedStatus = next.data.requestedStatus;
           const submittedStatuses = new Set(['submitted', 'pending_review', 'revise_resubmit', 'approved', 'rejected', 'closed']);
@@ -15710,15 +15933,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         targetType: 'document',
         map: row => this.mapDocument(row),
         label: 'document review',
-        allowedStatuses: new Set(['stored', 'draft', 'needs_review', 'needs_update', 'approved', 'rejected', 'expired', 'archived']),
+        allowedStatuses: new Set(['stored', 'draft', 'needs_review', 'needs_update', 'approved', 'rejected', 'expired', 'archived', 'superseded']),
         approvalStatuses: new Set(['approved']),
-        terminalStatuses: new Set(['approved', 'rejected', 'archived']),
+        terminalStatuses: new Set(['approved', 'rejected', 'archived', 'superseded']),
         validate(row, requestedStatus) {
           if (requestedStatus !== 'approved') return;
           const reference = payload.verificationReference || payload.verification_reference || payload.reference;
           if (!normalizeText(reference, '') || !normalizeText(payload.notes || payload.note, '')) {
             const error = new Error('Document review reference and evidence are required before approval');
             error.statusCode = 400;
+            throw error;
+          }
+          const data = fromJson(row.data_json, {});
+          if (data.controlledDocument === true && (
+            !normalizeText(row.document_number, '')
+            || !normalizeText(row.revision, '')
+            || !normalizeText(data.sourceReference, '')
+          )) {
+            const error = new Error('Controlled document number, revision, and retained source reference are required before approval');
+            error.statusCode = 409;
+            error.code = 'controlled_document_incomplete';
             throw error;
           }
         },
@@ -18919,7 +19153,54 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     } else if (targetType === 'credit_note') {
       this.db.prepare("UPDATE credit_notes SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'document') {
-      this.db.prepare("UPDATE documents SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
+      const before = this.db.prepare('SELECT * FROM documents WHERE id = ?').get(targetId);
+      if (before) {
+        const data = fromJson(before.data_json, {});
+        const nextData = data.controlledDocument === true
+          ? {
+              ...data,
+              candidateCurrent: false,
+              isCurrent: true,
+              approvedAt: timestamp
+            }
+          : data;
+        if (data.controlledDocument === true) {
+          const supersededRows = this.db.prepare(`
+            SELECT * FROM documents
+            WHERE job_id = ? AND document_number = ? AND id <> ? AND status = 'approved'
+            ORDER BY COALESCE(effective_at, updated_at, created_at) ASC
+          `).all(before.job_id, before.document_number, targetId);
+          for (const superseded of supersededRows) {
+            const supersededData = fromJson(superseded.data_json, {});
+            this.db.prepare(`
+              UPDATE documents
+              SET status = 'superseded', data_json = ?, updated_at = ?
+              WHERE id = ?
+            `).run(toJson({
+              ...supersededData,
+              candidateCurrent: false,
+              isCurrent: false,
+              supersededByDocumentId: targetId,
+              supersededAt: timestamp
+            }), timestamp, superseded.id);
+            this.audit({
+              entityType: 'document',
+              entityId: superseded.id,
+              jobId: superseded.job_id,
+              action: 'supersede_controlled_document_revision',
+              actor: 'approval',
+              before: this.mapDocument(superseded),
+              after: this.mapDocument(this.db.prepare('SELECT * FROM documents WHERE id = ?').get(superseded.id)),
+              metadata: { supersededByDocumentId: targetId }
+            });
+          }
+        }
+        this.db.prepare(`
+          UPDATE documents
+          SET status = 'approved', effective_at = COALESCE(effective_at, ?), data_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(timestamp, toJson(nextData), timestamp, targetId);
+      }
     } else if (targetType === 'quality_check') {
       this.db.prepare("UPDATE quality_checks SET status = 'approved', result = CASE WHEN result = 'pending' THEN 'passed' ELSE result END, updated_at = ? WHERE id = ?")
         .run(timestamp, targetId);
@@ -23448,6 +23729,72 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const overdueRfis = this.db.prepare(`
+      SELECT rfi_records.*, jobs.title AS job_title
+      FROM rfi_records
+      JOIN jobs ON jobs.id = rfi_records.job_id
+      WHERE rfi_records.status IN ('open', 'in_progress')
+        AND rfi_records.due_at IS NOT NULL
+      ORDER BY rfi_records.due_at ASC
+      LIMIT 20
+    `).all();
+    for (const rfi of overdueRfis) {
+      const dueAt = String(rfi.due_at || '');
+      const dueAtMs = Date.parse(dueAt.length === 10 ? `${dueAt}T23:59:59.999Z` : dueAt);
+      if (!Number.isFinite(dueAtMs) || dueAtMs >= Date.now()) continue;
+      const existingFollowUp = this.db.prepare(`
+        SELECT id FROM communication_records
+        WHERE job_id = ?
+          AND status NOT IN ('cancelled', 'rejected')
+          AND data_json LIKE ?
+        LIMIT 1
+      `).get(rfi.job_id, `%"rfiId":"${rfi.id}"%`);
+      if (existingFollowUp) continue;
+      const daysOverdue = Math.max(1, Math.ceil((Date.now() - dueAtMs) / (24 * 60 * 60 * 1000)));
+      actions.push({
+        type: 'draft_rfi_follow_up',
+        rfiId: rfi.id,
+        jobId: rfi.job_id,
+        severity: daysOverdue >= 3 ? 'high' : 'medium',
+        dueAt: rfi.due_at,
+        responsible: rfi.responsible || null,
+        message: `${rfi.job_title} RFI "${rfi.title}" is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue. Prepare an internal follow-up draft without changing the RFI status.`
+      });
+    }
+
+    const overdueSubmittals = this.db.prepare(`
+      SELECT submittal_records.*, jobs.title AS job_title
+      FROM submittal_records
+      JOIN jobs ON jobs.id = submittal_records.job_id
+      WHERE submittal_records.status IN ('submitted', 'pending_review', 'revise_resubmit')
+        AND submittal_records.due_at IS NOT NULL
+      ORDER BY submittal_records.due_at ASC
+      LIMIT 20
+    `).all();
+    for (const submittal of overdueSubmittals) {
+      const dueAt = String(submittal.due_at || '');
+      const dueAtMs = Date.parse(dueAt.length === 10 ? `${dueAt}T23:59:59.999Z` : dueAt);
+      if (!Number.isFinite(dueAtMs) || dueAtMs >= Date.now()) continue;
+      const existingFollowUp = this.db.prepare(`
+        SELECT id FROM communication_records
+        WHERE job_id = ?
+          AND status NOT IN ('cancelled', 'rejected')
+          AND data_json LIKE ?
+        LIMIT 1
+      `).get(submittal.job_id, `%"submittalId":"${submittal.id}"%`);
+      if (existingFollowUp) continue;
+      const daysOverdue = Math.max(1, Math.ceil((Date.now() - dueAtMs) / (24 * 60 * 60 * 1000)));
+      actions.push({
+        type: 'draft_submittal_follow_up',
+        submittalId: submittal.id,
+        jobId: submittal.job_id,
+        severity: daysOverdue >= 3 ? 'high' : 'medium',
+        dueAt: submittal.due_at,
+        responsible: submittal.reviewer || submittal.responsible || null,
+        message: `${submittal.job_title} submittal "${submittal.title}" is ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue. Prepare an internal review follow-up draft without approving the package.`
+      });
+    }
+
     const selectionGaps = this.db.prepare(`
       SELECT jobs.id, jobs.title, COUNT(material_requirements.id) AS material_count
       FROM jobs
@@ -24255,6 +24602,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'draft_field_report',
       'open_rfi_for_blocker',
       'create_submittal',
+      'draft_rfi_follow_up',
+      'draft_submittal_follow_up',
       'request_client_selection',
       'draft_change_order',
       'create_permit_review',
@@ -25200,6 +25549,67 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           this.audit({ entityType: 'communication', entityId: communication.id, jobId: action.jobId, action: 'autonomous_draft_client_reply_followup', actor, after: communication });
         }
 
+        const projectControlFollowUps = preview
+          .filter(action => ['draft_rfi_follow_up', 'draft_submittal_follow_up'].includes(action.type))
+          .slice(0, 5);
+        for (const action of projectControlFollowUps) {
+          const isRfi = action.type === 'draft_rfi_follow_up';
+          const recordId = isRfi ? action.rfiId : action.submittalId;
+          const row = this.db.prepare(`
+            SELECT * FROM ${isRfi ? 'rfi_records' : 'submittal_records'}
+            WHERE id = ? AND job_id = ?
+          `).get(recordId, action.jobId);
+          if (!row) {
+            blocked.push({ ...action, status: 'blocked', reason: 'The project-control record is no longer available.' });
+            continue;
+          }
+          const communicationId = `comm_${crypto.createHash('sha256').update(`${action.type}:${recordId}`).digest('hex').slice(0, 24)}`;
+          const communication = this.addCommunication(action.jobId, {
+            channel: 'internal_review',
+            direction: 'outbound',
+            subject: isRfi ? `RFI follow-up draft: ${row.title}` : `Submittal follow-up draft: ${row.title}`,
+            body: [
+              action.message,
+              isRfi
+                ? 'Confirm the responsible reviewer, current field impact, and retained technical question before any follow-up is sent.'
+                : 'Confirm the reviewer, outstanding evidence, procurement impact, and requested decision before any follow-up is sent.',
+              'This is an internal Contractor.AI draft. It does not send a message, approve a design decision, authorize procurement, or change the project-control status.'
+            ].join('\n\n'),
+            status: 'draft',
+            requiresApproval: true,
+            recipient: action.responsible || null,
+            expectsReply: true,
+            replyBy: futureIsoDate(2),
+            followUpFor: recordId,
+            followUpSource: isRfi ? 'rfi_due_monitor' : 'submittal_due_monitor',
+            data: {
+              ...(isRfi ? { rfiId: recordId } : { submittalId: recordId }),
+              internalDraft: true,
+              externalDeliveryInitiated: false,
+              statusChanged: false,
+              sourceDueAt: action.dueAt || null
+            }
+          }, { id: communicationId, actor, audit: false, ignoreExisting: true });
+          applied.push({
+            ...action,
+            communicationId: communication.id,
+            approvalId: communication.approvalId || communication.approval?.id || null,
+            status: communication.replayed ? 'replayed' : 'drafted',
+            externalDeliveryInitiated: false
+          });
+          if (!communication.replayed) {
+            this.audit({
+              entityType: 'communication',
+              entityId: communication.id,
+              jobId: action.jobId,
+              action: isRfi ? 'autonomous_draft_rfi_followup' : 'autonomous_draft_submittal_followup',
+              actor,
+              after: communication,
+              metadata: { recordId, externalCommitments: 0, externalDeliveryInitiated: false, statusChanged: false }
+            });
+          }
+        }
+
         const permitRenewals = preview.filter(action => action.type === 'renew_permit').slice(0, 3);
         for (const action of permitRenewals) {
           const permit = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(action.permitId);
@@ -25521,6 +25931,52 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (rfisWithoutApproval) issues.push({ severity: 'warning', message: `${rfisWithoutApproval} closed RFI response(s) have no approval gate.` });
     const submittalsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM submittal_records WHERE status IN ('approved', 'accepted', 'issued', 'sent', 'closed', 'client_visible') AND approval_id IS NULL").get().count || 0);
     if (submittalsWithoutApproval) issues.push({ severity: 'warning', message: `${submittalsWithoutApproval} approved/issued submittal(s) have no approval gate.` });
+    const incompleteControlledDocuments = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM documents
+      WHERE (type = 'controlled_document' OR document_number IS NOT NULL)
+        AND (
+          document_number IS NULL OR LENGTH(TRIM(document_number)) < 2
+          OR revision IS NULL OR LENGTH(TRIM(revision)) < 1
+          OR data_json NOT LIKE '%"controlledDocument":true%'
+          OR data_json NOT LIKE '%"sourceReference"%'
+        )
+    `).get().count || 0);
+    if (incompleteControlledDocuments) issues.push({ severity: 'error', message: `${incompleteControlledDocuments} controlled document revision(s) lack required identity or source evidence.` });
+    const duplicateCurrentControlledDocuments = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM (
+        SELECT job_id, document_number
+        FROM documents
+        WHERE document_number IS NOT NULL AND status = 'approved'
+        GROUP BY job_id, document_number
+        HAVING COUNT(*) > 1
+      ) current_revisions
+    `).get().count || 0);
+    if (duplicateCurrentControlledDocuments) issues.push({ severity: 'error', message: `${duplicateCurrentControlledDocuments} controlled document number(s) have multiple approved current revisions.` });
+    const duplicateCandidateControlledDocuments = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM (
+        SELECT job_id, document_number
+        FROM documents
+        WHERE type = 'controlled_document'
+          AND document_number IS NOT NULL
+          AND status IN ('draft', 'stored', 'needs_review', 'needs_update', 'expired', 'pending_approval')
+        GROUP BY job_id, document_number
+        HAVING COUNT(*) > 1
+      ) candidate_revisions
+    `).get().count || 0);
+    if (duplicateCandidateControlledDocuments) issues.push({ severity: 'error', message: `${duplicateCandidateControlledDocuments} controlled document number(s) have multiple unresolved candidate revisions.` });
+    const invalidDocumentSupersession = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM documents candidate
+      LEFT JOIN documents prior ON prior.id = candidate.supersedes_document_id
+      WHERE candidate.supersedes_document_id IS NOT NULL
+        AND (
+          prior.id IS NULL
+          OR prior.job_id <> candidate.job_id
+          OR prior.document_number <> candidate.document_number
+          OR prior.revision = candidate.revision
+        )
+    `).get().count || 0);
+    if (invalidDocumentSupersession) issues.push({ severity: 'error', message: `${invalidDocumentSupersession} controlled document supersession link(s) are invalid.` });
     const selectionsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM client_selections WHERE status IN ('approved', 'accepted', 'client_confirmed', 'locked', 'selected', 'ordered') AND approval_id IS NULL").get().count || 0);
     if (selectionsWithoutApproval) issues.push({ severity: 'warning', message: `${selectionsWithoutApproval} locked client selection(s) have no approval gate.` });
     const permitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM permit_records WHERE status IN ('active', 'approved', 'issued', 'submitted') AND approval_id IS NULL").get().count || 0);
@@ -26393,6 +26849,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       sizeBytes: normalizeNumber(row.size_bytes, 0),
       storageRef: row.storage_ref,
       status: row.status,
+      documentNumber: row.document_number || null,
+      revision: row.revision || null,
+      discipline: row.discipline || null,
+      effectiveAt: row.effective_at || null,
+      supersedesDocumentId: row.supersedes_document_id || null,
       approvalId: row.approval_id,
       data: fromJson(row.data_json),
       createdAt: row.created_at,

@@ -1437,6 +1437,17 @@ app.use(requireDashboardAuth);
 app.use(requireSessionMutationOrigin);
 app.use(requireOperatorAuthorization);
 app.use(express.json({ limit: '2mb' }));
+app.use((req, res, next) => {
+  if (
+    req.operator?.authenticated
+    && req.body
+    && typeof req.body === 'object'
+    && !Array.isArray(req.body)
+  ) {
+    req.body.actor = actorFromRequest(req);
+  }
+  next();
+});
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use((req, res, next) => {
   if (req.operator?.authenticated && req.body && typeof req.body === 'object') {
@@ -2271,18 +2282,18 @@ app.post('/api/ledger/jobs/:id/field-reports', (req, res) => {
 app.post('/api/ledger/jobs/:id/rfis', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    rfi: operatingLedger.createRfi(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    rfi: recordForOperator(req, operatingLedger.createRfi(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
 app.post('/api/ledger/jobs/:id/submittals', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    submittal: operatingLedger.createSubmittalRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    submittal: recordForOperator(req, operatingLedger.createSubmittalRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
@@ -2653,9 +2664,18 @@ app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, re
 app.post('/api/ledger/jobs/:id/documents', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    document: operatingLedger.addDocument(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    document: recordForOperator(req, operatingLedger.addDocument(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/controlled-document-revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createControlledDocumentRevision(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
@@ -3766,6 +3786,7 @@ function operationalExport() {
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
+    projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
     handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
     audit: operatingLedger.listAudit({ limit: 1_000 })
@@ -3814,6 +3835,15 @@ function validateOperationalExport(snapshot) {
       problems.push(`Export ${key} must be a collection when present.`);
     }
   }
+  if (snapshot.projectControls !== undefined) {
+    if (!snapshot.projectControls || typeof snapshot.projectControls !== 'object' || Array.isArray(snapshot.projectControls)) {
+      problems.push('Export projectControls must be an object when present.');
+    } else {
+      for (const key of ['rfis', 'submittals', 'controlledDocuments']) {
+        if (!Array.isArray(snapshot.projectControls[key])) problems.push(`Export projectControls is missing the ${key} collection.`);
+      }
+    }
+  }
   const integrity = snapshot.integrity;
   if (
     integrity?.algorithm !== 'sha256'
@@ -3847,6 +3877,9 @@ function validateOperationalExport(snapshot) {
       billingMilestones: snapshot.billingMilestones.length,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
+      rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
+      submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
+      controlledDocuments: Array.isArray(snapshot.projectControls?.controlledDocuments) ? snapshot.projectControls.controlledDocuments.length : 0,
       handoverPackages: snapshot.handoverPackages.length,
       approvals: snapshot.approvals.length,
       audit: snapshot.audit.length

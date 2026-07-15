@@ -109,6 +109,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.get('/api/ledger/dashboard'",
     "app.post('/api/ledger/upload'",
     "app.post('/api/ledger/jobs/:id/daily-logs'",
+    "app.post('/api/ledger/jobs/:id/controlled-document-revisions'",
     "app.post('/api/ledger/jobs/:id/supplier-invoices'",
     "app.post('/api/ledger/jobs/:id/supplier-invoices/:supplierInvoiceId/payments'",
     "app.post('/api/auth/login'",

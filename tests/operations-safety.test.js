@@ -75,6 +75,26 @@ test('operational export and backup are local, auditable maintenance controls', 
     body: JSON.stringify({ title: 'Real retained job', client: { name: 'Operations Client' }, address: 'Amsterdam' })
   });
   assert.equal(intake.response.status, 201);
+  const exportedRfi = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/rfis`, {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Exported RFI', question: 'Retain this decision question.', status: 'open' })
+  });
+  assert.equal(exportedRfi.response.status, 201);
+  const exportedSubmittal = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/submittals`, {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Exported submittal', status: 'draft' })
+  });
+  assert.equal(exportedSubmittal.response.status, 201);
+  const exportedDocument = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/controlled-document-revisions`, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Exported controlled plan',
+      documentNumber: 'EXP-A-101',
+      revision: 'P01',
+      sourceReference: 'private:EXP-A-101-P01'
+    })
+  });
+  assert.equal(exportedDocument.response.status, 201);
 
   const auditHistory = await request(baseUrl, '/api/ledger/audit?limit=1&includeFacets=true');
   assert.equal(auditHistory.response.status, 200);
@@ -108,6 +128,9 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
   assert.ok(Array.isArray(exported.body.taskDependencies));
   assert.ok(Array.isArray(exported.body.scheduleBaselines));
+  assert.ok(exported.body.projectControls.rfis.some(record => record.id === exportedRfi.body.rfi.id));
+  assert.ok(exported.body.projectControls.submittals.some(record => record.id === exportedSubmittal.body.submittal.id));
+  assert.ok(exported.body.projectControls.controlledDocuments.some(record => record.id === exportedDocument.body.document.id));
   assert.ok(Array.isArray(exported.body.handoverPackages));
 
   const exportValidation = await request(baseUrl, '/api/operations/exports/validate', {
@@ -124,11 +147,15 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
   assert.equal(exportValidation.body.counts.taskDependencies, exported.body.taskDependencies.length);
   assert.equal(exportValidation.body.counts.scheduleBaselines, exported.body.scheduleBaselines.length);
+  assert.equal(exportValidation.body.counts.rfis, exported.body.projectControls.rfis.length);
+  assert.equal(exportValidation.body.counts.submittals, exported.body.projectControls.submittals.length);
+  assert.equal(exportValidation.body.counts.controlledDocuments, exported.body.projectControls.controlledDocuments.length);
   assert.equal(exportValidation.body.counts.handoverPackages, exported.body.handoverPackages.length);
 
   const prePipelineExport = structuredClone(exported.body);
   delete prePipelineExport.opportunities;
   delete prePipelineExport.opportunityActivities;
+  delete prePipelineExport.projectControls;
   const { integrity: prePipelineIntegrity, ...prePipelinePayload } = prePipelineExport;
   prePipelineExport.integrity = {
     ...prePipelineIntegrity,
@@ -141,6 +168,9 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(prePipelineValidation.response.status, 200);
   assert.equal(prePipelineValidation.body.counts.opportunities, 0);
   assert.equal(prePipelineValidation.body.counts.opportunityActivities, 0);
+  assert.equal(prePipelineValidation.body.counts.rfis, 0);
+  assert.equal(prePipelineValidation.body.counts.submittals, 0);
+  assert.equal(prePipelineValidation.body.counts.controlledDocuments, 0);
 
   const tamperedExport = structuredClone(exported.body);
   tamperedExport.jobs[0].title = 'Tampered after export';
@@ -248,7 +278,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '021_preconstruction_opportunities');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '022_controlled_document_revisions');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
