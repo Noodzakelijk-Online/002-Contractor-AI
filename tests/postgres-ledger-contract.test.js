@@ -1228,6 +1228,35 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     const creditDetail = ledger.getJobDetail(creditJob.id, { includeAudit: false });
     assert.equal(creditDetail.creditNotes[0].status, 'prepared');
     assert.equal(creditDetail.invoices[0].status, 'partially_settled');
+    const handoverJob = ledger.createIntake({
+      title: `PostgreSQL handover ${marker}`,
+      client: { name: 'PostgreSQL handover client', email: 'handover@example.test' },
+      address: 'Hosted handover street 8',
+      city: 'Utrecht',
+      status: 'completed',
+      progressPercent: 100,
+      assignAutomatically: false
+    }, { actor: 'postgres_commercial_test' });
+    ledger.createFieldReport(handoverJob.id, {
+      status: 'draft',
+      reportDate: '2026-07-15',
+      workCompleted: 'PostgreSQL handover evidence retained.'
+    }, { actor: 'postgres_commercial_test' });
+    const handoverQuality = ledger.addQualityCheck(handoverJob.id, {
+      title: 'PostgreSQL final handover quality',
+      status: 'approved',
+      result: 'passed',
+      defects: [],
+      defectsOpen: 0,
+      notes: 'No open defects remain.'
+    }, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(handoverQuality.approval.id, { status: 'approved', resolvedBy: 'postgres_approver' });
+    const handoverPackage = ledger.prepareHandoverIssuePackage(handoverJob.id, {}, { actor: 'postgres_commercial_test' });
+    assert.equal(handoverPackage.document.type, 'handover_issue_package');
+    assert.equal(handoverPackage.externalCommitments, 0);
+    assert.equal(ledger.prepareHandoverIssuePackage(handoverJob.id).replayed, true);
+    assert.equal(ledger.assessHandoverReadiness(handoverJob.id).currentPackageId, handoverPackage.document.id);
+    assert.match(ledger.getHandoverIssuePackage(handoverPackage.document.id, { audit: false }).content, /PostgreSQL handover/);
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

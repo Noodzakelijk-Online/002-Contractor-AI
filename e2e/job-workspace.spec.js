@@ -1489,6 +1489,7 @@ test('field assurance prepares internal safety records and gates an RFI answer',
 });
 
 test('clients workspace prepares closeout and aftercare without delivery or booking', async ({ page, request }) => {
+  await ensureBrowserOrganization(request);
   const closeoutJob = await createBrowserJob(request, 'Browser client closeout job', {
     service: 'Bathroom renovation',
     status: 'completed',
@@ -1498,6 +1499,34 @@ test('clients workspace prepares closeout and aftercare without delivery or book
     assignAutomatically: false
   });
   await resolvePendingClientApprovals(request, closeoutJob.job.id);
+  const handoverJob = await createBrowserJob(request, 'Browser immutable handover job', {
+    service: 'Apartment renovation',
+    status: 'completed',
+    progressPercent: 100,
+    estimatedCost: 5200,
+    contractValue: 5200,
+    assignAutomatically: false
+  });
+  const handoverReportResponse = await request.post(`/api/ledger/jobs/${handoverJob.job.id}/field-reports`, {
+    data: { status: 'draft', reportDate: '2026-07-15', workCompleted: 'Final completion evidence retained for browser handover QA.' }
+  });
+  expect(handoverReportResponse.ok()).toBeTruthy();
+  const handoverQualityResponse = await request.post(`/api/ledger/jobs/${handoverJob.job.id}/quality-checks`, {
+    data: { title: 'Browser final handover quality', status: 'approved', result: 'passed', defects: [], defectsOpen: 0, notes: 'No open defects remain.' }
+  });
+  expect(handoverQualityResponse.ok()).toBeTruthy();
+  const handoverQuality = await handoverQualityResponse.json();
+  const handoverQualityApproval = await request.post(`/api/ledger/approvals/${handoverQuality.qualityCheck.approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser handover approver', reason: 'Final quality evidence checked.' }
+  });
+  expect(handoverQualityApproval.ok()).toBeTruthy();
+  await resolvePendingClientApprovals(request, handoverJob.job.id);
+  const handoverReadinessResponse = await request.get(`/api/ledger/client-success?mode=handover&limit=100`);
+  expect(handoverReadinessResponse.ok()).toBeTruthy();
+  const handoverReadiness = await handoverReadinessResponse.json();
+  expect(handoverReadiness.jobs.find(job => job.jobId === handoverJob.job.id)?.nextActions).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'prepare_handover_package' })
+  ]));
   const waitingJob = await createBrowserJob(request, 'Browser client selection job', {
     service: 'Kitchen installation',
     status: 'scheduled',
@@ -1615,6 +1644,19 @@ test('clients workspace prepares closeout and aftercare without delivery or book
   await expect(page.getByText(/(Closeout package retained|existing closeout package was retained)/i)).toBeVisible();
   await expect(closeoutRow.getByRole('button', { name: `Prepare closeout for ${closeoutJob.job.title}` })).toHaveCount(0);
 
+  let handoverRow = clients.locator('.client-item').filter({ hasText: handoverJob.job.title });
+  await expect(handoverRow.getByRole('button', { name: `Prepare handover dossier for ${handoverJob.job.title}` })).toBeVisible();
+  await handoverRow.getByRole('button', { name: `Prepare handover dossier for ${handoverJob.job.title}` }).click();
+  await expect(page.getByText('Immutable handover dossier retained. Client delivery is a separate approval-gated step.')).toBeVisible();
+  handoverRow = clients.locator('.client-item').filter({ hasText: handoverJob.job.title });
+  const handoverDownload = handoverRow.getByRole('link', { name: `Download handover dossier for ${handoverJob.job.title}` });
+  await expect(handoverDownload).toBeVisible();
+  await expect(handoverRow.getByRole('button', { name: 'Review approval' })).toBeVisible();
+  const handoverHref = await handoverDownload.getAttribute('href');
+  const handoverDownloadResponse = await request.get(handoverHref);
+  expect(handoverDownloadResponse.ok()).toBeTruthy();
+  expect(await handoverDownloadResponse.text()).toContain('Project handover dossier');
+
   const waitingRow = clients.locator('.client-item').filter({ hasText: waitingJob.job.title });
   await waitingRow.getByRole('button', { name: `Draft client follow-up for ${waitingJob.job.title}` }).click();
   await expect(page.getByText('Client follow-up drafted behind an approval gate. No message was delivered.')).toBeVisible();
@@ -1644,6 +1686,14 @@ test('clients workspace prepares closeout and aftercare without delivery or book
   expect(closeoutDetail.job.communications).toHaveLength(1);
   expect(closeoutDetail.job.communications[0].approvalId).toBeTruthy();
   expect(['sent', 'delivered']).not.toContain(closeoutDetail.job.communications[0].status);
+
+  const handoverDetailResponse = await request.get(`/api/ledger/jobs/${handoverJob.job.id}`);
+  expect(handoverDetailResponse.ok()).toBeTruthy();
+  const handoverDetail = await handoverDetailResponse.json();
+  const retainedHandover = handoverDetail.job.documents.find(document => document.type === 'handover_issue_package');
+  expect(retainedHandover).toMatchObject({ status: 'prepared', data: { deliveryMode: 'approval_gated_draft', externalCommitments: 0 } });
+  const retainedHandoverCommunication = handoverDetail.job.communications.find(message => message.data?.source === 'handover_issue_package');
+  expect(retainedHandoverCommunication).toMatchObject({ status: 'draft', approvalId: expect.any(String) });
 
   const waitingDetailResponse = await request.get(`/api/ledger/jobs/${waitingJob.job.id}`);
   expect(waitingDetailResponse.ok()).toBeTruthy();

@@ -150,6 +150,15 @@ test('job archive and restore controls use retained approval-gated ledger routes
   assert.match(dashboardSource, /No message, cancellation, supplier order, payment, safety clearance, or schedule commitment is triggered/);
 });
 
+test('client success exposes immutable handover readiness, preparation, and download controls', () => {
+  assert.match(dashboardSource, /api\(`\/api\/ledger\/jobs\/\$\{encodeURIComponent\(item\.jobId\)\}\/handover-packages`/);
+  assert.match(dashboardSource, /prepareClientHandover/);
+  assert.match(dashboardSource, /Prepare dossier/);
+  assert.match(dashboardSource, /Download dossier/);
+  assert.match(dashboardSource, /handoverReadiness\?\.currentPackageId/);
+  assert.match(dashboardSource, /Immutable handover dossier retained\. Client delivery is a separate approval-gated step\./);
+});
+
 test('client portal is a scoped React workflow without imperative HTML rendering', () => {
   assert.match(clientPortalSource, /\/api\/client-portal\/\$\{encodeURIComponent\(token\)\}/);
   assert.match(clientPortalSource, /\/messages`/);

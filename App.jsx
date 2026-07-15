@@ -874,13 +874,14 @@ function CommercialControl({ job, canCoordinate, canApprove, submitting, onNewQu
   </section>
 }
 
-function ClientSuccessWorkspace({ clients, jobs, canCoordinate, canApprove, submitting, onPrepareCloseout, onDraftFollowup, onDraftRecurring, onLifecycle, onOpenApprovals, onOpen }) {
+function ClientSuccessWorkspace({ clients, jobs, canCoordinate, canApprove, submitting, onPrepareCloseout, onPrepareHandover, onDraftFollowup, onDraftRecurring, onLifecycle, onOpenApprovals, onOpen }) {
   const rows = clients?.jobs || EMPTY_LIST
   const summary = clients?.summary || {}
   return <section className="panel page-panel client-workspace" data-testid="client-workspace">
     <div className="panel-heading"><div><h2>Client success</h2><p>Coordinate decisions, handover, punch, warranty, aftercare, and recurring service through retained approval gates.</p></div><span className="count-badge">{rows.length}</span></div>
     <div className="client-summary" aria-label="Client success summary">
       <div><span>Waiting client</span><strong>{summary.waitingClient || 0}</strong></div>
+      <div><span>Handover ready</span><strong>{summary.handoverReady || 0}</strong></div>
       <div><span>Closeout ready</span><strong>{summary.closeoutReady || 0}</strong></div>
       <div><span>Punch / warranty</span><strong>{summary.punchWarranty || 0}</strong></div>
       <div><span>Aftercare due</span><strong>{summary.aftercareDue || 0}</strong></div>
@@ -890,6 +891,8 @@ function ClientSuccessWorkspace({ clients, jobs, canCoordinate, canApprove, subm
       const action = type => item.nextActions?.find(candidate => candidate.type === type)
       const canAct = canCoordinate && !item.flags?.approvalRequired
       const canPrepareCloseout = canAct && item.flags?.closeoutReady
+      const handoverAction = action('prepare_handover_package')
+      const canPrepareHandover = canAct && Boolean(handoverAction)
       const followupAction = action('selection_follow_up') || action('client_reply_follow_up')
       const canDraftFollowup = canAct && Boolean(followupAction) && !item.counts?.outboundDrafts
       const selectionAction = canAct ? action('review_client_selection') : null
@@ -912,11 +915,17 @@ function ClientSuccessWorkspace({ clients, jobs, canCoordinate, canApprove, subm
             {item.counts?.overdueSelections ? <span className="tag tag-amber">{item.counts.overdueSelections} selection overdue</span> : null}
             {item.counts?.overdueReplies ? <span className="tag tag-amber">{item.counts.overdueReplies} reply overdue</span> : null}
             {item.counts?.dueAftercare ? <span className="tag">{item.counts.dueAftercare} aftercare due</span> : null}
+            {item.counts?.handoverBlockers ? <span className="tag tag-amber">{item.counts.handoverBlockers} handover blocker{item.counts.handoverBlockers === 1 ? '' : 's'}</span> : null}
+            {item.counts?.handoverMissing ? <span className="tag">{item.counts.handoverMissing} handover requirement{item.counts.handoverMissing === 1 ? '' : 's'}</span> : null}
+            {item.latest?.handoverPackage ? <span className={item.handoverReadiness?.currentPackageId ? 'tag tag-green' : 'tag tag-amber'}>{item.handoverReadiness?.currentPackageId ? 'Dossier current' : 'Dossier refresh due'}</span> : null}
+            {item.counts?.handoverDelivered ? <span className="tag tag-green">Handover delivered</span> : null}
           </div>
         </div>
         <div className="client-actions">
           {item.flags?.approvalRequired && canApprove ? <button className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ jobId: item.jobId, jobTitle: job.title, approvalId: item.nextActions?.find(action => action.approvalId)?.approvalId || null })}><ShieldCheck size={16} />Review approval</button> : null}
           {canPrepareCloseout ? <button className="secondary-button" aria-label={`Prepare closeout for ${job.title}`} disabled={submitting} onClick={() => onPrepareCloseout(item)}><Archive size={16} />Prepare closeout</button> : null}
+          {canPrepareHandover ? <button className="primary-button" aria-label={`Prepare handover dossier for ${job.title}`} disabled={submitting} onClick={() => onPrepareHandover(item)}><PackageCheck size={16} />Prepare dossier</button> : null}
+          {item.latest?.handoverPackage ? <a className="secondary-button" aria-label={`Download handover dossier for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(item.latest.handoverPackage.id)}/issue-package`} download><FileDown size={16} />Download dossier</a> : null}
           {canDraftFollowup ? <button className="secondary-button" aria-label={`Draft client follow-up for ${job.title}`} disabled={submitting} onClick={() => onDraftFollowup(item)}><MessageSquareText size={16} />Draft follow-up</button> : null}
           {selectionAction ? <button className="secondary-button" aria-label={`Record client selection for ${job.title}`} disabled={submitting} onClick={() => onLifecycle(item, 'selection', selectionAction.selectionId)}><ClipboardCheck size={16} />Record selection</button> : null}
           {punchAction ? <button className="secondary-button" aria-label={`Request punch resolution for ${job.title}`} disabled={submitting} onClick={() => onLifecycle(item, 'punch_item', punchAction.punchItemId)}><ShieldCheck size={16} />Punch review</button> : null}
@@ -3646,6 +3655,28 @@ function App() {
     }
   }
 
+  async function prepareClientHandover(item) {
+    if (!item?.jobId || !item.nextActions?.some(action => action.type === 'prepare_handover_package') || item.flags?.approvalRequired) return
+    setSubmitting(true)
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}/handover-packages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          channel: item.clientEmail ? 'email' : 'portal',
+          actor: 'office_operator'
+        })
+      })
+      notify(result.package?.replayed
+        ? 'The current handover dossier was verified and retained without creating duplicates.'
+        : 'Immutable handover dossier retained. Client delivery is a separate approval-gated step.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function draftClientFollowup(item) {
     if (!item?.jobId || item.counts?.outboundDrafts || item.flags?.approvalRequired) return
     const selection = item.latest?.selection
@@ -3984,7 +4015,7 @@ function App() {
 
         {section === 'finance' && capabilities.finance ? <FinanceWorkspace finance={data.finance} jobs={jobs} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onDraftInvoice={openInvoiceDraft} onPrepareInvoice={prepareInvoicePackage} onAction={openFinanceControl} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
 
-        {section === 'clients' && capabilities.clientSuccess ? <ClientSuccessWorkspace clients={data.clients} jobs={jobs} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onPrepareCloseout={prepareClientCloseout} onDraftFollowup={draftClientFollowup} onDraftRecurring={draftRecurringPlan} onLifecycle={openClientLifecycle} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
+        {section === 'clients' && capabilities.clientSuccess ? <ClientSuccessWorkspace clients={data.clients} jobs={jobs} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onPrepareCloseout={prepareClientCloseout} onPrepareHandover={prepareClientHandover} onDraftFollowup={draftClientFollowup} onDraftRecurring={draftRecurringPlan} onLifecycle={openClientLifecycle} onOpenApprovals={openApprovals} onOpen={openJobWorkspace} /> : null}
 
         {section === 'field' && capabilities.fieldEvidence && <section className="panel page-panel field-workspace" data-testid="field-workspace" aria-busy={loading || undefined}>
           <div className="panel-heading"><div><h2>Field updates</h2><p>Evidence, safety and quality assurance from the operating ledger.</p></div><button className="secondary-button" onClick={() => selectSection('jobs')}><BriefcaseBusiness size={16} />Open jobs</button></div>

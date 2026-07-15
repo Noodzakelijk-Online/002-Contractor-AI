@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { EvidenceStorageError, LocalEvidenceStorage, S3EvidenceStorage } = require('../evidence-storage');
 
 test('local evidence storage retains files under the configured private root', async t => {
@@ -18,6 +19,7 @@ test('local evidence storage retains files under the configured private root', a
   t.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
 
   assert.match(stored.storageRef, /^data\/uploads\//);
+  assert.equal(stored.sha256, crypto.createHash('sha256').update(Buffer.from([0xff, 0xd8, 0xff, 0xe0])).digest('hex'));
   assert.deepEqual(await storage.read(stored.storageRef), Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
   const verification = await storage.verify();
   assert.equal(verification.ready, true);
@@ -48,6 +50,7 @@ test('S3 evidence storage signs private object requests and requires full config
   });
   const stored = await storage.store({ originalName: 'site proof.jpg', mimeType: 'image/jpeg', size: 4, buffer: Buffer.from([0xff, 0xd8, 0xff, 0xe0]) });
   assert.match(stored.storageRef, /^s3:\/\/contractor-private\/contractor-ai\/evidence\//);
+  assert.equal(stored.sha256, crypto.createHash('sha256').update(Buffer.from([0xff, 0xd8, 0xff, 0xe0])).digest('hex'));
   assert.match(requests[0].url, /contractor-private\/contractor-ai\/evidence\//);
   assert.match(requests[0].options.headers.authorization, /^AWS4-HMAC-SHA256 Credential=test-access\//);
   assert.deepEqual(await storage.read(stored.storageRef), Buffer.from([0xff, 0xd8, 0xff, 0xe0]));

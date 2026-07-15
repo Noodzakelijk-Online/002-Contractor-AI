@@ -135,6 +135,30 @@ function createBackupFixture(t, suffix = 'success') {
     defaultPaymentTermsDays: 30,
     defaultQuoteValidityDays: 30
   }, { actor: 'migration_fixture' });
+  source.createFieldReport(job.id, {
+    status: 'draft',
+    reportDate: '2026-07-13',
+    workCompleted: 'Hosted migration completion evidence retained.'
+  }, { actor: 'migration_fixture' });
+  source.addProgressUpdate(job.id, {
+    status: 'completed',
+    progressPercent: 100,
+    note: 'Hosted migration fixture completed.'
+  }, { actor: 'migration_fixture' });
+  const quality = source.addQualityCheck(job.id, {
+    title: 'Hosted migration final quality review',
+    status: 'approved',
+    result: 'passed',
+    defects: [],
+    defectsOpen: 0,
+    notes: 'No open defects remain in the migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(quality.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration handover quality evidence verified.'
+  });
+  const handover = source.prepareHandoverIssuePackage(job.id, {}, { actor: 'migration_fixture' });
   source.createOperatorSession({
     sessionIdHash: `local-session-${suffix}`,
     operatorId: 'local-owner',
@@ -170,7 +194,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, document, evidenceBytes, job, localStorageRef, organization, supplierInvoice, supplierPayment, tradePartner };
+  return { backupDir, backupId, document, evidenceBytes, handover, job, localStorageRef, organization, supplierInvoice, supplierPayment, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -268,6 +292,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedOrganization.legalName, fixture.organization.legalName);
     assert.equal(migratedOrganization.registrationNumber, fixture.organization.registrationNumber);
     assert.equal(migratedOrganization.readiness.ready, true);
+    const migratedHandover = hosted.getHandoverIssuePackage(fixture.handover.document.id, { audit: false });
+    assert.equal(migratedHandover.packageHash, fixture.handover.packageHash);
+    assert.equal(migratedHandover.document.data.evidenceHash, fixture.handover.evidenceHash);
+    assert.match(migratedHandover.content, /Hosted migration success/);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM operator_sessions').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);

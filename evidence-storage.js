@@ -81,6 +81,7 @@ class LocalEvidenceStorage {
 
   async store(file) {
     const storageName = safeStorageName(file.originalName);
+    const sha256 = crypto.createHash('sha256').update(file.buffer).digest('hex');
     const target = path.resolve(this.rootDir, storageName);
     if (!target.startsWith(`${this.rootDir}${path.sep}`)) {
       throw new EvidenceStorageError('invalid_upload_path', 'Evidence storage path could not be resolved safely.', 400);
@@ -97,7 +98,8 @@ class LocalEvidenceStorage {
       filename: storageName,
       storageRef: path.relative(this.projectRoot, target).replace(/\\/g, '/'),
       size: file.size,
-      mimeType: file.mimeType
+      mimeType: file.mimeType,
+      sha256
     };
   }
 
@@ -216,12 +218,14 @@ class S3EvidenceStorage {
   async store(file) {
     const storageName = safeStorageName(file.originalName);
     const key = this.objectKey(storageName);
+    const sha256 = crypto.createHash('sha256').update(file.buffer).digest('hex');
     await this.request('PUT', key, file.buffer, file.mimeType || 'application/octet-stream');
     return {
       filename: storageName,
       storageRef: `s3://${this.bucket}/${key}`,
       size: file.size,
-      mimeType: file.mimeType
+      mimeType: file.mimeType,
+      sha256
     };
   }
 

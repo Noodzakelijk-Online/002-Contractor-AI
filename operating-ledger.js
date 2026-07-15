@@ -167,7 +167,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ],
   'eu-compliance': [
     { key: 'permit', label: 'Permit evidence', table: 'permit_records', detailKey: 'permits' },
-    { key: 'wkb', label: 'Wkb/photo dossier', table: 'documents', detailKey: 'documents' },
+    { key: 'wkb', label: 'Wkb-style handover dossier', table: 'documents', detailKey: 'documents', recordType: 'handover_issue_package', readyStatuses: ['prepared'] },
     { key: 'invoice', label: 'VAT/UBL invoice signal', table: 'invoices', detailKey: 'invoices' },
     { key: 'credit_note', label: 'Invoice correction signal', table: 'credit_notes', detailKey: 'creditNotes' },
     { key: 'vca', label: 'VCA/SDS safety proof', table: 'sds_sheets', detailKey: 'sdsSheets' },
@@ -287,7 +287,8 @@ function capabilityRequirementActionTarget(requirementKey) {
     warranty: 'warranty_claim_form',
     aftercare: 'aftercare_form',
     recurring: 'recurring_plan_form',
-    wkb: 'document_form',
+    wkb: 'client_handover_package',
+    handover: 'client_handover_package',
     audit: 'audit_log'
   };
   return targets[String(requirementKey || '')] || 'job_detail';
@@ -5870,6 +5871,500 @@ class ContractorOperatingLedger {
 </html>`;
   }
 
+  handoverEvidenceDocuments(detail = {}) {
+    const generatedTypes = new Set([
+      'quote_issue_package',
+      'invoice_issue_package',
+      'invoice_ubl_package',
+      'credit_note_issue_package',
+      'credit_note_ubl_package',
+      'handover_issue_package'
+    ]);
+    const inactiveStatuses = new Set(['cancelled', 'canceled', 'rejected', 'void']);
+    return (detail.documents || []).filter(document => (
+      !generatedTypes.has(normalizeStatus(document.type, 'document'))
+      && !inactiveStatuses.has(normalizeStatus(document.status, 'stored'))
+    ));
+  }
+
+  buildHandoverEvidenceSnapshot(detail = {}, options = {}) {
+    const organization = this.getOrganizationProfile();
+    const evidenceDocuments = this.handoverEvidenceDocuments(detail);
+    const compactText = value => normalizeText(value, '').slice(0, 2000) || null;
+    const recordBase = record => ({
+      id: record.id,
+      title: record.title || record.name || null,
+      status: record.status || null,
+      createdAt: record.createdAt || null,
+      updatedAt: record.updatedAt || null
+    });
+    const auditIntegrity = options.includeAuditProof === false ? null : this.verifyAuditIntegrity();
+    const snapshot = {
+      organization: {
+        legalName: organization.legalName,
+        tradingName: organization.tradingName,
+        registrationNumber: organization.registrationNumber,
+        vatNumber: organization.vatNumber,
+        email: organization.email,
+        phone: organization.phone,
+        address: organization.address,
+        postalCode: organization.postalCode,
+        city: organization.city,
+        country: organization.country
+      },
+      client: {
+        id: detail.client?.id || detail.clientId || null,
+        name: detail.client?.name || detail.clientName || null,
+        company: detail.client?.company || null,
+        address: detail.client?.address || detail.address || null,
+        email: detail.client?.email || detail.clientEmail || null,
+        phone: detail.client?.phone || detail.clientPhone || null
+      },
+      job: {
+        id: detail.id,
+        title: detail.title,
+        description: compactText(detail.description),
+        jobType: detail.jobType,
+        status: detail.status,
+        phase: detail.phase,
+        progressPercent: normalizeNumber(detail.progressPercent, 0),
+        address: detail.address,
+        city: detail.city,
+        region: detail.region,
+        country: detail.country || 'NL',
+        scheduledStart: detail.scheduledStart,
+        targetCompletion: detail.targetCompletion,
+        completedAt: detail.completedAt || detail.updatedAt || null
+      },
+      evidence: {
+        documents: evidenceDocuments.map(document => ({
+          ...recordBase(document),
+          type: document.type,
+          filename: document.filename,
+          mimeType: document.mimeType,
+          sizeBytes: normalizeNumber(document.sizeBytes, 0),
+          contentHash: document.data?.analysis?.upload?.sha256 || document.data?.contentHash || null,
+          tags: normalizeList(document.data?.tags)
+        })),
+        fieldReports: (detail.fieldReports || []).map(report => ({
+          ...recordBase(report),
+          reportDate: report.reportDate,
+          workCompleted: compactText(report.workCompleted),
+          blockers: normalizeList(report.blockers),
+          photoCount: normalizeList(report.photos).length
+        })),
+        progress: (detail.progress || []).map(progress => ({
+          id: progress.id,
+          status: progress.status,
+          progressPercent: normalizeNumber(progress.progressPercent, 0),
+          note: compactText(progress.note),
+          blockerCount: normalizeList(progress.blockers).length,
+          photoCount: normalizeList(progress.photos).length,
+          createdAt: progress.createdAt
+        })),
+        tasks: (detail.tasks || []).filter(task => normalizeStatus(task.status, '') === 'completed').map(task => ({
+          ...recordBase(task),
+          priority: task.priority,
+          completedAt: task.completedAt || task.updatedAt || null,
+          completionEvidence: compactText(task.data?.completionEvidence || task.data?.note || task.description)
+        })),
+        qualityChecks: (detail.qualityChecks || []).map(check => ({
+          ...recordBase(check),
+          result: check.result,
+          defectsOpen: normalizeNumber(check.data?.defectsOpen ?? check.defectsOpen, normalizeList(check.defects).length),
+          notes: compactText(check.notes),
+          photoCount: normalizeList(check.photos).length
+        })),
+        safetyChecks: (detail.safetyChecks || []).map(check => ({
+          ...recordBase(check),
+          riskLevel: check.riskLevel,
+          notes: compactText(check.notes),
+          hazards: normalizeList(check.hazards)
+        })),
+        permits: (detail.permits || []).map(permit => ({
+          ...recordBase(permit),
+          permitType: permit.permitType,
+          authority: permit.authority,
+          reference: permit.reference,
+          expiresAt: permit.expiresAt
+        })),
+        inspections: (detail.inspections || []).map(inspection => ({
+          ...recordBase(inspection),
+          inspectionType: inspection.inspectionType,
+          result: inspection.result,
+          defectCount: normalizeList(inspection.defects).length,
+          inspectedAt: inspection.inspectedAt || inspection.scheduledAt || null
+        })),
+        observations: (detail.observations || []).map(observation => ({
+          ...recordBase(observation),
+          severity: observation.severity,
+          category: observation.category,
+          dueAt: observation.dueAt,
+          closedAt: observation.closedAt || null
+        })),
+        incidents: (detail.incidents || []).map(incident => ({
+          ...recordBase(incident),
+          incidentType: incident.incidentType,
+          severity: incident.severity,
+          occurredAt: incident.occurredAt,
+          resolvedAt: incident.resolvedAt || null
+        })),
+        safetyMeetings: (detail.safetyMeetings || []).map(meeting => ({
+          ...recordBase(meeting),
+          meetingType: meeting.meetingType,
+          scheduledAt: meeting.scheduledAt,
+          attendees: normalizeList(meeting.attendees),
+          topics: normalizeList(meeting.topics)
+        })),
+        jhas: (detail.jhas || []).map(jha => ({
+          ...recordBase(jha),
+          riskLevel: jha.riskLevel,
+          hazards: normalizeList(jha.hazards),
+          controls: normalizeList(jha.controls)
+        })),
+        sdsSheets: (detail.sdsSheets || []).map(sheet => ({
+          ...recordBase(sheet),
+          material: sheet.material,
+          supplier: sheet.supplier,
+          reference: sheet.reference,
+          expiresAt: sheet.expiresAt
+        })),
+        punchItems: (detail.punchItems || []).map(item => ({
+          ...recordBase(item),
+          location: item.location,
+          dueAt: item.dueAt,
+          resolvedAt: item.resolvedAt || null
+        }))
+      },
+      auditProof: auditIntegrity ? {
+        format: auditIntegrity.format,
+        algorithm: auditIntegrity.algorithm,
+        eventCount: auditIntegrity.eventCount,
+        headEventId: auditIntegrity.headEventId,
+        headHash: auditIntegrity.headHash,
+        verifiedAt: auditIntegrity.checkedAt
+      } : null
+    };
+    return JSON.parse(JSON.stringify(snapshot));
+  }
+
+  handoverEvidenceHash(source = {}) {
+    return sha256Json({
+      organization: source.organization || {},
+      client: source.client || {},
+      job: source.job || {},
+      evidence: source.evidence || {}
+    });
+  }
+
+  assessHandoverReadiness(jobId, options = {}) {
+    const detail = options.detail || this.getJobDetail(jobId, { includeAudit: false });
+    const source = this.buildHandoverEvidenceSnapshot(detail, { includeAuditProof: false });
+    const missing = [];
+    const blockers = [];
+    const warnings = [];
+    const closed = (record, statuses) => statuses.includes(normalizeStatus(record?.status, ''));
+    const completedJob = ['completed', 'closed', 'accepted'].includes(normalizeStatus(detail.status, ''))
+      || normalizeNumber(detail.progressPercent, 0) >= 100;
+    if (!completedJob) missing.push({ code: 'job_completion_required', label: 'Job completion at 100%' });
+    if (!(source.organization.legalName || source.organization.tradingName)) missing.push({ code: 'contractor_name_required', label: 'Contractor legal or trading name' });
+    if (!source.organization.registrationNumber) missing.push({ code: 'contractor_registration_required', label: 'Contractor registration number' });
+    if (!source.organization.address || !source.organization.city) missing.push({ code: 'contractor_address_required', label: 'Contractor address and city' });
+    if (!source.client.name) missing.push({ code: 'client_identity_required', label: 'Client identity' });
+    const activeEvidenceStatuses = new Set(['cancelled', 'canceled', 'rejected', 'void']);
+    const activeFieldReports = source.evidence.fieldReports.filter(report => !activeEvidenceStatuses.has(normalizeStatus(report.status, 'draft')));
+    if (!source.evidence.documents.length && !activeFieldReports.length) {
+      missing.push({ code: 'field_evidence_required', label: 'At least one retained field report or evidence document' });
+    }
+    const finalQuality = (detail.qualityChecks || []).find(check => (
+      closed(check, ['approved', 'passed', 'completed', 'closed', 'accepted', 'verified'])
+      && normalizeNumber(check.data?.defectsOpen ?? check.defectsOpen, normalizeList(check.defects).length) <= 0
+    ));
+    if (!finalQuality) missing.push({ code: 'final_quality_required', label: 'Approved final quality check with no open defects' });
+    const openSafety = (detail.safetyChecks || []).filter(check => !closed(check, ['approved', 'passed', 'completed', 'closed', 'verified', 'cancelled', 'canceled', 'rejected', 'void']));
+    if (openSafety.length) blockers.push({ code: 'open_safety_checks', label: `${openSafety.length} safety check(s) remain open`, recordIds: openSafety.map(item => item.id) });
+    const openIncidents = (detail.incidents || []).filter(item => !closed(item, ['resolved', 'closed', 'cancelled', 'canceled', 'rejected', 'void']));
+    if (openIncidents.length) blockers.push({ code: 'open_incidents', label: `${openIncidents.length} incident(s) remain unresolved`, recordIds: openIncidents.map(item => item.id) });
+    const openObservations = (detail.observations || []).filter(item => !closed(item, ['resolved', 'closed', 'cancelled', 'canceled', 'rejected', 'void']));
+    if (openObservations.length) blockers.push({ code: 'open_observations', label: `${openObservations.length} observation(s) remain unresolved`, recordIds: openObservations.map(item => item.id) });
+    const openPunch = (detail.punchItems || []).filter(item => !closed(item, ['resolved', 'verified', 'closed', 'completed', 'cancelled', 'canceled', 'rejected', 'void']));
+    if (openPunch.length) blockers.push({ code: 'open_punch_items', label: `${openPunch.length} punch item(s) remain unresolved`, recordIds: openPunch.map(item => item.id) });
+    const openInspections = (detail.inspections || []).filter(item => !closed(item, ['approved', 'passed', 'completed', 'closed', 'verified', 'cancelled', 'canceled', 'rejected', 'void']));
+    if (openInspections.length) blockers.push({ code: 'open_inspections', label: `${openInspections.length} inspection(s) remain open`, recordIds: openInspections.map(item => item.id) });
+    const currentPermits = (detail.permits || []).filter(item => {
+      if (closed(item, ['cancelled', 'canceled', 'rejected', 'void'])) return false;
+      const expired = item.expiresAt && Date.parse(item.expiresAt) < Date.now();
+      return expired || !closed(item, ['approved', 'current', 'filed', 'completed', 'closed', 'verified']);
+    });
+    if (currentPermits.length) blockers.push({ code: 'permit_readiness', label: `${currentPermits.length} permit record(s) are open or expired`, recordIds: currentPermits.map(item => item.id) });
+    const unhashedDocuments = source.evidence.documents.filter(document => document.filename && !document.contentHash);
+    if (unhashedDocuments.length) warnings.push({
+      code: 'legacy_evidence_without_content_hash',
+      label: `${unhashedDocuments.length} retained evidence file(s) predate content hashing`,
+      recordIds: unhashedDocuments.map(item => item.id)
+    });
+    const evidenceHash = this.handoverEvidenceHash(source);
+    const currentPackage = (detail.documents || []).find(document => (
+      normalizeStatus(document.type, '') === 'handover_issue_package'
+      && document.data?.evidenceHash === evidenceHash
+    )) || null;
+    return {
+      ready: missing.length === 0 && blockers.length === 0,
+      status: blockers.length ? 'blocked' : missing.length ? 'needs_evidence' : currentPackage ? 'current' : 'ready',
+      jobId: detail.id,
+      evidenceHash,
+      missing,
+      blockers,
+      warnings,
+      currentPackageId: currentPackage?.id || null,
+      counts: Object.fromEntries(Object.entries(source.evidence).map(([key, records]) => [key, records.length]))
+    };
+  }
+
+  prepareHandoverIssuePackage(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const detail = this.getJobDetail(jobId, { includeAudit: false });
+      const readiness = this.assessHandoverReadiness(jobId, { detail });
+      if (!readiness.ready) {
+        const error = new Error('The handover dossier is not ready. Resolve the retained completion, quality, safety, permit, inspection, incident, observation, punch, and evidence requirements first.');
+        error.statusCode = 409;
+        error.code = 'handover_package_not_ready';
+        error.details = readiness;
+        throw error;
+      }
+      const source = this.buildHandoverEvidenceSnapshot(detail);
+      const evidenceHash = this.handoverEvidenceHash(source);
+      const identityKey = sha256Text(`${jobId}\0${evidenceHash}`);
+      const documentId = `doc_handover_${identityKey.slice(0, 24)}`;
+      const communicationId = `comm_handover_${identityKey.slice(0, 24)}`;
+      const existingDocument = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+      if (existingDocument) {
+        const issuePackage = this.getHandoverIssuePackage(documentId, { audit: false });
+        const communicationRow = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?').get(communicationId, jobId);
+        if (!communicationRow) {
+          const error = new Error('The retained handover package is missing its controlled delivery draft.');
+          error.statusCode = 409;
+          error.code = 'handover_issue_package_incomplete';
+          throw error;
+        }
+        const communication = this.mapCommunication(communicationRow);
+        const approvalRow = communication.approvalId
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(communication.approvalId)
+          : null;
+        return {
+          document: issuePackage.document,
+          communication,
+          approval: approvalRow ? this.mapApproval(approvalRow) : null,
+          readiness,
+          issueReference: issuePackage.document.data.issueReference,
+          packageHash: issuePackage.packageHash,
+          evidenceHash,
+          replayed: true,
+          deliveryMode: 'draft_only',
+          externalCommitments: 0
+        };
+      }
+
+      const preparedAt = nowIso();
+      const periodYear = new Date(preparedAt).getUTCFullYear();
+      const issueReference = `HOV-${periodYear}-${String(jobId).replace(/[^a-z0-9]/gi, '').slice(-8).toUpperCase()}-${evidenceHash.slice(0, 8).toUpperCase()}`;
+      const snapshot = {
+        packageVersion: 1,
+        packageType: 'wkb_style_handover',
+        issueReference,
+        preparedAt,
+        evidenceHash,
+        legalNotice: 'This package is an evidence-oriented project handover record. It does not certify statutory Wkb compliance or replace professional or authority review.',
+        ...source
+      };
+      const packageHash = sha256Json(snapshot);
+      const html = this.renderHandoverIssuePackageHtml(snapshot, packageHash);
+      const contentHash = sha256Text(html);
+      const document = this.addDocument(jobId, {
+        type: 'handover_issue_package',
+        title: `Handover dossier ${issueReference}`,
+        filename: `${issueReference}.html`,
+        mimeType: 'text/html; charset=utf-8',
+        sizeBytes: Buffer.byteLength(html, 'utf8'),
+        status: 'prepared',
+        tags: ['wkb', 'handover', 'closeout', 'immutable'],
+        data: {
+          source: 'handover_issue_package',
+          sourceRecordId: jobId,
+          issueReference,
+          packageHash,
+          contentHash,
+          evidenceHash,
+          snapshot,
+          format: 'html',
+          clientVisible: false,
+          deliveryMode: 'approval_gated_draft',
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: false, id: documentId, ignoreExisting: true });
+      const clientName = detail.client?.name || detail.clientName || 'Client';
+      const communication = this.addCommunication(jobId, {
+        channel: payload.channel || 'portal',
+        direction: 'outbound',
+        status: 'draft',
+        subject: `Project handover ${issueReference} - ${detail.title}`,
+        body: `Dear ${clientName},\n\nThe retained project handover dossier ${issueReference} for ${detail.title} is attached for review. It summarizes the evidence held in Contractor.AI and does not itself certify statutory compliance.\n\nPlease retain the package with the underlying project records.`,
+        recipient: detail.client?.email || detail.clientEmail || null,
+        expectsReply: false,
+        requiresApproval: true,
+        data: {
+          source: 'handover_issue_package',
+          sourceRecordId: jobId,
+          issueReference,
+          packageHash,
+          evidenceHash,
+          attachmentDocumentIds: [documentId],
+          deliveryMode: 'draft_only',
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: false, id: communicationId, ignoreExisting: true });
+      this.audit({
+        entityType: 'handover_issue_package',
+        entityId: documentId,
+        jobId,
+        action: 'prepare_handover_issue_package',
+        actor: options.actor || 'Contractor.AI',
+        after: {
+          documentId,
+          communicationId,
+          approvalId: communication.approvalId,
+          issueReference,
+          packageHash,
+          evidenceHash,
+          externalCommitments: 0
+        },
+        metadata: { deliveryMode: 'draft_only', statutoryCertificationClaimed: false }
+      });
+      return {
+        document,
+        communication,
+        approval: communication.approval || null,
+        readiness,
+        issueReference,
+        packageHash,
+        evidenceHash,
+        replayed: false,
+        deliveryMode: 'draft_only',
+        externalCommitments: 0
+      };
+    });
+  }
+
+  getHandoverIssuePackage(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (document.type !== 'handover_issue_package') {
+      const error = new Error('Document is not a generated handover issue package.');
+      error.statusCode = 409;
+      error.code = 'handover_issue_package_required';
+      throw error;
+    }
+    const snapshot = document.data?.snapshot;
+    const packageHash = normalizeText(document.data?.packageHash, '');
+    if (!snapshot || !packageHash || sha256Json(snapshot) !== packageHash) {
+      const error = new Error('The retained handover package failed its snapshot checksum verification.');
+      error.statusCode = 409;
+      error.code = 'handover_issue_package_integrity_failed';
+      throw error;
+    }
+    const content = this.renderHandoverIssuePackageHtml(snapshot, packageHash);
+    if (!document.data?.contentHash || sha256Text(content) !== document.data.contentHash) {
+      const error = new Error('The retained handover package failed its content checksum verification.');
+      error.statusCode = 409;
+      error.code = 'handover_issue_package_integrity_failed';
+      throw error;
+    }
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId: document.jobId,
+        action: 'download_handover_issue_package',
+        actor: options.actor || 'authenticated_operator',
+        after: { issueReference: document.data.issueReference, packageHash, evidenceHash: document.data.evidenceHash }
+      });
+    }
+    return {
+      document,
+      content,
+      filename: document.filename || `${document.data.issueReference || 'handover'}.html`,
+      mimeType: 'text/html; charset=utf-8',
+      packageHash
+    };
+  }
+
+  renderHandoverIssuePackageHtml(snapshot, packageHash) {
+    const date = value => {
+      if (!value) return 'Not retained';
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value) : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const statusRows = (records = [], detail = () => '') => records.map(record => `<tr><td>${escapeHtml(record.title || record.filename || record.id)}</td><td>${escapeHtml(record.status || 'retained')}</td><td>${detail(record)}</td></tr>`).join('');
+    const evidence = snapshot.evidence || {};
+    const sections = [
+      ['Field evidence', evidence.documents, record => `${escapeHtml(record.filename || record.type || '')}${record.contentHash ? `<br><small>SHA-256 ${escapeHtml(record.contentHash)}</small>` : '<br><small>Legacy evidence: content digest not retained</small>'}`],
+      ['Daily reports', evidence.fieldReports, record => `${escapeHtml(date(record.reportDate))} / ${escapeHtml(record.workCompleted || '')}`],
+      ['Completed tasks', evidence.tasks, record => escapeHtml(record.completionEvidence || date(record.completedAt))],
+      ['Quality checks', evidence.qualityChecks, record => `${escapeHtml(record.result || '')} / ${escapeHtml(record.defectsOpen || 0)} open defect(s)`],
+      ['Safety checks', evidence.safetyChecks, record => `${escapeHtml(record.riskLevel || 'normal')} / ${escapeHtml(record.notes || '')}`],
+      ['Permits', evidence.permits, record => `${escapeHtml(record.reference || record.authority || '')} / expires ${escapeHtml(date(record.expiresAt))}`],
+      ['Inspections', evidence.inspections, record => `${escapeHtml(record.result || '')} / ${escapeHtml(record.defectCount || 0)} defect(s)`],
+      ['Observations', evidence.observations, record => `${escapeHtml(record.severity || '')} / closed ${escapeHtml(date(record.closedAt))}`],
+      ['Incidents', evidence.incidents, record => `${escapeHtml(record.severity || '')} / resolved ${escapeHtml(date(record.resolvedAt))}`],
+      ['Safety meetings', evidence.safetyMeetings, record => `${escapeHtml(record.attendees?.length || 0)} attendee(s) / ${escapeHtml(record.topics?.join(', ') || '')}`],
+      ['Job hazard analyses', evidence.jhas, record => `${escapeHtml(record.riskLevel || '')} / ${escapeHtml(record.controls?.join(', ') || '')}`],
+      ['Safety data sheets', evidence.sdsSheets, record => `${escapeHtml(record.material || '')} / ${escapeHtml(record.reference || '')}`],
+      ['Punch items', evidence.punchItems, record => `${escapeHtml(record.location || '')} / resolved ${escapeHtml(date(record.resolvedAt))}`]
+    ].filter(([, records]) => records?.length);
+    const organization = snapshot.organization || {};
+    const client = snapshot.client || {};
+    const job = snapshot.job || {};
+    const organizationName = organization.tradingName || organization.legalName || 'Contractor';
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 980px; margin: 0 auto; padding: 42px; font-size: 13px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 32px; padding-bottom: 24px; border-bottom: 3px solid #176b57; }
+    h1 { margin: 0; font-size: 29px; color: #174d40; }
+    h2 { margin: 28px 0 9px; font-size: 18px; color: #23483d; }
+    p { margin: 4px 0; }
+    .muted, small { color: #65756f; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties, .summary { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; margin-top: 22px; }
+    .summary { grid-template-columns: repeat(4, 1fr); }
+    .summary div { padding: 12px; background: #f2f6f4; }
+    .summary span { display: block; color: #65756f; font-size: 10px; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px; border-bottom: 1px solid #dfe7e3; text-align: left; vertical-align: top; }
+    th { color: #53645e; background: #f2f6f4; font-size: 10px; text-transform: uppercase; }
+    .notice { margin-top: 28px; padding: 16px; border-left: 4px solid #b77618; background: #fff8e8; }
+    footer { margin-top: 34px; padding-top: 15px; border-top: 1px solid #dce5e1; color: #65756f; font-size: 10px; overflow-wrap: anywhere; }
+    @media print { body { max-width: none; padding: 18mm; } }
+    @media (max-width: 650px) { body { padding: 20px; } header, .parties, .summary { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>Project handover dossier</h1><p><strong>${escapeHtml(organizationName)}</strong></p><p>${escapeHtml(organization.address || '')}, ${escapeHtml(organization.postalCode || '')} ${escapeHtml(organization.city || '')}</p><p class="muted">Registration ${escapeHtml(organization.registrationNumber || 'not retained')}</p></div><div class="reference"><span class="muted">Handover reference</span><strong>${escapeHtml(snapshot.issueReference)}</strong><p>Prepared ${escapeHtml(date(snapshot.preparedAt))}</p></div></header>
+  <section class="parties"><div><h2>Client</h2><strong>${escapeHtml(client.company || client.name || 'Client')}</strong><p>${escapeHtml(client.address || '')}</p><p>${escapeHtml(client.email || client.phone || '')}</p></div><div><h2>Project</h2><strong>${escapeHtml(job.title)}</strong><p>${escapeHtml([job.address, job.city, job.country].filter(Boolean).join(', '))}</p><p>${escapeHtml(job.description || '')}</p></div></section>
+  <section class="summary"><div><span>Progress</span><strong>${escapeHtml(job.progressPercent || 0)}%</strong></div><div><span>Documents</span><strong>${escapeHtml(evidence.documents?.length || 0)}</strong></div><div><span>Field reports</span><strong>${escapeHtml(evidence.fieldReports?.length || 0)}</strong></div><div><span>Audit events</span><strong>${escapeHtml(snapshot.auditProof?.eventCount || 0)}</strong></div></section>
+  ${sections.map(([title, records, detail]) => `<section><h2>${escapeHtml(title)}</h2><table><thead><tr><th>Record</th><th>Status</th><th>Evidence</th></tr></thead><tbody>${statusRows(records, detail)}</tbody></table></section>`).join('')}
+  <section class="notice"><strong>Evidence scope</strong><p>${escapeHtml(snapshot.legalNotice)}</p><p>The listed evidence remains privately retained in Contractor.AI. This package records identifiers and hashes; it does not expose private storage locations.</p></section>
+  <footer>Package SHA-256 ${escapeHtml(packageHash)} &middot; Evidence SHA-256 ${escapeHtml(snapshot.evidenceHash)} &middot; Audit head ${escapeHtml(snapshot.auditProof?.headHash || 'not retained')} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)}</footer>
+</body>
+</html>`;
+  }
+
   allocateInvoiceReference(preparedAt = nowIso()) {
     const periodYear = new Date(preparedAt).getUTCFullYear();
     if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
@@ -6610,6 +7105,9 @@ class ContractorOperatingLedger {
 
   getIssuePackage(documentId, options = {}) {
     const document = this.getDocument(documentId);
+    if (document.type === 'handover_issue_package') {
+      return this.getHandoverIssuePackage(documentId, options);
+    }
     if (document.type === 'quote_issue_package') {
       const issue = this.getQuoteIssuePackage(documentId, options);
       return { ...issue, content: issue.html, mimeType: 'text/html; charset=utf-8' };
@@ -10201,7 +10699,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     const communication = this.mapCommunication(row);
     const source = communication.data?.source;
-    if (!['quote_issue_package', 'invoice_issue_package', 'credit_note_issue_package'].includes(source)) return communication;
+    if (!['quote_issue_package', 'invoice_issue_package', 'credit_note_issue_package', 'handover_issue_package'].includes(source)) return communication;
 
     const attachmentIds = Array.isArray(communication.data?.attachmentDocumentIds)
       ? communication.data.attachmentDocumentIds.filter(Boolean)
@@ -10220,6 +10718,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const error = new Error('The quote delivery draft no longer matches its retained issue package.');
         error.statusCode = 409;
         error.code = 'quote_issue_package_attachment_mismatch';
+        throw error;
+      }
+      return communication;
+    }
+
+    if (source === 'handover_issue_package') {
+      if (attachmentIds.length !== 1) {
+        const error = new Error('The handover delivery draft must retain exactly one immutable dossier attachment.');
+        error.statusCode = 409;
+        error.code = 'handover_issue_package_attachment_invalid';
+        throw error;
+      }
+      const issuePackage = this.getHandoverIssuePackage(attachmentIds[0], { audit: false });
+      if (issuePackage.document.jobId !== communication.jobId
+        || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
+        || issuePackage.packageHash !== communication.data?.packageHash
+        || issuePackage.document.data?.evidenceHash !== communication.data?.evidenceHash) {
+        const error = new Error('The handover delivery draft no longer matches its retained dossier.');
+        error.statusCode = 409;
+        error.code = 'handover_issue_package_attachment_mismatch';
+        throw error;
+      }
+      const readiness = this.assessHandoverReadiness(communication.jobId);
+      if (!readiness.ready || readiness.currentPackageId !== issuePackage.document.id) {
+        const error = new Error('The handover dossier is no longer current with the retained project evidence. Prepare a new package before approval or delivery.');
+        error.statusCode = 409;
+        error.code = 'handover_issue_package_stale';
+        error.details = readiness;
         throw error;
       }
       return communication;
@@ -10418,6 +10944,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       throw error;
     }
     return this.mapDocument(row);
+  }
+
+  listHandoverPackages(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const limit = safeLimit(filters.limit, 100, 500);
+    const rows = jobId
+      ? this.db.prepare(`
+          SELECT * FROM documents
+          WHERE type = 'handover_issue_package' AND job_id = ?
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(jobId, limit)
+      : this.db.prepare(`
+          SELECT * FROM documents
+          WHERE type = 'handover_issue_package'
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(limit);
+    return rows.map(row => this.mapDocument(row));
   }
 
   addTimeLog(jobId, payload = {}, options = {}) {
@@ -18460,6 +19005,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   classifyClientSuccessReadiness(flags = {}) {
     if (flags.approvalRequired) return 'approval_required';
     if (flags.waitingClient) return 'waiting_client';
+    if (flags.handoverReady || flags.handoverPendingDelivery) return 'handover_ready';
     if (flags.closeoutReady) return 'closeout_ready';
     if (flags.punchOrWarranty) return 'punch_warranty';
     if (flags.aftercareDue) return 'aftercare_due';
@@ -18472,6 +19018,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       matching,
       approvalRequired: 0,
       waitingClient: 0,
+      handoverReady: 0,
+      handoverPendingDelivery: 0,
       closeoutReady: 0,
       punchWarranty: 0,
       aftercareDue: 0,
@@ -18482,6 +19030,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       outboundDrafts: 0,
       waitingReplies: 0,
       closeoutMissing: 0,
+      handoverPackages: 0,
+      handoverDelivered: 0,
       openPunchItems: 0,
       openWarrantyClaims: 0,
       openAftercare: 0,
@@ -18493,6 +19043,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const status = normalizeStatus(row.clientStatus, 'stable');
       if (row.flags?.approvalRequired) summary.approvalRequired += 1;
       if (row.flags?.waitingClient) summary.waitingClient += 1;
+      if (row.flags?.handoverReady) summary.handoverReady += 1;
+      if (row.flags?.handoverPendingDelivery) summary.handoverPendingDelivery += 1;
       if (row.flags?.closeoutReady) summary.closeoutReady += 1;
       if (row.flags?.punchOrWarranty) summary.punchWarranty += 1;
       if (row.flags?.aftercareDue) summary.aftercareDue += 1;
@@ -18503,6 +19055,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.outboundDrafts += normalizeNumber(row.counts?.outboundDrafts, 0);
       summary.waitingReplies += normalizeNumber(row.counts?.waitingReplies, 0);
       summary.closeoutMissing += row.flags?.closeoutMissing ? 1 : 0;
+      summary.handoverPackages += normalizeNumber(row.counts?.handoverPackages, 0);
+      summary.handoverDelivered += normalizeNumber(row.counts?.handoverDelivered, 0);
       summary.openPunchItems += normalizeNumber(row.counts?.openPunchItems, 0);
       summary.openWarrantyClaims += normalizeNumber(row.counts?.openWarrantyClaims, 0);
       summary.openAftercare += normalizeNumber(row.counts?.openAftercare, 0);
@@ -18543,6 +19097,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const pendingSelections = selections.filter(selection => !['approved', 'accepted', 'locked', 'selected'].includes(normalizeStatus(selection.status, 'pending_client')));
         const overdueSelections = pendingSelections.filter(selection => this.financeDueOrOverdue(selection.dueAt));
         const communications = detail.communications || [];
+        const handoverReadiness = this.assessHandoverReadiness(detail.id, { detail });
+        const handoverPackages = (detail.documents || [])
+          .filter(document => normalizeStatus(document.type, '') === 'handover_issue_package');
+        const currentHandoverPackage = handoverPackages.find(document => document.id === handoverReadiness.currentPackageId) || null;
+        const latestHandoverPackage = currentHandoverPackage || handoverPackages[0] || null;
+        const handoverCommunications = communications.filter(message => normalizeStatus(message.data?.source, '') === 'handover_issue_package');
+        const handoverCommunication = (currentHandoverPackage
+          ? handoverCommunications.find(message => message.data?.packageHash === currentHandoverPackage.data?.packageHash)
+          : null) || handoverCommunications[0] || null;
+        const handoverDelivered = Boolean(currentHandoverPackage && handoverCommunication
+          && ['sent', 'delivered'].includes(normalizeStatus(handoverCommunication.status, '')));
+        const handoverReady = handoverReadiness.ready && !currentHandoverPackage;
+        const handoverPendingDelivery = Boolean(currentHandoverPackage && !handoverDelivered);
         const outboundDrafts = communications.filter(message =>
           normalizeStatus(message.direction, '') === 'outbound'
           && ['draft', 'pending_approval'].includes(normalizeStatus(message.status, 'draft'))
@@ -18596,6 +19163,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const flags = {
           approvalRequired,
           waitingClient,
+          handoverReady,
+          handoverPendingDelivery,
           closeoutReady: closeoutMissing,
           punchOrWarranty,
           aftercareDue,
@@ -18610,6 +19179,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (overdueReplies.length || waitingReplies.length) nextActions.push({ type: 'client_reply_follow_up', label: 'Draft client reply follow-up', communicationId: (overdueReplies[0] || waitingReplies[0])?.id || null, requiresApproval: true });
         if (pendingSelections.length) nextActions.push({ type: 'review_client_selection', label: 'Record the retained client selection decision', selectionId: pendingSelections[0].id, requiresApproval: true });
         if (closeoutMissing) nextActions.push({ type: 'prepare_closeout', label: 'Create closeout pack and client handover draft', requiresApproval: true });
+        if (handoverReady) nextActions.push({
+          type: 'prepare_handover_package',
+          label: 'Prepare immutable handover dossier',
+          evidenceHash: handoverReadiness.evidenceHash,
+          requiresApproval: false
+        });
+        if (handoverPendingDelivery && normalizeStatus(handoverCommunication?.status, '') === 'approved') nextActions.push({
+          type: 'verify_handover_delivery',
+          label: 'Record delivery through a verified integration',
+          communicationId: handoverCommunication.id,
+          requiresApproval: true
+        });
         if (openPunchItems.length) nextActions.push({
           type: 'resolve_punch_item',
           label: 'Resolve punch item before acceptance',
@@ -18674,7 +19255,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             dueWarrantyClaims: dueWarrantyClaims.length,
             openAftercare: openAftercare.length,
             dueAftercare: dueAftercare.length,
-            recurringPlans: activeRecurringPlans.length
+            recurringPlans: activeRecurringPlans.length,
+            handoverPackages: handoverPackages.length,
+            handoverDelivered: handoverDelivered ? 1 : 0,
+            handoverMissing: handoverReadiness.missing.length,
+            handoverBlockers: handoverReadiness.blockers.length
           },
           money: {
             clientValue,
@@ -18686,8 +19271,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             punchItem: openPunchItems[0] || null,
             warrantyClaim: openWarrantyClaims[0] || null,
             aftercare: openAftercare[0] || null,
-            recurringPlan: activeRecurringPlans[0] || null
-          }
+            recurringPlan: activeRecurringPlans[0] || null,
+            handoverPackage: latestHandoverPackage,
+            handoverCommunication
+          },
+          handoverReadiness
         };
       });
 
@@ -18696,6 +19284,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (mode === 'approval') return row.flags?.approvalRequired === true;
       if (mode === 'waiting') return row.flags?.waitingClient === true;
       if (mode === 'waiting_client') return row.flags?.waitingClient === true;
+      if (mode === 'handover') return row.flags?.handoverReady === true || row.flags?.handoverPendingDelivery === true;
+      if (mode === 'handover_ready') return row.flags?.handoverReady === true || row.flags?.handoverPendingDelivery === true;
       if (mode === 'closeout') return row.flags?.closeoutReady === true;
       if (mode === 'closeout_ready') return row.flags?.closeoutReady === true;
       if (mode === 'punch') return row.flags?.punchOrWarranty === true;
@@ -18709,10 +19299,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const statusRank = {
       approval_required: 0,
       waiting_client: 1,
-      closeout_ready: 2,
-      punch_warranty: 3,
-      aftercare_due: 4,
-      stable: 5
+      handover_ready: 2,
+      closeout_ready: 3,
+      punch_warranty: 4,
+      aftercare_due: 5,
+      stable: 6
     };
     const priorityScore = priority => {
       const rank = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -19873,6 +20464,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   countCapabilityRequirement(requirement = {}) {
     if (!requirement.table) return 0;
+    if (requirement.recordType) {
+      const scope = this.activeRecordScope(requirement.table);
+      return Number(this.db.prepare(`
+        SELECT COUNT(DISTINCT records.id) AS count
+        FROM ${scope.from}
+        WHERE ${scope.condition}
+          AND records.type = ?
+      `).get(requirement.recordType).count || 0);
+    }
     return this.countActiveRecords(requirement.table);
   }
 
@@ -19911,7 +20511,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       supplier_invoices: 'status',
       supplier_invoice_payments: 'status',
       invoices: 'status',
-      creditNotes: 'status',
+      credit_notes: 'status',
       payments: 'status',
       draw_requests: 'status',
       lien_waivers: 'status',
@@ -19925,28 +20525,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (!statusColumn) {
       return requirement.table === 'audit_events' ? 0 : this.countCapabilityRequirement(requirement);
     }
-    const closed = Array.from(LEDGER_CLOSED_STATUSES);
+    const closed = Array.from(new Set([...LEDGER_CLOSED_STATUSES, ...(requirement.readyStatuses || [])]));
     const placeholders = closed.map(() => '?').join(',');
     const scope = this.activeRecordScope(requirement.table);
+    const typeClause = requirement.recordType ? 'AND records.type = ?' : '';
+    const params = requirement.recordType ? [requirement.recordType, ...closed] : closed;
     return Number(this.db.prepare(`
       SELECT COUNT(DISTINCT records.id) AS count
       FROM ${scope.from}
       WHERE ${scope.condition}
+        ${typeClause}
         AND records.${statusColumn} NOT IN (${placeholders})
-    `).get(...closed).count || 0);
+    `).get(...params).count || 0);
   }
 
   describeCapabilityRequirement(requirement = {}, jobDetail = null) {
     if (jobDetail) {
       const value = jobDetail[requirement.detailKey];
-      const records = Array.isArray(value)
+      const allRecords = Array.isArray(value)
         ? value
         : value
           ? [value]
           : [];
+      const records = requirement.recordType
+        ? allRecords.filter(record => normalizeStatus(record?.type, '') === requirement.recordType)
+        : allRecords;
+      const readyStatuses = new Set(requirement.readyStatuses || []);
+      const recordOpen = record => !readyStatuses.has(normalizeStatus(record?.status, '')) && isLedgerCapabilityRecordOpen(record);
       const openCount = Array.isArray(value)
-        ? records.filter(isLedgerCapabilityRecordOpen).length
-        : records.length && isLedgerCapabilityRecordOpen(records[0])
+        ? records.filter(recordOpen).length
+        : records.length && recordOpen(records[0])
           ? 1
           : 0;
       return {
@@ -21638,6 +22246,35 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'create_quality_check', jobId: job.id, severity: 'high', message: `${job.title} is complete but has no final quality check.` });
     }
 
+    const completedHandoverCandidates = this.db.prepare(`
+      SELECT id, title FROM jobs
+      WHERE (status IN ('completed', 'closed', 'accepted') OR progress_percent >= 100)
+        AND status NOT IN ('cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
+      ORDER BY updated_at DESC
+      LIMIT 10
+    `).all();
+    for (const job of completedHandoverCandidates) {
+      const detail = this.getJobDetail(job.id, { includeAudit: false });
+      const readiness = this.assessHandoverReadiness(job.id, { detail });
+      if (!readiness.ready || readiness.currentPackageId) continue;
+      const existingTask = this.db.prepare(`
+        SELECT id FROM job_tasks
+        WHERE job_id = ?
+          AND status NOT IN ('completed', 'cancelled')
+          AND data_json LIKE ?
+        LIMIT 1
+      `).get(job.id, `%${readiness.evidenceHash}%`);
+      if (existingTask) continue;
+      actions.push({
+        type: 'prepare_handover_package_review',
+        jobId: job.id,
+        severity: 'medium',
+        evidenceHash: readiness.evidenceHash,
+        requiresApproval: false,
+        message: `${job.title} has a complete handover evidence set ready for immutable package preparation.`
+      });
+    }
+
     const openSafety = this.db.prepare(`
       SELECT id, job_id, title, risk_level FROM safety_checks
       WHERE status NOT IN ('approved', 'completed', 'closed', 'cancelled')
@@ -21786,7 +22423,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const type = normalizeStatus(actionType, 'review');
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
-    if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring')) return 'client_success';
+    if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
     if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('jha') || type.includes('sds') || type.includes('access')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
@@ -21817,6 +22454,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_loading_plan',
       'draft_worker_instruction',
       'create_quality_check',
+      'prepare_handover_package_review',
       'payment_follow_up',
       'client_reply_follow_up',
       'renew_permit',
@@ -22579,6 +23217,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           this.audit({ entityType: 'quality_check', entityId: quality.id, jobId: action.jobId, action: 'autonomous_create_quality_check', actor, after: quality });
         }
 
+        const handoverReviews = preview.filter(action => action.type === 'prepare_handover_package_review').slice(0, 3);
+        for (const action of handoverReviews) {
+          const task = this.addTask(action.jobId, {
+            title: `Prepare handover dossier: ${action.message.replace(/ has a complete.*/, '')}`,
+            description: 'Review the retained completion, client, quality, safety, permit, and field evidence. Generate the immutable dossier from Client Success only after the evidence set is confirmed. External delivery remains separately approval-gated.',
+            priority: 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'autonomous_cycle',
+            data: {
+              evidenceHash: action.evidenceHash,
+              packagePrepared: false,
+              externalDeliveryInitiated: false
+            }
+          }, { actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalDeliveryInitiated: false });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_handover_package_review_task',
+            actor,
+            after: task,
+            metadata: { evidenceHash: action.evidenceHash, externalCommitments: 0, externalDeliveryInitiated: false }
+          });
+        }
+
         const paymentFollowUps = preview.filter(action => action.type === 'payment_follow_up').slice(0, 2);
         for (const action of paymentFollowUps) {
           const communication = this.addCommunication(action.jobId, {
@@ -22858,6 +23522,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     if (!auditIntegrity.valid) {
       issues.push({ severity: 'error', message: `Audit integrity verification failed with ${auditIntegrity.failures.length} retained issue(s).` });
+    }
+    const handoverPackages = this.db.prepare(`
+      SELECT id FROM documents
+      WHERE type = 'handover_issue_package'
+      ORDER BY created_at DESC
+    `).all();
+    for (const handoverPackage of handoverPackages) {
+      try {
+        this.getHandoverIssuePackage(handoverPackage.id, { audit: false });
+      } catch (error) {
+        issues.push({
+          severity: 'error',
+          message: `Handover dossier ${handoverPackage.id} failed retained checksum verification: ${error.message}`
+        });
+      }
     }
     const orphanTasks = Number(this.db.prepare('SELECT COUNT(*) AS count FROM job_tasks LEFT JOIN jobs ON jobs.id = job_tasks.job_id WHERE jobs.id IS NULL').get().count || 0);
     if (orphanTasks) issues.push({ severity: 'error', message: `${orphanTasks} task(s) are orphaned.` });

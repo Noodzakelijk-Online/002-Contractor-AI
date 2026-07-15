@@ -702,7 +702,8 @@ function withStoredUpload(payload, storedFile) {
       storedName: storedFile.filename,
       storageRef: storedFile.storageRef,
       mimeType: storedFile.mimeType,
-      size: storedFile.size
+      size: storedFile.size,
+      sha256: storedFile.sha256 || null
     }
   };
 }
@@ -1439,7 +1440,11 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use((req, res, next) => {
   if (req.operator?.authenticated && req.body && typeof req.body === 'object') {
-    req.body.actor = actorFromRequest(req);
+    Object.defineProperty(req.body, 'actor', {
+      value: actorFromRequest(req),
+      enumerable: false,
+      configurable: true
+    });
   }
   next();
 });
@@ -2842,6 +2847,24 @@ app.post('/api/ledger/jobs/:id/closeout', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/jobs/:id/handover-readiness', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    readiness: operatingLedger.assessHandoverReadiness(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/handover-packages', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    package: operatingLedger.prepareHandoverIssuePackage(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id, { includeAudit: true }),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
 app.get('/api/ledger/approvals', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3467,7 +3490,8 @@ app.post('/api/ledger/upload', async (req, res) => {
       upload: storedFile ? {
         storageRef: storedFile.storageRef,
         mimeType: storedFile.mimeType,
-        size: storedFile.size
+        size: storedFile.size,
+        sha256: storedFile.sha256 || null
       } : null
     };
     const actor = actorFromRequest(req, 'upload_api');
@@ -3596,6 +3620,7 @@ function operationalExport() {
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
+    handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
     audit: operatingLedger.listAudit({ limit: 1_000 })
   }));
@@ -3655,6 +3680,7 @@ function validateOperationalExport(snapshot) {
       tradePartners: snapshot.tradePartners.length,
       supplierInvoices: Array.isArray(snapshot.supplierInvoices) ? snapshot.supplierInvoices.length : 0,
       supplierInvoicePayments: Array.isArray(snapshot.supplierInvoicePayments) ? snapshot.supplierInvoicePayments.length : 0,
+      handoverPackages: Array.isArray(snapshot.handoverPackages) ? snapshot.handoverPackages.length : 0,
       approvals: snapshot.approvals.length,
       audit: snapshot.audit.length
     }

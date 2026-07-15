@@ -97,6 +97,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(exported.body.jobs.some(job => job.id === intake.body.job.id));
   assert.ok(Array.isArray(exported.body.supplierInvoices));
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
+  assert.ok(Array.isArray(exported.body.handoverPackages));
 
   const exportValidation = await request(baseUrl, '/api/operations/exports/validate', {
     method: 'POST',
@@ -109,6 +110,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.counts.jobs, exported.body.jobs.length);
   assert.equal(exportValidation.body.counts.supplierInvoices, exported.body.supplierInvoices.length);
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
+  assert.equal(exportValidation.body.counts.handoverPackages, exported.body.handoverPackages.length);
 
   const tamperedExport = structuredClone(exported.body);
   tamperedExport.jobs[0].title = 'Tampered after export';
