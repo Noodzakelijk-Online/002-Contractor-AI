@@ -969,6 +969,62 @@ test('PostgreSQL audit chain atomically serializes concurrent replica appends', 
   }
 });
 
+test('PostgreSQL commercial acceptance preserves net contract accounting parity', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const marker = Date.now();
+    const job = ledger.createIntake({
+      clientName: `Postgres Commercial ${marker}`,
+      title: `Postgres commercial contract ${marker}`,
+      service: 'commercial_contract',
+      estimatedCost: 400,
+      contractValue: 400,
+      lineItems: [{ description: 'Initial allowance', quantity: 1, unitPrice: 400 }],
+      assignAutomatically: false
+    }, { actor: 'postgres_commercial_test' });
+    const quote = ledger.createQuote(job.id, {
+      taxRate: 21,
+      subtotal: 9999,
+      lineItems: [{ description: 'Accepted scope', quantity: 2, unitPrice: 500 }]
+    }, { actor: 'postgres_commercial_test' });
+    assert.equal(quote.subtotal, 1000);
+    assert.equal(quote.total, 1210);
+    ledger.resolveApproval(quote.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    assert.equal(ledger.getJobDetail(job.id).contractValue, 400);
+    const quoteAcceptance = ledger.requestQuoteAcceptance(job.id, quote.id, {
+      acceptedAt: '2026-07-14T12:00:00.000Z',
+      evidenceReference: `postgres-quote-proof-${marker}`
+    }, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(quoteAcceptance.approval.id, { status: 'approved', resolvedBy: 'postgres_approver' });
+    assert.equal(ledger.getJobDetail(job.id).contractValue, 1000);
+
+    const changeOrder = ledger.createChangeOrder(job.id, {
+      quoteId: quote.id,
+      title: 'Postgres added scope',
+      scopeDelta: 'Retain one additional approved work package.',
+      status: 'submitted',
+      requiresApproval: true,
+      taxRate: 21,
+      lineItems: [{ description: 'Additional package', quantity: 1, unitPrice: 125 }]
+    }, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(changeOrder.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    assert.equal(ledger.getJobDetail(job.id).contractValue, 1000);
+    const changeAcceptance = ledger.requestChangeOrderAcceptance(job.id, changeOrder.id, {
+      acceptedAt: '2026-07-14T13:00:00.000Z',
+      evidenceReference: `postgres-change-proof-${marker}`
+    }, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(changeAcceptance.approval.id, { status: 'approved', resolvedBy: 'postgres_approver' });
+    const detail = ledger.getJobDetail(job.id, { includeAudit: true });
+    assert.equal(detail.contractValue, 1125);
+    assert.equal(detail.quotes.find(item => item.id === quote.id).status, 'accepted');
+    assert.equal(detail.changeOrders.find(item => item.id === changeOrder.id).status, 'accepted');
+    assert.ok(detail.audit.some(event => event.action === 'accept_change_order_contract'));
+    assert.equal(ledger.verifyAuditIntegrity().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
 test('PostgreSQL audit history preserves cursor, filter, facet, and chain parity', { skip: !connectionString }, () => {
   const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
   const runId = `postgres-history-${Date.now()}`;

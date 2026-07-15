@@ -859,5 +859,39 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
       body: JSON.stringify({ status: 'approved', resolvedBy: 'Approver role' })
     });
     assert.equal(approved.response.status, 200);
+
+    const deniedFieldAcceptance = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/quotes/${quote.body.quote.id}/acceptance`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify({ acceptedAt: '2026-07-14T12:00:00.000Z', evidenceReference: 'FIELD-CANNOT-ACCEPT' })
+    });
+    assert.equal(deniedFieldAcceptance.response.status, 403);
+    assert.equal(deniedFieldAcceptance.body.error.code, 'insufficient_role');
+
+    const acceptance = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/quotes/${quote.body.quote.id}/acceptance`, {
+      method: 'POST',
+      headers: officeHeaders,
+      body: JSON.stringify({ acceptedAt: '2026-07-14T12:00:00.000Z', evidenceReference: 'SIGNED-QUOTE-ROLE-001' })
+    });
+    assert.equal(acceptance.response.status, 201);
+    assert.equal(acceptance.body.approval.targetType, 'quote_acceptance');
+
+    const deniedOfficeVerification = await request(baseUrl, `/api/ledger/approvals/${acceptance.body.approval.id}/resolve`, {
+      method: 'POST',
+      headers: officeHeaders,
+      body: JSON.stringify({ status: 'approved' })
+    });
+    assert.equal(deniedOfficeVerification.response.status, 403);
+
+    const verifiedAcceptance = await request(baseUrl, `/api/ledger/approvals/${acceptance.body.approval.id}/resolve`, {
+      method: 'POST',
+      headers: approverHeaders,
+      body: JSON.stringify({ status: 'approved', resolvedBy: 'Approver role' })
+    });
+    assert.equal(verifiedAcceptance.response.status, 200);
+
+    const commercialDetail = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}`, { headers: ownerHeaders });
+    assert.equal(commercialDetail.body.job.contractValue, 1200);
+    assert.equal(commercialDetail.body.job.quotes.find(item => item.id === quote.body.quote.id).status, 'accepted');
   });
 });

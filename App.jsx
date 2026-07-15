@@ -24,7 +24,12 @@ const navItems = [
   ['operations', 'Operations', Gauge]
 ]
 
-const currency = new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
+const currency = new Intl.NumberFormat('nl-NL', {
+  style: 'currency',
+  currency: 'EUR',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+})
 const EMPTY_LIST = []
 const EQUIPMENT_EDITABLE_STATUSES = new Set(['available', 'in_use', 'maintenance', 'inspection_due', 'inactive', 'lost'])
 const FIELD_ASSURANCE_REVIEW_PRIORITY = [
@@ -192,6 +197,41 @@ function emptyTaskDraft() {
     priority: 'medium',
     dueAt: futureDateInput(1),
     assigneeId: ''
+  }
+}
+
+function emptyQuoteDraft(job = null) {
+  return {
+    validUntil: futureDateInput(30),
+    taxRate: '21',
+    notes: '',
+    lineItems: [{
+      description: job?.title || '',
+      quantity: '1',
+      unitPrice: job?.estimatedCost ? String(job.estimatedCost) : '',
+      costCode: 'contract'
+    }]
+  }
+}
+
+function emptyChangeOrderDraft(job = null) {
+  const referenceQuote = (job?.quotes || []).find(quote => ['accepted', 'approved'].includes(quote.status))
+  return {
+    quoteId: referenceQuote?.id || '',
+    title: '',
+    scopeDelta: '',
+    scheduleDeltaDays: '0',
+    taxRate: referenceQuote?.taxRate == null ? '21' : String(referenceQuote.taxRate),
+    notes: '',
+    lineItems: [{ description: '', quantity: '1', unitPrice: '', costCode: 'change_order' }]
+  }
+}
+
+function emptyCommercialAcceptanceDraft() {
+  return {
+    acceptedAt: new Date().toISOString().slice(0, 10),
+    evidenceReference: '',
+    notes: ''
   }
 }
 
@@ -688,6 +728,44 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
   </section>
 }
 
+function CommercialControl({ job, canCoordinate, canApprove, submitting, onNewQuote, onNewChangeOrder, onRequestAcceptance, onOpenApprovals }) {
+  const quotes = job.quotes || EMPTY_LIST
+  const changeOrders = job.changeOrders || EMPTY_LIST
+  const pendingApprovals = job.approvals?.filter(approval => approval.status === 'pending') || EMPTY_LIST
+  const pendingFor = (targetType, targetId) => pendingApprovals.find(approval => approval.targetType === targetType && approval.targetId === targetId)
+  const acceptedQuote = quotes.find(quote => quote.status === 'accepted')
+  const acceptedChanges = changeOrders.filter(changeOrder => changeOrder.status === 'accepted')
+  const acceptedChangeNet = acceptedChanges.reduce((sum, changeOrder) => sum + Number(changeOrder.amount || 0), 0)
+  const commercialCurrency = acceptedQuote?.currency || quotes[0]?.currency || 'EUR'
+
+  return <section className="job-workspace-section commercial-control" data-testid="commercial-control">
+    <div className="section-heading commercial-heading"><ReceiptEuro size={18} /><div><h3>Commercial control</h3><p>Separate internal approval from retained client acceptance before contract value changes.</p></div></div>
+    <div className="commercial-summary" aria-label="Accepted commercial value">
+      <div><span>Accepted contract net</span><strong>{currency.format(job.contractValue || 0)}</strong></div>
+      <div><span>Accepted quote</span><strong>{acceptedQuote ? currency.format(acceptedQuote.subtotal || 0) : 'Not retained'}</strong></div>
+      <div><span>Accepted changes</span><strong>{currency.format(acceptedChangeNet)}</strong></div>
+      <div><span>Pending decisions</span><strong>{pendingApprovals.filter(approval => ['quote', 'quote_acceptance', 'change_order', 'change_order_acceptance'].includes(approval.targetType)).length}</strong></div>
+    </div>
+    {canCoordinate ? <div className="commercial-actions"><button type="button" className="secondary-button" disabled={submitting} onClick={onNewQuote}><Plus size={15} />New estimate</button><button type="button" className="secondary-button" disabled={submitting} onClick={onNewChangeOrder}><Plus size={15} />Scope change</button></div> : null}
+    <div className="commercial-ledger">
+      <section aria-labelledby="quote-ledger-title"><div className="commercial-list-heading"><h4 id="quote-ledger-title">Estimates and quotes</h4><span>{quotes.length}</span></div>
+        {quotes.length ? <div className="activity-list commercial-list">{quotes.map(quote => {
+          const issueApproval = pendingFor('quote', quote.id)
+          const acceptanceApproval = pendingFor('quote_acceptance', quote.id)
+          return <div className="activity-row commercial-row" key={quote.id} data-testid={`commercial-quote-${quote.id}`}><div className="commercial-record"><div><strong>{currency.format(quote.subtotal || 0)} net</strong><span className={`status status-${quote.status}`}>{formatStatus(quote.status)}</span></div><small>{quote.lineItems?.length || 0} line item{quote.lineItems?.length === 1 ? '' : 's'} · VAT {quote.taxRate || 0}% · gross {currency.format(quote.total || 0)}</small><small>Valid until {formatDate(quote.validUntil)}{quote.data?.acceptance?.evidenceReference ? ` · evidence ${quote.data.acceptance.evidenceReference}` : ''}</small></div><div className="commercial-row-actions">{issueApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: issueApproval.id })}><ShieldCheck size={15} />Review quote</button> : null}{acceptanceApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: acceptanceApproval.id })}><ShieldCheck size={15} />Verify acceptance</button> : null}{quote.status === 'approved' && canCoordinate && !acceptanceApproval ? <button type="button" className="primary-button" disabled={submitting} onClick={() => onRequestAcceptance('quote', quote)}><Check size={15} />Record acceptance</button> : null}</div></div>
+        })}</div> : <p className="workflow-note">No retained estimate exists for this job.</p>}
+      </section>
+      <section aria-labelledby="change-ledger-title"><div className="commercial-list-heading"><h4 id="change-ledger-title">Scope changes</h4><span>{changeOrders.length}</span></div>
+        {changeOrders.length ? <div className="activity-list commercial-list">{changeOrders.map(changeOrder => {
+          const approval = pendingFor('change_order', changeOrder.id)
+          const acceptanceApproval = pendingFor('change_order_acceptance', changeOrder.id)
+          return <div className="activity-row commercial-row" key={changeOrder.id} data-testid={`commercial-change-${changeOrder.id}`}><div className="commercial-record"><div><strong>{changeOrder.title}</strong><span className={`status status-${changeOrder.status}`}>{formatStatus(changeOrder.status)}</span></div><small>{currency.format(changeOrder.amount || 0)} net · {changeOrder.scheduleDeltaDays || 0} day schedule impact · {commercialCurrency}</small><small>{changeOrder.scopeDelta || 'Scope evidence not retained'}{changeOrder.data?.acceptance?.evidenceReference ? ` · evidence ${changeOrder.data.acceptance.evidenceReference}` : ''}</small></div><div className="commercial-row-actions">{approval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: approval.id })}><ShieldCheck size={15} />Review change</button> : null}{acceptanceApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: acceptanceApproval.id })}><ShieldCheck size={15} />Verify acceptance</button> : null}{changeOrder.status === 'approved' && canCoordinate && !acceptanceApproval ? <button type="button" className="primary-button" disabled={submitting} onClick={() => onRequestAcceptance('change_order', changeOrder)}><Check size={15} />Record acceptance</button> : null}</div></div>
+        })}</div> : <p className="workflow-note">No retained scope change exists for this job.</p>}
+      </section>
+    </div>
+  </section>
+}
+
 function ClientSuccessWorkspace({ clients, jobs, canCoordinate, canApprove, submitting, onPrepareCloseout, onDraftFollowup, onDraftRecurring, onLifecycle, onOpenApprovals, onOpen }) {
   const rows = clients?.jobs || EMPTY_LIST
   const summary = clients?.summary || {}
@@ -1078,6 +1156,11 @@ function App() {
   const [taskDraft, setTaskDraft] = useState(emptyTaskDraft)
   const [taskAction, setTaskAction] = useState(null)
   const [taskActionNote, setTaskActionNote] = useState('')
+  const [commercialDraftMode, setCommercialDraftMode] = useState(null)
+  const [quoteDraft, setQuoteDraft] = useState(emptyQuoteDraft)
+  const [changeOrderDraft, setChangeOrderDraft] = useState(emptyChangeOrderDraft)
+  const [commercialAcceptance, setCommercialAcceptance] = useState(null)
+  const [commercialAcceptanceDraft, setCommercialAcceptanceDraft] = useState(emptyCommercialAcceptanceDraft)
   const [jobLifecycleAction, setJobLifecycleAction] = useState(null)
   const [jobLifecycleReason, setJobLifecycleReason] = useState('')
   const [showResourcePlanner, setShowResourcePlanner] = useState(false)
@@ -1137,6 +1220,7 @@ function App() {
   const equipmentDialogOpenerRef = useRef(null)
   const equipmentInspectionOpenerRef = useRef(null)
   const equipmentMaintenanceOpenerRef = useRef(null)
+  const commercialDialogOpenerRef = useRef(null)
   const noticeSequenceRef = useRef(0)
 
   const refresh = useCallback(async () => {
@@ -1299,6 +1383,23 @@ function App() {
   const financeControlHours = Number(financeActionDraft.hours) || 0
   const financeControlRate = Number(financeActionDraft.rate) || 0
   const financeControlExpense = Number(financeActionDraft.expenseAmount) || 0
+  const activeCommercialDraft = commercialDraftMode === 'quote' ? quoteDraft : changeOrderDraft
+  const commercialDraftNet = roundMoney((activeCommercialDraft.lineItems || []).reduce((sum, item) => {
+    const quantity = Number(item.quantity)
+    const unitPrice = Number(item.unitPrice)
+    return sum + (Number.isFinite(quantity) && Number.isFinite(unitPrice) ? quantity * unitPrice : 0)
+  }, 0))
+  const commercialDraftTax = roundMoney(commercialDraftNet * (Number(activeCommercialDraft.taxRate) || 0) / 100)
+  const commercialDraftTotal = roundMoney(commercialDraftNet + commercialDraftTax)
+  const commercialLinesValid = (activeCommercialDraft.lineItems || []).length > 0 && activeCommercialDraft.lineItems.every(item => (
+    item.description.trim().length >= 2
+    && Number.isFinite(Number(item.quantity))
+    && Number(item.quantity) > 0
+    && Number.isFinite(Number(item.unitPrice))
+  ))
+  const commercialDraftReady = commercialLinesValid && (commercialDraftMode !== 'change_order' || (
+    changeOrderDraft.title.trim().length >= 2 && changeOrderDraft.scopeDelta.trim().length >= 3
+  ))
   const visibleNavItems = useMemo(() => navItems.filter(([key]) => {
     if (key === 'approvals') return capabilities.approvals
     if (key === 'dispatch') return capabilities.dispatch
@@ -1311,7 +1412,12 @@ function App() {
   }), [capabilities])
 
   const selectSection = (next) => { setApprovalFocus(null); setSection(next); setMobileNavOpen(false) }
-  const openApprovals = (focus = null) => { setApprovalFocus(focus); setSection('approvals'); setMobileNavOpen(false) }
+  const openApprovals = (focus = null) => {
+    if (selectedJobId) closeJobWorkspace()
+    setApprovalFocus(focus)
+    setSection('approvals')
+    setMobileNavOpen(false)
+  }
   const notify = useCallback((message) => {
     noticeSequenceRef.current += 1
     setNotice({ id: noticeSequenceRef.current, message })
@@ -1759,6 +1865,136 @@ function App() {
     setShowResourcePlanner(false)
     setTaskAction(null)
     setTaskActionNote('')
+    setCommercialDraftMode(null)
+    setCommercialAcceptance(null)
+  }
+
+  function openCommercialDraft(mode) {
+    if (!selectedJob) return
+    commercialDialogOpenerRef.current = document.activeElement
+    setCommercialDraftMode(mode)
+    if (mode === 'quote') setQuoteDraft(emptyQuoteDraft(selectedJob))
+    else setChangeOrderDraft(emptyChangeOrderDraft(selectedJob))
+  }
+
+  function restoreCommercialDialogFocus() {
+    const opener = commercialDialogOpenerRef.current
+    commercialDialogOpenerRef.current = null
+    requestAnimationFrame(() => opener?.focus?.())
+  }
+
+  function closeCommercialDialog() {
+    if (submitting) return
+    setCommercialDraftMode(null)
+    setCommercialAcceptance(null)
+    setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
+    restoreCommercialDialogFocus()
+  }
+
+  function updateCommercialLineItem(mode, index, key, value) {
+    const update = current => ({
+      ...current,
+      lineItems: current.lineItems.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: value } : item)
+    })
+    if (mode === 'quote') setQuoteDraft(update)
+    else setChangeOrderDraft(update)
+  }
+
+  function addCommercialLineItem(mode) {
+    const item = { description: '', quantity: '1', unitPrice: '', costCode: mode === 'quote' ? 'contract' : 'change_order' }
+    if (mode === 'quote') setQuoteDraft(current => ({ ...current, lineItems: [...current.lineItems, item] }))
+    else setChangeOrderDraft(current => ({ ...current, lineItems: [...current.lineItems, item] }))
+  }
+
+  function removeCommercialLineItem(mode, index) {
+    const update = current => ({ ...current, lineItems: current.lineItems.filter((_, itemIndex) => itemIndex !== index) })
+    if (mode === 'quote') setQuoteDraft(update)
+    else setChangeOrderDraft(update)
+  }
+
+  async function submitCommercialDraft(event) {
+    event.preventDefault()
+    if (!selectedJobId || !commercialDraftMode) return
+    const mode = commercialDraftMode
+    const draft = mode === 'quote' ? quoteDraft : changeOrderDraft
+    const lineItems = draft.lineItems.map(item => ({
+      description: item.description.trim(),
+      quantity: Number(item.quantity),
+      unitPrice: Number(item.unitPrice),
+      costCode: item.costCode.trim()
+    }))
+    if (!lineItems.length || lineItems.some(item => item.description.length < 2 || !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.unitPrice))) return
+    setSubmitting(true)
+    try {
+      const route = mode === 'quote' ? 'quote' : 'change-orders'
+      const payload = mode === 'quote'
+        ? { currency: 'EUR', taxRate: Number(draft.taxRate), validUntil: draft.validUntil || null, notes: draft.notes.trim() || null, lineItems }
+        : {
+            quoteId: draft.quoteId || null,
+            title: draft.title.trim(),
+            scopeDelta: draft.scopeDelta.trim(),
+            scheduleDeltaDays: Number(draft.scheduleDeltaDays),
+            currency: 'EUR',
+            taxRate: Number(draft.taxRate),
+            notes: draft.notes.trim() || null,
+            lineItems,
+            status: 'submitted',
+            requiresApproval: true
+          }
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/${route}`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      })
+      setSelectedJob(result.job)
+      setCommercialDraftMode(null)
+      await refresh()
+      restoreCommercialDialogFocus()
+      notify(mode === 'quote'
+        ? `Estimate retained at ${currency.format(result.quote.subtotal)} net. Internal approval is required before issue.`
+        : `Scope change retained at ${currency.format(result.changeOrder.amount)} net. Contract value remains unchanged until client acceptance is verified.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openCommercialAcceptance(type, record) {
+    commercialDialogOpenerRef.current = document.activeElement
+    setCommercialAcceptance({ type, record })
+    setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
+  }
+
+  async function submitCommercialAcceptance(event) {
+    event.preventDefault()
+    if (!selectedJobId || !commercialAcceptance || commercialAcceptanceDraft.evidenceReference.trim().length < 3) return
+    const { type, record } = commercialAcceptance
+    const route = type === 'quote'
+      ? `quotes/${encodeURIComponent(record.id)}/acceptance`
+      : `change-orders/${encodeURIComponent(record.id)}/acceptance`
+    setSubmitting(true)
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/${route}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          acceptedAt: commercialAcceptanceDraft.acceptedAt,
+          evidenceReference: commercialAcceptanceDraft.evidenceReference.trim(),
+          notes: commercialAcceptanceDraft.notes.trim() || null
+        })
+      })
+      setSelectedJob(result.job)
+      setCommercialAcceptance(null)
+      setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
+      await refresh()
+      restoreCommercialDialogFocus()
+      notify(result.replayed
+        ? 'The existing client-acceptance verification is already waiting in Approvals.'
+        : 'Client acceptance evidence retained. Contract value remains unchanged until an approver verifies it.')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   async function createJobTask(event) {
@@ -3745,7 +3981,60 @@ function App() {
       </section>
     </div> : null}
 
-    {selectedJobId ? <div className="modal-backdrop" role="presentation"><section className="modal job-workspace" role="dialog" aria-modal="true" aria-labelledby="job-workspace-title" data-testid="job-workspace"><div className="modal-heading"><div><p className="eyebrow">Ledger job workspace</p><h2 id="job-workspace-title">{selectedJob?.title || 'Loading job record'}</h2><p>{selectedJob?.clientName || 'Client pending'}{selectedJob?.city ? ` · ${selectedJob.city}` : ''}</p></div><button className="icon-button" aria-label="Close job workspace" onClick={closeJobWorkspace}><X size={18} /></button></div>{selectedJobLoading || !selectedJob ? <div className="loading job-workspace-loading"><LoaderCircle className="spin" size={24} />Loading the retained job record</div> : <div className="job-workspace-body"><div className="job-facts"><div><span>State</span><strong><span className={`status status-${selectedJob.status}`}>{formatStatus(selectedJob.status)}</span></strong></div><div><span>Progress</span><strong>{Math.round(selectedJob.progressPercent || 0)}%</strong></div><div><span>Proposed work</span><strong>{formatDate(selectedJob.scheduledStart || selectedJob.targetCompletion)}</strong></div><div><span>Open approvals</span><strong>{(selectedJob.approvals || []).filter(item => item.status === 'pending').length}</strong></div></div><section className="job-workspace-section task-control" data-testid="job-task-control"><div className="section-heading"><ClipboardList size={18} /><div><h3>Task control</h3><p>Retained assignments and completion evidence for this job.</p></div></div>{canCoordinate ? <form className="form-grid compact-form task-create-form" onSubmit={createJobTask}><label className="form-span">Task title<input required value={taskDraft.title} onChange={event => setTaskDraft({ ...taskDraft, title: event.target.value })} placeholder="Describe the work item" /></label><label>Priority<select value={taskDraft.priority} onChange={event => setTaskDraft({ ...taskDraft, priority: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label><label>Due date<input type="date" value={taskDraft.dueAt} onChange={event => setTaskDraft({ ...taskDraft, dueAt: event.target.value })} /></label><label className="form-span">Assignee<select value={taskDraft.assigneeId} onChange={event => setTaskDraft({ ...taskDraft, assigneeId: event.target.value })}><option value="">Unassigned</option>{taskAssigneeOptions.map(assignee => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting || !taskDraft.title.trim()}><Plus size={16} />Add task</button></div></form> : null}{selectedJob.tasks?.length ? <div className="activity-list task-list">{selectedJob.tasks.map(task => { const terminal = ['completed', 'cancelled'].includes(task.status); const assignedWorker = taskAssigneeOptions.find(assignee => assignee.id === task.assigneeId); const canUpdateTask = canCoordinate || (fieldScoped && (!task.assigneeId || task.assigneeId === operator.worker?.id)); return <div className="activity-row task-row" key={task.id} data-testid={'job-task-' + task.id}><div className="task-summary"><strong>{task.title}</strong><small>{formatStatus(task.priority)} · {assignedWorker?.name || (task.assigneeId ? 'Assigned crew' : 'Unassigned')} · due {formatDate(task.dueAt)}</small></div><div className="task-actions"><span className={'status status-' + task.status}>{formatStatus(task.status)}</span>{canUpdateTask && !terminal && task.status !== 'in_progress' ? <button type="button" className="secondary-button" disabled={submitting} aria-label={'Start ' + task.title} onClick={() => openTaskTransition(task, 'in_progress')}><Activity size={15} />Start</button> : null}{canUpdateTask && !terminal ? <button type="button" className="secondary-button" disabled={submitting} aria-label={'Complete ' + task.title} onClick={() => openTaskTransition(task, 'completed')}><Check size={15} />Complete</button> : null}{canUpdateTask && !terminal && task.status !== 'blocked' ? <button type="button" className="secondary-button" disabled={submitting} aria-label={'Block ' + task.title} onClick={() => openTaskTransition(task, 'blocked')}><TriangleAlert size={15} />Block</button> : null}{canCoordinate && !terminal ? <button type="button" className="icon-button" disabled={submitting} title="Cancel task" aria-label={'Cancel ' + task.title} onClick={() => openTaskTransition(task, 'cancelled')}><Ban size={15} /></button> : null}</div></div> })}</div> : <p className="workflow-note task-empty">No retained tasks for this job.</p>}</section>{canCoordinate ? <div className="job-workspace-lifecycle" data-testid="job-archive-control"><div><Archive size={18} /><span><strong>Archive control</strong><small>Remove this job from active operations after approval while retaining its complete ledger.</small></span></div><button type="button" className="danger-button" data-testid="request-job-archive" disabled={submitting || (selectedJob.approvals || []).some(item => item.status === 'pending')} title={(selectedJob.approvals || []).some(item => item.status === 'pending') ? 'Resolve pending job decisions before archive' : 'Request approval to archive this job'} onClick={() => openJobLifecycle('archive', selectedJob)}><Archive size={15} />{(selectedJob.approvals || []).some(item => item.status === 'pending' && item.targetType === 'job_archive') ? 'Archive pending' : (selectedJob.approvals || []).some(item => item.status === 'pending') ? 'Resolve approvals first' : 'Request archive'}</button></div> : null}{canCoordinate ? <><section className="job-workspace-section"><div className="section-heading"><CalendarDays size={18} /><div><h3>Schedule review</h3><p>Review planning readiness first. A client or crew commitment is created only through the approval queue.</p></div></div><form className="form-grid compact-form" onSubmit={reviewSchedule}><label>Proposed start<input required type="datetime-local" value={scheduleDraft.plannedStart} onChange={event => setScheduleDraft({ ...scheduleDraft, plannedStart: event.target.value, plannedEnd: scheduleDraft.plannedEnd || suggestedEndInput(event.target.value, selectedJob.estimatedHours) })} /></label><label>Proposed end<input required type="datetime-local" value={scheduleDraft.plannedEnd} onChange={event => setScheduleDraft({ ...scheduleDraft, plannedEnd: event.target.value })} /></label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting}><CalendarDays size={16} />Review schedule</button><button type="button" className="primary-button" disabled={submitting} onClick={requestScheduleApproval}><ShieldCheck size={16} />Request approval</button></div></form>{scheduleReview ? <div className="workflow-result"><div><strong>{formatStatus(scheduleReview.status)}</strong><span>{scheduleReview.nextAction}</span></div>{scheduleReview.recommendedWorker?.name ? <span className="tag tag-green">Worker: {scheduleReview.recommendedWorker.name}</span> : null}{scheduleReview.blockers?.length ? <ul>{scheduleReview.blockers.slice(0, 3).map(blocker => <li key={blocker.type}>{blocker.message}</li>)}</ul> : null}</div> : null}</section><section className="job-workspace-section"><div className="section-heading"><CloudOff size={18} /><div><h3>Weather assessment</h3><p>Record a local weather condition for this job. It updates readiness but never commits a date.</p></div></div><form className="form-grid compact-form" onSubmit={recordWeatherAssessment}><label>Condition<select value={weatherDraft.condition} onChange={event => setWeatherDraft({ ...weatherDraft, condition: event.target.value })}><option value="workable">Workable</option><option value="rain_risk">Rain risk</option><option value="wind_risk">Wind risk</option><option value="heat_risk">Heat risk</option><option value="unsafe">Unsafe</option></select></label><label>Precipitation risk (%)<input required type="number" min="0" max="100" step="1" value={weatherDraft.precipitationPercent} onChange={event => setWeatherDraft({ ...weatherDraft, precipitationPercent: event.target.value })} /></label><label className="form-span checkbox-label"><input type="checkbox" checked={weatherDraft.weatherSensitive} onChange={event => setWeatherDraft({ ...weatherDraft, weatherSensitive: event.target.checked })} />This work is weather-sensitive</label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting}><CloudOff size={16} />Record assessment</button></div></form>{selectedJob.weather?.[0] ? <p className="workflow-note"><strong>Latest:</strong> {formatStatus(selectedJob.weather[0].condition)} · {selectedJob.weather[0].precipitationPercent}% · {selectedJob.weather[0].recommendation}</p> : null}</section><section className="job-workspace-section"><div className="section-heading"><MessageSquareText size={18} /><div><h3>Client communication draft</h3><p>Creates a retained draft and approval record. This interface cannot deliver a message.</p></div></div><form className="form-grid compact-form" onSubmit={createCommunicationDraft}><label>Channel<select value={communicationDraft.channel} onChange={event => setCommunicationDraft({ ...communicationDraft, channel: event.target.value })}><option value="email">Email</option><option value="portal">Client portal</option><option value="phone">Phone follow-up</option></select></label><label className="checkbox-label"><input type="checkbox" checked={communicationDraft.expectsReply} onChange={event => setCommunicationDraft({ ...communicationDraft, expectsReply: event.target.checked })} />Reply expected</label><label className="form-span">Subject<input required value={communicationDraft.subject} onChange={event => setCommunicationDraft({ ...communicationDraft, subject: event.target.value })} placeholder="Describe the client decision or update" /></label><label className="form-span">Draft message<textarea required value={communicationDraft.body} onChange={event => setCommunicationDraft({ ...communicationDraft, body: event.target.value })} placeholder="Prepare the approved wording. Delivery stays blocked until a verified integration receipt is recorded." /></label><div className="form-actions form-span"><button className="primary-button" disabled={submitting}><MessageSquareText size={16} />Create approval-gated draft</button></div></form></section><section className="job-workspace-section"><div className="section-heading"><Link2 size={18} /><div><h3>Client portal access</h3><p>Generate a restricted job portal link. The client cannot open it until the access approval is resolved.</p></div></div><form className="form-grid compact-form" onSubmit={requestClientPortalAccess}><label>Portal label<input required value={portalDraft.label} onChange={event => setPortalDraft({ ...portalDraft, label: event.target.value })} /></label><label>Expiry<input required type="date" value={portalDraft.expiresAt} onChange={event => setPortalDraft({ ...portalDraft, expiresAt: event.target.value })} /></label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting}><Link2 size={16} />Request portal access</button></div></form>{portalLink ? <div className="workflow-result portal-secret"><div><strong>One-time portal link</strong><span>Copy this link securely now. It is inactive until approval and cannot be recovered from the ledger after this workspace closes.</span></div><input aria-label="One-time client portal link" readOnly value={portalLink} /><button type="button" className="secondary-button" onClick={copyPortalLink}><Copy size={16} />Copy link</button></div> : null}{selectedJob.portalAccess?.length ? <div className="activity-list">{selectedJob.portalAccess.slice(0, 3).map(access => <div className="activity-row" key={access.id}><div><strong>{access.data?.label || 'Client job portal'}</strong><small>Expires {formatDate(access.expiresAt)} · {formatStatus(access.status)}</small></div>{!['revoked', 'expired'].includes(access.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => revokeClientPortalAccess(access.id)}><Ban size={15} />Revoke</button> : <span className={`status status-${access.status}`}>{formatStatus(access.status)}</span>}</div>)}</div> : null}</section></> : <div className="field-note"><ShieldCheck size={20} /><div><strong>Field-scoped job workspace</strong><p>Task updates and field records remain available. Schedule and client communication actions stay reserved for the office role.</p></div></div>}<section className="job-workspace-section activity-section"><div className="section-heading"><Bell size={18} /><div><h3>Recent communications</h3><p>Every client record remains linked to approval and delivery evidence.</p></div></div>{selectedJob.communications?.length ? <div className="activity-list">{selectedJob.communications.slice(0, 5).map(item => <div className="activity-row" key={item.id}><div><strong>{item.subject || formatStatus(item.channel)}</strong><small>{formatStatus(item.direction)} · {formatDate(item.createdAt)}</small></div><span className={`status status-${item.status}`}>{formatStatus(item.status)}</span></div>)}</div> : <p className="workflow-note">No client communication has been recorded for this job.</p>}</section></div>}</section></div> : null}
+    {selectedJobId ? <div className="modal-backdrop" role="presentation"><section className="modal job-workspace" role="dialog" aria-modal="true" aria-labelledby="job-workspace-title" data-testid="job-workspace"><div className="modal-heading"><div><p className="eyebrow">Ledger job workspace</p><h2 id="job-workspace-title">{selectedJob?.title || 'Loading job record'}</h2><p>{selectedJob?.clientName || 'Client pending'}{selectedJob?.city ? ` · ${selectedJob.city}` : ''}</p></div><button className="icon-button" aria-label="Close job workspace" onClick={closeJobWorkspace}><X size={18} /></button></div>{selectedJobLoading || !selectedJob ? <div className="loading job-workspace-loading"><LoaderCircle className="spin" size={24} />Loading the retained job record</div> : <div className="job-workspace-body"><div className="job-facts"><div><span>State</span><strong><span className={`status status-${selectedJob.status}`}>{formatStatus(selectedJob.status)}</span></strong></div><div><span>Progress</span><strong>{Math.round(selectedJob.progressPercent || 0)}%</strong></div><div><span>Proposed work</span><strong>{formatDate(selectedJob.scheduledStart || selectedJob.targetCompletion)}</strong></div><div><span>Open approvals</span><strong>{(selectedJob.approvals || []).filter(item => item.status === 'pending').length}</strong></div></div>{!fieldScoped ? <CommercialControl job={selectedJob} canCoordinate={canCoordinate} canApprove={capabilities.approvals === true} submitting={submitting} onNewQuote={() => openCommercialDraft('quote')} onNewChangeOrder={() => openCommercialDraft('change_order')} onRequestAcceptance={openCommercialAcceptance} onOpenApprovals={openApprovals} /> : null}<section className="job-workspace-section task-control" data-testid="job-task-control"><div className="section-heading"><ClipboardList size={18} /><div><h3>Task control</h3><p>Retained assignments and completion evidence for this job.</p></div></div>{canCoordinate ? <form className="form-grid compact-form task-create-form" onSubmit={createJobTask}><label className="form-span">Task title<input required value={taskDraft.title} onChange={event => setTaskDraft({ ...taskDraft, title: event.target.value })} placeholder="Describe the work item" /></label><label>Priority<select value={taskDraft.priority} onChange={event => setTaskDraft({ ...taskDraft, priority: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label><label>Due date<input type="date" value={taskDraft.dueAt} onChange={event => setTaskDraft({ ...taskDraft, dueAt: event.target.value })} /></label><label className="form-span">Assignee<select value={taskDraft.assigneeId} onChange={event => setTaskDraft({ ...taskDraft, assigneeId: event.target.value })}><option value="">Unassigned</option>{taskAssigneeOptions.map(assignee => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting || !taskDraft.title.trim()}><Plus size={16} />Add task</button></div></form> : null}{selectedJob.tasks?.length ? <div className="activity-list task-list">{selectedJob.tasks.map(task => { const terminal = ['completed', 'cancelled'].includes(task.status); const assignedWorker = taskAssigneeOptions.find(assignee => assignee.id === task.assigneeId); const canUpdateTask = canCoordinate || (fieldScoped && (!task.assigneeId || task.assigneeId === operator.worker?.id)); return <div className="activity-row task-row" key={task.id} data-testid={'job-task-' + task.id}><div className="task-summary"><strong>{task.title}</strong><small>{formatStatus(task.priority)} · {assignedWorker?.name || (task.assigneeId ? 'Assigned crew' : 'Unassigned')} · due {formatDate(task.dueAt)}</small></div><div className="task-actions"><span className={'status status-' + task.status}>{formatStatus(task.status)}</span>{canUpdateTask && !terminal && task.status !== 'in_progress' ? <button type="button" className="secondary-button" disabled={submitting} aria-label={'Start ' + task.title} onClick={() => openTaskTransition(task, 'in_progress')}><Activity size={15} />Start</button> : null}{canUpdateTask && !terminal ? <button type="button" className="secondary-button" disabled={submitting} aria-label={'Complete ' + task.title} onClick={() => openTaskTransition(task, 'completed')}><Check size={15} />Complete</button> : null}{canUpdateTask && !terminal && task.status !== 'blocked' ? <button type="button" className="secondary-button" disabled={submitting} aria-label={'Block ' + task.title} onClick={() => openTaskTransition(task, 'blocked')}><TriangleAlert size={15} />Block</button> : null}{canCoordinate && !terminal ? <button type="button" className="icon-button" disabled={submitting} title="Cancel task" aria-label={'Cancel ' + task.title} onClick={() => openTaskTransition(task, 'cancelled')}><Ban size={15} /></button> : null}</div></div> })}</div> : <p className="workflow-note task-empty">No retained tasks for this job.</p>}</section>{canCoordinate ? <div className="job-workspace-lifecycle" data-testid="job-archive-control"><div><Archive size={18} /><span><strong>Archive control</strong><small>Remove this job from active operations after approval while retaining its complete ledger.</small></span></div><button type="button" className="danger-button" data-testid="request-job-archive" disabled={submitting || (selectedJob.approvals || []).some(item => item.status === 'pending')} title={(selectedJob.approvals || []).some(item => item.status === 'pending') ? 'Resolve pending job decisions before archive' : 'Request approval to archive this job'} onClick={() => openJobLifecycle('archive', selectedJob)}><Archive size={15} />{(selectedJob.approvals || []).some(item => item.status === 'pending' && item.targetType === 'job_archive') ? 'Archive pending' : (selectedJob.approvals || []).some(item => item.status === 'pending') ? 'Resolve approvals first' : 'Request archive'}</button></div> : null}{canCoordinate ? <><section className="job-workspace-section"><div className="section-heading"><CalendarDays size={18} /><div><h3>Schedule review</h3><p>Review planning readiness first. A client or crew commitment is created only through the approval queue.</p></div></div><form className="form-grid compact-form" onSubmit={reviewSchedule}><label>Proposed start<input required type="datetime-local" value={scheduleDraft.plannedStart} onChange={event => setScheduleDraft({ ...scheduleDraft, plannedStart: event.target.value, plannedEnd: scheduleDraft.plannedEnd || suggestedEndInput(event.target.value, selectedJob.estimatedHours) })} /></label><label>Proposed end<input required type="datetime-local" value={scheduleDraft.plannedEnd} onChange={event => setScheduleDraft({ ...scheduleDraft, plannedEnd: event.target.value })} /></label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting}><CalendarDays size={16} />Review schedule</button><button type="button" className="primary-button" disabled={submitting} onClick={requestScheduleApproval}><ShieldCheck size={16} />Request approval</button></div></form>{scheduleReview ? <div className="workflow-result"><div><strong>{formatStatus(scheduleReview.status)}</strong><span>{scheduleReview.nextAction}</span></div>{scheduleReview.recommendedWorker?.name ? <span className="tag tag-green">Worker: {scheduleReview.recommendedWorker.name}</span> : null}{scheduleReview.blockers?.length ? <ul>{scheduleReview.blockers.slice(0, 3).map(blocker => <li key={blocker.type}>{blocker.message}</li>)}</ul> : null}</div> : null}</section><section className="job-workspace-section"><div className="section-heading"><CloudOff size={18} /><div><h3>Weather assessment</h3><p>Record a local weather condition for this job. It updates readiness but never commits a date.</p></div></div><form className="form-grid compact-form" onSubmit={recordWeatherAssessment}><label>Condition<select value={weatherDraft.condition} onChange={event => setWeatherDraft({ ...weatherDraft, condition: event.target.value })}><option value="workable">Workable</option><option value="rain_risk">Rain risk</option><option value="wind_risk">Wind risk</option><option value="heat_risk">Heat risk</option><option value="unsafe">Unsafe</option></select></label><label>Precipitation risk (%)<input required type="number" min="0" max="100" step="1" value={weatherDraft.precipitationPercent} onChange={event => setWeatherDraft({ ...weatherDraft, precipitationPercent: event.target.value })} /></label><label className="form-span checkbox-label"><input type="checkbox" checked={weatherDraft.weatherSensitive} onChange={event => setWeatherDraft({ ...weatherDraft, weatherSensitive: event.target.checked })} />This work is weather-sensitive</label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting}><CloudOff size={16} />Record assessment</button></div></form>{selectedJob.weather?.[0] ? <p className="workflow-note"><strong>Latest:</strong> {formatStatus(selectedJob.weather[0].condition)} · {selectedJob.weather[0].precipitationPercent}% · {selectedJob.weather[0].recommendation}</p> : null}</section><section className="job-workspace-section"><div className="section-heading"><MessageSquareText size={18} /><div><h3>Client communication draft</h3><p>Creates a retained draft and approval record. This interface cannot deliver a message.</p></div></div><form className="form-grid compact-form" onSubmit={createCommunicationDraft}><label>Channel<select value={communicationDraft.channel} onChange={event => setCommunicationDraft({ ...communicationDraft, channel: event.target.value })}><option value="email">Email</option><option value="portal">Client portal</option><option value="phone">Phone follow-up</option></select></label><label className="checkbox-label"><input type="checkbox" checked={communicationDraft.expectsReply} onChange={event => setCommunicationDraft({ ...communicationDraft, expectsReply: event.target.checked })} />Reply expected</label><label className="form-span">Subject<input required value={communicationDraft.subject} onChange={event => setCommunicationDraft({ ...communicationDraft, subject: event.target.value })} placeholder="Describe the client decision or update" /></label><label className="form-span">Draft message<textarea required value={communicationDraft.body} onChange={event => setCommunicationDraft({ ...communicationDraft, body: event.target.value })} placeholder="Prepare the approved wording. Delivery stays blocked until a verified integration receipt is recorded." /></label><div className="form-actions form-span"><button className="primary-button" disabled={submitting}><MessageSquareText size={16} />Create approval-gated draft</button></div></form></section><section className="job-workspace-section"><div className="section-heading"><Link2 size={18} /><div><h3>Client portal access</h3><p>Generate a restricted job portal link. The client cannot open it until the access approval is resolved.</p></div></div><form className="form-grid compact-form" onSubmit={requestClientPortalAccess}><label>Portal label<input required value={portalDraft.label} onChange={event => setPortalDraft({ ...portalDraft, label: event.target.value })} /></label><label>Expiry<input required type="date" value={portalDraft.expiresAt} onChange={event => setPortalDraft({ ...portalDraft, expiresAt: event.target.value })} /></label><div className="form-actions form-span"><button className="secondary-button" disabled={submitting}><Link2 size={16} />Request portal access</button></div></form>{portalLink ? <div className="workflow-result portal-secret"><div><strong>One-time portal link</strong><span>Copy this link securely now. It is inactive until approval and cannot be recovered from the ledger after this workspace closes.</span></div><input aria-label="One-time client portal link" readOnly value={portalLink} /><button type="button" className="secondary-button" onClick={copyPortalLink}><Copy size={16} />Copy link</button></div> : null}{selectedJob.portalAccess?.length ? <div className="activity-list">{selectedJob.portalAccess.slice(0, 3).map(access => <div className="activity-row" key={access.id}><div><strong>{access.data?.label || 'Client job portal'}</strong><small>Expires {formatDate(access.expiresAt)} · {formatStatus(access.status)}</small></div>{!['revoked', 'expired'].includes(access.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => revokeClientPortalAccess(access.id)}><Ban size={15} />Revoke</button> : <span className={`status status-${access.status}`}>{formatStatus(access.status)}</span>}</div>)}</div> : null}</section></> : <div className="field-note"><ShieldCheck size={20} /><div><strong>Field-scoped job workspace</strong><p>Task updates and field records remain available. Schedule and client communication actions stay reserved for the office role.</p></div></div>}<section className="job-workspace-section activity-section"><div className="section-heading"><Bell size={18} /><div><h3>Recent communications</h3><p>Every client record remains linked to approval and delivery evidence.</p></div></div>{selectedJob.communications?.length ? <div className="activity-list">{selectedJob.communications.slice(0, 5).map(item => <div className="activity-row" key={item.id}><div><strong>{item.subject || formatStatus(item.channel)}</strong><small>{formatStatus(item.direction)} · {formatDate(item.createdAt)}</small></div><span className={`status status-${item.status}`}>{formatStatus(item.status)}</span></div>)}</div> : <p className="workflow-note">No client communication has been recorded for this job.</p>}</section></div>}</section></div> : null}
+    {commercialDraftMode ? <div className="modal-backdrop commercial-backdrop" role="presentation">
+      <section className="modal commercial-draft-modal" role="dialog" aria-modal="true" aria-labelledby="commercial-draft-title" data-testid="commercial-draft-modal" onKeyDown={event => { if (event.key === 'Escape') closeCommercialDialog() }}>
+        <div className="modal-heading">
+          <div><p className="eyebrow">Approval-gated commercial record</p><h2 id="commercial-draft-title">{commercialDraftMode === 'quote' ? 'New estimate' : 'New scope change'}</h2><p>{selectedJob?.title} / server-derived totals</p></div>
+          <button type="button" className="icon-button" aria-label="Close commercial draft" onClick={closeCommercialDialog}><X size={18} /></button>
+        </div>
+        <form onSubmit={submitCommercialDraft}>
+          <div className="commercial-draft-body">
+            {commercialDraftMode === 'quote' ? <div className="form-grid compact-form">
+              <label>Valid until<input autoFocus required type="date" min={new Date().toISOString().slice(0, 10)} value={quoteDraft.validUntil} onChange={event => setQuoteDraft({ ...quoteDraft, validUntil: event.target.value })} /></label>
+              <label>VAT rate (%)<input required type="number" min="0" max="100" step="0.01" value={quoteDraft.taxRate} onChange={event => setQuoteDraft({ ...quoteDraft, taxRate: event.target.value })} /></label>
+            </div> : <div className="form-grid compact-form">
+              <label className="form-span">Change title<input autoFocus required minLength="2" value={changeOrderDraft.title} onChange={event => setChangeOrderDraft({ ...changeOrderDraft, title: event.target.value })} placeholder="Describe the commercial decision" /></label>
+              <label className="form-span">Scope change<textarea required minLength="3" value={changeOrderDraft.scopeDelta} onChange={event => setChangeOrderDraft({ ...changeOrderDraft, scopeDelta: event.target.value })} placeholder="Record added, omitted, or revised scope." /></label>
+              <label>Reference quote<select value={changeOrderDraft.quoteId} onChange={event => setChangeOrderDraft({ ...changeOrderDraft, quoteId: event.target.value })}><option value="">Current retained contract</option>{(selectedJob?.quotes || []).filter(quote => ['approved', 'accepted'].includes(quote.status)).map(quote => <option key={quote.id} value={quote.id}>{formatStatus(quote.status)} / {currency.format(quote.subtotal || 0)} net</option>)}</select></label>
+              <label>Schedule impact (days)<input required type="number" min="-3650" max="3650" step="1" value={changeOrderDraft.scheduleDeltaDays} onChange={event => setChangeOrderDraft({ ...changeOrderDraft, scheduleDeltaDays: event.target.value })} /></label>
+              <label>VAT rate (%)<input required type="number" min="0" max="100" step="0.01" value={changeOrderDraft.taxRate} onChange={event => setChangeOrderDraft({ ...changeOrderDraft, taxRate: event.target.value })} /></label>
+            </div>}
+            <div className="commercial-line-heading"><div><h3>Line items</h3><p>Amounts are recalculated by the ledger.</p></div><button type="button" className="secondary-button" disabled={(activeCommercialDraft.lineItems || []).length >= 50} onClick={() => addCommercialLineItem(commercialDraftMode)}><Plus size={15} />Add line</button></div>
+            <div className="commercial-line-items">{activeCommercialDraft.lineItems.map((item, index) => <div className="commercial-line-item" key={index}>
+              <label>Description<input required minLength="2" maxLength="240" value={item.description} onChange={event => updateCommercialLineItem(commercialDraftMode, index, 'description', event.target.value)} /></label>
+              <label>Quantity<input required type="number" min="0.01" max="1000000" step="0.01" value={item.quantity} onChange={event => updateCommercialLineItem(commercialDraftMode, index, 'quantity', event.target.value)} /></label>
+              <label>Unit price<input required type="number" min={commercialDraftMode === 'quote' ? '0' : '-1000000000'} max="1000000000" step="0.01" value={item.unitPrice} onChange={event => updateCommercialLineItem(commercialDraftMode, index, 'unitPrice', event.target.value)} /></label>
+              <label>Cost code<input maxLength="80" value={item.costCode} onChange={event => updateCommercialLineItem(commercialDraftMode, index, 'costCode', event.target.value)} /></label>
+              <button type="button" className="icon-button commercial-line-remove" aria-label={`Remove line ${index + 1}`} disabled={activeCommercialDraft.lineItems.length === 1} onClick={() => removeCommercialLineItem(commercialDraftMode, index)}><X size={16} /></button>
+            </div>)}</div>
+            <div className="commercial-total-strip" aria-label="Commercial totals"><span>Net <strong>{currency.format(commercialDraftNet)}</strong></span><span>VAT <strong>{currency.format(commercialDraftTax)}</strong></span><span>Gross <strong>{currency.format(commercialDraftTotal)}</strong></span></div>
+            <label>Internal notes<textarea maxLength="4000" value={activeCommercialDraft.notes} onChange={event => commercialDraftMode === 'quote' ? setQuoteDraft({ ...quoteDraft, notes: event.target.value }) : setChangeOrderDraft({ ...changeOrderDraft, notes: event.target.value })} placeholder="Record assumptions, exclusions, and reviewer context." /></label>
+            <p className="workflow-note">Saving creates an internal approval request. It does not send a quote, commit scope, alter contract value, or contact the client.</p>
+          </div>
+          <div className="modal-actions"><button type="button" className="secondary-button" onClick={closeCommercialDialog}>Cancel</button><button className="primary-button" disabled={submitting || !commercialDraftReady}><ShieldCheck size={16} />{submitting ? 'Saving...' : commercialDraftMode === 'quote' ? 'Retain estimate' : 'Request change approval'}</button></div>
+        </form>
+      </section>
+    </div> : null}
+
+    {commercialAcceptance ? <div className="modal-backdrop commercial-backdrop" role="presentation">
+      <section className="modal commercial-acceptance-modal" role="dialog" aria-modal="true" aria-labelledby="commercial-acceptance-title" data-testid="commercial-acceptance-modal" onKeyDown={event => { if (event.key === 'Escape') closeCommercialDialog() }}>
+        <div className="modal-heading">
+          <div><p className="eyebrow">Client evidence verification</p><h2 id="commercial-acceptance-title">Record client acceptance</h2><p>{commercialAcceptance.type === 'quote' ? `Quote ${currency.format(commercialAcceptance.record.subtotal || 0)} net` : commercialAcceptance.record.title}</p></div>
+          <button type="button" className="icon-button" aria-label="Close client acceptance" onClick={closeCommercialDialog}><X size={18} /></button>
+        </div>
+        <form onSubmit={submitCommercialAcceptance}>
+          <div className="form-grid commercial-acceptance-form">
+            <label>Accepted on<input autoFocus required type="date" max={new Date().toISOString().slice(0, 10)} value={commercialAcceptanceDraft.acceptedAt} onChange={event => setCommercialAcceptanceDraft({ ...commercialAcceptanceDraft, acceptedAt: event.target.value })} /></label>
+            <label className="form-span">Evidence reference<input required minLength="3" maxLength="240" value={commercialAcceptanceDraft.evidenceReference} onChange={event => setCommercialAcceptanceDraft({ ...commercialAcceptanceDraft, evidenceReference: event.target.value })} placeholder="Signed quote, portal decision, email, or document reference" /></label>
+            <label className="form-span">Verification notes<textarea maxLength="2000" value={commercialAcceptanceDraft.notes} onChange={event => setCommercialAcceptanceDraft({ ...commercialAcceptanceDraft, notes: event.target.value })} placeholder="Record where the evidence is retained and any conditions." /></label>
+            <p className="workflow-note form-span">This request does not claim acceptance by itself. Contract value changes only after a separate approver verifies the retained evidence.</p>
+          </div>
+          <div className="modal-actions"><button type="button" className="secondary-button" onClick={closeCommercialDialog}>Cancel</button><button className="primary-button" disabled={submitting || commercialAcceptanceDraft.evidenceReference.trim().length < 3}><ShieldCheck size={16} />{submitting ? 'Recording...' : 'Request verification'}</button></div>
+        </form>
+      </section>
+    </div> : null}
+
     {taskAction ? <div className="modal-backdrop task-action-backdrop" role="presentation"><section className="modal task-action-modal" role="dialog" aria-modal="true" aria-labelledby="task-action-title" data-testid="task-action-modal"><div className="modal-heading"><div><p className="eyebrow">Retained task lifecycle</p><h2 id="task-action-title">{formatStatus(taskAction.status)} task</h2><p>{taskAction.task.title}</p></div><button type="button" className="icon-button" aria-label="Close task action" disabled={submitting} onClick={() => { setTaskAction(null); setTaskActionNote('') }}><X size={18} /></button></div><form onSubmit={submitTaskTransition}><div className="form-grid"><label className="form-span">Evidence and outcome<textarea required minLength="4" autoFocus value={taskActionNote} onChange={event => setTaskActionNote(event.target.value)} placeholder="Record the work, blocker, or cancellation basis" /></label></div><div className="modal-actions"><button type="button" className="secondary-button" disabled={submitting} onClick={() => { setTaskAction(null); setTaskActionNote('') }}>Cancel</button><button className={taskAction.status === 'cancelled' ? 'danger-button' : 'primary-button'} disabled={submitting || taskActionNote.trim().length < 4}>{taskAction.status === 'completed' ? <Check size={16} /> : taskAction.status === 'blocked' ? <TriangleAlert size={16} /> : <Ban size={16} />}{submitting ? 'Saving...' : `Mark ${formatStatus(taskAction.status)}`}</button></div></form></section></div> : null}
     {showIntake ? <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="intake-title"><div className="modal-heading"><div><h2 id="intake-title">New intake</h2><p>Create an auditable local job record.</p></div><button className="icon-button" aria-label="Close intake" onClick={() => setShowIntake(false)}><X size={18} /></button></div><form onSubmit={createIntake}><div className="form-grid"><label>Client name<input required value={intake.clientName} onChange={event => setIntake({ ...intake, clientName: event.target.value })} /></label><label>Job title<input required value={intake.title} onChange={event => setIntake({ ...intake, title: event.target.value })} /></label><label>Service<input value={intake.service} onChange={event => setIntake({ ...intake, service: event.target.value })} placeholder="Renovation, maintenance..." /></label><label>Location<input value={intake.address} onChange={event => setIntake({ ...intake, address: event.target.value })} /></label><label>Priority<select value={intake.priority} onChange={event => setIntake({ ...intake, priority: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label><label className="form-span">Scope<textarea value={intake.description} onChange={event => setIntake({ ...intake, description: event.target.value })} placeholder="Describe the work, constraints and desired timing." /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowIntake(false)}>Cancel</button><button className="primary-button" disabled={submitting}>{submitting ? 'Saving...' : 'Create intake'}</button></div></form></section></div> : null}
     {resourceAction ? <div className="modal-backdrop" role="presentation">

@@ -123,6 +123,23 @@ test('operations view exposes owner audit investigation with cursor paging and c
   assert.match(dashboardSource, /detailOpenerRef\.current\?\.focus\(\)/);
 });
 
+test('job workspace exposes approval-safe commercial drafting and acceptance evidence', () => {
+  assert.match(dashboardSource, /minimumFractionDigits: 2/);
+  assert.match(dashboardSource, /maximumFractionDigits: 2/);
+  assert.match(dashboardSource, /data-testid="commercial-control"/);
+  assert.match(dashboardSource, /data-testid="commercial-draft-modal"/);
+  assert.match(dashboardSource, /data-testid="commercial-acceptance-modal"/);
+  assert.match(dashboardSource, /server-derived totals/);
+  assert.match(dashboardSource, /quotes\/\$\{encodeURIComponent\(record\.id\)\}\/acceptance/);
+  assert.match(dashboardSource, /change-orders\/\$\{encodeURIComponent\(record\.id\)\}\/acceptance/);
+  assert.match(dashboardSource, /acceptedAt: commercialAcceptanceDraft\.acceptedAt/);
+  assert.match(dashboardSource, /Contract value remains unchanged until client acceptance is verified/);
+  assert.match(dashboardSource, /Internal change-order approval alone does not alter contract value|internal approval request/);
+  assert.match(dashboardSource, /commercialDialogOpenerRef\.current = document\.activeElement/);
+  assert.match(dashboardSource, /requestAnimationFrame\(\(\) => opener\?\.focus\?\.\(\)\)/);
+  assert.match(dashboardSource, /if \(selectedJobId\) closeJobWorkspace\(\)/);
+});
+
 test('job archive and restore controls use retained approval-gated ledger routes', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/jobs\?archiveOnly=true&limit=100'\)/);
   assert.match(dashboardSource, /`\/api\/ledger\/jobs\/\$\{encodeURIComponent\(job\.id\)\}\/\$\{mode\}`/);

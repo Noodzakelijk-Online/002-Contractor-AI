@@ -2017,6 +2017,22 @@ app.post('/api/ledger/jobs/:id/quote', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/quotes/:quoteId/acceptance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const acceptance = operatingLedger.requestQuoteAcceptance(
+      req.params.id,
+      req.params.quoteId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...acceptance,
+      job: operatingLedger.getJobDetail(req.params.id)
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/site-visits', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -2033,6 +2049,23 @@ app.post('/api/ledger/jobs/:id/change-orders', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/acceptance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const acceptance = operatingLedger.requestChangeOrderAcceptance(
+      req.params.id,
+      req.params.changeOrderId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...acceptance,
+      job: operatingLedger.getJobDetail(req.params.id),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/field-reports', (req, res) => {

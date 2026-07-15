@@ -786,6 +786,111 @@ function normalizeNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function roundMoney(value) {
+  return Math.round((normalizeNumber(value, 0) + Number.EPSILON) * 100) / 100;
+}
+
+function ledgerInputError(code, message, details = null) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  error.code = code;
+  if (details) error.details = details;
+  return error;
+}
+
+function normalizeCommercialLineItems(rawItems, {
+  fallbackDescription,
+  fallbackAmount = 0,
+  fallbackCostCode = 'contract',
+  allowNegativeUnitPrice = false
+} = {}) {
+  if (rawItems !== undefined && !Array.isArray(rawItems)) {
+    throw ledgerInputError('commercial_line_items_invalid', 'Commercial line items must be an array.');
+  }
+  const input = Array.isArray(rawItems) && rawItems.length
+    ? rawItems
+    : [{ description: fallbackDescription, quantity: 1, unitPrice: fallbackAmount, costCode: fallbackCostCode }];
+  if (input.length > 50) {
+    throw ledgerInputError('commercial_line_items_invalid', 'Commercial records support at most 50 line items.');
+  }
+  return input.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw ledgerInputError('commercial_line_item_invalid', `Line item ${index + 1} must be an object.`);
+    }
+    const description = normalizeText(item.description || item.title || item.name, '');
+    const quantity = Number(item.quantity ?? 1);
+    const unitPrice = Number(item.unitPrice ?? item.unit_price ?? item.price ?? item.amount ?? 0);
+    if (description.length < 2 || description.length > 240) {
+      throw ledgerInputError('commercial_line_item_invalid', `Line item ${index + 1} requires a description between 2 and 240 characters.`);
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1000000) {
+      throw ledgerInputError('commercial_line_item_invalid', `Line item ${index + 1} requires a positive quantity.`);
+    }
+    if (!Number.isFinite(unitPrice) || (!allowNegativeUnitPrice && unitPrice < 0) || Math.abs(unitPrice) > 1000000000) {
+      throw ledgerInputError(
+        'commercial_line_item_invalid',
+        `Line item ${index + 1} requires ${allowNegativeUnitPrice ? 'a valid' : 'a non-negative'} unit price.`
+      );
+    }
+    const costCode = normalizeText(item.costCode || item.cost_code, fallbackCostCode);
+    if (costCode.length > 80) {
+      throw ledgerInputError('commercial_line_item_invalid', `Line item ${index + 1} cost code is too long.`);
+    }
+    return {
+      description,
+      quantity,
+      unitPrice: roundMoney(unitPrice),
+      costCode
+    };
+  });
+}
+
+function normalizeCommercialTaxRate(value, fallback = 21) {
+  const taxRate = Number(value ?? fallback);
+  if (!Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100) {
+    throw ledgerInputError('commercial_tax_rate_invalid', 'Tax rate must be between 0 and 100 percent.');
+  }
+  return roundMoney(taxRate);
+}
+
+function normalizeCommercialCurrency(value = 'EUR') {
+  const currency = normalizeText(value, 'EUR').toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw ledgerInputError('commercial_currency_invalid', 'Currency must be a three-letter ISO currency code.');
+  }
+  return currency;
+}
+
+function normalizeAcceptanceEvidence(payload = {}) {
+  const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.reference, '');
+  if (evidenceReference.length < 3 || evidenceReference.length > 240) {
+    throw ledgerInputError('commercial_acceptance_evidence_required', 'Client acceptance requires an evidence reference between 3 and 240 characters.');
+  }
+  const acceptedAtInput = normalizeText(payload.acceptedAt || payload.accepted_at, '');
+  if (!acceptedAtInput) {
+    throw ledgerInputError('commercial_acceptance_date_required', 'Client acceptance requires the date recorded on the retained evidence.');
+  }
+  const acceptedAt = new Date(acceptedAtInput);
+  if (Number.isNaN(acceptedAt.getTime())) {
+    throw ledgerInputError('commercial_acceptance_date_invalid', 'Client acceptance date is invalid.');
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(acceptedAtInput) && acceptedAt.toISOString().slice(0, 10) !== acceptedAtInput) {
+    throw ledgerInputError('commercial_acceptance_date_invalid', 'Client acceptance date is invalid.');
+  }
+  if (acceptedAt.getTime() > Date.now() + 5 * 60 * 1000) {
+    throw ledgerInputError('commercial_acceptance_date_invalid', 'Client acceptance cannot be recorded in the future.');
+  }
+  const notes = normalizeText(payload.notes || payload.note, '');
+  if (notes.length > 2000) {
+    throw ledgerInputError('commercial_acceptance_notes_too_long', 'Client acceptance notes must be 2,000 characters or fewer.');
+  }
+  return {
+    evidenceReference,
+    acceptedAt: acceptedAt.toISOString(),
+    notes: notes || null
+  };
+}
+
 function normalizePriority(value) {
   const priority = normalizeText(value, 'medium').toLowerCase().replace(/[\s-]+/g, '_');
   if (['critical', 'high', 'medium', 'low'].includes(priority)) {
@@ -4548,14 +4653,21 @@ class ContractorOperatingLedger {
         : this.defaultTasksForJob(job);
       const tasks = taskPayloads.map(task => this.addTask(job.id, task, { actor, audit: false }));
 
-      const quote = this.createQuote(job.id, {
-        currency: payload.currency || 'EUR',
-        taxRate: payload.taxRate ?? payload.vatRate ?? 21,
-        lineItems: Array.isArray(payload.lineItems) ? payload.lineItems : payload.quote?.lineItems,
-        subtotal: payload.subtotal,
-        total: payload.total,
-        validUntil: payload.validUntil
-      }, { actor, audit: false });
+      const quoteLineItems = Array.isArray(payload.lineItems) ? payload.lineItems : payload.quote?.lineItems;
+      const quoteBasis = normalizeNumber(
+        payload.subtotal ?? payload.quote?.subtotal ?? payload.total ?? payload.quote?.total,
+        estimate
+      );
+      const hasQuoteBasis = (Array.isArray(quoteLineItems) && quoteLineItems.length > 0) || quoteBasis > 0;
+      const quote = hasQuoteBasis
+        ? this.createQuote(job.id, {
+            currency: payload.currency || payload.quote?.currency || 'EUR',
+            taxRate: payload.taxRate ?? payload.vatRate ?? payload.quote?.taxRate ?? 21,
+            lineItems: quoteLineItems,
+            subtotal: quoteBasis,
+            validUntil: payload.validUntil || payload.quote?.validUntil
+          }, { actor, audit: false })
+        : null;
 
       const materials = (Array.isArray(payload.materials) ? payload.materials : [])
         .map(item => this.addMaterialRequirement(job.id, item, { actor, audit: false }));
@@ -4585,7 +4697,9 @@ class ContractorOperatingLedger {
         channel: 'portal',
         direction: 'outbound',
         subject: `Intake received: ${job.title}`,
-        body: `Draft acknowledgement for ${client.name}. Quote ${quote.id} is waiting for approval before sending.`,
+        body: quote
+          ? `Draft acknowledgement for ${client.name}. Quote ${quote.id} is waiting for approval before sending.`
+          : `Draft acknowledgement for ${client.name}. A commercial estimate has not yet been retained.`,
         status: 'draft',
         requiresApproval: true
       }, { actor, audit: false });
@@ -4596,7 +4710,7 @@ class ContractorOperatingLedger {
         jobId: job.id,
         action: 'create_intake_job',
         actor,
-        after: { job, client, requestId, tasks: tasks.length, quote: quote.id, materials: materials.length, tools: toolReservations.length, assignmentId: assignment?.id || null },
+        after: { job, client, requestId, tasks: tasks.length, quote: quote?.id || null, materials: materials.length, tools: toolReservations.length, assignmentId: assignment?.id || null },
         metadata: {
           source: 'ledger_intake',
           progressId: progress.id,
@@ -5065,25 +5179,24 @@ class ContractorOperatingLedger {
       const actor = options.actor || 'Contractor.AI';
       const timestamp = nowIso();
       const id = makeId('quote');
-      const lineItems = Array.isArray(payload.lineItems) && payload.lineItems.length
-        ? payload.lineItems.map(item => ({
-          description: normalizeText(item.description || item.title || item.name, 'Contractor work'),
-          quantity: normalizeNumber(item.quantity, 1),
-          unitPrice: normalizeNumber(item.unitPrice || item.unit_price || item.price || item.amount, 0),
-          costCode: item.costCode || item.cost_code || null
-        }))
-        : [{
-          description: job.title,
-          quantity: 1,
-          unitPrice: normalizeNumber(payload.subtotal || job.estimated_cost || job.estimatedCost || 0),
-          costCode: 'contract'
-        }];
-      const calculatedSubtotal = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-      const subtotal = normalizeNumber(payload.subtotal, calculatedSubtotal);
-      const taxRate = normalizeNumber(payload.taxRate || payload.tax_rate, 21);
-      const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, subtotal * (taxRate / 100));
-      const total = normalizeNumber(payload.total, subtotal + taxAmount);
-      const status = normalizeStatus(payload.status, 'draft');
+      const lineItems = normalizeCommercialLineItems(payload.lineItems, {
+        fallbackDescription: job.title,
+        fallbackAmount: payload.subtotal ?? job.estimated_cost ?? job.estimatedCost ?? 0,
+        fallbackCostCode: 'contract'
+      });
+      const subtotal = roundMoney(lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0));
+      const taxRate = normalizeCommercialTaxRate(payload.taxRate ?? payload.tax_rate, 21);
+      const taxAmount = roundMoney(subtotal * (taxRate / 100));
+      const total = roundMoney(subtotal + taxAmount);
+      const currency = normalizeCommercialCurrency(payload.currency);
+      const validUntil = payload.validUntil || payload.valid_until || null;
+      if (validUntil && Number.isNaN(new Date(validUntil).getTime())) {
+        throw ledgerInputError('quote_valid_until_invalid', 'Quote validity date is invalid.');
+      }
+      const notes = normalizeText(payload.notes, '');
+      if (notes.length > 4000) {
+        throw ledgerInputError('quote_notes_too_long', 'Quote notes must be 4,000 characters or fewer.');
+      }
 
       this.db.prepare(`
         INSERT INTO quotes (id, job_id, status, currency, subtotal, tax_rate, tax_amount, total, valid_until, line_items_json, data_json, created_at, updated_at)
@@ -5091,15 +5204,15 @@ class ContractorOperatingLedger {
       `).run(
         id,
         jobId,
-        status,
-        normalizeText(payload.currency, 'EUR').toUpperCase(),
+        'draft',
+        currency,
         subtotal,
         taxRate,
         taxAmount,
         total,
-        payload.validUntil || payload.valid_until || null,
+        validUntil,
         toJson(lineItems, []),
-        toJson({ notes: payload.notes || null }),
+        toJson({ notes: notes || null, calculation: 'server_derived' }),
         timestamp,
         timestamp
       );
@@ -5109,9 +5222,9 @@ class ContractorOperatingLedger {
         targetId: id,
         jobId,
         approvalType: 'quote_issue',
-        summary: `Approve quote ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency, 'EUR').toUpperCase()}`,
+        summary: `Approve quote ${id} for ${total.toFixed(2)} ${currency}`,
         reason: 'Quotes must be approved before sending externally.',
-        data: { total, taxRate, lineItems }
+        data: { subtotal, taxAmount, total, taxRate, currency, lineItems }
       }, { actor, audit: false });
       this.db.prepare('UPDATE quotes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
 
@@ -5120,6 +5233,156 @@ class ContractorOperatingLedger {
         this.audit({ entityType: 'quote', entityId: id, jobId, action: 'create_quote', actor, after: quote });
       }
       return quote;
+    });
+  }
+
+  requestQuoteAcceptance(jobId, quoteId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(quoteId, jobId);
+      if (!row) {
+        const error = new Error('Quote not found for this job');
+        error.statusCode = 404;
+        error.code = 'quote_not_found';
+        throw error;
+      }
+      const quote = this.mapQuote(row);
+      if (quote.status === 'accepted') {
+        const error = new Error('Quote is already recorded as client accepted');
+        error.statusCode = 409;
+        error.code = 'quote_already_accepted';
+        throw error;
+      }
+      if (quote.status !== 'approved') {
+        const error = new Error('Quote must receive internal approval before client acceptance can be verified');
+        error.statusCode = 409;
+        error.code = 'quote_not_approved';
+        throw error;
+      }
+      const evidence = normalizeAcceptanceEvidence(payload);
+      const pending = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'quote_acceptance' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(quoteId);
+      if (pending) {
+        const existing = fromJson(pending.data_json, {});
+        if (existing.evidenceReference !== evidence.evidenceReference
+          || existing.acceptedAt !== evidence.acceptedAt
+          || (existing.notes || null) !== evidence.notes) {
+          const error = new Error('A different quote acceptance verification is already pending');
+          error.statusCode = 409;
+          error.code = 'quote_acceptance_pending_conflict';
+          throw error;
+        }
+        return { quote, approval: this.mapApproval(pending), replayed: true };
+      }
+      const approval = this.createApproval({
+        targetType: 'quote_acceptance',
+        targetId: quoteId,
+        jobId,
+        approvalType: 'quote_acceptance_verification',
+        summary: `Verify client acceptance of quote ${quoteId} for ${quote.total.toFixed(2)} ${quote.currency}`,
+        reason: 'Signed or otherwise retained client acceptance evidence must be verified before contract value changes.',
+        data: {
+          quoteId,
+          evidenceReference: evidence.evidenceReference,
+          acceptedAt: evidence.acceptedAt,
+          notes: evidence.notes,
+          subtotal: quote.subtotal,
+          taxAmount: quote.taxAmount,
+          total: quote.total,
+          currency: quote.currency
+        }
+      }, { actor, audit: false });
+      this.audit({
+        entityType: 'quote',
+        entityId: quoteId,
+        jobId,
+        action: 'request_quote_acceptance',
+        actor,
+        before: quote,
+        after: quote,
+        metadata: { approvalId: approval.id, evidenceReference: evidence.evidenceReference }
+      });
+      return { quote, approval, replayed: false };
+    });
+  }
+
+  requestChangeOrderAcceptance(jobId, changeOrderId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(changeOrderId, jobId);
+      if (!row) {
+        const error = new Error('Change order not found for this job');
+        error.statusCode = 404;
+        error.code = 'change_order_not_found';
+        throw error;
+      }
+      const changeOrder = this.mapChangeOrder(row);
+      if (changeOrder.status === 'accepted') {
+        const error = new Error('Change order is already recorded as client accepted');
+        error.statusCode = 409;
+        error.code = 'change_order_already_accepted';
+        throw error;
+      }
+      if (changeOrder.status !== 'approved') {
+        const error = new Error('Change order must receive internal approval before client acceptance can be verified');
+        error.statusCode = 409;
+        error.code = 'change_order_not_approved';
+        throw error;
+      }
+      const evidence = normalizeAcceptanceEvidence(payload);
+      const pending = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'change_order_acceptance' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(changeOrderId);
+      if (pending) {
+        const existing = fromJson(pending.data_json, {});
+        if (existing.evidenceReference !== evidence.evidenceReference
+          || existing.acceptedAt !== evidence.acceptedAt
+          || (existing.notes || null) !== evidence.notes) {
+          const error = new Error('A different change-order acceptance verification is already pending');
+          error.statusCode = 409;
+          error.code = 'change_order_acceptance_pending_conflict';
+          throw error;
+        }
+        return { changeOrder, approval: this.mapApproval(pending), replayed: true };
+      }
+      const approval = this.createApproval({
+        targetType: 'change_order_acceptance',
+        targetId: changeOrderId,
+        jobId,
+        approvalType: 'change_order_acceptance_verification',
+        summary: `Verify client acceptance of change order ${changeOrderId} for ${changeOrder.total.toFixed(2)} ${changeOrder.currency}`,
+        reason: 'Retained client acceptance evidence must be verified before approved scope changes alter contract value.',
+        data: {
+          changeOrderId,
+          evidenceReference: evidence.evidenceReference,
+          acceptedAt: evidence.acceptedAt,
+          notes: evidence.notes,
+          amount: changeOrder.amount,
+          taxAmount: changeOrder.taxAmount,
+          total: changeOrder.total,
+          currency: changeOrder.currency
+        }
+      }, { actor, audit: false });
+      this.audit({
+        entityType: 'change_order',
+        entityId: changeOrderId,
+        jobId,
+        action: 'request_change_order_acceptance',
+        actor,
+        before: changeOrder,
+        after: changeOrder,
+        metadata: { approvalId: approval.id, evidenceReference: evidence.evidenceReference }
+      });
+      return { changeOrder, approval, replayed: false };
     });
   }
 
@@ -5217,30 +5480,35 @@ class ContractorOperatingLedger {
         quoteId = quote?.id || null;
       }
 
-      const rawLineItems = Array.isArray(payload.lineItems) && payload.lineItems.length ? payload.lineItems : [];
-      const lineItems = rawLineItems.length
-        ? rawLineItems.map(item => ({
-          description: normalizeText(item.description || item.title || item.name, 'Scope change'),
-          quantity: normalizeNumber(item.quantity, 1),
-          unitPrice: normalizeNumber(item.unitPrice || item.unit_price || item.price || item.amount, 0),
-          costCode: item.costCode || item.cost_code || 'change_order'
-        }))
-        : [{
-          description: normalizeText(payload.title || payload.scopeDelta || payload.scope_delta, 'Scope change'),
-          quantity: 1,
-          unitPrice: normalizeNumber(payload.amount || payload.subtotal, 0),
-          costCode: 'change_order'
-        }];
-      const calculatedAmount = lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-      const amount = normalizeNumber(payload.amount || payload.subtotal, calculatedAmount);
-      const taxRate = normalizeNumber(payload.taxRate || payload.tax_rate, 21);
-      const taxAmount = normalizeNumber(payload.taxAmount || payload.tax_amount, amount * (taxRate / 100));
-      const total = normalizeNumber(payload.total, amount + taxAmount);
+      const lineItems = normalizeCommercialLineItems(payload.lineItems, {
+        fallbackDescription: normalizeText(payload.title || payload.scopeDelta || payload.scope_delta, 'Scope change'),
+        fallbackAmount: payload.amount ?? payload.subtotal ?? 0,
+        fallbackCostCode: 'change_order',
+        allowNegativeUnitPrice: true
+      });
+      const amount = roundMoney(lineItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0));
+      const taxRate = normalizeCommercialTaxRate(payload.taxRate ?? payload.tax_rate, 21);
+      const taxAmount = roundMoney(amount * (taxRate / 100));
+      const total = roundMoney(amount + taxAmount);
       const scheduleDeltaDays = normalizeNumber(payload.scheduleDeltaDays || payload.schedule_delta_days, 0);
+      if (!Number.isFinite(scheduleDeltaDays) || Math.abs(scheduleDeltaDays) > 3650) {
+        throw ledgerInputError('change_order_schedule_delta_invalid', 'Schedule impact must be between -3,650 and 3,650 days.');
+      }
+      const title = normalizeText(payload.title, 'Scope change');
+      const scopeDelta = normalizeText(payload.scopeDelta || payload.scope_delta || payload.description, '');
+      if (title.length < 2 || title.length > 240) {
+        throw ledgerInputError('change_order_title_invalid', 'Change order title must be between 2 and 240 characters.');
+      }
+      if (scopeDelta.length < 3 || scopeDelta.length > 4000) {
+        throw ledgerInputError('change_order_scope_required', 'Change order scope must be between 3 and 4,000 characters.');
+      }
+      const currency = normalizeCommercialCurrency(payload.currency);
       const requestedStatus = normalizeStatus(payload.status, 'draft');
       const commitmentStatuses = ['sent', 'submitted', 'approved', 'accepted', 'committed', 'issued'];
-      const hasImpact = Math.abs(total) > 0 || Math.abs(scheduleDeltaDays) > 0 || Boolean(normalizeText(payload.scopeDelta || payload.scope_delta, ''));
-      const requiresApproval = normalizeBoolean(payload.requiresApproval, hasImpact || commitmentStatuses.includes(requestedStatus));
+      const hasImpact = Math.abs(total) > 0 || Math.abs(scheduleDeltaDays) > 0 || Boolean(scopeDelta);
+      const requiresApproval = hasImpact
+        || commitmentStatuses.includes(requestedStatus)
+        || normalizeBoolean(payload.requiresApproval, false);
       const status = requiresApproval && commitmentStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
       this.db.prepare(`
@@ -5250,10 +5518,10 @@ class ContractorOperatingLedger {
         id,
         jobId,
         quoteId,
-        normalizeText(payload.title, 'Scope change'),
+        title,
         status,
-        payload.scopeDelta || payload.scope_delta || payload.description || null,
-        normalizeText(payload.currency, 'EUR').toUpperCase(),
+        scopeDelta,
+        currency,
         amount,
         taxRate,
         taxAmount,
@@ -5264,7 +5532,8 @@ class ContractorOperatingLedger {
           notes: payload.notes || null,
           source: payload.source || null,
           requestedStatus,
-          requiresApproval
+          requiresApproval,
+          calculation: 'server_derived'
         }),
         timestamp,
         timestamp
@@ -5277,7 +5546,7 @@ class ContractorOperatingLedger {
           targetId: id,
           jobId,
           approvalType: 'scope_change',
-          summary: `Approve change order ${id} for ${total.toFixed(2)} ${normalizeText(payload.currency, 'EUR').toUpperCase()}`,
+          summary: `Approve change order ${id} for ${total.toFixed(2)} ${currency}`,
           reason: 'Scope, price, or schedule changes require approval before client commitment.',
           data: {
             quoteId,
@@ -13154,6 +13423,13 @@ class ContractorOperatingLedger {
         error.statusCode = 400;
         throw error;
       }
+      if (before.status !== 'pending') {
+        if (before.status === status) return this.mapApproval(before);
+        const error = new Error(`Approval was already resolved as ${before.status}`);
+        error.statusCode = 409;
+        error.code = 'approval_already_resolved';
+        throw error;
+      }
       if (status === 'approved' && before.job_id && !['job_archive', 'job_restore'].includes(before.target_type)) {
         this.requireJob(before.job_id);
       }
@@ -13184,6 +13460,18 @@ class ContractorOperatingLedger {
           SET status = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
           WHERE id = ? AND status = 'pending_approval'
         `).run(status, timestamp, timestamp, before.target_id);
+      } else if (before.target_type === 'quote') {
+        this.db.prepare(`
+          UPDATE quotes
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status IN ('draft', 'pending_approval')
+        `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'change_order') {
+        this.db.prepare(`
+          UPDATE change_orders
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status IN ('draft', 'pending_approval')
+        `).run(status, timestamp, before.target_id);
       }
 
       const after = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -13200,12 +13488,91 @@ class ContractorOperatingLedger {
     });
   }
 
+  recalculateCommercialContractValue(jobId, { captureBaseline = false } = {}) {
+    const job = this.db.prepare('SELECT contract_value, data_json FROM jobs WHERE id = ?').get(jobId);
+    if (!job) return null;
+    const acceptedQuote = this.db.prepare(`
+      SELECT subtotal
+      FROM quotes
+      WHERE job_id = ? AND status = 'accepted'
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
+    `).get(jobId);
+    const data = fromJson(job.data_json, {});
+    if (!acceptedQuote && captureBaseline && data.commercialBaselineNet === undefined) {
+      data.commercialBaselineNet = roundMoney(job.contract_value);
+    }
+    const baseline = acceptedQuote
+      ? roundMoney(acceptedQuote.subtotal)
+      : roundMoney(data.commercialBaselineNet ?? job.contract_value);
+    const acceptedChanges = this.db.prepare(`
+      SELECT COALESCE(SUM(amount), 0) AS amount
+      FROM change_orders
+      WHERE job_id = ? AND status = 'accepted'
+    `).get(jobId);
+    const changeOrderNet = roundMoney(acceptedChanges?.amount || 0);
+    const contractValue = roundMoney(baseline + changeOrderNet);
+    this.db.prepare(`
+      UPDATE jobs
+      SET contract_value = ?, data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(contractValue, toJson(data, {}), nowIso(), jobId);
+    return { baseline, changeOrderNet, contractValue };
+  }
+
   applyApprovalTarget(targetType, targetId) {
     const timestamp = nowIso();
     if (targetType === 'quote') {
-      this.db.prepare("UPDATE quotes SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
+      this.db.prepare("UPDATE quotes SET status = 'approved', updated_at = ? WHERE id = ? AND status IN ('draft', 'pending_approval')").run(timestamp, targetId);
       this.db.prepare("UPDATE jobs SET approval_state = 'quote_approved', phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM quotes WHERE id = ?)")
         .run(timestamp, targetId);
+    } else if (targetType === 'quote_acceptance') {
+      const quote = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(targetId);
+      const approval = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'quote_acceptance' AND target_id = ? AND status = 'approved'
+        ORDER BY resolved_at DESC, updated_at DESC
+        LIMIT 1
+      `).get(targetId);
+      if (quote && approval && quote.status === 'approved') {
+        const acceptance = fromJson(approval.data_json, {});
+        this.db.prepare(`
+          UPDATE quotes
+          SET status = 'superseded', updated_at = ?
+          WHERE job_id = ? AND status = 'accepted' AND id <> ?
+        `).run(timestamp, quote.job_id, targetId);
+        this.db.prepare(`
+          UPDATE quotes
+          SET status = 'accepted', data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'approved'
+        `).run(toJson({
+          ...fromJson(quote.data_json, {}),
+          acceptance: {
+            approvalId: approval.id,
+            evidenceReference: acceptance.evidenceReference,
+            acceptedAt: acceptance.acceptedAt,
+            notes: acceptance.notes || null,
+            verifiedBy: approval.resolved_by,
+            verifiedAt: approval.resolved_at
+          }
+        }), timestamp, targetId);
+        const commercial = this.recalculateCommercialContractValue(quote.job_id);
+        this.db.prepare(`
+          UPDATE jobs
+          SET approval_state = 'contract_accepted', phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ?
+          WHERE id = ?
+        `).run(timestamp, quote.job_id);
+        this.audit({
+          entityType: 'quote',
+          entityId: targetId,
+          jobId: quote.job_id,
+          action: 'accept_quote_contract',
+          actor: approval.resolved_by || 'approval',
+          before: this.mapQuote(quote),
+          after: this.mapQuote(this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(targetId)),
+          metadata: { approvalId: approval.id, commercial }
+        });
+      }
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -13318,7 +13685,6 @@ class ContractorOperatingLedger {
       this.db.prepare("UPDATE jobs SET phase = CASE WHEN phase = 'intake' THEN 'survey' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM site_visits WHERE id = ?)")
         .run(timestamp, targetId);
     } else if (targetType === 'change_order') {
-      const changeOrder = this.db.prepare('SELECT job_id, total FROM change_orders WHERE id = ?').get(targetId);
       this.db.prepare(`
         UPDATE change_orders
         SET status = CASE
@@ -13329,9 +13695,49 @@ class ContractorOperatingLedger {
         updated_at = ?
         WHERE id = ?
       `).run(timestamp, targetId);
+      const changeOrder = this.db.prepare('SELECT job_id FROM change_orders WHERE id = ?').get(targetId);
       if (changeOrder) {
-        this.db.prepare('UPDATE jobs SET contract_value = contract_value + ?, approval_state = ?, updated_at = ? WHERE id = ?')
-          .run(normalizeNumber(changeOrder.total, 0), 'change_order_approved', timestamp, changeOrder.job_id);
+        this.db.prepare('UPDATE jobs SET approval_state = ?, updated_at = ? WHERE id = ?')
+          .run('change_order_approved', timestamp, changeOrder.job_id);
+      }
+    } else if (targetType === 'change_order_acceptance') {
+      const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId);
+      const approval = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'change_order_acceptance' AND target_id = ? AND status = 'approved'
+        ORDER BY resolved_at DESC, updated_at DESC
+        LIMIT 1
+      `).get(targetId);
+      if (changeOrder && approval && changeOrder.status === 'approved') {
+        const acceptance = fromJson(approval.data_json, {});
+        this.db.prepare(`
+          UPDATE change_orders
+          SET status = 'accepted', data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'approved'
+        `).run(toJson({
+          ...fromJson(changeOrder.data_json, {}),
+          acceptance: {
+            approvalId: approval.id,
+            evidenceReference: acceptance.evidenceReference,
+            acceptedAt: acceptance.acceptedAt,
+            notes: acceptance.notes || null,
+            verifiedBy: approval.resolved_by,
+            verifiedAt: approval.resolved_at
+          }
+        }), timestamp, targetId);
+        const commercial = this.recalculateCommercialContractValue(changeOrder.job_id, { captureBaseline: true });
+        this.db.prepare('UPDATE jobs SET approval_state = ?, updated_at = ? WHERE id = ?')
+          .run('change_order_accepted', timestamp, changeOrder.job_id);
+        this.audit({
+          entityType: 'change_order',
+          entityId: targetId,
+          jobId: changeOrder.job_id,
+          action: 'accept_change_order_contract',
+          actor: approval.resolved_by || 'approval',
+          before: this.mapChangeOrder(changeOrder),
+          after: this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId)),
+          metadata: { approvalId: approval.id, commercial }
+        });
       }
     } else if (targetType === 'field_report') {
       const fieldReport = this.db.prepare('SELECT data_json FROM field_reports WHERE id = ?').get(targetId);
@@ -20391,6 +20797,34 @@ class ContractorOperatingLedger {
       riskLevel = 'high';
       preview.expiresAt = mapped?.expiresAt || data.expiresAt || null;
       preview.label = mapped?.data?.label || data.label || null;
+    } else if (targetType === 'quote_acceptance') {
+      const quote = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = quote ? this.mapQuote(quote) : null;
+      primaryEffect = `Verify retained client acceptance of quote${mapped ? ` for ${mapped.total.toFixed(2)} ${mapped.currency}` : ''}.`;
+      addEffect(`Set the accepted net contract baseline to ${(mapped?.subtotal ?? data.subtotal ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'}.`);
+      addEffect('Mark older accepted quote revisions as superseded while retaining their complete history.');
+      addSafeguard('Requires a retained acceptance reference and a separate approver decision.');
+      addSafeguard('Does not send the quote, contact the client, collect payment, or create supplier spend.');
+      riskLevel = 'high';
+      preview.total = mapped?.total ?? data.total ?? null;
+      preview.subtotal = mapped?.subtotal ?? data.subtotal ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.evidenceReference = data.evidenceReference || null;
+      preview.acceptedAt = data.acceptedAt || null;
+    } else if (targetType === 'change_order_acceptance') {
+      const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = changeOrder ? this.mapChangeOrder(changeOrder) : null;
+      primaryEffect = `Verify retained client acceptance of ${mapped?.title || 'the approved change order'}.`;
+      addEffect(`Add ${(mapped?.amount ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} net to accepted contract value.`);
+      addSafeguard('Internal change-order approval alone does not alter contract value.');
+      addSafeguard('Does not notify the client, order materials, commit schedule dates, issue an invoice, or collect payment.');
+      riskLevel = 'high';
+      preview.title = mapped?.title || null;
+      preview.amount = mapped?.amount ?? data.amount ?? null;
+      preview.total = mapped?.total ?? data.total ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.evidenceReference = data.evidenceReference || null;
+      preview.acceptedAt = data.acceptedAt || null;
     } else if (targetType === 'quote') {
       const quote = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = quote ? this.mapQuote(quote) : null;

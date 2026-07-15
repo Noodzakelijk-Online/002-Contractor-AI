@@ -172,6 +172,158 @@ test('office operator can review job planning and create a client draft without 
   expect(draft.approvalId).toBeTruthy();
 });
 
+test('commercial control retains server totals and changes contract value only after verified client acceptance', async ({ page, request }) => {
+  const intake = await createBrowserJob(request, 'Browser commercial acceptance workflow', {
+    service: 'Interior renovation',
+    estimatedCost: 0
+  });
+  const openJob = async () => {
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+    await page.getByRole('button', { name: `Open ${intake.job.title}` }).first().click();
+    await expect(page.getByTestId('job-workspace').getByRole('heading', { name: intake.job.title })).toBeVisible();
+  };
+
+  await openJob();
+  let workspace = page.getByTestId('job-workspace');
+  let commercial = workspace.getByTestId('commercial-control');
+  await expect(commercial.getByRole('heading', { name: 'Commercial control' })).toBeVisible();
+  await expect(commercial.getByText('Not retained')).toBeVisible();
+
+  const estimateButton = commercial.getByRole('button', { name: 'New estimate' });
+  await estimateButton.click();
+  const quoteModal = page.getByTestId('commercial-draft-modal');
+  await expect(quoteModal.getByRole('heading', { name: 'New estimate' })).toBeVisible();
+  const firstQuoteLine = quoteModal.locator('.commercial-line-item').first();
+  await firstQuoteLine.getByLabel('Description').fill('Carpentry installation');
+  await firstQuoteLine.getByLabel('Quantity').fill('2');
+  await firstQuoteLine.getByLabel('Unit price').fill('600');
+  await quoteModal.getByRole('button', { name: 'Add line' }).click();
+  const secondQuoteLine = quoteModal.locator('.commercial-line-item').nth(1);
+  await secondQuoteLine.getByLabel('Description').fill('Finish materials');
+  await secondQuoteLine.getByLabel('Quantity').fill('3');
+  await secondQuoteLine.getByLabel('Unit price').fill('100');
+  await expect(quoteModal.getByLabel('Commercial totals')).toContainText(/1[.,]500/);
+  await quoteModal.getByRole('button', { name: 'Retain estimate' }).click();
+  await expect(quoteModal).toBeHidden();
+  await expect(estimateButton).toBeFocused();
+
+  let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  expect(detailResponse.ok()).toBeTruthy();
+  let detail = await detailResponse.json();
+  const quote = detail.job.quotes.find(item => item.subtotal === 1500);
+  expect(quote).toMatchObject({ subtotal: 1500, taxAmount: 315, total: 1815, status: 'draft' });
+  expect(detail.job.contractValue).toBe(0);
+
+  let quoteRow = commercial.getByTestId(`commercial-quote-${quote.id}`);
+  await quoteRow.getByRole('button', { name: 'Review quote' }).click();
+  await expect(workspace).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Approval queue' })).toBeVisible();
+  await approveQueueItem(page, page.locator('.approval-item'), 'Estimate scope, rates, VAT, and retained safeguards verified.');
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  quoteRow = commercial.getByTestId(`commercial-quote-${quote.id}`);
+  await expect(quoteRow.getByText('approved', { exact: true })).toBeVisible();
+  await expect(commercial.getByLabel('Accepted commercial value')).toContainText(/Accepted contract net€\s*0/);
+  await quoteRow.getByRole('button', { name: 'Record acceptance' }).click();
+  const quoteAcceptanceModal = page.getByTestId('commercial-acceptance-modal');
+  await quoteAcceptanceModal.getByLabel('Evidence reference').fill('signed-quote-browser-001');
+  await quoteAcceptanceModal.getByLabel('Verification notes').fill('Signed PDF retained in the client contract file.');
+  await quoteAcceptanceModal.getByRole('button', { name: 'Request verification' }).click();
+  await expect(quoteAcceptanceModal).toBeHidden();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.contractValue).toBe(0);
+  const quoteAcceptance = detail.job.approvals.find(item => item.targetType === 'quote_acceptance' && item.status === 'pending');
+  expect(quoteAcceptance).toBeTruthy();
+  quoteRow = commercial.getByTestId(`commercial-quote-${quote.id}`);
+  await quoteRow.getByRole('button', { name: 'Verify acceptance' }).click();
+  await approveQueueItem(page, page.locator('.approval-item'), 'Signed quote reference and retained evidence location verified.');
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  quoteRow = commercial.getByTestId(`commercial-quote-${quote.id}`);
+  await expect(quoteRow.getByText('accepted', { exact: true })).toBeVisible();
+  await expect(quoteRow).toContainText('signed-quote-browser-001');
+
+  const changeButton = commercial.getByRole('button', { name: 'Scope change' });
+  await changeButton.click();
+  const changeModal = page.getByTestId('commercial-draft-modal');
+  await changeModal.getByLabel('Change title').fill('Additional acoustic lining');
+  await changeModal.getByLabel('Scope change').fill('Add acoustic lining to the retained partition scope.');
+  const changeLine = changeModal.locator('.commercial-line-item').first();
+  await changeLine.getByLabel('Description').fill('Acoustic lining');
+  await changeLine.getByLabel('Quantity').fill('2');
+  await changeLine.getByLabel('Unit price').fill('125');
+  await changeModal.getByRole('button', { name: 'Request change approval' }).click();
+  await expect(changeModal).toBeHidden();
+  await expect(changeButton).toBeFocused();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  const changeOrder = detail.job.changeOrders.find(item => item.title === 'Additional acoustic lining');
+  expect(changeOrder).toMatchObject({ amount: 250, taxAmount: 52.5, total: 302.5, status: 'pending_approval' });
+  expect(detail.job.contractValue).toBe(1500);
+
+  let changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
+  await changeRow.getByRole('button', { name: 'Review change' }).click();
+  await approveQueueItem(page, page.locator('.approval-item'), 'Scope delta, schedule impact, and retained rates verified.');
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
+  await expect(changeRow.getByText('approved', { exact: true })).toBeVisible();
+  await expect(commercial.getByLabel('Accepted commercial value')).toContainText(/1[.,]500/);
+  await changeRow.getByRole('button', { name: 'Record acceptance' }).click();
+  const changeAcceptanceModal = page.getByTestId('commercial-acceptance-modal');
+  await changeAcceptanceModal.getByLabel('Evidence reference').fill('signed-change-browser-001');
+  await changeAcceptanceModal.getByLabel('Verification notes').fill('Signed change record retained with the contract.');
+  await changeAcceptanceModal.getByRole('button', { name: 'Request verification' }).click();
+  await expect(changeAcceptanceModal).toBeHidden();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.contractValue).toBe(1500);
+  const changeAcceptance = detail.job.approvals.find(item => item.targetType === 'change_order_acceptance' && item.status === 'pending');
+  expect(changeAcceptance).toBeTruthy();
+  const acceptedChangeResponse = await request.post(`/api/ledger/approvals/${changeAcceptance.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser commercial QA', reason: 'Signed change reference and retained evidence location verified.' }
+  });
+  expect(acceptedChangeResponse.ok()).toBeTruthy();
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
+  await expect(changeRow.getByText('accepted', { exact: true })).toBeVisible();
+  await expect(changeRow).toContainText('signed-change-browser-001');
+  await expect(commercial.getByLabel('Accepted commercial value')).toContainText(/1[.,]750/);
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.contractValue).toBe(1750);
+  expect(detail.job.audit).toEqual(expect.arrayContaining([
+    expect.objectContaining({ action: 'accept_quote_contract', entityId: quote.id }),
+    expect.objectContaining({ action: 'accept_change_order_contract', entityId: changeOrder.id })
+  ]));
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(commercial).toBeVisible();
+  const geometry = await commercial.evaluate(element => ({
+    pageWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+    controlWidth: element.scrollWidth,
+    visibleWidth: element.clientWidth
+  }));
+  expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+  expect(geometry.controlWidth).toBeLessThanOrEqual(geometry.visibleWidth + 1);
+});
+
 test('job workspace creates, starts, and completes retained tasks with evidence', async ({ page, request }) => {
   const intake = await createBrowserJob(request, 'Browser retained task workflow');
   const taskTitle = 'Protect completed floor before second fix';
