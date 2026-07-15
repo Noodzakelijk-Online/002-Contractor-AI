@@ -20,7 +20,7 @@ test('dashboard mutations remain API-backed and confirmation-gated where they af
   assert.match(dashboardSource, /api\(`\/api\/ledger\/approvals\/\$\{item\.id\}\/resolve`/);
   assert.match(dashboardSource, /data-testid="approval-review-modal"/);
   assert.match(dashboardSource, /approvalReview\.item\.decision\?\.safeguards/);
-  assert.match(dashboardSource, /required=\{approvalReview\.status === 'rejected'\}/);
+  assert.match(dashboardSource, /required=\{approvalReview\.status === 'rejected' \|\| approvalReview\.item\.data\?\.requiresExceptionOverride === true\}/);
   assert.match(dashboardSource, /confirmation: 'RESET_QA'/);
   assert.match(dashboardSource, /window\.confirm\('Archive Browser QA and demo records/);
 });

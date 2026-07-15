@@ -91,6 +91,20 @@ function verifySqliteBackupDatabase(ledgerFile) {
       const retainedTables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name));
       const missingTables = requiredTables.filter(table => !retainedTables.has(table));
       if (missingTables.length) throw new Error(`Backup ledger schema is incomplete: ${missingTables.join(', ')}.`);
+      const appliedMigrations = new Set(database.prepare('SELECT version FROM ledger_schema_migrations').all().map(row => row.version));
+      if (appliedMigrations.has('018_supplier_payables')) {
+        const payableTables = ['supplier_invoices', 'supplier_invoice_payments'];
+        const missingPayableTables = payableTables.filter(table => !retainedTables.has(table));
+        if (missingPayableTables.length) {
+          throw new Error(`Backup supplier-payable schema is incomplete: ${missingPayableTables.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const payableIndexes = ['idx_supplier_invoices_duplicate_key', 'idx_supplier_invoice_payments_reconciliation_key'];
+        const missingPayableIndexes = payableIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingPayableIndexes.length) {
+          throw new Error(`Backup supplier-payable constraints are incomplete: ${missingPayableIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

@@ -148,6 +148,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'budget', label: 'Budget lines', table: 'budget_lines', detailKey: 'budgetLines' },
     { key: 'expense', label: 'Expenses', table: 'expenses', detailKey: 'expenses' },
     { key: 'purchase_order', label: 'Purchase orders', table: 'purchase_orders', detailKey: 'purchaseOrders' },
+    { key: 'supplier_invoice', label: 'Supplier invoices', table: 'supplier_invoices', detailKey: 'supplierInvoices' },
     { key: 'invoice', label: 'Invoices', table: 'invoices', detailKey: 'invoices' },
     { key: 'credit_note', label: 'Credit notes', table: 'credit_notes', detailKey: 'creditNotes' },
     { key: 'payment', label: 'Payments', table: 'payments', detailKey: 'payments' },
@@ -272,6 +273,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     budget: 'budget_line_form',
     expense: 'expense_form',
     purchase_order: 'purchase_order_form',
+    supplier_invoice: 'supplier_invoice_form',
     invoice: 'invoice_form',
     payment: 'payment_form',
     draw: 'draw_request_form',
@@ -1439,6 +1441,56 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
         CREATE INDEX IF NOT EXISTS idx_credit_notes_job ON credit_notes(job_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_credit_notes_invoice_status ON credit_notes(invoice_id, status);
+      `);
+    }
+  },
+  {
+    version: '018_supplier_payables',
+    description: 'Retain matched supplier invoices and approval-gated payment confirmations without initiating funds movement.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS supplier_invoices (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          purchase_order_id TEXT REFERENCES purchase_orders(id) ON DELETE SET NULL,
+          trade_partner_id TEXT REFERENCES trade_partners(id) ON DELETE SET NULL,
+          supplier TEXT NOT NULL,
+          invoice_number TEXT NOT NULL,
+          duplicate_key TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          net_amount REAL NOT NULL DEFAULT 0,
+          tax_amount REAL NOT NULL DEFAULT 0,
+          total REAL NOT NULL DEFAULT 0,
+          invoice_date TEXT NOT NULL,
+          due_at TEXT,
+          approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_invoices_duplicate_key ON supplier_invoices(duplicate_key);
+        CREATE INDEX IF NOT EXISTS idx_supplier_invoices_job_status ON supplier_invoices(job_id, status, due_at);
+        CREATE INDEX IF NOT EXISTS idx_supplier_invoices_purchase_order ON supplier_invoices(purchase_order_id, status);
+
+        CREATE TABLE IF NOT EXISTS supplier_invoice_payments (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          supplier_invoice_id TEXT NOT NULL REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL DEFAULT 'pending_confirmation',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          amount REAL NOT NULL DEFAULT 0,
+          paid_at TEXT,
+          method TEXT,
+          reference TEXT NOT NULL,
+          reconciliation_key TEXT NOT NULL,
+          approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_invoice_payments_reconciliation_key ON supplier_invoice_payments(reconciliation_key);
+        CREATE INDEX IF NOT EXISTS idx_supplier_invoice_payments_invoice_status ON supplier_invoice_payments(supplier_invoice_id, status);
       `);
     }
   }
@@ -3801,7 +3853,10 @@ class ContractorOperatingLedger {
 
   assertTradePartnerReadyForCommitment(record, recordType = 'supplier commitment') {
     const data = fromJson(record?.data_json, record?.data || {});
-    const partner = this.resolveTradePartnerForSpend({ ...data, tradePartnerId: data.tradePartnerId }, record?.supplier || '');
+    const partner = this.resolveTradePartnerForSpend({
+      ...data,
+      tradePartnerId: record?.trade_partner_id || record?.tradePartnerId || data.tradePartnerId
+    }, record?.supplier || '');
     if (!partner) {
       const error = new Error(`A retained trade partner must be linked before approving this ${recordType}`);
       error.statusCode = 409;
@@ -7521,7 +7576,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       payload.assigneeId || payload.assignee_id || null,
       payload.dueAt || payload.due_at || payload.dueDate || null,
       payload.completedAt || payload.completed_at || null,
-      toJson({ source: payload.source || null }),
+      toJson({
+        ...(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {}),
+        source: payload.source || payload.data?.source || null
+      }),
       timestamp,
       timestamp
     );
@@ -12679,6 +12737,417 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  supplierInvoiceDuplicateKey({ tradePartnerId = null, supplier = '', invoiceNumber = '' } = {}) {
+    const supplierIdentity = tradePartnerId || normalizeText(supplier, '').toLowerCase().replace(/\s+/g, ' ');
+    const normalizedInvoiceNumber = normalizeText(invoiceNumber, '').toLowerCase().replace(/\s+/g, ' ');
+    return supplierIdentity && normalizedInvoiceNumber
+      ? sha256Text(`${supplierIdentity}\0${normalizedInvoiceNumber}`)
+      : null;
+  }
+
+  supplierInvoiceMatch(jobId, payload = {}, amounts = {}) {
+    const purchaseOrderId = payload.purchaseOrderId || payload.purchase_order_id || null;
+    const purchaseOrder = purchaseOrderId
+      ? this.db.prepare('SELECT * FROM purchase_orders WHERE id = ? AND job_id = ?').get(purchaseOrderId, jobId)
+      : null;
+    if (purchaseOrderId && !purchaseOrder) {
+      throw ledgerInputError('supplier_invoice_purchase_order_not_found', 'The selected purchase order was not found for this job.');
+    }
+    const deliveryDocumentId = payload.deliveryDocumentId || payload.delivery_document_id || null;
+    const deliveryDocument = deliveryDocumentId
+      ? this.db.prepare('SELECT id, title, status FROM documents WHERE id = ? AND job_id = ?').get(deliveryDocumentId, jobId)
+      : null;
+    if (deliveryDocumentId && !deliveryDocument) {
+      throw ledgerInputError('supplier_invoice_delivery_document_not_found', 'The selected delivery evidence was not found for this job.');
+    }
+
+    const supplier = normalizeText(payload.supplier || payload.vendor, '');
+    const currency = normalizeText(amounts.currency || payload.currency, 'EUR').toUpperCase();
+    const netAmount = roundMoney(amounts.netAmount);
+    const deliveryReference = normalizeText(
+      payload.deliveryReference || payload.delivery_reference || payload.receiptReference || payload.receipt_reference,
+      deliveryDocument?.title || ''
+    );
+    const exceptions = [];
+    if (!purchaseOrder) {
+      exceptions.push({ code: 'purchase_order_missing', message: 'No retained purchase order is linked.' });
+    } else {
+      const purchaseOrderStatus = normalizeStatus(purchaseOrder.status, 'draft');
+      if (!['approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued', 'received', 'closed'].includes(purchaseOrderStatus)) {
+        exceptions.push({ code: 'purchase_order_not_approved', message: `Purchase order ${purchaseOrder.id} is ${purchaseOrderStatus.replace(/_/g, ' ')}.` });
+      }
+      if (normalizeText(purchaseOrder.supplier, '').toLowerCase() !== supplier.toLowerCase()) {
+        exceptions.push({ code: 'supplier_mismatch', message: `Supplier does not match purchase order ${purchaseOrder.id}.` });
+      }
+      if (normalizeText(purchaseOrder.currency, 'EUR').toUpperCase() !== currency) {
+        exceptions.push({ code: 'currency_mismatch', message: `Currency does not match purchase order ${purchaseOrder.id}.` });
+      }
+      const commitment = roundMoney(purchaseOrder.amount);
+      if (netAmount - commitment > 0.01) {
+        exceptions.push({
+          code: 'amount_exceeds_commitment',
+          message: `Net supplier invoice amount exceeds purchase order ${purchaseOrder.id} by ${(netAmount - commitment).toFixed(2)} ${currency}.`
+        });
+      }
+    }
+    if (!deliveryReference) {
+      exceptions.push({ code: 'delivery_evidence_missing', message: 'Delivery or service-completion evidence is not retained.' });
+    }
+
+    const tradePartner = this.resolveTradePartnerForSpend(payload, supplier);
+    const compliance = this.tradePartnerComplianceSnapshot(tradePartner);
+    if (!tradePartner) {
+      exceptions.push({ code: 'trade_partner_missing', message: 'Supplier is not linked to the retained trade-partner register.' });
+    } else if (!tradePartner.compliance.compliant) {
+      exceptions.push({ code: 'trade_partner_not_compliant', message: `${tradePartner.name} is not compliance-ready.` });
+    }
+
+    return {
+      purchaseOrder,
+      tradePartner,
+      supplier: tradePartner?.name || supplier,
+      deliveryReference: deliveryReference || null,
+      deliveryDocumentId: deliveryDocument?.id || null,
+      compliance,
+      exceptions,
+      matched: exceptions.length === 0,
+      matchType: purchaseOrder && deliveryReference ? 'three_way' : purchaseOrder ? 'two_way_exception' : 'manual_exception'
+    };
+  }
+
+  createSupplierInvoice(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const invoiceNumber = normalizeText(payload.invoiceNumber || payload.invoice_number || payload.reference, '');
+      const suppliedName = normalizeText(payload.supplier || payload.vendor, '');
+      if (!invoiceNumber || invoiceNumber.length > 120) {
+        throw ledgerInputError('supplier_invoice_number_invalid', 'Supplier invoice number is required and cannot exceed 120 characters.');
+      }
+      if (!suppliedName || suppliedName.length > 240) {
+        throw ledgerInputError('supplier_invoice_supplier_invalid', 'Supplier name is required and cannot exceed 240 characters.');
+      }
+      const rawNetAmount = payload.netAmount ?? payload.net_amount ?? payload.amount;
+      const rawTaxAmount = payload.taxAmount ?? payload.tax_amount ?? 0;
+      const netAmount = roundMoney(Number(rawNetAmount));
+      const taxAmount = roundMoney(Number(rawTaxAmount));
+      const total = roundMoney(payload.total ?? (netAmount + taxAmount));
+      if (!Number.isFinite(Number(rawNetAmount)) || netAmount <= 0 || netAmount > 100_000_000) {
+        throw ledgerInputError('supplier_invoice_amount_invalid', 'Supplier invoice net amount must be greater than zero and no more than 100,000,000.');
+      }
+      if (!Number.isFinite(Number(rawTaxAmount)) || taxAmount < 0 || taxAmount > 100_000_000) {
+        throw ledgerInputError('supplier_invoice_tax_invalid', 'Supplier invoice VAT amount cannot be negative.');
+      }
+      if (Math.abs(total - roundMoney(netAmount + taxAmount)) > 0.01) {
+        throw ledgerInputError('supplier_invoice_total_mismatch', 'Supplier invoice total must match the retained net and VAT amounts.', { netAmount, taxAmount, total });
+      }
+      const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) {
+        throw ledgerInputError('supplier_invoice_currency_invalid', 'Supplier invoice currency must be a three-letter ISO currency code.');
+      }
+      const invoiceDate = normalizeText(payload.invoiceDate || payload.invoice_date, nowIso().slice(0, 10));
+      const parsedInvoiceDate = Date.parse(invoiceDate);
+      if (!Number.isFinite(parsedInvoiceDate) || parsedInvoiceDate > Date.now() + 86_400_000) {
+        throw ledgerInputError('supplier_invoice_date_invalid', 'Supplier invoice date must be a valid date that is not in the future.');
+      }
+      const dueAt = payload.dueAt || payload.due_at || null;
+      if (dueAt && (!Number.isFinite(Date.parse(dueAt)) || Date.parse(dueAt) < parsedInvoiceDate)) {
+        throw ledgerInputError('supplier_invoice_due_date_invalid', 'Supplier invoice due date must be valid and cannot precede the invoice date.');
+      }
+      const match = this.supplierInvoiceMatch(jobId, payload, { netAmount, taxAmount, total, currency });
+      const duplicateKey = this.supplierInvoiceDuplicateKey({
+        tradePartnerId: match.tradePartner?.id || null,
+        supplier: match.supplier,
+        invoiceNumber
+      });
+      const duplicate = this.db.prepare('SELECT id, job_id, status FROM supplier_invoices WHERE duplicate_key = ?').get(duplicateKey);
+      if (duplicate) {
+        const error = new Error('This supplier invoice number is already retained for the supplier.');
+        error.statusCode = 409;
+        error.code = 'duplicate_supplier_invoice';
+        error.details = { supplierInvoiceId: duplicate.id, jobId: duplicate.job_id, status: duplicate.status };
+        throw error;
+      }
+
+      const id = makeId('supplier_invoice');
+      const timestamp = nowIso();
+      const requestedStatus = normalizeStatus(payload.status, 'approved');
+      const lineItems = normalizeList(payload.lineItems || payload.line_items || payload.items)
+        .filter(item => item && typeof item === 'object')
+        .slice(0, 100);
+      const data = {
+        requestedStatus: ['approved', 'ready_to_pay'].includes(requestedStatus) ? requestedStatus : 'approved',
+        notes: payload.notes || payload.note || null,
+        lineItems,
+        match: {
+          status: match.matched ? 'matched' : 'exception',
+          type: match.matchType,
+          purchaseOrderId: match.purchaseOrder?.id || null,
+          purchaseOrderAmount: match.purchaseOrder ? roundMoney(match.purchaseOrder.amount) : null,
+          deliveryReference: match.deliveryReference,
+          deliveryDocumentId: match.deliveryDocumentId,
+          exceptions: match.exceptions,
+          checkedAt: timestamp
+        },
+        partnerComplianceSnapshot: match.compliance,
+        externalPaymentInitiated: false
+      };
+      this.db.prepare(`
+        INSERT INTO supplier_invoices (
+          id, job_id, purchase_order_id, trade_partner_id, supplier, invoice_number, duplicate_key,
+          status, currency, net_amount, tax_amount, total, invoice_date, due_at, approval_id,
+          data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        match.purchaseOrder?.id || null,
+        match.tradePartner?.id || null,
+        match.supplier,
+        invoiceNumber,
+        duplicateKey,
+        'pending_approval',
+        currency,
+        netAmount,
+        taxAmount,
+        total,
+        invoiceDate.slice(0, 10),
+        dueAt,
+        null,
+        toJson(data),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'supplier_invoice',
+        targetId: id,
+        jobId,
+        approvalType: 'supplier_invoice_approval',
+        summary: `Approve supplier invoice ${invoiceNumber} from ${match.supplier} for ${total.toFixed(2)} ${currency}`,
+        reason: match.matched
+          ? 'The retained purchase order, supplier invoice, and delivery evidence match. Human approval is required before recognizing the payable as ready for payment.'
+          : `Supplier invoice match has ${match.exceptions.length} exception(s). An approver must record an explicit override reason before recognizing the payable.`,
+        data: {
+          requestedStatus: data.requestedStatus,
+          supplier: match.supplier,
+          invoiceNumber,
+          amount: total,
+          currency,
+          match: data.match,
+          requiresExceptionOverride: !match.matched
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE supplier_invoices SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const supplierInvoice = this.mapSupplierInvoice(this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'supplier_invoice',
+          entityId: id,
+          jobId,
+          action: 'record_supplier_invoice',
+          actor,
+          after: supplierInvoice,
+          metadata: { approvalId: approval.id, matched: match.matched, exceptions: match.exceptions.length, externalCommitments: 0 }
+        });
+      }
+      return { ...supplierInvoice, approval };
+    });
+  }
+
+  supplierInvoicePaymentKey(supplierInvoiceId, reference) {
+    const normalizedReference = normalizeText(reference, '').toLowerCase().replace(/\s+/g, ' ');
+    return supplierInvoiceId && normalizedReference ? sha256Text(`${supplierInvoiceId}\0${normalizedReference}`) : null;
+  }
+
+  getSupplierInvoiceReconciliation(supplierInvoiceId, options = {}) {
+    const invoiceRow = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(supplierInvoiceId);
+    if (!invoiceRow) {
+      const error = new Error('Supplier invoice not found');
+      error.statusCode = 404;
+      error.code = 'supplier_invoice_not_found';
+      throw error;
+    }
+    const excludedPaymentId = options.excludePaymentId || null;
+    const payments = this.db.prepare('SELECT * FROM supplier_invoice_payments WHERE supplier_invoice_id = ? ORDER BY created_at ASC').all(supplierInvoiceId)
+      .filter(row => row.id !== excludedPaymentId);
+    let paidAmount = 0;
+    let pendingAmount = 0;
+    for (const payment of payments) {
+      const status = normalizeStatus(payment.status, '');
+      if (['paid', 'confirmed', 'settled'].includes(status)) paidAmount = roundMoney(paidAmount + normalizeNumber(payment.amount, 0));
+      if (status === 'pending_confirmation') pendingAmount = roundMoney(pendingAmount + normalizeNumber(payment.amount, 0));
+    }
+    const invoiceTotal = roundMoney(invoiceRow.total);
+    const outstandingAmount = roundMoney(Math.max(0, invoiceTotal - paidAmount));
+    const availableAmount = roundMoney(Math.max(0, outstandingAmount - pendingAmount));
+    return {
+      supplierInvoiceId,
+      currency: invoiceRow.currency,
+      invoiceTotal,
+      paidAmount,
+      pendingAmount,
+      outstandingAmount,
+      availableAmount,
+      settled: outstandingAmount <= 0.01
+    };
+  }
+
+  reconcileSupplierInvoice(supplierInvoiceId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(supplierInvoiceId);
+    if (!row) return null;
+    const before = this.mapSupplierInvoice(row);
+    const reconciliation = this.getSupplierInvoiceReconciliation(supplierInvoiceId);
+    const status = reconciliation.settled ? 'paid' : reconciliation.paidAmount > 0 ? 'partially_paid' : 'approved';
+    const timestamp = options.timestamp || nowIso();
+    const data = fromJson(row.data_json, {});
+    this.db.prepare('UPDATE supplier_invoices SET status = ?, data_json = ?, updated_at = ? WHERE id = ?').run(
+      status,
+      toJson({
+        ...data,
+        reconciliation: {
+          ...reconciliation,
+          status,
+          lastPaymentId: options.lastPaymentId || data.reconciliation?.lastPaymentId || null,
+          updatedAt: timestamp
+        }
+      }),
+      timestamp,
+      supplierInvoiceId
+    );
+    const after = this.mapSupplierInvoice(this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(supplierInvoiceId));
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'supplier_invoice',
+        entityId: supplierInvoiceId,
+        jobId: row.job_id,
+        action: 'reconcile_supplier_payable',
+        actor: options.actor || 'approval',
+        before,
+        after,
+        metadata: { paymentId: options.lastPaymentId || null, reconciliation, externalCommitments: 0 }
+      });
+    }
+    return { ...reconciliation, status };
+  }
+
+  recordSupplierInvoicePayment(jobId, supplierInvoiceId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const invoice = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ? AND job_id = ?').get(supplierInvoiceId, jobId);
+      if (!invoice) {
+        const error = new Error('Supplier invoice not found for this job');
+        error.statusCode = 404;
+        error.code = 'supplier_invoice_not_found';
+        throw error;
+      }
+      const invoiceStatus = normalizeStatus(invoice.status, 'pending_approval');
+      if (!['approved', 'partially_paid'].includes(invoiceStatus)) {
+        const error = new Error('Supplier payment can only be confirmed after the supplier invoice is approved.');
+        error.statusCode = 409;
+        error.code = 'supplier_invoice_not_payable';
+        throw error;
+      }
+      const tradePartner = this.assertTradePartnerReadyForCommitment(invoice, 'supplier payment confirmation');
+      const partnerComplianceSnapshot = this.tradePartnerComplianceSnapshot(tradePartner);
+      const amount = roundMoney(Number(payload.amount));
+      const currency = normalizeText(payload.currency || invoice.currency, 'EUR').toUpperCase();
+      const reference = normalizeText(payload.reference || payload.paymentReference || payload.payment_reference, '');
+      if (!Number.isFinite(Number(payload.amount)) || amount <= 0) {
+        throw ledgerInputError('supplier_payment_amount_invalid', 'Supplier payment amount must be greater than zero.');
+      }
+      if (currency !== normalizeText(invoice.currency, 'EUR').toUpperCase()) {
+        throw ledgerInputError('supplier_payment_currency_mismatch', 'Supplier payment currency must match the retained supplier invoice.');
+      }
+      if (!reference || reference.length > 240) {
+        throw ledgerInputError('supplier_payment_reference_invalid', 'Supplier payment confirmation requires a reference of at most 240 characters.');
+      }
+      const reconciliation = this.getSupplierInvoiceReconciliation(supplierInvoiceId);
+      if (amount - reconciliation.availableAmount > 0.01) {
+        throw ledgerInputError('supplier_payment_exceeds_payable', 'Supplier payment amount exceeds the payable balance available for confirmation.', {
+          supplierInvoiceId,
+          requestedAmount: amount,
+          outstandingAmount: reconciliation.outstandingAmount,
+          pendingAmount: reconciliation.pendingAmount,
+          availableAmount: reconciliation.availableAmount
+        });
+      }
+      const reconciliationKey = this.supplierInvoicePaymentKey(supplierInvoiceId, reference);
+      const duplicate = this.db.prepare('SELECT id, status FROM supplier_invoice_payments WHERE reconciliation_key = ?').get(reconciliationKey);
+      if (duplicate) {
+        const error = new Error('This payment reference is already retained for the supplier invoice.');
+        error.statusCode = 409;
+        error.code = 'duplicate_supplier_payment_reference';
+        error.details = { supplierInvoiceId, paymentId: duplicate.id, status: duplicate.status };
+        throw error;
+      }
+      const id = makeId('supplier_payment');
+      const timestamp = nowIso();
+      const paidAt = payload.paidAt || payload.paid_at || timestamp;
+      if (!Number.isFinite(Date.parse(paidAt))) {
+        throw ledgerInputError('supplier_payment_date_invalid', 'Supplier payment confirmation requires a valid payment date.');
+      }
+      this.db.prepare(`
+        INSERT INTO supplier_invoice_payments (
+          id, job_id, supplier_invoice_id, status, currency, amount, paid_at, method, reference,
+          reconciliation_key, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        supplierInvoiceId,
+        'pending_confirmation',
+        currency,
+        amount,
+        paidAt,
+        normalizeStatus(payload.method, 'bank_transfer'),
+        reference,
+        reconciliationKey,
+        null,
+        toJson({
+          requestedStatus: 'paid',
+          notes: payload.notes || payload.note || null,
+          previousReconciliation: reconciliation,
+          partnerComplianceSnapshot,
+          externalPaymentInitiated: false
+        }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'supplier_invoice_payment',
+        targetId: id,
+        jobId,
+        approvalType: 'supplier_payment_confirmation',
+        summary: `Confirm supplier payment ${reference} for ${amount.toFixed(2)} ${currency}`,
+        reason: 'This records evidence of a payment made outside Contractor.AI. Approval is required before the supplier payable balance changes.',
+        data: {
+          supplierInvoiceId,
+          amount,
+          currency,
+          reference,
+          requestedStatus: 'paid',
+          partnerComplianceSnapshot,
+          externalPaymentInitiated: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE supplier_invoice_payments SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const payment = this.mapSupplierInvoicePayment(this.db.prepare('SELECT * FROM supplier_invoice_payments WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'supplier_invoice_payment',
+          entityId: id,
+          jobId,
+          action: 'record_supplier_payment_confirmation',
+          actor,
+          after: payment,
+          metadata: { supplierInvoiceId, approvalId: approval.id, externalCommitments: 0, fundsMoved: false }
+        });
+      }
+      return { ...payment, approval };
+    });
+  }
+
   createDrawRequest(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
@@ -12846,6 +13315,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
         budgetLines: detail.budgetLines || [],
         purchaseOrders: detail.purchaseOrders || [],
+        supplierInvoices: detail.supplierInvoices || [],
+        supplierInvoicePayments: detail.supplierInvoicePayments || [],
         expenses: detail.expenses || [],
         invoices: detail.invoices || [],
         creditNotes: detail.creditNotes || [],
@@ -12947,6 +13418,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
         budgetLines: detail.budgetLines || [],
         purchaseOrders: detail.purchaseOrders || [],
+        supplierInvoices: detail.supplierInvoices || [],
+        supplierInvoicePayments: detail.supplierInvoicePayments || [],
         expenses: detail.expenses || [],
         invoices: detail.invoices || [],
         creditNotes: detail.creditNotes || [],
@@ -15651,6 +16124,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 400;
         throw error;
       }
+      if (status === 'approved' && before.target_type === 'supplier_invoice') {
+        const supplierInvoice = this.db.prepare('SELECT data_json FROM supplier_invoices WHERE id = ?').get(before.target_id);
+        const matchExceptions = fromJson(supplierInvoice?.data_json, {}).match?.exceptions || [];
+        const overrideReason = normalizeText(payload.reason || payload.notes, '');
+        if (matchExceptions.length && overrideReason.length < 3) {
+          throw ledgerInputError(
+            'supplier_invoice_exception_reason_required',
+            'Approving a supplier invoice with match exceptions requires an explicit override reason.'
+          );
+        }
+      }
       if (before.status !== 'pending') {
         if (before.status === status) return this.mapApproval(before);
         const error = new Error(`Approval was already resolved as ${before.status}`);
@@ -15739,6 +16223,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           UPDATE credit_notes
           SET status = ?, updated_at = ?
           WHERE id = ? AND status IN ('draft', 'pending_approval', 'approved')
+        `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'supplier_invoice') {
+        this.db.prepare(`
+          UPDATE supplier_invoices
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'supplier_invoice_payment') {
+        this.db.prepare(`
+          UPDATE supplier_invoice_payments
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_confirmation'
         `).run(status, timestamp, before.target_id);
       }
 
@@ -16457,6 +16953,86 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           metadata: { invoiceId: payment.invoice_id || null, reconciliation }
         });
       }
+    } else if (targetType === 'supplier_invoice') {
+      const supplierInvoice = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(targetId);
+      if (supplierInvoice) {
+        const approval = supplierInvoice.approval_id
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(supplierInvoice.approval_id)
+          : null;
+        const before = this.mapSupplierInvoice(supplierInvoice);
+        const data = fromJson(supplierInvoice.data_json, {});
+        const exceptions = data.match?.exceptions || [];
+        const approvedStatus = 'approved';
+        this.db.prepare('UPDATE supplier_invoices SET status = ?, data_json = ?, updated_at = ? WHERE id = ?').run(
+          approvedStatus,
+          toJson({
+            ...data,
+            approvalDecision: {
+              status: 'approved',
+              approvalId: approval?.id || null,
+              resolvedAt: timestamp,
+              resolvedBy: approval?.resolved_by || null,
+              exceptionOverride: exceptions.length ? approval?.reason || null : null
+            },
+            externalPaymentInitiated: false
+          }),
+          timestamp,
+          targetId
+        );
+        this.audit({
+          entityType: 'supplier_invoice',
+          entityId: targetId,
+          jobId: supplierInvoice.job_id,
+          action: exceptions.length ? 'approve_supplier_invoice_exception' : 'approve_supplier_invoice_match',
+          actor: approval?.resolved_by || approval?.requested_by || 'approval',
+          before,
+          after: this.mapSupplierInvoice(this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(targetId)),
+          metadata: { approvalId: approval?.id || null, exceptions: exceptions.length, externalCommitments: 0 }
+        });
+      }
+    } else if (targetType === 'supplier_invoice_payment') {
+      const payment = this.db.prepare('SELECT * FROM supplier_invoice_payments WHERE id = ?').get(targetId);
+      if (payment) {
+        const supplierInvoice = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(payment.supplier_invoice_id);
+        const tradePartner = this.assertTradePartnerReadyForCommitment(supplierInvoice, 'supplier payment confirmation');
+        const partnerComplianceSnapshot = this.tradePartnerComplianceSnapshot(tradePartner);
+        const approval = payment.approval_id
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(payment.approval_id)
+          : null;
+        const before = this.mapSupplierInvoicePayment(payment);
+        const data = fromJson(payment.data_json, {});
+        this.db.prepare('UPDATE supplier_invoice_payments SET status = ?, data_json = ?, updated_at = ? WHERE id = ?').run(
+          'paid',
+          toJson({
+            ...data,
+            confirmationDecision: {
+              status: 'approved',
+              approvalId: approval?.id || null,
+              resolvedAt: timestamp,
+              resolvedBy: approval?.resolved_by || null,
+              partnerComplianceSnapshot
+            },
+            externalPaymentInitiated: false
+          }),
+          timestamp,
+          targetId
+        );
+        const reconciliation = this.reconcileSupplierInvoice(payment.supplier_invoice_id, {
+          lastPaymentId: targetId,
+          timestamp,
+          actor: approval?.resolved_by || approval?.requested_by || 'approval'
+        });
+        this.audit({
+          entityType: 'supplier_invoice_payment',
+          entityId: targetId,
+          jobId: payment.job_id,
+          action: 'approve_supplier_payment_confirmation',
+          actor: approval?.resolved_by || approval?.requested_by || 'approval',
+          before,
+          after: this.mapSupplierInvoicePayment(this.db.prepare('SELECT * FROM supplier_invoice_payments WHERE id = ?').get(targetId)),
+          metadata: { supplierInvoiceId: payment.supplier_invoice_id, reconciliation, externalCommitments: 0, fundsMoved: false }
+        });
+      }
     } else if (targetType === 'budget_line') {
       const budgetLine = this.db.prepare('SELECT data_json FROM budget_lines WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(budgetLine?.data_json, {}).requestedStatus, 'approved');
@@ -16581,6 +17157,51 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       mapped = mapped.filter(job => JSON.stringify(job).toLowerCase().includes(search));
     }
     return mapped.slice(0, limit);
+  }
+
+  listSupplierInvoices(filters = {}) {
+    const status = normalizeStatus(filters.status, '');
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const search = normalizeText(filters.search || filters.q, '').toLowerCase();
+    const limit = safeLimit(filters.limit, 100, 500);
+    const rows = this.db.prepare(`
+      SELECT supplier_invoices.*, jobs.title AS job_title, jobs.status AS job_status
+      FROM supplier_invoices
+      JOIN jobs ON jobs.id = supplier_invoices.job_id
+      WHERE (? = '' OR supplier_invoices.status = ?)
+        AND (? = '' OR supplier_invoices.job_id = ?)
+      ORDER BY supplier_invoices.invoice_date DESC, supplier_invoices.created_at DESC
+      LIMIT 500
+    `).all(status, status, jobId, jobId).map(row => ({
+      ...this.mapSupplierInvoice(row),
+      jobTitle: row.job_title,
+      jobStatus: row.job_status
+    }));
+    return rows.filter(invoice => !search || JSON.stringify(invoice).toLowerCase().includes(search)).slice(0, limit);
+  }
+
+  listSupplierInvoicePayments(filters = {}) {
+    const status = normalizeStatus(filters.status, '');
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const supplierInvoiceId = normalizeText(filters.supplierInvoiceId || filters.supplier_invoice_id, '');
+    const limit = safeLimit(filters.limit, 100, 500);
+    return this.db.prepare(`
+      SELECT supplier_invoice_payments.*, jobs.title AS job_title, jobs.status AS job_status,
+        supplier_invoices.invoice_number AS supplier_invoice_number
+      FROM supplier_invoice_payments
+      JOIN jobs ON jobs.id = supplier_invoice_payments.job_id
+      JOIN supplier_invoices ON supplier_invoices.id = supplier_invoice_payments.supplier_invoice_id
+      WHERE (? = '' OR supplier_invoice_payments.status = ?)
+        AND (? = '' OR supplier_invoice_payments.job_id = ?)
+        AND (? = '' OR supplier_invoice_payments.supplier_invoice_id = ?)
+      ORDER BY supplier_invoice_payments.paid_at DESC, supplier_invoice_payments.created_at DESC
+      LIMIT ?
+    `).all(status, status, jobId, jobId, supplierInvoiceId, supplierInvoiceId, limit).map(row => ({
+      ...this.mapSupplierInvoicePayment(row),
+      jobTitle: row.job_title,
+      jobStatus: row.job_status,
+      supplierInvoiceNumber: row.supplier_invoice_number
+    }));
   }
 
   listCommunications(filters = {}) {
@@ -17309,6 +17930,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   classifyFinanceReadiness(flags = {}) {
     if (flags.approvalRequired) return 'approval_required';
+    if (flags.supplierPayableDue) return 'payable_due';
     if (flags.paymentOutstanding || flags.paymentFollowUp) return 'payment_follow_up';
     if (flags.invoicePackageReady || flags.creditNotePackageReady) return 'invoice_ready';
     if (flags.invoiceReady) return 'invoice_ready';
@@ -17325,6 +17947,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       invoiceReady: 0,
       paymentOutstanding: 0,
       paymentFollowUp: 0,
+      supplierPayableDue: 0,
       handoffReady: 0,
       needsCosts: 0,
       stable: 0,
@@ -17339,6 +17962,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       missingHandoffs: 0,
       dueOrOverduePayments: 0,
       openPurchaseOrders: 0,
+      supplierInvoices: 0,
+      pendingSupplierInvoices: 0,
+      dueSupplierInvoices: 0,
+      pendingSupplierPayments: 0,
       openDrawRequests: 0,
       openLienWaivers: 0,
       contractValue: 0,
@@ -17359,6 +17986,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       expenseValue: 0,
       billableLaborValue: 0,
       purchaseOrderValue: 0,
+      supplierInvoiceNetValue: 0,
+      supplierInvoiceValue: 0,
+      supplierPayableValue: 0,
+      supplierPaidValue: 0,
+      pendingSupplierPaymentValue: 0,
       drawRequestValue: 0,
       financeHandoffValue: 0
     };
@@ -17367,6 +17999,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (status === 'approval_required') summary.approvalRequired += 1;
       if (status === 'invoice_ready') summary.invoiceReady += 1;
       if (status === 'payment_follow_up') summary.paymentFollowUp += 1;
+      if (status === 'payable_due') summary.supplierPayableDue += 1;
       if (row.flags?.paymentOutstanding) summary.paymentOutstanding += 1;
       if (status === 'handoff_ready') summary.handoffReady += 1;
       if (status === 'needs_costs') summary.needsCosts += 1;
@@ -17382,6 +18015,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.missingHandoffs += row.flags?.handoffMissing ? 1 : 0;
       summary.dueOrOverduePayments += normalizeNumber(row.counts?.dueOrOverduePayments, 0);
       summary.openPurchaseOrders += normalizeNumber(row.counts?.openPurchaseOrders, 0);
+      summary.supplierInvoices += normalizeNumber(row.counts?.supplierInvoices, 0);
+      summary.pendingSupplierInvoices += normalizeNumber(row.counts?.pendingSupplierInvoices, 0);
+      summary.dueSupplierInvoices += normalizeNumber(row.counts?.dueSupplierInvoices, 0);
+      summary.pendingSupplierPayments += normalizeNumber(row.counts?.pendingSupplierPayments, 0);
       summary.openDrawRequests += normalizeNumber(row.counts?.openDrawRequests, 0);
       summary.openLienWaivers += normalizeNumber(row.counts?.openLienWaivers, 0);
       const money = row.money || {};
@@ -17403,6 +18040,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.expenseValue += normalizeNumber(money.expenseValue, 0);
       summary.billableLaborValue += normalizeNumber(money.billableLaborValue, 0);
       summary.purchaseOrderValue += normalizeNumber(money.purchaseOrderValue, 0);
+      summary.supplierInvoiceNetValue += normalizeNumber(money.supplierInvoiceNetValue, 0);
+      summary.supplierInvoiceValue += normalizeNumber(money.supplierInvoiceValue, 0);
+      summary.supplierPayableValue += normalizeNumber(money.supplierPayableValue, 0);
+      summary.supplierPaidValue += normalizeNumber(money.supplierPaidValue, 0);
+      summary.pendingSupplierPaymentValue += normalizeNumber(money.pendingSupplierPaymentValue, 0);
       summary.drawRequestValue += normalizeNumber(money.drawRequestValue, 0);
       summary.financeHandoffValue += normalizeNumber(money.financeHandoffValue, 0);
     }
@@ -17421,6 +18063,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'payment',
       'budget_line',
       'purchase_order',
+      'supplier_invoice',
+      'supplier_invoice_payment',
       'draw_request',
       'lien_waiver',
       'finance_handoff'
@@ -17467,6 +18111,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const writtenOffPayments = (detail.payments || []).filter(payment => normalizeStatus(payment.status, '') === 'written_off');
         const activeBudgetLines = (detail.budgetLines || []).filter(line => this.financeRecordOpen(line.status));
         const openPurchaseOrders = (detail.purchaseOrders || []).filter(order => this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received']));
+        const validSupplierInvoices = (detail.supplierInvoices || []).filter(invoice => this.financeRecordOpen(invoice.status, ['cancelled', 'canceled', 'rejected', 'void']));
+        const pendingSupplierInvoices = validSupplierInvoices.filter(invoice => normalizeStatus(invoice.status, '') === 'pending_approval');
+        const payableSupplierInvoices = validSupplierInvoices.filter(invoice => ['approved', 'partially_paid'].includes(normalizeStatus(invoice.status, '')));
+        const supplierInvoiceReconciliations = payableSupplierInvoices.map(invoice => ({
+          invoice,
+          ...this.getSupplierInvoiceReconciliation(invoice.id)
+        }));
+        const nextSupplierPayable = supplierInvoiceReconciliations.find(item => item.availableAmount > 0.01) || null;
+        const dueSupplierInvoices = supplierInvoiceReconciliations.filter(item => item.outstandingAmount > 0.01 && this.financeDueOrOverdue(item.invoice.dueAt));
+        const pendingSupplierPayments = (detail.supplierInvoicePayments || []).filter(payment => normalizeStatus(payment.status, '') === 'pending_confirmation');
+        const paidSupplierPayments = (detail.supplierInvoicePayments || []).filter(payment => ['paid', 'confirmed', 'settled'].includes(normalizeStatus(payment.status, '')));
+        const linkedPurchaseOrderIds = new Set(validSupplierInvoices.map(invoice => invoice.purchaseOrderId).filter(Boolean));
+        const unmatchedPurchaseOrders = openPurchaseOrders.filter(order => !linkedPurchaseOrderIds.has(order.id));
+        const supplierInvoiceCandidates = unmatchedPurchaseOrders.filter(order =>
+          ['approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued', 'received'].includes(normalizeStatus(order.status, ''))
+        );
         const openDrawRequests = (detail.drawRequests || []).filter(draw => this.financeRecordOpen(draw.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'funded']));
         const openLienWaivers = (detail.lienWaivers || []).filter(waiver => this.financeRecordOpen(waiver.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'released', 'waived']));
         const activeHandoffs = (detail.financeHandoffs || []).filter(handoff => this.financeRecordOpen(handoff.status, activeHandoffClosedStatuses));
@@ -17499,7 +18159,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const unmatchedOpenPaymentValue = openPayments
           .filter(payment => !payment.invoiceId || !receivableInvoiceIds.has(payment.invoiceId))
           .reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
-        const purchaseOrderValue = openPurchaseOrders.reduce((sum, order) => sum + normalizeNumber(order.amount, 0), 0);
+        const purchaseOrderValue = unmatchedPurchaseOrders.reduce((sum, order) => sum + normalizeNumber(order.amount, 0), 0);
+        const supplierInvoiceNetValue = validSupplierInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.netAmount, 0), 0);
+        const supplierInvoiceValue = validSupplierInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total, 0), 0);
+        const supplierPayableValue = supplierInvoiceReconciliations.reduce((sum, item) => sum + item.outstandingAmount, 0);
+        const supplierPaidValue = paidSupplierPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
+        const pendingSupplierPaymentValue = pendingSupplierPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const drawRequestValue = openDrawRequests.reduce((sum, draw) => sum + normalizeNumber(draw.requestedAmount, 0), 0);
         const financeHandoffValue = activeHandoffs.reduce((sum, handoff) => sum + normalizeNumber(handoff.amount, 0), 0);
         const budgetForecastValue = activeBudgetLines.reduce((sum, line) => sum + normalizeNumber(line.forecastAmount, 0), 0);
@@ -17517,6 +18182,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || timeLogs.length
           || activeBudgetLines.length
           || openPurchaseOrders.length
+          || validSupplierInvoices.length
+          || paidSupplierPayments.length
           || openDrawRequests.length
           || openLienWaivers.length;
         const missingCosts = startedForCosting && !expenses.length && !timeLogs.length && budgetActualValue <= 0;
@@ -17528,6 +18195,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           && nextReceivable.availableAmount > 1;
         const paymentOutstanding = receivableOutstandingValue > 1;
         const paymentFollowUp = paymentsDueForFollowUp.length > 0 || untrackedReceivable;
+        const supplierPayableOutstanding = supplierPayableValue > 0.01;
+        const supplierPayableDue = dueSupplierInvoices.length > 0;
         const handoffMissing = hasFinancialActivity && !activeHandoffs.length;
         const handoffReady = !missingCosts
           && !missingBudget
@@ -17535,7 +18204,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const approvalRequired = pendingFinanceApprovals.length > 0
           || activeInvoices.some(invoice => invoice.approvalId && ['draft', 'submitted', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')))
           || openPayments.some(payment => payment.approvalId && ['pending_confirmation', 'pending_approval'].includes(normalizeStatus(payment.status, '')))
-          || openPurchaseOrders.some(order => order.approvalId && ['pending_approval', 'ready_to_order'].includes(normalizeStatus(order.status, '')))
+          || openPurchaseOrders.some(order => order.approvalId && normalizeStatus(order.status, '') === 'pending_approval')
+          || pendingSupplierInvoices.length > 0
+          || pendingSupplierPayments.length > 0
           || openDrawRequests.some(draw => draw.approvalId && ['pending_approval', 'submitted', 'approved_for_funding'].includes(normalizeStatus(draw.status, '')))
           || openLienWaivers.some(waiver => waiver.approvalId && ['pending_approval', 'received', 'released'].includes(normalizeStatus(waiver.status, '')))
           || activeHandoffs.some(handoff => handoff.approvalId && ['pending_approval', 'submitted', 'ready_to_export'].includes(normalizeStatus(handoff.status, '')));
@@ -17543,6 +18214,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           approvalRequired,
           paymentOutstanding,
           paymentFollowUp,
+          supplierPayableOutstanding,
+          supplierPayableDue,
           invoiceReady,
           invoicePackageReady,
           creditNotePackageReady: packageReadyCreditNotes.length > 0,
@@ -17592,6 +18265,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             availableNetAmount: roundMoney(nextReceivable.availableAmount / (1 + taxRate / 100)),
             taxRate,
             structuredExportRequested: nextReceivable.invoice.data?.issuePackage?.structuredExportIncluded === true,
+            requiresApproval: true
+          });
+        }
+        if (supplierInvoiceCandidates.length) {
+          const purchaseOrder = supplierInvoiceCandidates[0];
+          nextActions.push({
+            type: 'record_supplier_invoice',
+            label: 'Match supplier invoice',
+            purchaseOrderId: purchaseOrder.id,
+            supplier: purchaseOrder.supplier,
+            currency: purchaseOrder.currency,
+            committedAmount: purchaseOrder.amount,
+            requiresApproval: true
+          });
+        }
+        if (nextSupplierPayable) {
+          nextActions.push({
+            type: 'record_supplier_payment',
+            label: 'Confirm supplier payment',
+            supplierInvoiceId: nextSupplierPayable.invoice.id,
+            supplierInvoiceNumber: nextSupplierPayable.invoice.invoiceNumber,
+            supplier: nextSupplierPayable.invoice.supplier,
+            dueAt: nextSupplierPayable.invoice.dueAt,
+            outstandingAmount: nextSupplierPayable.outstandingAmount,
+            availableAmount: nextSupplierPayable.availableAmount,
+            pendingAmount: nextSupplierPayable.pendingAmount,
             requiresApproval: true
           });
         }
@@ -17648,6 +18347,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             receivedPayments: receivedPayments.length,
             budgetLines: activeBudgetLines.length,
             openPurchaseOrders: openPurchaseOrders.length,
+            supplierInvoices: validSupplierInvoices.length,
+            pendingSupplierInvoices: pendingSupplierInvoices.length,
+            payableSupplierInvoices: payableSupplierInvoices.length,
+            dueSupplierInvoices: dueSupplierInvoices.length,
+            pendingSupplierPayments: pendingSupplierPayments.length,
+            paidSupplierPayments: paidSupplierPayments.length,
             openDrawRequests: openDrawRequests.length,
             openLienWaivers: openLienWaivers.length,
             financeHandoffs: activeHandoffs.length,
@@ -17674,11 +18379,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             expenseValue,
             billableLaborValue,
             purchaseOrderValue,
+            supplierInvoiceNetValue,
+            supplierInvoiceValue,
+            supplierPayableValue: roundMoney(supplierPayableValue),
+            supplierPaidValue,
+            pendingSupplierPaymentValue,
             drawRequestValue,
             financeHandoffValue,
             budgetForecastValue,
             budgetActualValue,
-            projectedMargin: netRevenueBasis - expenseValue - billableLaborValue - purchaseOrderValue
+            projectedMargin: netRevenueBasis - expenseValue - billableLaborValue - purchaseOrderValue - supplierInvoiceNetValue
           },
           latest: {
             invoice: validInvoices[0] || null,
@@ -17686,6 +18396,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             payment: openPayments[0] || receivedPayments[0] || null,
             budgetLine: activeBudgetLines[0] || null,
             purchaseOrder: openPurchaseOrders[0] || null,
+            supplierInvoice: validSupplierInvoices[0] || null,
+            supplierInvoicePayment: pendingSupplierPayments[0] || paidSupplierPayments[0] || null,
             drawRequest: openDrawRequests[0] || null,
             lienWaiver: openLienWaivers[0] || null,
             financeHandoff: activeHandoffs[0] || null,
@@ -17701,6 +18413,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (mode === 'payment') return row.flags?.paymentOutstanding === true || row.flags?.paymentFollowUp === true;
       if (mode === 'payment_followup') return row.flags?.paymentFollowUp === true;
       if (mode === 'payment_follow_up') return row.flags?.paymentFollowUp === true;
+      if (mode === 'payable') return row.flags?.supplierPayableOutstanding === true || row.counts?.pendingSupplierInvoices > 0;
+      if (mode === 'payable_due') return row.flags?.supplierPayableDue === true;
       if (mode === 'invoice') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true || row.flags?.creditNotePackageReady === true;
       if (mode === 'invoice_ready') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true || row.flags?.creditNotePackageReady === true;
       if (mode === 'handoff') return row.flags?.handoffReady === true;
@@ -17714,6 +18428,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const statusRank = {
       approval_required: 0,
       payment_follow_up: 1,
+      payable_due: 1,
       invoice_ready: 2,
       handoff_ready: 3,
       needs_costs: 4,
@@ -19127,6 +19842,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       creditNotes: this.db.prepare('SELECT * FROM credit_notes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCreditNote(row)),
       budgetLines: this.db.prepare('SELECT * FROM budget_lines WHERE job_id = ? ORDER BY cost_code ASC, created_at DESC').all(jobId).map(row => this.mapBudgetLine(row)),
       purchaseOrders: this.db.prepare('SELECT * FROM purchase_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapPurchaseOrder(row)),
+      supplierInvoices: this.db.prepare('SELECT * FROM supplier_invoices WHERE job_id = ? ORDER BY invoice_date DESC, created_at DESC').all(jobId).map(row => this.mapSupplierInvoice(row)),
+      supplierInvoicePayments: this.db.prepare('SELECT * FROM supplier_invoice_payments WHERE job_id = ? ORDER BY paid_at DESC, created_at DESC').all(jobId).map(row => this.mapSupplierInvoicePayment(row)),
       drawRequests: this.db.prepare('SELECT * FROM draw_requests WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapDrawRequest(row)),
       lienWaivers: this.db.prepare('SELECT * FROM lien_waivers WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapLienWaiver(row)),
       financeHandoffs: this.db.prepare('SELECT * FROM finance_handoffs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapFinanceHandoff(row)),
@@ -19191,6 +19908,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       budget_lines: 'status',
       expenses: 'status',
       purchase_orders: 'status',
+      supplier_invoices: 'status',
+      supplier_invoice_payments: 'status',
       invoices: 'status',
       creditNotes: 'status',
       payments: 'status',
@@ -20047,10 +20766,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       openMobilizationApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('worker_orientation_completion', 'jha_approval', 'sds_current_review', 'site_access_clearance')"),
       budgetLines: activeCount('budget_lines'),
       purchaseOrders: activeCount('purchase_orders'),
+      supplierInvoices: activeCount('supplier_invoices'),
+      openSupplierInvoices: activeCount('supplier_invoices', "records.status IN ('pending_approval', 'approved', 'partially_paid')"),
+      dueSupplierInvoices: activeCount('supplier_invoices', "records.status IN ('approved', 'partially_paid') AND records.due_at IS NOT NULL AND records.due_at <= ?", [nowIso()]),
+      pendingSupplierPayments: activeCount('supplier_invoice_payments', "records.status = 'pending_confirmation'"),
       drawRequests: activeCount('draw_requests'),
       lienWaivers: activeCount('lien_waivers'),
       financeHandoffs: activeCount('finance_handoffs'),
-      openFinanceApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('budget_control', 'purchase_commitment', 'draw_request_submission', 'lien_waiver_release', 'finance_handoff')"),
+      openFinanceApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('budget_control', 'purchase_commitment', 'supplier_invoice_approval', 'supplier_payment_confirmation', 'draw_request_submission', 'lien_waiver_release', 'finance_handoff')"),
       draftInvoices: activeCount('invoices', "records.status IN ('draft', 'submitted')"),
       qualityChecks: activeCount('quality_checks'),
       safetyChecks: activeCount('safety_checks'),
@@ -20107,6 +20830,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       procurementValue: activeSum('procurement_orders', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
       budgetValue: activeSum('budget_lines', 'budget_amount', "records.status NOT IN ('cancelled', 'rejected')"),
       purchaseOrderValue: activeSum('purchase_orders', 'amount', "records.status NOT IN ('cancelled', 'rejected')"),
+      supplierInvoiceValue: activeSum('supplier_invoices', 'total', "records.status NOT IN ('cancelled', 'rejected', 'void')"),
+      supplierPaymentValue: activeSum('supplier_invoice_payments', 'amount', "records.status IN ('paid', 'confirmed', 'settled')"),
       drawRequestValue: activeSum('draw_requests', 'requested_amount', "records.status NOT IN ('cancelled', 'rejected')"),
       financeHandoffValue: activeSum('finance_handoffs', 'amount', "records.status NOT IN ('cancelled', 'rejected')")
     };
@@ -20139,6 +20864,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM site_access_logs records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('blocked', 'requested', 'pending_approval') OR records.orientation_valid = 0), 0) AS siteAccessQueue,
         COALESCE((SELECT COUNT(*) FROM budget_lines records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval') OR records.forecast_amount > records.budget_amount), 0) AS budgetReviews,
         COALESCE((SELECT COUNT(*) FROM purchase_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_order')), 0) AS purchaseOrderQueue,
+        COALESCE((SELECT COUNT(*) FROM supplier_invoices records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('pending_approval', 'approved', 'partially_paid')), 0) AS supplierInvoiceQueue,
+        COALESCE((SELECT COUNT(*) FROM supplier_invoice_payments records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_confirmation'), 0) AS supplierPaymentQueue,
         COALESCE((SELECT COUNT(*) FROM draw_requests records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'approved_for_funding')), 0) AS drawQueue,
         COALESCE((SELECT COUNT(*) FROM lien_waivers records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('requested', 'pending_approval')), 0) AS lienWaiverQueue,
         COALESCE((SELECT COUNT(*) FROM finance_handoffs records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'ready_to_export')), 0) AS financeHandoffQueue,
@@ -20165,6 +20892,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         procurementValue: normalizeNumber(money.procurementValue, 0),
         budgetValue: normalizeNumber(money.budgetValue, 0),
         purchaseOrderValue: normalizeNumber(money.purchaseOrderValue, 0),
+        supplierInvoiceValue: normalizeNumber(money.supplierInvoiceValue, 0),
+        supplierPaymentValue: normalizeNumber(money.supplierPaymentValue, 0),
         drawRequestValue: normalizeNumber(money.drawRequestValue, 0),
         financeHandoffValue: normalizeNumber(money.financeHandoffValue, 0)
       },
@@ -20194,6 +20923,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         siteAccessQueue: normalizeNumber(workload.siteAccessQueue, 0),
         budgetReviews: normalizeNumber(workload.budgetReviews, 0),
         purchaseOrderQueue: normalizeNumber(workload.purchaseOrderQueue, 0),
+        supplierInvoiceQueue: normalizeNumber(workload.supplierInvoiceQueue, 0),
+        supplierPaymentQueue: normalizeNumber(workload.supplierPaymentQueue, 0),
         drawQueue: normalizeNumber(workload.drawQueue, 0),
         lienWaiverQueue: normalizeNumber(workload.lienWaiverQueue, 0),
         financeHandoffQueue: normalizeNumber(workload.financeHandoffQueue, 0),
@@ -20925,6 +21656,49 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     `).all();
     for (const payment of paymentFollowUps) {
       actions.push({ type: 'payment_follow_up', paymentId: payment.id, jobId: payment.job_id, severity: payment.due_at && payment.due_at < nowIso() ? 'high' : 'medium', message: `Payment follow-up ${payment.id} is ${payment.status} for ${Number(payment.amount || 0).toFixed(2)} EUR.` });
+    }
+
+    const supplierPayables = this.db.prepare(`
+      SELECT supplier_invoices.id, supplier_invoices.job_id, supplier_invoices.invoice_number,
+        supplier_invoices.supplier, supplier_invoices.total, supplier_invoices.due_at, jobs.title,
+        COALESCE((
+          SELECT SUM(supplier_invoice_payments.amount)
+          FROM supplier_invoice_payments
+          WHERE supplier_invoice_payments.supplier_invoice_id = supplier_invoices.id
+            AND supplier_invoice_payments.status IN ('paid', 'confirmed', 'settled')
+        ), 0) AS paid_amount
+      FROM supplier_invoices
+      JOIN jobs ON jobs.id = supplier_invoices.job_id
+      WHERE supplier_invoices.status IN ('approved', 'partially_paid')
+        AND supplier_invoices.due_at <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM supplier_invoice_payments
+          WHERE supplier_invoice_payments.supplier_invoice_id = supplier_invoices.id
+            AND supplier_invoice_payments.status = 'pending_confirmation'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM job_tasks
+          WHERE job_tasks.job_id = supplier_invoices.job_id
+            AND job_tasks.status NOT IN ('completed', 'cancelled')
+            AND job_tasks.data_json LIKE '%' || supplier_invoices.id || '%'
+        )
+      ORDER BY supplier_invoices.due_at ASC, supplier_invoices.created_at ASC
+      LIMIT 5
+    `).all(futureIsoDate(3));
+    for (const payable of supplierPayables) {
+      const outstandingAmount = Math.max(0, normalizeNumber(payable.total, 0) - normalizeNumber(payable.paid_amount, 0));
+      if (!(outstandingAmount > 0.01)) continue;
+      const overdue = Boolean(payable.due_at && payable.due_at < nowIso());
+      actions.push({
+        type: 'review_supplier_payable',
+        supplierInvoiceId: payable.id,
+        jobId: payable.job_id,
+        severity: overdue ? 'high' : 'medium',
+        requiresApproval: true,
+        suggestedAmount: outstandingAmount,
+        dueAt: payable.due_at,
+        message: `${payable.title} has supplier invoice ${payable.invoice_number} from ${payable.supplier} ${overdue ? 'overdue' : 'due soon'} for ${outstandingAmount.toFixed(2)} EUR. Verify bank evidence and request approval; Contractor.AI cannot move funds.`
+      });
     }
 
     const aftercareDue = this.db.prepare(`
@@ -21819,6 +22593,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           this.audit({ entityType: 'communication', entityId: communication.id, jobId: action.jobId, action: 'autonomous_draft_payment_followup', actor, after: communication });
         }
 
+        const supplierPayableReviews = preview.filter(action => action.type === 'review_supplier_payable').slice(0, 3);
+        for (const action of supplierPayableReviews) {
+          const task = this.addTask(action.jobId, {
+            title: `Review supplier invoice ${action.supplierInvoiceId}`,
+            description: `${action.message} Confirm supplier identity, invoice match, due amount, and external bank evidence before recording a payment confirmation.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: action.dueAt || futureIsoDate(1),
+            source: 'autonomous_cycle',
+            data: {
+              supplierInvoiceId: action.supplierInvoiceId,
+              suggestedAmount: action.suggestedAmount,
+              externalPaymentInitiated: false
+            }
+          }, { actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalPaymentInitiated: false });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_supplier_payable_review_task',
+            actor,
+            after: task,
+            metadata: { supplierInvoiceId: action.supplierInvoiceId, externalCommitments: 0, fundsMoved: false }
+          });
+        }
+
         const clientReplyFollowUps = preview.filter(action => action.type === 'client_reply_follow_up').slice(0, 3);
         for (const action of clientReplyFollowUps) {
           const original = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(action.communicationId);
@@ -22099,6 +22899,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (budgetLinesWithoutApproval) issues.push({ severity: 'warning', message: `${budgetLinesWithoutApproval} approved budget line(s) have no approval gate.` });
     const purchaseOrdersWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM purchase_orders WHERE status IN ('approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued') AND approval_id IS NULL").get().count || 0);
     if (purchaseOrdersWithoutApproval) issues.push({ severity: 'warning', message: `${purchaseOrdersWithoutApproval} purchase order commitment(s) have no approval gate.` });
+    const supplierInvoicesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM supplier_invoices WHERE status IN ('approved', 'partially_paid', 'paid') AND approval_id IS NULL").get().count || 0);
+    if (supplierInvoicesWithoutApproval) issues.push({ severity: 'warning', message: `${supplierInvoicesWithoutApproval} recognized supplier invoice(s) have no approval gate.` });
+    const supplierPaymentsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM supplier_invoice_payments WHERE status IN ('paid', 'confirmed', 'settled') AND approval_id IS NULL").get().count || 0);
+    if (supplierPaymentsWithoutApproval) issues.push({ severity: 'warning', message: `${supplierPaymentsWithoutApproval} supplier payment confirmation(s) have no approval gate.` });
     const drawRequestsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM draw_requests WHERE status IN ('submitted', 'approved', 'approved_for_funding', 'funded', 'sent') AND approval_id IS NULL").get().count || 0);
     if (drawRequestsWithoutApproval) issues.push({ severity: 'warning', message: `${drawRequestsWithoutApproval} draw/funding request(s) have no approval gate.` });
     const lienWaiversWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM lien_waivers WHERE status IN ('received', 'approved', 'released', 'waived') AND approval_id IS NULL").get().count || 0);
@@ -22172,6 +22976,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         siteAccessLogs: this.count('site_access_logs'),
         budgetLines: this.count('budget_lines'),
         purchaseOrders: this.count('purchase_orders'),
+        supplierInvoices: this.count('supplier_invoices'),
+        supplierInvoicePayments: this.count('supplier_invoice_payments'),
         drawRequests: this.count('draw_requests'),
         lienWaivers: this.count('lien_waivers'),
         financeHandoffs: this.count('finance_handoffs'),
@@ -23033,6 +23839,51 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapSupplierInvoice(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      purchaseOrderId: row.purchase_order_id,
+      tradePartnerId: row.trade_partner_id,
+      supplier: row.supplier,
+      invoiceNumber: row.invoice_number,
+      status: row.status,
+      currency: row.currency,
+      netAmount: normalizeNumber(row.net_amount, 0),
+      taxAmount: normalizeNumber(row.tax_amount, 0),
+      total: normalizeNumber(row.total, 0),
+      invoiceDate: row.invoice_date,
+      dueAt: row.due_at,
+      approvalId: row.approval_id,
+      match: data.match || null,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapSupplierInvoicePayment(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      supplierInvoiceId: row.supplier_invoice_id,
+      status: row.status,
+      currency: row.currency,
+      amount: normalizeNumber(row.amount, 0),
+      paidAt: row.paid_at,
+      method: row.method,
+      reference: row.reference,
+      approvalId: row.approval_id,
+      reconciliationKey: row.reconciliation_key,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapDrawRequest(row) {
     return {
       id: row.id,
@@ -23317,6 +24168,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.total = mapped?.total ?? data.total ?? null;
       preview.currency = mapped?.currency || data.currency || 'EUR';
       preview.reason = mapped?.data?.reason || null;
+    } else if (targetType === 'supplier_invoice') {
+      const row = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapSupplierInvoice(row) : null;
+      const exceptions = mapped?.match?.exceptions || data.match?.exceptions || [];
+      primaryEffect = `Recognize supplier invoice ${mapped?.invoiceNumber || data.invoiceNumber || ''} for ${(mapped?.total ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'}.`;
+      addEffect('Move the retained supplier invoice from pending approval to an approved payable.');
+      addEffect(exceptions.length
+        ? `Accept ${exceptions.length} retained match exception${exceptions.length === 1 ? '' : 's'} with the reviewer reason as the explicit override.`
+        : 'Confirm the retained purchase-order, supplier, amount, currency, and delivery-evidence match.');
+      addSafeguard('Does not initiate, schedule, or transmit a supplier payment and does not contact the supplier.');
+      addSafeguard('Duplicate supplier and invoice-number combinations are refused before approval.');
+      if (exceptions.length) addSafeguard('Approval is blocked until the reviewer records an explicit exception override reason.');
+      riskLevel = 'high';
+      preview.supplier = mapped?.supplier || data.supplier || null;
+      preview.invoiceNumber = mapped?.invoiceNumber || data.invoiceNumber || null;
+      preview.netAmount = mapped?.netAmount ?? null;
+      preview.taxAmount = mapped?.taxAmount ?? null;
+      preview.total = mapped?.total ?? data.amount ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.purchaseOrderId = mapped?.purchaseOrderId || data.match?.purchaseOrderId || null;
+      preview.deliveryReference = mapped?.match?.deliveryReference || data.match?.deliveryReference || null;
+      preview.matchStatus = exceptions.length ? 'exception' : 'matched';
+      preview.exceptions = exceptions;
+    } else if (targetType === 'supplier_invoice_payment') {
+      const row = this.db.prepare('SELECT * FROM supplier_invoice_payments WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapSupplierInvoicePayment(row) : null;
+      primaryEffect = `Confirm retained supplier payment evidence for ${(mapped?.amount ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'}.`;
+      addEffect('Mark the payment confirmation approved and reconcile it against the retained supplier payable.');
+      addSafeguard('Confirms evidence only: Contractor.AI does not initiate, schedule, transmit, or retry a bank payment.');
+      addSafeguard('Duplicate references and amounts above the available payable balance are refused.');
+      riskLevel = 'high';
+      preview.supplierInvoiceId = mapped?.supplierInvoiceId || data.supplierInvoiceId || null;
+      preview.amount = mapped?.amount ?? data.amount ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.reference = mapped?.reference || data.reference || null;
+      preview.paidAt = mapped?.paidAt || null;
     } else if (targetType === 'assignment') {
       primaryEffect = `Approve worker assignment for ${data.workerName || data.workerId || 'worker'}.`;
       addEffect(`Set assignment to ${data.requestedStatus || 'planned'} for ${data.scheduledStart || 'the proposed start'} through ${data.scheduledEnd || 'the proposed end'}.`);

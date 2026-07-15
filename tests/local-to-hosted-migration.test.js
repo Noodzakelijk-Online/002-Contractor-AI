@@ -80,6 +80,49 @@ function createBackupFixture(t, suffix = 'success') {
     verificationReference: `Migration fixture registry check ${suffix}`,
     verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
   }, { actor: 'migration_fixture' });
+  const purchaseOrder = source.createPurchaseOrder(job.id, {
+    supplier: tradePartner.name,
+    tradePartnerId: tradePartner.id,
+    status: 'ready_to_order',
+    amount: 400,
+    currency: 'EUR',
+    items: [{ name: 'Migration payable materials', quantity: 1, unitCost: 400 }]
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(purchaseOrder.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration purchase commitment verified.'
+  });
+  const supplierInvoice = source.createSupplierInvoice(job.id, {
+    purchaseOrderId: purchaseOrder.id,
+    tradePartnerId: tradePartner.id,
+    supplier: tradePartner.name,
+    invoiceNumber: `MIGRATION-SUP-${suffix}`,
+    invoiceDate: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+    dueAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+    netAmount: 400,
+    taxAmount: 84,
+    total: 484,
+    deliveryReference: `Migration goods receipt ${suffix}`,
+    notes: 'Retained supplier payable migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(supplierInvoice.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration supplier invoice match verified.'
+  });
+  const supplierPayment = source.recordSupplierInvoicePayment(job.id, supplierInvoice.id, {
+    amount: 484,
+    paidAt: new Date().toISOString(),
+    method: 'bank_transfer',
+    reference: `MIGRATION-BANK-${suffix}`,
+    notes: 'Retained payment evidence migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(supplierPayment.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration supplier payment evidence verified.'
+  });
   const organization = source.updateOrganizationProfile({
     legalName: `Migration Contractor ${suffix} B.V.`,
     registrationNumber: '44332211',
@@ -127,7 +170,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, document, evidenceBytes, job, localStorageRef, organization, tradePartner };
+  return { backupDir, backupId, document, evidenceBytes, job, localStorageRef, organization, supplierInvoice, supplierPayment, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -194,7 +237,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '017_invoice_credit_notes');
+  assert.equal(migration.migrationVersion, '018_supplier_payables');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -217,6 +260,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPartner.name, fixture.tradePartner.name);
     assert.equal(migratedPartner.compliance.status, 'verified');
     assert.equal(migratedPartner.data.verificationReference, fixture.tradePartner.data.verificationReference);
+    const migratedSupplierInvoice = detail.supplierInvoices.find(item => item.id === fixture.supplierInvoice.id);
+    assert.equal(migratedSupplierInvoice.status, 'paid');
+    assert.equal(migratedSupplierInvoice.data.reconciliation.outstandingAmount, 0);
+    assert.ok(detail.supplierInvoicePayments.some(item => item.id === fixture.supplierPayment.id && item.status === 'paid'));
     const migratedOrganization = hosted.getOrganizationProfile();
     assert.equal(migratedOrganization.legalName, fixture.organization.legalName);
     assert.equal(migratedOrganization.registrationNumber, fixture.organization.registrationNumber);

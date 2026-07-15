@@ -548,6 +548,57 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(approvedProcurement.tradePartnerId, tradePartner.id);
     assert.equal(approvedProcurement.partnerComplianceSnapshot.complianceStatus, 'verified');
 
+    const purchaseOrder = ledger.createPurchaseOrder(job.id, {
+      supplier: verifiedTradePartner.name,
+      tradePartnerId: verifiedTradePartner.id,
+      status: 'ready_to_order',
+      amount: 320,
+      currency: 'EUR',
+      orderReference: `POSTGRES-PO-${Date.now()}`,
+      items: [{ name: 'PostgreSQL payable material', quantity: 2, unitCost: 160 }]
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(purchaseOrder.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_approver',
+      reason: 'Hosted purchase commitment and supplier evidence verified.'
+    });
+    const supplierInvoice = ledger.createSupplierInvoice(job.id, {
+      purchaseOrderId: purchaseOrder.id,
+      tradePartnerId: verifiedTradePartner.id,
+      supplier: verifiedTradePartner.name,
+      invoiceNumber: `POSTGRES-SUP-${Date.now()}`,
+      invoiceDate: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+      dueAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+      netAmount: 320,
+      taxAmount: 67.2,
+      total: 387.2,
+      deliveryReference: 'PostgreSQL retained receipt GR-320',
+      notes: 'Hosted three-way supplier invoice match.'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(supplierInvoice.match.status, 'matched');
+    ledger.resolveApproval(supplierInvoice.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_approver',
+      reason: 'Hosted purchase order, receipt, invoice, and supplier evidence verified.'
+    });
+    const supplierPayment = ledger.recordSupplierInvoicePayment(job.id, supplierInvoice.id, {
+      amount: 387.2,
+      paidAt: new Date().toISOString(),
+      method: 'bank_transfer',
+      reference: `POSTGRES-BANK-${Date.now()}`,
+      notes: 'Hosted bank statement payment evidence.'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(supplierPayment.status, 'pending_confirmation');
+    ledger.resolveApproval(supplierPayment.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_approver',
+      reason: 'Hosted bank reference and amount verified.'
+    });
+    const hostedPayable = ledger.getJobDetail(job.id, { includeAudit: false }).supplierInvoices
+      .find(invoice => invoice.id === supplierInvoice.id);
+    assert.equal(hostedPayable.status, 'paid');
+    assert.equal(hostedPayable.data.reconciliation.outstandingAmount, 0);
+
     const inspectedAt = new Date().toISOString().slice(0, 10);
     const nextInspectionDue = new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10);
     const inspectionEquipment = ledger.upsertTool({
@@ -783,7 +834,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '017_invoice_credit_notes');
+    assert.equal(migrations.currentVersion, '018_supplier_payables');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -864,12 +915,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('017_invoice_credit_notes'));
+  assert.deepEqual(versions, Array(4).fill('018_supplier_payables'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 17);
+    assert.equal(Number(migrationCount.count), 18);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables

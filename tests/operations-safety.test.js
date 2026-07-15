@@ -95,6 +95,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exported.body.restorable, false);
   assert.match(exported.body.integrity.digest, /^[a-f0-9]{64}$/);
   assert.ok(exported.body.jobs.some(job => job.id === intake.body.job.id));
+  assert.ok(Array.isArray(exported.body.supplierInvoices));
+  assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
 
   const exportValidation = await request(baseUrl, '/api/operations/exports/validate', {
     method: 'POST',
@@ -105,6 +107,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.restorable, false);
   assert.equal(exportValidation.body.integrity.verified, true);
   assert.equal(exportValidation.body.counts.jobs, exported.body.jobs.length);
+  assert.equal(exportValidation.body.counts.supplierInvoices, exported.body.supplierInvoices.length);
+  assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
 
   const tamperedExport = structuredClone(exported.body);
   tamperedExport.jobs[0].title = 'Tampered after export';
@@ -212,7 +216,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '017_invoice_credit_notes');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '018_supplier_payables');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 

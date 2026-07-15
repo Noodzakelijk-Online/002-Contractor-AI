@@ -2709,6 +2709,37 @@ app.post('/api/ledger/jobs/:id/purchase-orders', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/supplier-invoices', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    supplierInvoice: operatingLedger.createSupplierInvoice(
+      req.params.id,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary(),
+    externalPaymentInitiated: false
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/supplier-invoices/:supplierInvoiceId/payments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    supplierPayment: operatingLedger.recordSupplierInvoicePayment(
+      req.params.id,
+      req.params.supplierInvoiceId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary(),
+    externalPaymentInitiated: false
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/draw-requests', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3563,6 +3594,8 @@ function operationalExport() {
     organization: operatingLedger.getOrganizationProfile(),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
+    supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
+    supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
     audit: operatingLedger.listAudit({ limit: 1_000 })
   }));
@@ -3620,6 +3653,8 @@ function validateOperationalExport(snapshot) {
     counts: {
       jobs: snapshot.jobs.length,
       tradePartners: snapshot.tradePartners.length,
+      supplierInvoices: Array.isArray(snapshot.supplierInvoices) ? snapshot.supplierInvoices.length : 0,
+      supplierInvoicePayments: Array.isArray(snapshot.supplierInvoicePayments) ? snapshot.supplierInvoicePayments.length : 0,
       approvals: snapshot.approvals.length,
       audit: snapshot.audit.length
     }

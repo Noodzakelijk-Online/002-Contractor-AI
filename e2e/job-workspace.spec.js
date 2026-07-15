@@ -1762,6 +1762,103 @@ test('finance workspace creates and prepares an approval-gated structured invoic
   expect(packagedDetail.job.communications.find(communication => communication.data.source === 'invoice_issue_package')).toMatchObject({ status: 'draft' });
 });
 
+test('finance workspace matches a supplier invoice and confirms payment evidence without moving funds', async ({ page, request }) => {
+  const supplier = await ensureVerifiedTradePartner(request, `Browser payable supplier ${Date.now()}`);
+  const intake = await createBrowserJob(request, 'Browser supplier payable workflow', {
+    status: 'scheduled',
+    progressPercent: 0,
+    estimatedCost: 1000,
+    contractValue: 0,
+    assignAutomatically: false
+  });
+  const purchaseOrderResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/purchase-orders`, {
+    data: {
+      supplier: supplier.name,
+      tradePartnerId: supplier.id,
+      status: 'ready_to_order',
+      amount: 1000,
+      currency: 'EUR',
+      items: [{ name: 'Browser payable materials', quantity: 1, unitCost: 1000 }],
+      notes: 'Browser supplier payable purchase commitment.'
+    }
+  });
+  expect(purchaseOrderResponse.ok()).toBeTruthy();
+  const purchaseOrder = await purchaseOrderResponse.json();
+  const purchaseApproval = await request.post(`/api/ledger/approvals/${purchaseOrder.purchaseOrder.approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser payables approver', reason: 'Supplier compliance and purchase commitment checked.' }
+  });
+  expect(purchaseApproval.ok()).toBeTruthy();
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Finance', exact: true }).click();
+  const finance = page.getByTestId('finance-workspace');
+  let row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await expect(row).toContainText('Supplier payable');
+  await row.getByRole('button', { name: `Supplier invoice for ${intake.job.title}` }).click();
+  let control = page.getByTestId('finance-control-modal');
+  await expect(control.getByRole('heading', { name: 'Supplier invoice' })).toBeVisible();
+  await expect(control.getByLabel('Supplier', { exact: true })).toHaveValue(supplier.name);
+  await expect(control.getByLabel('Net amount (EUR)')).toHaveValue('1000.00');
+  await expect(control.getByLabel('VAT amount (EUR)')).toHaveValue('210.00');
+  await control.getByLabel('Supplier invoice number').fill('BROWSER-SUP-1000');
+  await control.getByLabel('Delivery or service evidence reference').fill('Browser signed goods receipt GR-1000');
+  await control.getByLabel('Internal evidence and notes').fill('Supplier, purchase order, goods receipt, net amount, VAT, and due date were checked.');
+  await control.getByRole('button', { name: 'Request payable approval' }).click();
+  await expect(page.getByText(/Supplier invoice BROWSER-SUP-1000 retained for/)).toBeVisible();
+
+  await page.locator('.side-nav').getByRole('button', { name: /^Approvals/ }).click();
+  const supplierInvoiceApproval = page.locator('.approval-item').filter({ hasText: 'BROWSER-SUP-1000' });
+  await expect(supplierInvoiceApproval).toHaveCount(1);
+  await approveQueueItem(page, supplierInvoiceApproval, 'Purchase order, goods receipt, VAT, and supplier identity verified.');
+
+  await page.getByRole('button', { name: 'Finance', exact: true }).click();
+  row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await row.getByRole('button', { name: `Supplier payment for ${intake.job.title}` }).click();
+  control = page.getByTestId('finance-control-modal');
+  await expect(control.getByRole('heading', { name: 'Supplier payment' })).toBeVisible();
+  await expect(control.getByText('BROWSER-SUP-1000', { exact: true })).toBeVisible();
+  await expect(control.getByLabel('Payment amount (EUR)')).toHaveValue('1210.00');
+  await control.getByLabel('Bank or bookkeeping reference').fill('BROWSER-BANK-SUP-1000');
+  await control.getByLabel('Internal evidence and notes').fill('Bank statement reference and full supplier payment amount were checked.');
+  await control.getByRole('button', { name: 'Request payment confirmation' }).click();
+  await expect(page.getByText('Supplier payment evidence retained for approver review. The payable balance is unchanged and Contractor.AI did not move funds.')).toBeVisible();
+
+  await page.locator('.side-nav').getByRole('button', { name: /^Approvals/ }).click();
+  const paymentApproval = page.locator('.approval-item').filter({ hasText: 'BROWSER-BANK-SUP-1000' });
+  await expect(paymentApproval).toHaveCount(1);
+  await approveQueueItem(page, paymentApproval, 'Bank reference, date, supplier invoice, and amount verified.');
+
+  const detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  expect(detailResponse.ok()).toBeTruthy();
+  const detail = await detailResponse.json();
+  expect(detail.job.supplierInvoices[0]).toMatchObject({
+    invoiceNumber: 'BROWSER-SUP-1000',
+    status: 'paid',
+    total: 1210,
+    data: { match: { status: 'matched', type: 'three_way' }, reconciliation: { paidAmount: 1210, outstandingAmount: 0 } }
+  });
+  expect(detail.job.supplierInvoicePayments[0]).toMatchObject({
+    status: 'paid',
+    amount: 1210,
+    reference: 'BROWSER-BANK-SUP-1000',
+    data: { externalPaymentInitiated: false }
+  });
+
+  await page.getByRole('button', { name: 'Finance', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileGeometry = await page.evaluate(() => {
+    const workspace = document.querySelector('[data-testid="finance-workspace"]');
+    return {
+      pageWidth: document.body.scrollWidth,
+      viewportWidth: window.innerWidth,
+      workspaceWidth: workspace?.scrollWidth || 0,
+      workspaceClientWidth: workspace?.clientWidth || 0
+    };
+  });
+  expect(mobileGeometry.pageWidth).toBeLessThanOrEqual(mobileGeometry.viewportWidth);
+  expect(mobileGeometry.workspaceWidth).toBeLessThanOrEqual(mobileGeometry.workspaceClientWidth);
+});
+
 test('finance workspace creates, approves, and packages a partial credit note against an issued invoice', async ({ page, request }) => {
   await ensureBrowserOrganization(request);
   const intake = await createBrowserJob(request, 'Browser finance credit-note job', {
