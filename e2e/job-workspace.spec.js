@@ -1762,6 +1762,111 @@ test('finance workspace creates and prepares an approval-gated structured invoic
   expect(packagedDetail.job.communications.find(communication => communication.data.source === 'invoice_issue_package')).toMatchObject({ status: 'draft' });
 });
 
+test('finance workspace creates, approves, and packages a partial credit note against an issued invoice', async ({ page, request }) => {
+  await ensureBrowserOrganization(request);
+  const intake = await createBrowserJob(request, 'Browser finance credit-note job', {
+    status: 'completed',
+    progressPercent: 100,
+    estimatedCost: 1000,
+    contractValue: 1000,
+    targetCompletion: '2026-07-10T16:00:00.000Z',
+    assignAutomatically: false
+  });
+  const invoiceResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/invoices`, {
+    data: {
+      amount: 1000,
+      taxRate: 21,
+      dueAt: '2026-09-30T23:59:59.000Z',
+      structuredExportRequested: true,
+      buyerReference: 'BROWSER-CREDIT-1000',
+      buyerLegalName: 'Browser Credit Buyer B.V.',
+      buyerRegistrationNumber: '87654321',
+      buyerEndpointScheme: '0106',
+      buyerEndpointId: '87654321',
+      buyerAddress: 'Keizersgracht 10',
+      buyerPostalCode: '1015 CN',
+      buyerCity: 'Amsterdam',
+      buyerCountry: 'NL'
+    }
+  });
+  expect(invoiceResponse.ok()).toBeTruthy();
+  const invoice = await invoiceResponse.json();
+  const invoiceApproval = await request.post(`/api/ledger/approvals/${invoice.invoice.approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Invoice identity and totals checked.' }
+  });
+  expect(invoiceApproval.ok()).toBeTruthy();
+  const invoicePackageResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/invoices/${invoice.invoice.id}/issue-package`, { data: {} });
+  expect(invoicePackageResponse.ok()).toBeTruthy();
+  const invoicePackage = await invoicePackageResponse.json();
+  const deliveryApproval = await request.post(`/api/ledger/approvals/${invoicePackage.approval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Invoice recipient and attachments checked.' }
+  });
+  expect(deliveryApproval.ok()).toBeTruthy();
+  const invoiceDelivery = await request.post(`/api/ledger/communications/${invoicePackage.communication.id}/delivery-receipt`, {
+    data: { integration: 'playwright_test_provider', providerMessageId: 'browser-credit-source-invoice' }
+  });
+  expect(invoiceDelivery.ok()).toBeTruthy();
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Finance', exact: true }).click();
+  const finance = page.getByTestId('finance-workspace');
+  let row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await row.getByRole('button', { name: `Credit invoice for ${intake.job.title}` }).click();
+  let modal = page.getByTestId('finance-control-modal');
+  await expect(modal.getByRole('heading', { name: 'Credit invoice' })).toBeVisible();
+  await expect(modal.getByLabel('Net credit amount (EUR)')).toHaveValue('1000.00');
+  await expect(modal.getByLabel('VAT rate (%)')).toHaveValue('21');
+  await modal.getByLabel('Net credit amount (EUR)').fill('200');
+  await modal.getByLabel('Credit-line description').fill('Duplicate material line correction');
+  await modal.getByLabel('Internal evidence and notes').fill('Signed scope correction and original invoice line were checked against the retained project record.');
+  await expect(modal.getByLabel('Credit note calculation')).toContainText(/Total credit\s*€\s*242,00/);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const modalGeometry = await page.evaluate(() => {
+    const creditModal = document.querySelector('[data-testid="finance-control-modal"]');
+    return {
+      pageWidth: document.body.scrollWidth,
+      viewportWidth: window.innerWidth,
+      modalWidth: creditModal?.scrollWidth || 0,
+      modalClientWidth: creditModal?.clientWidth || 0
+    };
+  });
+  expect(modalGeometry.pageWidth).toBeLessThanOrEqual(modalGeometry.viewportWidth);
+  expect(modalGeometry.modalWidth).toBeLessThanOrEqual(modalGeometry.modalClientWidth);
+  await modal.getByRole('button', { name: 'Request credit-note approval' }).click();
+  await expect(page.getByText(/Credit-note draft retained for €\s*242,00/)).toBeVisible();
+
+  let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  expect(detailResponse.ok()).toBeTruthy();
+  let detail = await detailResponse.json();
+  expect(detail.job.creditNotes).toHaveLength(1);
+  expect(detail.job.creditNotes[0]).toMatchObject({ status: 'draft', amount: 200, taxAmount: 42, total: 242 });
+  expect(detail.job.invoices[0].status).toBe('sent');
+  const creditApproval = await request.post(`/api/ledger/approvals/${detail.job.creditNotes[0].approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Correction and VAT treatment checked.' }
+  });
+  expect(creditApproval.ok()).toBeTruthy();
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await row.getByRole('button', { name: `Prepare credit note package for ${intake.job.title}` }).click();
+  await expect(page.getByText(/Credit note CRN-.* retained with HTML and UBL attachments\. The receivable was adjusted/i)).toBeVisible();
+  await expect(row.getByText(/€\s*242,00 credited/)).toBeVisible();
+  await expect(row.getByRole('link', { name: `Download credit note for ${intake.job.title}` })).toBeVisible();
+  await expect(row.getByRole('link', { name: `Download credit note UBL for ${intake.job.title}` })).toBeVisible();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.creditNotes[0].status).toBe('prepared');
+  expect(detail.job.creditNotes[0].data.issuePackage.issueReference).toMatch(/^CRN-\d{4}-\d{6}$/);
+  expect(detail.job.invoices[0]).toMatchObject({
+    status: 'partially_settled',
+    data: { reconciliation: { creditedAmount: 242, outstandingAmount: 968 } }
+  });
+  expect(detail.job.documents.map(document => document.type)).toEqual(expect.arrayContaining(['credit_note_issue_package', 'credit_note_ubl_package']));
+});
+
 test('finance workspace operates costs, budgets, handoffs, receivables, draws and waiver requests', async ({ page, request }) => {
   await ensureBrowserOrganization(request);
   const costJob = await createBrowserJob(request, 'Browser finance cost control job', {

@@ -50,6 +50,7 @@ const FIELD_ASSURANCE_REVIEW_PRIORITY = [
   'complete_orientation'
 ]
 const FINANCE_ACTION_LABELS = {
+  create_credit_note: 'Credit invoice',
   record_payment_reconciliation: 'Record payment',
   record_payment_follow_up: 'Payment follow-up',
   prepare_finance_handoff: 'Finance handoff',
@@ -66,21 +67,45 @@ const RESOURCE_ACTION_LABELS = {
   request_procurement_approval: 'Request procurement approval'
 }
 
-async function api(path, options = {}) {
-  const headers = options.body ? { 'Content-Type': 'application/json', ...(options.headers || {}) } : options.headers
-  const response = await fetch(path, {
-    ...options,
-    credentials: 'same-origin',
-    headers
-  })
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const error = new Error(payload.error?.message || 'The ledger request could not be completed.')
-    error.code = payload.error?.code || 'request_failed'
-    error.status = response.status
-    throw error
+const TRANSIENT_REQUEST_RETRY_DELAYS_MS = [250, 750]
+
+function isTransientRequestError(error) {
+  if (Number.isInteger(error?.status)) return false
+  return /failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(String(error?.message || ''))
+}
+
+async function retryTransientRequest(operation) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      const delay = TRANSIENT_REQUEST_RETRY_DELAYS_MS[attempt]
+      if (!isTransientRequestError(error) || delay === undefined) throw error
+      await new Promise(resolve => window.setTimeout(resolve, delay))
+    }
   }
-  return payload
+}
+
+async function api(path, options = {}) {
+  const request = async () => {
+    const headers = options.body ? { 'Content-Type': 'application/json', ...(options.headers || {}) } : options.headers
+    const response = await fetch(path, {
+      ...options,
+      credentials: 'same-origin',
+      headers
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const error = new Error(payload.error?.message || 'The ledger request could not be completed.')
+      error.code = payload.error?.code || 'request_failed'
+      error.status = response.status
+      throw error
+    }
+    return payload
+  }
+  return String(options.method || 'GET').toUpperCase() === 'GET'
+    ? retryTransientRequest(request)
+    : request()
 }
 
 async function recordFieldEvidence({ id, jobId, notes, riskLevel, file }) {
@@ -759,21 +784,24 @@ function FinanceWorkspace({ finance, jobs, canCoordinate, canApprove, submitting
       const job = jobs.find(candidate => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
       const canAct = canCoordinate && !item.flags?.approvalRequired
       const canDraftInvoice = canAct && item.flags?.invoiceReady && !item.counts?.draftInvoices
-      const prepareAction = canAct ? item.nextActions?.find(action => action.type === 'prepare_invoice_package') : null
+      const prepareAction = canAct ? item.nextActions?.find(action => ['prepare_invoice_package', 'prepare_credit_note_package'].includes(action.type)) : null
       const issuePackage = item.latest?.invoice?.data?.issuePackage
+      const creditNotePackage = item.latest?.creditNote?.data?.issuePackage
       const financeActions = canAct ? item.nextActions?.filter(action => (
-        action.type !== 'review_finance_approval' && action.type !== 'draft_invoice' && action.type !== 'prepare_invoice_package'
+        action.type !== 'review_finance_approval' && action.type !== 'draft_invoice' && !['prepare_invoice_package', 'prepare_credit_note_package'].includes(action.type)
           && FINANCE_ACTION_LABELS[action.type]
       )).slice(0, 3) : EMPTY_LIST
       return <article className="finance-item" key={item.jobId}>
-        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Received <strong>{currency.format(item.money?.receivedValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.money?.writtenOffValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.writtenOffValue)} written off</span> : null}{item.money?.pendingPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingPaymentValue)} pending</span> : null}{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
+        <div className="finance-copy"><div className="finance-title"><h3>{item.jobTitle || 'Ledger job'}</h3><span className={`status status-${item.financeStatus}`}>{formatStatus(item.financeStatus)}</span></div><p>{item.nextAction || 'Finance records are stable.'}</p><div className="finance-values"><span>Contract net <strong>{currency.format(item.money?.contractValue || 0)}</strong></span><span>Unpaid gross <strong>{currency.format(item.money?.unpaidValue || 0)}</strong></span><span>Received <strong>{currency.format(item.money?.receivedValue || 0)}</strong></span><span>Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong></span></div><div className="finance-flags">{item.money?.creditedValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.creditedValue)} credited</span> : null}{item.money?.pendingCreditValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingCreditValue)} credit pending</span> : null}{item.money?.writtenOffValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.writtenOffValue)} written off</span> : null}{item.money?.pendingPaymentValue > 0 ? <span className="tag tag-amber">{currency.format(item.money.pendingPaymentValue)} payment pending</span> : null}{item.counts?.timeLogs ? <span className="tag tag-green">{item.counts.timeLogs} time log{item.counts.timeLogs === 1 ? '' : 's'}</span> : null}{item.counts?.expenses ? <span className="tag">{item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}</span> : null}{item.latest?.invoice?.data?.structuredExportRequested ? <span className={`tag ${item.latest.invoice.data.structuredReadiness?.ready ? 'tag-green' : 'tag-amber'}`}>UBL {item.latest.invoice.data.structuredReadiness?.ready ? 'ready' : 'incomplete'}</span> : null}{issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}{creditNotePackage ? <span className="tag tag-green">{creditNotePackage.issueReference}</span> : null}{item.counts?.pendingApprovals ? <span className="tag tag-amber">{item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}</span> : null}</div></div>
         <div className="finance-actions">
           {item.flags?.approvalRequired && canApprove ? <button className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ jobId: item.jobId, jobTitle: job.title, approvalId: item.nextActions?.find(action => action.approvalId)?.approvalId || null })}><ShieldCheck size={16} />Review approval</button> : null}
           {canDraftInvoice ? <button className="secondary-button" aria-label={`Draft invoice for ${job.title}`} disabled={submitting} onClick={() => onDraftInvoice(item)}><ReceiptEuro size={16} />Draft invoice</button> : null}
-          {prepareAction ? <button className="secondary-button" aria-label={`Prepare invoice package for ${job.title}`} disabled={submitting} onClick={() => onPrepareInvoice(item, prepareAction)}><PackageCheck size={16} />Prepare package</button> : null}
+          {prepareAction ? <button className="secondary-button" aria-label={`Prepare ${prepareAction.type === 'prepare_credit_note_package' ? 'credit note' : 'invoice'} package for ${job.title}`} disabled={submitting} onClick={() => onPrepareInvoice(item, prepareAction)}><PackageCheck size={16} />{prepareAction.type === 'prepare_credit_note_package' ? 'Prepare credit' : 'Prepare package'}</button> : null}
           {issuePackage?.htmlDocumentId ? <a className="secondary-button" aria-label={`Download invoice for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.htmlDocumentId)}/issue-package`} download><FileDown size={16} />Invoice</a> : null}
           {issuePackage?.ublDocumentId ? <a className="secondary-button" aria-label={`Download UBL for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(issuePackage.ublDocumentId)}/issue-package`} download><FileDown size={16} />UBL</a> : null}
-          {financeActions.map(action => <button className="secondary-button" key={`${action.type}-${action.invoiceId || action.paymentId || item.jobId}`} aria-label={`${FINANCE_ACTION_LABELS[action.type]} for ${job.title}`} disabled={submitting} onClick={() => onAction(item, action)}><ClipboardCheck size={16} />{FINANCE_ACTION_LABELS[action.type]}</button>)}
+          {creditNotePackage?.htmlDocumentId ? <a className="secondary-button" aria-label={`Download credit note for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(creditNotePackage.htmlDocumentId)}/issue-package`} download><FileDown size={16} />Credit note</a> : null}
+          {creditNotePackage?.ublDocumentId ? <a className="secondary-button" aria-label={`Download credit note UBL for ${job.title}`} href={`/api/ledger/documents/${encodeURIComponent(creditNotePackage.ublDocumentId)}/issue-package`} download><FileDown size={16} />Credit UBL</a> : null}
+          {financeActions.map(action => <button className="secondary-button" key={`${action.type}-${action.creditNoteId || action.invoiceId || action.paymentId || item.jobId}`} aria-label={`${FINANCE_ACTION_LABELS[action.type]} for ${job.title}`} disabled={submitting} onClick={() => onAction(item, action)}><ClipboardCheck size={16} />{FINANCE_ACTION_LABELS[action.type]}</button>)}
           <button className="icon-button table-action" aria-label={`Open ${job.title}`} onClick={() => onOpen(job)}><ArrowUpRight size={16} /></button>
         </div>
       </article>
@@ -1456,6 +1484,9 @@ function App() {
   const invoiceTaxAmount = roundMoney(invoiceAmount * (Number(invoiceDraft.taxRate) || 0) / 100)
   const invoiceTotal = roundMoney(invoiceAmount + invoiceTaxAmount)
   const financeControlAmount = Number(financeActionDraft.amount) || 0
+  const financeCreditTaxRate = Number(financeAction?.action?.taxRate) || 0
+  const financeCreditTax = roundMoney(financeControlAmount * financeCreditTaxRate / 100)
+  const financeCreditTotal = roundMoney(financeControlAmount + financeCreditTax)
   const financeControlForecast = Number(financeActionDraft.forecastAmount) || 0
   const financeControlHours = Number(financeActionDraft.hours) || 0
   const financeControlRate = Number(financeActionDraft.rate) || 0
@@ -3277,17 +3308,21 @@ function App() {
   }
 
   async function prepareInvoicePackage(item, action) {
-    if (!item?.jobId || !action?.invoiceId) {
-      setError('The approved invoice is not linked to a retained finance row.')
+    const creditNotePackage = action?.type === 'prepare_credit_note_package'
+    if (!item?.jobId || (creditNotePackage ? !action?.creditNoteId : !action?.invoiceId)) {
+      setError(`The approved ${creditNotePackage ? 'credit note' : 'invoice'} is not linked to a retained finance row.`)
       return
     }
     setSubmitting(true)
     try {
-      const result = await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}/invoices/${encodeURIComponent(action.invoiceId)}/issue-package`, {
+      const route = creditNotePackage
+        ? `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/credit-notes/${encodeURIComponent(action.creditNoteId)}/issue-package`
+        : `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/invoices/${encodeURIComponent(action.invoiceId)}/issue-package`
+      const result = await api(route, {
         method: 'POST',
         body: JSON.stringify({ actor: 'office_operator' })
       })
-      notify(`Invoice ${result.issueReference} retained with ${result.structuredExportIncluded ? 'HTML and UBL attachments' : 'a human-readable attachment'}. Delivery still requires approval and a verified receipt.`)
+      notify(`${creditNotePackage ? 'Credit note' : 'Invoice'} ${result.issueReference} retained with ${result.structuredExportIncluded ? 'HTML and UBL attachments' : 'a human-readable attachment'}. ${creditNotePackage ? 'The receivable was adjusted; delivery' : 'Delivery'} still requires approval and a verified receipt.`)
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -3302,9 +3337,12 @@ function App() {
       return
     }
     const paymentAmount = Number(action.availableAmount || action.outstandingAmount || item.money?.unpaidValue || item.latest?.payment?.amount || item.latest?.invoice?.total || 0)
+    const creditNoteAmount = Number(action.availableNetAmount || 0)
     const contractAmount = Number(item.money?.contractValue || item.money?.quotedNetValue || 0)
     const drawAmount = Number(item.latest?.invoice?.total || item.money?.invoiceValue || item.money?.unpaidValue || 0)
-    const amount = action.type === 'create_budget_line'
+    const amount = action.type === 'create_credit_note'
+      ? creditNoteAmount
+      : action.type === 'create_budget_line'
       ? contractAmount
       : action.type === 'create_draw_request'
         ? drawAmount
@@ -3341,7 +3379,26 @@ function App() {
 
     let route = ''
     let body = {}
-    if (type === 'record_payment_reconciliation') {
+    if (type === 'create_credit_note') {
+      if (!(financeControlAmount > 0) || !financeAction.action.invoiceId) {
+        setError('Record a positive net correction amount against the retained invoice.')
+        return
+      }
+      const availableAmount = Number(financeAction.action.availableAmount || 0)
+      if (availableAmount > 0 && financeCreditTotal - availableAmount > 0.01) {
+        setError(`The credit-note total cannot exceed the available invoice balance of ${currency.format(availableAmount)}.`)
+        return
+      }
+      route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/invoices/${encodeURIComponent(financeAction.action.invoiceId)}/credit-notes`
+      body = {
+        amount: roundMoney(financeControlAmount),
+        taxRate: financeCreditTaxRate,
+        currency: 'EUR',
+        reason: notes,
+        description: financeActionDraft.description.trim() || `Correction for invoice ${financeAction.action.invoiceReference || financeAction.action.invoiceId}`,
+        structuredExportRequested: financeAction.action.structuredExportRequested === true
+      }
+    } else if (type === 'record_payment_reconciliation') {
       if (!(financeControlAmount > 0) || !financeAction.action.invoiceId || !reference) {
         setError('Record a positive settlement amount, retained invoice, and payment or authority reference.')
         return
@@ -3482,7 +3539,9 @@ function App() {
     setSubmitting(true)
     try {
       const result = await api(route, { method: 'POST', body: JSON.stringify({ ...body, actor: 'office_operator' }) })
-      if (type === 'record_payment_reconciliation') {
+      if (type === 'create_credit_note') {
+        notify(`Credit-note draft retained for ${currency.format(financeCreditTotal)} against ${financeAction.action.invoiceReference || 'the issued invoice'}. Approval and immutable package preparation are required before the receivable changes.`)
+      } else if (type === 'record_payment_reconciliation') {
         notify('Payment reconciliation retained for approver review. The invoice balance is unchanged until approval and no funds moved.')
       } else if (type === 'record_payment_follow_up') {
         notify(result.payment?.approvalId
@@ -4405,6 +4464,14 @@ function App() {
               <p>Contract {currency.format(financeAction.item.money?.contractValue || 0)} / unpaid {currency.format(financeAction.item.money?.unpaidValue || 0)} / received {currency.format(financeAction.item.money?.receivedValue || 0)}</p>
             </div>
 
+            {financeAction.action.type === 'create_credit_note' ? <>
+              <label>Net credit amount (EUR)<input required type="number" min="0.01" max={financeAction.action.availableNetAmount || undefined} step="0.01" value={financeActionDraft.amount} onChange={event => setFinanceActionDraft({ ...financeActionDraft, amount: event.target.value })} /></label>
+              <label>VAT rate (%)<input readOnly value={financeCreditTaxRate} /></label>
+              <label className="form-span">Credit-line description<input maxLength={500} value={financeActionDraft.description} onChange={event => setFinanceActionDraft({ ...financeActionDraft, description: event.target.value })} placeholder={`Correction for invoice ${financeAction.action.invoiceReference || ''}`} /></label>
+              <div className="invoice-preview form-span" aria-label="Credit note calculation"><span>Net credit <strong>{currency.format(financeControlAmount)}</strong></span><span>VAT correction <strong>{currency.format(financeCreditTax)}</strong></span><span>Total credit <strong>{currency.format(financeCreditTotal)}</strong></span></div>
+              <p className="workflow-note form-span">Available invoice balance: {currency.format(financeAction.action.availableAmount || 0)}. The draft reserves that amount against concurrent payment or credit requests; only approved immutable package preparation reduces the receivable. Delivery and Peppol transport remain separately gated.</p>
+            </> : null}
+
             {financeAction.action.type === 'record_payment_reconciliation' ? <>
               <label>Reconciliation type<select value={financeActionDraft.outcome} onChange={event => setFinanceActionDraft({ ...financeActionDraft, outcome: event.target.value })}><option value="received">Payment received</option><option value="written_off">Approved write-off request</option></select></label>
               <label>Settlement amount (EUR)<input required type="number" min="0.01" max={financeAction.action.availableAmount || financeAction.action.outstandingAmount || undefined} step="0.01" value={financeActionDraft.amount} onChange={event => setFinanceActionDraft({ ...financeActionDraft, amount: event.target.value })} /></label>
@@ -4462,7 +4529,7 @@ function App() {
           </div>
           <div className="modal-actions">
             <button type="button" className="secondary-button" onClick={closeFinanceControl}>Cancel</button>
-            <button className="primary-button" disabled={submitting || !financeActionDraft.notes.trim()}><ShieldCheck size={16} />{submitting ? 'Recording...' : financeAction.action.type === 'record_time_expense' ? 'Record ledger costs' : financeAction.action.type === 'request_lien_waiver' ? 'Retain waiver request' : financeAction.action.type === 'record_payment_follow_up' && financeActionDraft.outcome === 'follow_up_recorded' ? 'Record internal follow-up' : 'Request approver review'}</button>
+            <button className="primary-button" disabled={submitting || !financeActionDraft.notes.trim()}><ShieldCheck size={16} />{submitting ? 'Recording...' : financeAction.action.type === 'create_credit_note' ? 'Request credit-note approval' : financeAction.action.type === 'record_time_expense' ? 'Record ledger costs' : financeAction.action.type === 'request_lien_waiver' ? 'Retain waiver request' : financeAction.action.type === 'record_payment_follow_up' && financeActionDraft.outcome === 'follow_up_recorded' ? 'Record internal follow-up' : 'Request approver review'}</button>
           </div>
         </form>
       </section>

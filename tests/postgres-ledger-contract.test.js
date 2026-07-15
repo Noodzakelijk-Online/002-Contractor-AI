@@ -783,7 +783,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '016_receivable_reconciliation');
+    assert.equal(migrations.currentVersion, '017_invoice_credit_notes');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -864,12 +864,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('016_receivable_reconciliation'));
+  assert.deepEqual(versions, Array(4).fill('017_invoice_credit_notes'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 16);
+    assert.equal(Number(migrationCount.count), 17);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1122,6 +1122,61 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     assert.equal(reconciledInvoice.data.reconciliation.receivedAmount, 500);
     assert.equal(reconciledInvoice.data.reconciliation.writtenOffAmount, 861.25);
     assert.equal(reconciledInvoice.data.reconciliation.outstandingAmount, 0);
+
+    const creditJob = ledger.createIntake({
+      client: {
+        name: `Postgres Credit Buyer ${marker}`,
+        company: `Postgres Credit Buyer ${marker} B.V.`,
+        email: `postgres-credit-${marker}@example.test`,
+        address: 'Credit buyer street 18',
+        city: 'Rotterdam',
+        country: 'NL'
+      },
+      title: `Postgres credit-note parity ${marker}`,
+      status: 'completed',
+      progressPercent: 100,
+      contractValue: 1000,
+      assignAutomatically: false
+    }, { actor: 'postgres_commercial_test' });
+    const creditInvoice = ledger.createInvoice(creditJob.id, {
+      amount: 1000,
+      taxRate: 21,
+      dueAt: '2026-08-14T12:00:00.000Z',
+      structuredExportRequested: true,
+      buyerReference: `PG-CREDIT-${marker}`,
+      buyerLegalName: `Postgres Credit Buyer ${marker} B.V.`,
+      buyerRegistrationNumber: String(marker).slice(-8),
+      buyerEndpointScheme: '0106',
+      buyerEndpointId: String(marker).slice(-8),
+      buyerAddress: 'Credit buyer street 18',
+      buyerPostalCode: '3011 AA',
+      buyerCity: 'Rotterdam',
+      buyerCountry: 'NL'
+    }, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(creditInvoice.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    const creditInvoicePackage = ledger.prepareInvoiceIssuePackage(creditJob.id, creditInvoice.id, { actor: 'postgres_commercial_test' });
+    const creditNote = ledger.createCreditNote(creditJob.id, creditInvoice.id, {
+      amount: 200,
+      taxRate: 21,
+      reason: 'PostgreSQL credit-note contract parity correction.',
+      structuredExportRequested: true
+    }, { actor: 'postgres_commercial_test' });
+    assert.equal(creditNote.total, 242);
+    assert.equal(ledger.getInvoiceReconciliation(creditInvoice.id).pendingCreditAmount, 242);
+    ledger.resolveApproval(creditNote.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
+    const creditPackage = ledger.prepareCreditNoteIssuePackage(creditJob.id, creditNote.id, { actor: 'postgres_commercial_test' });
+    assert.match(creditPackage.issueReference, /^CRN-\d{4}-\d{6}$/);
+    assert.deepEqual(creditPackage.documents.map(document => document.type), ['credit_note_issue_package', 'credit_note_ubl_package']);
+    assert.equal(creditPackage.reconciliation.creditedAmount, 242);
+    assert.equal(creditPackage.reconciliation.outstandingAmount, 968);
+    assert.equal(creditPackage.reconciliation.status, 'partially_settled');
+    assert.equal(ledger.prepareCreditNoteIssuePackage(creditJob.id, creditNote.id).replayed, true);
+    const creditUbl = ledger.getCreditNoteIssueDocument(creditPackage.ublDocument.id, { audit: false }).content;
+    assert.match(creditUbl, /<cbc:CreditNoteTypeCode>381<\/cbc:CreditNoteTypeCode>/);
+    assert.match(creditUbl, new RegExp(`<cac:InvoiceDocumentReference><cbc:ID>${creditInvoicePackage.issueReference}<\\/cbc:ID>`));
+    const creditDetail = ledger.getJobDetail(creditJob.id, { includeAudit: false });
+    assert.equal(creditDetail.creditNotes[0].status, 'prepared');
+    assert.equal(creditDetail.invoices[0].status, 'partially_settled');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

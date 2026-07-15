@@ -149,6 +149,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'expense', label: 'Expenses', table: 'expenses', detailKey: 'expenses' },
     { key: 'purchase_order', label: 'Purchase orders', table: 'purchase_orders', detailKey: 'purchaseOrders' },
     { key: 'invoice', label: 'Invoices', table: 'invoices', detailKey: 'invoices' },
+    { key: 'credit_note', label: 'Credit notes', table: 'credit_notes', detailKey: 'creditNotes' },
     { key: 'payment', label: 'Payments', table: 'payments', detailKey: 'payments' },
     { key: 'draw', label: 'Draw/progress request', table: 'draw_requests', detailKey: 'drawRequests' },
     { key: 'waiver', label: 'Waiver/compliance hold', table: 'lien_waivers', detailKey: 'lienWaivers' },
@@ -167,6 +168,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'permit', label: 'Permit evidence', table: 'permit_records', detailKey: 'permits' },
     { key: 'wkb', label: 'Wkb/photo dossier', table: 'documents', detailKey: 'documents' },
     { key: 'invoice', label: 'VAT/UBL invoice signal', table: 'invoices', detailKey: 'invoices' },
+    { key: 'credit_note', label: 'Invoice correction signal', table: 'credit_notes', detailKey: 'creditNotes' },
     { key: 'vca', label: 'VCA/SDS safety proof', table: 'sds_sheets', detailKey: 'sdsSheets' },
     { key: 'site_access', label: 'Site access proof', table: 'site_access_logs', detailKey: 'siteAccessLogs' },
     { key: 'approval_audit', label: 'Approval audit', table: 'approvals', detailKey: 'approvals' },
@@ -1408,6 +1410,35 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         ALTER TABLE payments ADD COLUMN reconciliation_key TEXT;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_reconciliation_key ON payments(reconciliation_key);
         CREATE INDEX IF NOT EXISTS idx_payments_invoice_status ON payments(invoice_id, status);
+      `);
+    }
+  },
+  {
+    version: '017_invoice_credit_notes',
+    description: 'Retain approval-gated invoice corrections, durable credit-note numbering, and immutable issue packages.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS credit_note_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS credit_notes (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          invoice_id TEXT NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL DEFAULT 'draft',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          amount REAL NOT NULL DEFAULT 0,
+          tax_amount REAL NOT NULL DEFAULT 0,
+          total REAL NOT NULL DEFAULT 0,
+          approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_credit_notes_job ON credit_notes(job_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_credit_notes_invoice_status ON credit_notes(invoice_id, status);
       `);
     }
   }
@@ -5810,6 +5841,32 @@ class ContractorOperatingLedger {
     return `INV-${periodYear}-${String(sequence).padStart(6, '0')}`;
   }
 
+  allocateCreditNoteReference(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('credit_note_issue_date_invalid', 'Credit-note issue date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO credit_note_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE credit_note_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable credit-note number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'credit_note_number_allocation_failed';
+      throw error;
+    }
+    return `CRN-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
   prepareInvoiceIssuePackage(jobId, invoiceId, options = {}) {
     return this.transaction(() => {
       const job = this.requireJob(jobId);
@@ -6108,6 +6165,306 @@ class ContractorOperatingLedger {
     });
   }
 
+  prepareCreditNoteIssuePackage(jobId, creditNoteId, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM credit_notes WHERE id = ? AND job_id = ?').get(creditNoteId, jobId);
+      if (!row) {
+        const error = new Error('Credit note not found for this job.');
+        error.statusCode = 404;
+        error.code = 'credit_note_not_found';
+        throw error;
+      }
+      const creditNote = this.mapCreditNote(row);
+      const identityKey = crypto.createHash('sha256').update(`${jobId}\0${creditNoteId}`, 'utf8').digest('hex');
+      const htmlDocumentId = `doc_credit_${identityKey.slice(0, 24)}`;
+      const ublDocumentId = `doc_credit_ubl_${identityKey.slice(0, 20)}`;
+      const communicationId = `comm_credit_${identityKey.slice(0, 23)}`;
+      const retainedHtml = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(htmlDocumentId, jobId);
+      if (retainedHtml) {
+        const htmlPackage = this.getCreditNoteIssueDocument(htmlDocumentId, { audit: false });
+        const structured = htmlPackage.document.data?.structuredExportIncluded === true;
+        const ublPackage = structured ? this.getCreditNoteIssueDocument(ublDocumentId, { audit: false }) : null;
+        const communicationRow = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?').get(communicationId, jobId);
+        if (!communicationRow) {
+          const error = new Error('The retained credit-note package is missing its controlled delivery draft.');
+          error.statusCode = 409;
+          error.code = 'credit_note_issue_package_incomplete';
+          throw error;
+        }
+        const communication = this.mapCommunication(communicationRow);
+        const approvalRow = communication.approvalId
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(communication.approvalId)
+          : null;
+        return {
+          document: htmlPackage.document,
+          documents: [htmlPackage.document, ...(ublPackage ? [ublPackage.document] : [])],
+          htmlDocument: htmlPackage.document,
+          ublDocument: ublPackage?.document || null,
+          communication,
+          approval: approvalRow ? this.mapApproval(approvalRow) : null,
+          issueReference: htmlPackage.document.data.issueReference,
+          packageHash: htmlPackage.packageHash,
+          reconciliation: this.getInvoiceReconciliation(creditNote.invoiceId),
+          replayed: true,
+          deliveryMode: 'draft_only',
+          structuredExportIncluded: structured,
+          transportSubmitted: false,
+          notSent: !['sent', 'delivered'].includes(normalizeStatus(communication.status, 'draft')),
+          externalCommitments: 0
+        };
+      }
+      if (creditNote.status !== 'approved') {
+        const error = new Error('Credit note must receive internal approval before an issue package can be prepared.');
+        error.statusCode = 409;
+        error.code = 'credit_note_not_approved_for_issue';
+        throw error;
+      }
+      const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(creditNote.invoiceId, jobId);
+      if (!invoiceRow) {
+        const error = new Error('The credit note is no longer linked to its source invoice.');
+        error.statusCode = 409;
+        error.code = 'credit_note_source_invoice_missing';
+        throw error;
+      }
+      const invoice = this.mapInvoice(invoiceRow);
+      const sourceHtmlId = invoice.data?.issuePackage?.htmlDocumentId;
+      if (!sourceHtmlId) {
+        const error = new Error('The source invoice issue package is missing.');
+        error.statusCode = 409;
+        error.code = 'credit_note_source_package_missing';
+        throw error;
+      }
+      const sourcePackage = this.getInvoiceIssueDocument(sourceHtmlId, { audit: false });
+      const sourceSnapshot = sourcePackage.document.data?.snapshot || {};
+      const reconciliationBefore = this.getInvoiceReconciliation(invoice.id, { excludeCreditNoteId: creditNote.id });
+      if (creditNote.total - reconciliationBefore.availableAmount > 0.01) {
+        throw ledgerInputError('credit_note_exceeds_invoice_balance', 'Credit-note total exceeds the invoice balance still available for correction.', {
+          invoiceId: invoice.id,
+          creditNoteId: creditNote.id,
+          requestedTotal: creditNote.total,
+          availableAmount: reconciliationBefore.availableAmount
+        });
+      }
+      const organization = this.getOrganizationProfile();
+      if (!organization.readiness.ready) {
+        const error = new Error('Complete the business identity before preparing a credit-note package.');
+        error.statusCode = 409;
+        error.code = 'organization_profile_incomplete';
+        error.details = { missing: organization.readiness.missing };
+        throw error;
+      }
+      const creditData = creditNote.data || {};
+      const originalInvoice = sourceSnapshot.invoice || {};
+      const buyer = sourceSnapshot.buyer || {};
+      const supplierEndpoint = this.organizationElectronicAddress(organization);
+      const lineItems = [{
+        id: '1',
+        description: creditData.description || `Correction for invoice ${sourceSnapshot.issueReference}`,
+        quantity: 1,
+        unitPrice: creditNote.amount,
+        lineAmount: creditNote.amount,
+        costCode: null
+      }];
+      const structuredExportRequested = creditData.structuredExportRequested === true;
+      const structuredReadiness = this.assessInvoiceStructuredReadiness({
+        invoice: {
+          taxRate: creditData.taxRate,
+          buyerReference: originalInvoice.buyerReference,
+          purchaseOrderReference: originalInvoice.purchaseOrderReference
+        },
+        organization,
+        buyer,
+        lineItems
+      });
+      if (structuredExportRequested && !structuredReadiness.ready) {
+        const error = new Error('Complete the structured credit-note fields before preparing the requested UBL package.');
+        error.statusCode = 409;
+        error.code = 'credit_note_structured_export_incomplete';
+        error.details = { missing: structuredReadiness.missing };
+        throw error;
+      }
+      const preparedAt = nowIso();
+      const issueReference = this.allocateCreditNoteReference(preparedAt);
+      const snapshot = {
+        packageVersion: 1,
+        issueReference,
+        preparedAt,
+        issueDate: preparedAt.slice(0, 10),
+        preparedBy: options.actor || 'Contractor.AI',
+        structuredExportIncluded: structuredExportRequested,
+        structuredProfile: structuredExportRequested ? 'Peppol BIS Billing 3.0 / UBL 2.1 CreditNote' : null,
+        transportStatus: 'not_submitted',
+        organization: {
+          legalName: organization.legalName,
+          tradingName: organization.tradingName,
+          registrationNumber: organization.registrationNumber,
+          vatNumber: organization.vatNumber,
+          vatExempt: organization.data?.vatExempt === true,
+          electronicAddressScheme: supplierEndpoint.scheme,
+          electronicAddress: supplierEndpoint.id,
+          email: organization.email,
+          phone: organization.phone,
+          address: organization.address,
+          postalCode: organization.postalCode,
+          city: organization.city,
+          country: organization.country
+        },
+        buyer: { ...buyer },
+        job: { ...(sourceSnapshot.job || {}), id: jobId },
+        sourceInvoice: {
+          id: invoice.id,
+          issueReference: sourceSnapshot.issueReference,
+          issueDate: sourceSnapshot.issueDate,
+          packageHash: sourcePackage.packageHash,
+          total: invoice.total,
+          currency: invoice.currency
+        },
+        creditNote: {
+          id: creditNote.id,
+          invoiceId: invoice.id,
+          currency: creditNote.currency,
+          amount: creditNote.amount,
+          taxRate: creditData.taxRate,
+          taxAmount: creditNote.taxAmount,
+          total: creditNote.total,
+          reason: creditData.reason,
+          buyerReference: originalInvoice.buyerReference || null,
+          purchaseOrderReference: originalInvoice.purchaseOrderReference || null,
+          lineItems
+        }
+      };
+      const packageHash = sha256Json(snapshot);
+      const html = this.renderCreditNoteIssuePackageHtml(snapshot, packageHash);
+      const ubl = structuredExportRequested ? this.renderCreditNoteUbl(snapshot, packageHash) : null;
+      const htmlDocument = this.addDocument(jobId, {
+        type: 'credit_note_issue_package',
+        title: `Credit note ${issueReference}`,
+        filename: `${issueReference}.html`,
+        mimeType: 'text/html; charset=utf-8',
+        sizeBytes: Buffer.byteLength(html, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          format: 'html',
+          sourceRecordType: 'credit_note',
+          sourceRecordId: creditNote.id,
+          sourceInvoiceId: invoice.id,
+          issueReference,
+          packageHash,
+          contentHash: sha256Text(html),
+          snapshot,
+          structuredExportIncluded: structuredExportRequested,
+          safeguards: { deliveryMode: 'draft_only', transportSubmitted: false, externalCommitments: 0 }
+        }
+      }, { actor: options.actor, audit: true, id: htmlDocumentId, ignoreExisting: true });
+      const ublDocument = ubl ? this.addDocument(jobId, {
+        type: 'credit_note_ubl_package',
+        title: `UBL credit note ${issueReference}`,
+        filename: `${issueReference}.xml`,
+        mimeType: 'application/xml; charset=utf-8',
+        sizeBytes: Buffer.byteLength(ubl, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          format: 'ubl_2_1_credit_note',
+          sourceRecordType: 'credit_note',
+          sourceRecordId: creditNote.id,
+          sourceInvoiceId: invoice.id,
+          issueReference,
+          packageHash,
+          contentHash: sha256Text(ubl),
+          snapshot,
+          structuredExportIncluded: true,
+          structuredReadiness,
+          safeguards: { deliveryMode: 'draft_only', transportSubmitted: false, externalCommitments: 0 }
+        }
+      }, { actor: options.actor, audit: true, id: ublDocumentId, ignoreExisting: true }) : null;
+      const attachmentDocumentIds = [htmlDocument.id, ...(ublDocument ? [ublDocument.id] : [])];
+      const recipient = normalizeText(buyer.email, '') || null;
+      const communication = this.addCommunication(jobId, {
+        clientId: buyer.id,
+        channel: recipient ? 'email' : 'portal',
+        direction: 'outbound',
+        status: 'draft',
+        subject: `Credit note ${issueReference} for invoice ${sourceSnapshot.issueReference}`,
+        body: `Dear ${buyer.contactName || buyer.legalName},\n\nPlease find credit note ${issueReference} correcting invoice ${sourceSnapshot.issueReference}.\n\nReason: ${creditData.reason}. Structured export preparation does not mean that a Peppol transport submission occurred.`,
+        recipient,
+        expectsReply: false,
+        requiresApproval: true,
+        data: {
+          source: 'credit_note_issue_package',
+          sourceRecordId: creditNote.id,
+          sourceInvoiceId: invoice.id,
+          issueReference,
+          packageHash,
+          attachmentDocumentIds,
+          deliveryMode: 'draft_only',
+          structuredExportIncluded: structuredExportRequested,
+          transportSubmitted: false,
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: true, id: communicationId, ignoreExisting: true });
+      const nextData = {
+        ...creditData,
+        structuredReadiness,
+        issuePackage: {
+          issueReference,
+          packageHash,
+          htmlDocumentId: htmlDocument.id,
+          ublDocumentId: ublDocument?.id || null,
+          communicationId: communication.id,
+          communicationApprovalId: communication.approvalId || communication.approval?.id || null,
+          preparedAt,
+          structuredExportIncluded: structuredExportRequested,
+          transportStatus: 'not_submitted'
+        }
+      };
+      this.db.prepare("UPDATE credit_notes SET status = 'prepared', data_json = ?, updated_at = ? WHERE id = ?")
+        .run(toJson(nextData), nowIso(), creditNote.id);
+      const reconciliation = this.reconcileInvoiceReceivable(invoice.id, {
+        lastCreditNoteId: creditNote.id,
+        actor: options.actor || 'Contractor.AI'
+      });
+      this.audit({
+        entityType: 'credit_note_issue_package',
+        entityId: htmlDocument.id,
+        jobId,
+        action: 'prepare_credit_note_issue_package',
+        actor: options.actor || 'Contractor.AI',
+        after: {
+          creditNoteId: creditNote.id,
+          invoiceId: invoice.id,
+          issueReference,
+          packageHash,
+          documentIds: attachmentDocumentIds,
+          communicationId: communication.id,
+          approvalId: communication.approvalId || communication.approval?.id || null,
+          reconciliation,
+          transportSubmitted: false,
+          externalCommitments: 0
+        }
+      });
+      return {
+        document: htmlDocument,
+        documents: [htmlDocument, ...(ublDocument ? [ublDocument] : [])],
+        htmlDocument,
+        ublDocument,
+        communication,
+        approval: communication.approval || null,
+        issueReference,
+        packageHash,
+        reconciliation,
+        replayed: false,
+        deliveryMode: 'draft_only',
+        structuredExportIncluded: structuredExportRequested,
+        transportSubmitted: false,
+        notSent: true,
+        externalCommitments: 0
+      };
+    });
+  }
+
   getInvoiceIssueDocument(documentId, options = {}) {
     const document = this.getDocument(documentId);
     if (!['invoice_issue_package', 'invoice_ubl_package'].includes(document.type)) {
@@ -6152,11 +6509,58 @@ class ContractorOperatingLedger {
     };
   }
 
+  getCreditNoteIssueDocument(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (!['credit_note_issue_package', 'credit_note_ubl_package'].includes(document.type)) {
+      const error = new Error('Document is not a generated credit-note issue package.');
+      error.statusCode = 409;
+      error.code = 'credit_note_issue_package_required';
+      throw error;
+    }
+    const snapshot = document.data?.snapshot;
+    const retainedHash = normalizeText(document.data?.packageHash, '');
+    if (!snapshot || !retainedHash || sha256Json(snapshot) !== retainedHash) {
+      const error = new Error('The retained credit-note package failed its snapshot checksum verification.');
+      error.statusCode = 409;
+      error.code = 'credit_note_issue_package_integrity_failed';
+      throw error;
+    }
+    const content = document.type === 'credit_note_ubl_package'
+      ? this.renderCreditNoteUbl(snapshot, retainedHash)
+      : this.renderCreditNoteIssuePackageHtml(snapshot, retainedHash);
+    if (!normalizeText(document.data?.contentHash, '') || sha256Text(content) !== document.data.contentHash) {
+      const error = new Error('The retained credit-note package failed its content checksum verification.');
+      error.statusCode = 409;
+      error.code = 'credit_note_issue_package_integrity_failed';
+      throw error;
+    }
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId: document.jobId,
+        action: 'download_credit_note_issue_package',
+        actor: options.actor || 'authenticated_operator',
+        after: { issueReference: document.data.issueReference, packageHash: retainedHash, format: document.data.format }
+      });
+    }
+    return {
+      document,
+      content,
+      filename: document.filename || `${document.data.issueReference || 'credit-note'}.${document.type === 'credit_note_ubl_package' ? 'xml' : 'html'}`,
+      mimeType: document.mimeType || (document.type === 'credit_note_ubl_package' ? 'application/xml; charset=utf-8' : 'text/html; charset=utf-8'),
+      packageHash: retainedHash
+    };
+  }
+
   getIssuePackage(documentId, options = {}) {
     const document = this.getDocument(documentId);
     if (document.type === 'quote_issue_package') {
       const issue = this.getQuoteIssuePackage(documentId, options);
       return { ...issue, content: issue.html, mimeType: 'text/html; charset=utf-8' };
+    }
+    if (['credit_note_issue_package', 'credit_note_ubl_package'].includes(document.type)) {
+      return this.getCreditNoteIssueDocument(documentId, options);
     }
     return this.getInvoiceIssueDocument(documentId, options);
   }
@@ -6284,6 +6688,130 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
   <cac:TaxTotal><cbc:TaxAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.taxAmount))}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.amount))}</cbc:TaxableAmount><cbc:TaxAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.taxAmount))}</cbc:TaxAmount><cac:TaxCategory><cbc:ID>S</cbc:ID><cbc:Percent>${escapeXml(invoice.taxRate)}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal></cac:TaxTotal>
   <cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.amount))}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.amount))}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.total))}</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(invoice.total))}</cbc:PayableAmount></cac:LegalMonetaryTotal>${lines}
 </Invoice>`;
+  }
+
+  renderCreditNoteIssuePackageHtml(snapshot, packageHash) {
+    const supplier = snapshot.organization || {};
+    const buyer = snapshot.buyer || {};
+    const job = snapshot.job || {};
+    const source = snapshot.sourceInvoice || {};
+    const creditNote = snapshot.creditNote || {};
+    const money = value => {
+      try {
+        return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: creditNote.currency || 'EUR' }).format(Number(value || 0));
+      } catch {
+        return `${Number(value || 0).toFixed(2)} ${creditNote.currency || 'EUR'}`;
+      }
+    };
+    const date = value => {
+      if (!value) return 'Not specified';
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value) : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const lines = (creditNote.lineItems || []).map(item => `<tr><td>${escapeHtml(item.description)}</td><td class="number">${escapeHtml(item.quantity)}</td><td class="number">${escapeHtml(money(item.unitPrice))}</td><td class="number">${escapeHtml(money(item.lineAmount))}</td></tr>`).join('');
+    const supplierName = supplier.tradingName || supplier.legalName || 'Contractor';
+    const buyerAddress = [buyer.address, buyer.postalCode, buyer.city, buyer.country].filter(Boolean).map(escapeHtml).join(', ');
+    const supplierAddress = [supplier.address, supplier.postalCode, supplier.city, supplier.country].filter(Boolean).map(escapeHtml).join(', ');
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 920px; margin: 0 auto; padding: 42px; font-size: 14px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 32px; padding-bottom: 24px; border-bottom: 3px solid #9b4d20; }
+    h1 { margin: 0; color: #7d3d1e; font-size: 30px; }
+    h2 { margin: 28px 0 10px; color: #493b34; font-size: 18px; }
+    p { margin: 4px 0; }
+    .muted { color: #6f6864; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 26px; }
+    .party { padding: 16px 0; border-bottom: 1px solid #e6ded9; }
+    .party span { display: block; color: #756b65; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    table { width: 100%; margin-top: 14px; border-collapse: collapse; }
+    th, td { padding: 11px 9px; border-bottom: 1px solid #e8e0dc; text-align: left; vertical-align: top; }
+    th { color: #615752; background: #f7f3f1; font-size: 11px; text-transform: uppercase; }
+    .number { text-align: right; white-space: nowrap; }
+    .totals { width: min(390px, 100%); margin: 18px 0 0 auto; }
+    .totals div { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #ebe4e0; }
+    .totals .grand { padding-top: 12px; color: #7d3d1e; font-size: 18px; font-weight: 700; border-bottom: 0; }
+    .reason { margin-top: 28px; padding: 17px; background: #f8f3f0; border-left: 4px solid #9b4d20; }
+    footer { margin-top: 38px; padding-top: 16px; color: #746c68; border-top: 1px solid #e5ddd8; font-size: 10px; overflow-wrap: anywhere; }
+    @media print { body { max-width: none; padding: 18mm; } }
+    @media (max-width: 650px) { body { padding: 22px; } header, .parties { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>Credit note</h1><p><strong>${escapeHtml(supplierName)}</strong></p><p>${supplierAddress}</p><p>${escapeHtml(supplier.email || supplier.phone || '')}</p></div><div class="reference"><strong>${escapeHtml(snapshot.issueReference)}</strong><p>Issued ${escapeHtml(date(snapshot.issueDate))}</p><p>Corrects ${escapeHtml(source.issueReference)}</p></div></header>
+  <section class="parties"><div class="party"><span>Credited to</span><strong>${escapeHtml(buyer.legalName)}</strong>${buyer.contactName && buyer.contactName !== buyer.legalName ? `<p>${escapeHtml(buyer.contactName)}</p>` : ''}<p>${buyerAddress}</p><p>${escapeHtml(buyer.email || '')}</p></div><div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${escapeHtml(job.address || '')}</p><p class="muted">Job ${escapeHtml(job.id)} &middot; Original invoice ${escapeHtml(source.issueReference)}</p></div></section>
+  <h2>Credit lines</h2>
+  <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit value</th><th class="number">Credit</th></tr></thead><tbody>${lines}</tbody></table>
+  <div class="totals"><div><span>Net credit</span><strong>${escapeHtml(money(creditNote.amount))}</strong></div><div><span>VAT correction (${escapeHtml(creditNote.taxRate)}%)</span><strong>${escapeHtml(money(creditNote.taxAmount))}</strong></div><div class="grand"><span>Total credit</span><strong>${escapeHtml(money(creditNote.total))}</strong></div></div>
+  <section class="reason"><strong>Correction reason</strong><p>${escapeHtml(creditNote.reason)}</p><p>This document corrects invoice ${escapeHtml(source.issueReference)} issued ${escapeHtml(date(source.issueDate))}.</p><p>Structured export: ${snapshot.structuredExportIncluded ? 'UBL 2.1 CreditNote prepared; transport not submitted.' : 'not requested.'}</p></section>
+  <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source invoice ${escapeHtml(source.id)} &middot; Source credit note ${escapeHtml(creditNote.id)}</footer>
+</body>
+</html>`;
+  }
+
+  renderCreditNoteUbl(snapshot, packageHash) {
+    const supplier = snapshot.organization || {};
+    const buyer = snapshot.buyer || {};
+    const source = snapshot.sourceInvoice || {};
+    const creditNote = snapshot.creditNote || {};
+    const currency = normalizeText(creditNote.currency, 'EUR').toUpperCase();
+    const supplierLegalScheme = supplier.electronicAddressScheme;
+    const buyerLegalId = buyer.registrationNumber || (['0106', '0190'].includes(buyer.endpointScheme) ? buyer.endpointId : '');
+    const amount = value => roundMoney(value).toFixed(2);
+    const quantity = value => String(normalizeNumber(value, 0)).replace(/\.0+$/, '');
+    const lines = (creditNote.lineItems || []).map((item, index) => `
+  <cac:CreditNoteLine>
+    <cbc:ID>${escapeXml(item.id || index + 1)}</cbc:ID>
+    <cbc:CreditedQuantity unitCode="C62">${escapeXml(quantity(item.quantity))}</cbc:CreditedQuantity>
+    <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(item.lineAmount))}</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Name>${escapeXml(item.description)}</cbc:Name>
+      <cac:ClassifiedTaxCategory><cbc:ID>S</cbc:ID><cbc:Percent>${escapeXml(creditNote.taxRate)}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price><cbc:PriceAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(item.unitPrice))}</cbc:PriceAmount><cbc:BaseQuantity unitCode="C62">1</cbc:BaseQuantity></cac:Price>
+  </cac:CreditNoteLine>`).join('');
+    const documentReference = creditNote.buyerReference
+      ? `  <cbc:BuyerReference>${escapeXml(creditNote.buyerReference)}</cbc:BuyerReference>\n`
+      : `  <cac:OrderReference><cbc:ID>${escapeXml(creditNote.purchaseOrderReference)}</cbc:ID></cac:OrderReference>\n`;
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<CreditNote xmlns="urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0</cbc:CustomizationID>
+  <cbc:ProfileID>urn:fdc:peppol.eu:2017:poacc:billing:01:1.0</cbc:ProfileID>
+  <cbc:ID>${escapeXml(snapshot.issueReference)}</cbc:ID>
+  <cbc:IssueDate>${escapeXml(snapshot.issueDate)}</cbc:IssueDate>
+  <cbc:CreditNoteTypeCode>381</cbc:CreditNoteTypeCode>
+  <cbc:Note>${escapeXml(creditNote.reason)}</cbc:Note>
+  <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
+${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${escapeXml(source.issueReference)}</cbc:ID>${source.issueDate ? `<cbc:IssueDate>${escapeXml(source.issueDate)}</cbc:IssueDate>` : ''}</cac:InvoiceDocumentReference></cac:BillingReference>
+  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIIntegrity</cbc:ID><cbc:DocumentDescription>SHA-256 ${escapeXml(packageHash)}</cbc:DocumentDescription></cac:AdditionalDocumentReference>
+  <cac:AccountingSupplierParty><cac:Party>
+    <cbc:EndpointID schemeID="${escapeXml(supplier.electronicAddressScheme)}">${escapeXml(supplier.electronicAddress)}</cbc:EndpointID>
+    <cac:PartyIdentification><cbc:ID schemeID="${escapeXml(supplierLegalScheme)}">${escapeXml(supplier.registrationNumber)}</cbc:ID></cac:PartyIdentification>
+    <cac:PartyName><cbc:Name>${escapeXml(supplier.tradingName || supplier.legalName)}</cbc:Name></cac:PartyName>
+    <cac:PostalAddress><cbc:StreetName>${escapeXml(supplier.address)}</cbc:StreetName><cbc:CityName>${escapeXml(supplier.city)}</cbc:CityName><cbc:PostalZone>${escapeXml(supplier.postalCode)}</cbc:PostalZone><cac:Country><cbc:IdentificationCode>${escapeXml(supplier.country)}</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
+    <cac:PartyTaxScheme><cbc:CompanyID>${escapeXml(supplier.vatNumber)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    <cac:PartyLegalEntity><cbc:RegistrationName>${escapeXml(supplier.legalName)}</cbc:RegistrationName><cbc:CompanyID schemeID="${escapeXml(supplierLegalScheme)}">${escapeXml(supplier.registrationNumber)}</cbc:CompanyID></cac:PartyLegalEntity>
+    <cac:Contact><cbc:Name>${escapeXml(supplier.tradingName || supplier.legalName)}</cbc:Name>${supplier.phone ? `<cbc:Telephone>${escapeXml(supplier.phone)}</cbc:Telephone>` : ''}${supplier.email ? `<cbc:ElectronicMail>${escapeXml(supplier.email)}</cbc:ElectronicMail>` : ''}</cac:Contact>
+  </cac:Party></cac:AccountingSupplierParty>
+  <cac:AccountingCustomerParty><cac:Party>
+    <cbc:EndpointID schemeID="${escapeXml(buyer.endpointScheme)}">${escapeXml(buyer.endpointId)}</cbc:EndpointID>
+    <cac:PartyIdentification><cbc:ID schemeID="${escapeXml(buyer.endpointScheme)}">${escapeXml(buyerLegalId)}</cbc:ID></cac:PartyIdentification>
+    <cac:PartyName><cbc:Name>${escapeXml(buyer.legalName)}</cbc:Name></cac:PartyName>
+    <cac:PostalAddress><cbc:StreetName>${escapeXml(buyer.address)}</cbc:StreetName><cbc:CityName>${escapeXml(buyer.city)}</cbc:CityName><cbc:PostalZone>${escapeXml(buyer.postalCode)}</cbc:PostalZone><cac:Country><cbc:IdentificationCode>${escapeXml(buyer.country)}</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
+    ${buyer.vatNumber ? `<cac:PartyTaxScheme><cbc:CompanyID>${escapeXml(buyer.vatNumber)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>` : ''}
+    <cac:PartyLegalEntity><cbc:RegistrationName>${escapeXml(buyer.legalName)}</cbc:RegistrationName><cbc:CompanyID schemeID="${escapeXml(buyer.endpointScheme)}">${escapeXml(buyerLegalId)}</cbc:CompanyID></cac:PartyLegalEntity>
+  </cac:Party></cac:AccountingCustomerParty>
+  <cac:TaxTotal><cbc:TaxAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.taxAmount))}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.amount))}</cbc:TaxableAmount><cbc:TaxAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.taxAmount))}</cbc:TaxAmount><cac:TaxCategory><cbc:ID>S</cbc:ID><cbc:Percent>${escapeXml(creditNote.taxRate)}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal></cac:TaxTotal>
+  <cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.amount))}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.amount))}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.total))}</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(creditNote.total))}</cbc:PayableAmount></cac:LegalMonetaryTotal>${lines}
+</CreditNote>`;
   }
 
   requestQuoteAcceptance(jobId, quoteId, payload = {}, options = {}) {
@@ -9615,7 +10143,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     }
     const communication = this.mapCommunication(row);
     const source = communication.data?.source;
-    if (!['quote_issue_package', 'invoice_issue_package'].includes(source)) return communication;
+    if (!['quote_issue_package', 'invoice_issue_package', 'credit_note_issue_package'].includes(source)) return communication;
 
     const attachmentIds = Array.isArray(communication.data?.attachmentDocumentIds)
       ? communication.data.attachmentDocumentIds.filter(Boolean)
@@ -9639,32 +10167,39 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       return communication;
     }
 
+    const creditNotePackage = source === 'credit_note_issue_package';
+    const packageLabel = creditNotePackage ? 'credit-note' : 'invoice';
+    const errorPrefix = creditNotePackage ? 'credit_note' : 'invoice';
     const expectedCount = communication.data?.structuredExportIncluded === true ? 2 : 1;
     if (attachmentIds.length !== expectedCount || new Set(attachmentIds).size !== expectedCount) {
-      const error = new Error(`The invoice delivery draft must retain exactly ${expectedCount} immutable package attachment${expectedCount === 1 ? '' : 's'}.`);
+      const error = new Error(`The ${packageLabel} delivery draft must retain exactly ${expectedCount} immutable package attachment${expectedCount === 1 ? '' : 's'}.`);
       error.statusCode = 409;
-      error.code = 'invoice_issue_package_attachment_invalid';
+      error.code = `${errorPrefix}_issue_package_attachment_invalid`;
       throw error;
     }
-    const packages = attachmentIds.map(documentId => this.getInvoiceIssueDocument(documentId, { audit: false }));
+    const packages = attachmentIds.map(documentId => creditNotePackage
+      ? this.getCreditNoteIssueDocument(documentId, { audit: false })
+      : this.getInvoiceIssueDocument(documentId, { audit: false }));
     const expectedTypes = communication.data?.structuredExportIncluded === true
-      ? new Set(['invoice_issue_package', 'invoice_ubl_package'])
-      : new Set(['invoice_issue_package']);
+      ? new Set(creditNotePackage
+        ? ['credit_note_issue_package', 'credit_note_ubl_package']
+        : ['invoice_issue_package', 'invoice_ubl_package'])
+      : new Set([creditNotePackage ? 'credit_note_issue_package' : 'invoice_issue_package']);
     for (const issuePackage of packages) {
       expectedTypes.delete(issuePackage.document.type);
       if (issuePackage.document.jobId !== communication.jobId
         || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
         || issuePackage.packageHash !== communication.data?.packageHash) {
-        const error = new Error('The invoice delivery draft no longer matches its retained issue package.');
+        const error = new Error(`The ${packageLabel} delivery draft no longer matches its retained issue package.`);
         error.statusCode = 409;
-        error.code = 'invoice_issue_package_attachment_mismatch';
+        error.code = `${errorPrefix}_issue_package_attachment_mismatch`;
         throw error;
       }
     }
     if (expectedTypes.size) {
-      const error = new Error('The invoice delivery draft is missing a required issue package format.');
+      const error = new Error(`The ${packageLabel} delivery draft is missing a required issue package format.`);
       error.statusCode = 409;
-      error.code = 'invoice_issue_package_attachment_invalid';
+      error.code = `${errorPrefix}_issue_package_attachment_invalid`;
       throw error;
     }
     return communication;
@@ -9740,6 +10275,34 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
             providerMessageId: data.deliveryReceipt.providerMessageId
           }
         }), nowIso(), invoiceRow.id);
+      const invoiceReconciliation = this.getInvoiceReconciliation(invoiceRow.id);
+      if (invoiceReconciliation.receivedAmount > 0.01 || invoiceReconciliation.writtenOffAmount > 0.01 || invoiceReconciliation.creditedAmount > 0.01) {
+        this.reconcileInvoiceReceivable(invoiceRow.id, {
+          actor: options.actor || 'verified_integration'
+        });
+      }
+    }
+    if (existing.data?.source === 'credit_note_issue_package' && existing.data?.sourceRecordId) {
+      const creditNoteRow = this.db.prepare('SELECT * FROM credit_notes WHERE id = ? AND job_id = ?')
+        .get(existing.data.sourceRecordId, row.job_id);
+      if (!creditNoteRow) {
+        const error = new Error('The delivered credit-note communication is no longer linked to its source record.');
+        error.statusCode = 409;
+        error.code = 'credit_note_issue_package_source_missing';
+        throw error;
+      }
+      const creditData = fromJson(creditNoteRow.data_json, {});
+      this.db.prepare("UPDATE credit_notes SET status = 'sent', data_json = ?, updated_at = ? WHERE id = ?")
+        .run(toJson({
+          ...creditData,
+          issuePackage: {
+            ...(creditData.issuePackage || {}),
+            transportStatus: 'delivered_by_verified_integration',
+            deliveredAt: sentAt,
+            deliveryIntegration: integration,
+            providerMessageId: data.deliveryReceipt.providerMessageId
+          }
+        }), nowIso(), creditNoteRow.id);
     }
     const communication = this.mapCommunication(this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(row.id));
     this.audit({
@@ -10311,6 +10874,122 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         this.audit({ entityType: 'invoice', entityId: id, jobId, action: 'create_invoice', actor: options.actor || 'Contractor.AI', after: invoice });
       }
       return invoice;
+    });
+  }
+
+  createCreditNote(jobId, invoiceId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?').get(invoiceId, jobId);
+      if (!invoiceRow) {
+        const error = new Error('Invoice not found for this job.');
+        error.statusCode = 404;
+        error.code = 'invoice_not_found';
+        throw error;
+      }
+      const invoice = this.mapInvoice(invoiceRow);
+      const invoiceStatus = normalizeStatus(invoice.status, 'draft');
+      if (!['prepared', 'sent', 'submitted', 'partially_paid', 'partially_settled'].includes(invoiceStatus)
+        || !invoice.data?.issuePackage?.issueReference) {
+        throw ledgerInputError('invoice_not_creditable', 'A credit note requires an issued invoice with an immutable issue package.', {
+          invoiceId,
+          invoiceStatus
+        });
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (!reason) throw ledgerInputError('credit_note_reason_required', 'Credit-note preparation requires a retained correction reason.');
+      if (reason.length > 2000) throw ledgerInputError('credit_note_reason_invalid', 'Credit-note reason cannot exceed 2,000 characters.');
+
+      const invoiceTaxRate = roundMoney(normalizeNumber(invoice.data?.taxRate, invoice.amount ? invoice.taxAmount / invoice.amount * 100 : 0));
+      const suppliedTaxRate = payload.taxRate ?? payload.tax_rate;
+      const taxRate = suppliedTaxRate === undefined ? invoiceTaxRate : roundMoney(Number(suppliedTaxRate));
+      if (!Number.isFinite(taxRate) || Math.abs(taxRate - invoiceTaxRate) > 0.001) {
+        throw ledgerInputError('credit_note_tax_rate_mismatch', 'Credit-note VAT rate must match the retained source invoice.', {
+          invoiceId,
+          invoiceTaxRate,
+          requestedTaxRate: suppliedTaxRate
+        });
+      }
+      const amount = roundMoney(Number(payload.amount));
+      if (!Number.isFinite(Number(payload.amount)) || amount <= 0) {
+        throw ledgerInputError('credit_note_amount_invalid', 'Credit-note net amount must be greater than zero.');
+      }
+      const taxAmount = roundMoney(amount * taxRate / 100);
+      const total = roundMoney(amount + taxAmount);
+      const reconciliation = this.getInvoiceReconciliation(invoiceId);
+      if (total - reconciliation.availableAmount > 0.01) {
+        throw ledgerInputError('credit_note_exceeds_invoice_balance', 'Credit-note total exceeds the invoice balance available for correction.', {
+          invoiceId,
+          requestedTotal: total,
+          outstandingAmount: reconciliation.outstandingAmount,
+          pendingPaymentAmount: reconciliation.pendingAmount,
+          pendingCreditAmount: reconciliation.pendingCreditAmount,
+          availableAmount: reconciliation.availableAmount
+        });
+      }
+      const currency = normalizeText(payload.currency || invoice.currency, 'EUR').toUpperCase();
+      if (currency !== normalizeText(invoice.currency, 'EUR').toUpperCase()) {
+        throw ledgerInputError('credit_note_currency_mismatch', 'Credit-note currency must match the retained source invoice.', {
+          invoiceId,
+          invoiceCurrency: invoice.currency,
+          creditNoteCurrency: currency
+        });
+      }
+      const structuredExportRequested = normalizeBoolean(
+        payload.structuredExportRequested ?? payload.structured_export_requested,
+        invoice.data?.structuredExportRequested === true || invoice.data?.issuePackage?.structuredExportIncluded === true
+      );
+      const description = normalizeText(payload.description, `Correction for invoice ${invoice.data.issuePackage.issueReference}`);
+      if (description.length > 500) throw ledgerInputError('credit_note_description_invalid', 'Credit-note description cannot exceed 500 characters.');
+      const id = makeId('credit');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO credit_notes (id, job_id, invoice_id, status, currency, amount, tax_amount, total, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        invoiceId,
+        currency,
+        amount,
+        taxAmount,
+        total,
+        toJson({
+          taxRate,
+          reason,
+          description,
+          sourceInvoiceReference: invoice.data.issuePackage.issueReference,
+          sourceInvoiceIssueDate: invoice.data.issuePackage.preparedAt?.slice(0, 10) || invoice.createdAt?.slice(0, 10) || null,
+          structuredExportRequested,
+          transportStatus: 'not_configured',
+          reconciliationAtRequest: reconciliation
+        }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'credit_note',
+        targetId: id,
+        jobId,
+        approvalType: 'credit_note_issue',
+        summary: `Approve credit note for ${total.toFixed(2)} ${currency} against ${invoice.data.issuePackage.issueReference}`,
+        reason: 'Credit notes change the retained receivable and VAT correction evidence and require approval before numbering or delivery.',
+        data: { creditNoteId: id, invoiceId, amount, taxRate, taxAmount, total, currency, structuredExportRequested }
+      }, { actor: options.actor || 'Contractor.AI', audit: false });
+      this.db.prepare('UPDATE credit_notes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const creditNote = this.mapCreditNote(this.db.prepare('SELECT * FROM credit_notes WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'credit_note',
+          entityId: id,
+          jobId,
+          action: 'create_credit_note',
+          actor: options.actor || 'Contractor.AI',
+          after: creditNote,
+          metadata: { invoiceId, approvalId: approval.id, externalCommitments: 0 }
+        });
+      }
+      return { ...creditNote, approval };
     });
   }
 
@@ -11417,9 +12096,14 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     const excludedPaymentId = options.excludePaymentId || null;
     const payments = this.db.prepare('SELECT * FROM payments WHERE invoice_id = ? ORDER BY created_at ASC').all(invoiceId)
       .filter(row => row.id !== excludedPaymentId);
+    const excludedCreditNoteId = options.excludeCreditNoteId || null;
+    const creditNotes = this.db.prepare('SELECT * FROM credit_notes WHERE invoice_id = ? ORDER BY created_at ASC').all(invoiceId)
+      .filter(row => row.id !== excludedCreditNoteId);
     let receivedAmount = 0;
     let writtenOffAmount = 0;
     let pendingAmount = 0;
+    let creditedAmount = 0;
+    let pendingCreditAmount = 0;
     for (const row of payments) {
       const status = normalizeStatus(row.status, '');
       const amount = roundMoney(row.amount);
@@ -11432,16 +12116,26 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         }
       }
     }
+    for (const row of creditNotes) {
+      const status = normalizeStatus(row.status, 'draft');
+      const total = roundMoney(row.total);
+      if (['prepared', 'sent', 'delivered', 'issued'].includes(status)) creditedAmount = roundMoney(creditedAmount + total);
+      if (['draft', 'pending_approval', 'approved'].includes(status)) pendingCreditAmount = roundMoney(pendingCreditAmount + total);
+    }
     const invoiceTotal = roundMoney(invoiceRow.total);
-    const outstandingAmount = roundMoney(Math.max(0, invoiceTotal - receivedAmount - writtenOffAmount));
-    const availableAmount = roundMoney(Math.max(0, outstandingAmount - pendingAmount));
+    const adjustedInvoiceTotal = roundMoney(Math.max(0, invoiceTotal - creditedAmount));
+    const outstandingAmount = roundMoney(Math.max(0, adjustedInvoiceTotal - receivedAmount - writtenOffAmount));
+    const availableAmount = roundMoney(Math.max(0, outstandingAmount - pendingAmount - pendingCreditAmount));
     return {
       invoiceId,
       currency: invoiceRow.currency,
       invoiceTotal,
+      adjustedInvoiceTotal,
       receivedAmount,
       writtenOffAmount,
       pendingAmount,
+      creditedAmount,
+      pendingCreditAmount,
       outstandingAmount,
       availableAmount,
       settled: outstandingAmount <= 0.01
@@ -11453,7 +12147,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       throw ledgerInputError('invoice_required_for_payment_confirmation', 'Payment confirmation requires a retained invoice.');
     }
     const invoiceStatus = normalizeStatus(invoiceRow.status, 'draft');
-    if (!['prepared', 'sent', 'submitted', 'partially_paid'].includes(invoiceStatus)) {
+    if (!['prepared', 'sent', 'submitted', 'partially_paid', 'partially_settled'].includes(invoiceStatus)) {
       throw ledgerInputError('invoice_not_payable', 'Payment can only be confirmed after the immutable invoice issue package is prepared.', { invoiceId: invoiceRow.id, invoiceStatus });
     }
     const amount = roundMoney(Number(payload.amount));
@@ -11499,11 +12193,17 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     const before = this.mapInvoice(invoiceRow);
     const reconciliation = this.getInvoiceReconciliation(invoiceId);
     let status = normalizeStatus(invoiceRow.status, 'approved');
-    const reconciledAmount = roundMoney(reconciliation.receivedAmount + reconciliation.writtenOffAmount);
+    const reconciledAmount = roundMoney(reconciliation.receivedAmount + reconciliation.writtenOffAmount + reconciliation.creditedAmount);
     if (reconciliation.settled) {
-      status = reconciliation.writtenOffAmount > 0 ? 'settled' : 'paid';
+      status = reconciliation.creditedAmount >= reconciliation.invoiceTotal - 0.01
+        && reconciliation.receivedAmount <= 0.01
+        && reconciliation.writtenOffAmount <= 0.01
+        ? 'credited'
+        : reconciliation.writtenOffAmount > 0 || reconciliation.creditedAmount > 0
+          ? 'settled'
+          : 'paid';
     } else if (reconciledAmount > 0) {
-      status = 'partially_paid';
+      status = reconciliation.writtenOffAmount > 0 || reconciliation.creditedAmount > 0 ? 'partially_settled' : 'partially_paid';
     }
     const timestamp = options.timestamp || nowIso();
     const data = fromJson(invoiceRow.data_json, {});
@@ -11513,6 +12213,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         ...reconciliation,
         status,
         lastPaymentId: options.lastPaymentId || data.reconciliation?.lastPaymentId || null,
+        lastCreditNoteId: options.lastCreditNoteId || data.reconciliation?.lastCreditNoteId || null,
         updatedAt: timestamp
       }
     };
@@ -11528,7 +12229,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         actor: options.actor || 'approval',
         before,
         after,
-        metadata: { paymentId: options.lastPaymentId || null, reconciliation }
+        metadata: { paymentId: options.lastPaymentId || null, creditNoteId: options.lastCreditNoteId || null, reconciliation }
       });
     }
     return { ...reconciliation, status };
@@ -12139,13 +12840,15 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         ...(detail.invoices || []),
         ...(detail.payments || []),
         ...(detail.purchaseOrders || [])
-      ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0));
+      ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0)
+        - (detail.creditNotes || []).reduce((sum, item) => sum + normalizeNumber(item.total, 0), 0));
       const payloadPackage = {
         job: { id: detail.id, title: detail.title, clientName: detail.client?.name || detail.clientName || null },
         budgetLines: detail.budgetLines || [],
         purchaseOrders: detail.purchaseOrders || [],
         expenses: detail.expenses || [],
         invoices: detail.invoices || [],
+        creditNotes: detail.creditNotes || [],
         payments: detail.payments || [],
         drawRequests: detail.drawRequests || [],
         lienWaivers: detail.lienWaivers || []
@@ -12246,6 +12949,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         purchaseOrders: detail.purchaseOrders || [],
         expenses: detail.expenses || [],
         invoices: detail.invoices || [],
+        creditNotes: detail.creditNotes || [],
         payments: detail.payments || [],
         drawRequests: detail.drawRequests || [],
         lienWaivers: detail.lienWaivers || []
@@ -12254,7 +12958,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         ...packagePayload.invoices,
         ...packagePayload.payments,
         ...packagePayload.purchaseOrders
-      ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0);
+      ].reduce((sum, item) => sum + normalizeNumber(item.total || item.amount || item.requestedAmount, 0), 0)
+        - packagePayload.creditNotes.reduce((sum, item) => sum + normalizeNumber(item.total, 0), 0);
       const approval = this.createApproval({
         targetType: 'finance_handoff',
         targetId: existing.id,
@@ -15029,6 +15734,12 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           SET status = ?, updated_at = ?
           WHERE id = ? AND status IN ('draft', 'pending_approval')
         `).run(status, timestamp, before.target_id);
+      } else if (before.target_type === 'credit_note') {
+        this.db.prepare(`
+          UPDATE credit_notes
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status IN ('draft', 'pending_approval', 'approved')
+        `).run(status, timestamp, before.target_id);
       }
 
       const after = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -15591,6 +16302,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       }
     } else if (targetType === 'invoice') {
       this.db.prepare("UPDATE invoices SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
+    } else if (targetType === 'credit_note') {
+      this.db.prepare("UPDATE credit_notes SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'document') {
       this.db.prepare("UPDATE documents SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'quality_check') {
@@ -16597,7 +17310,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
   classifyFinanceReadiness(flags = {}) {
     if (flags.approvalRequired) return 'approval_required';
     if (flags.paymentOutstanding || flags.paymentFollowUp) return 'payment_follow_up';
-    if (flags.invoicePackageReady) return 'invoice_ready';
+    if (flags.invoicePackageReady || flags.creditNotePackageReady) return 'invoice_ready';
     if (flags.invoiceReady) return 'invoice_ready';
     if (flags.handoffReady) return 'handoff_ready';
     if (flags.needsCosts) return 'needs_costs';
@@ -16619,6 +17332,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       draftInvoices: 0,
       openPayments: 0,
       receivedPayments: 0,
+      creditNotes: 0,
+      pendingCreditNotes: 0,
       missingCosts: 0,
       missingBudgetLines: 0,
       missingHandoffs: 0,
@@ -16631,6 +17346,9 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       quotedNetValue: 0,
       invoiceValue: 0,
       invoicedNetValue: 0,
+      creditedValue: 0,
+      creditedNetValue: 0,
+      pendingCreditValue: 0,
       invoiceDraftAmount: 0,
       uninvoicedValue: 0,
       uninvoicedNetValue: 0,
@@ -16657,6 +17375,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       summary.draftInvoices += normalizeNumber(row.counts?.draftInvoices, 0);
       summary.openPayments += normalizeNumber(row.counts?.openPayments, 0);
       summary.receivedPayments += normalizeNumber(row.counts?.receivedPayments, 0);
+      summary.creditNotes += normalizeNumber(row.counts?.creditNotes, 0);
+      summary.pendingCreditNotes += normalizeNumber(row.counts?.pendingCreditNotes, 0);
       summary.missingCosts += row.flags?.needsCosts ? 1 : 0;
       summary.missingBudgetLines += row.flags?.missingBudget ? 1 : 0;
       summary.missingHandoffs += row.flags?.handoffMissing ? 1 : 0;
@@ -16670,6 +17390,9 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       summary.quotedNetValue += normalizeNumber(money.quotedNetValue, 0);
       summary.invoiceValue += normalizeNumber(money.invoiceValue, 0);
       summary.invoicedNetValue += normalizeNumber(money.invoicedNetValue, 0);
+      summary.creditedValue += normalizeNumber(money.creditedValue, 0);
+      summary.creditedNetValue += normalizeNumber(money.creditedNetValue, 0);
+      summary.pendingCreditValue += normalizeNumber(money.pendingCreditValue, 0);
       summary.invoiceDraftAmount += normalizeNumber(money.invoiceDraftAmount, 0);
       summary.uninvoicedValue += normalizeNumber(money.uninvoicedValue, 0);
       summary.uninvoicedNetValue += normalizeNumber(money.uninvoicedNetValue, 0);
@@ -16694,6 +17417,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     const excludedStatuses = new Set(includeArchived ? [] : ['cancelled', 'canceled', 'rejected', 'archived']);
     const financeTargetTypes = new Set([
       'invoice',
+      'credit_note',
       'payment',
       'budget_line',
       'purchase_order',
@@ -16703,7 +17427,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     ]);
     const completedStatuses = new Set(['completed', 'closed', 'accepted']);
     const activeJobStatuses = new Set(['scheduled', 'in_progress', 'active', 'approved', 'completed', 'closed', 'accepted']);
-    const activeInvoiceStatuses = ['paid', 'received', 'settled', 'cancelled', 'canceled', 'rejected', 'void'];
+    const activeInvoiceStatuses = ['paid', 'received', 'settled', 'credited', 'cancelled', 'canceled', 'rejected', 'void'];
     const activePaymentClosedStatuses = ['paid', 'received', 'settled', 'written_off', 'cancelled', 'canceled', 'rejected', 'void'];
     const activeHandoffClosedStatuses = ['exported', 'sent', 'cancelled', 'canceled', 'rejected', 'void'];
 
@@ -16717,7 +17441,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           && financeTargetTypes.has(normalizeStatus(approval.targetType, ''))
         );
         const invoiceDeliveryApprovals = (detail.communications || [])
-          .filter(communication => communication.data?.source === 'invoice_issue_package' && communication.approvalId)
+          .filter(communication => ['invoice_issue_package', 'credit_note_issue_package'].includes(communication.data?.source) && communication.approvalId)
           .map(communication => (detail.approvals || []).find(approval => approval.id === communication.approvalId))
           .filter(approval => approval && normalizeStatus(approval.status, 'pending') === 'pending');
         const pendingFinanceApprovals = [...financeApprovals, ...invoiceDeliveryApprovals]
@@ -16727,7 +17451,12 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         const draftInvoices = activeInvoices.filter(invoice => ['draft', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')));
         const packageReadyInvoices = activeInvoices.filter(invoice => normalizeStatus(invoice.status, 'draft') === 'approved' && !invoice.data?.issuePackage);
         const preparedInvoices = activeInvoices.filter(invoice => normalizeStatus(invoice.status, 'draft') === 'prepared');
-        const receivableInvoices = activeInvoices.filter(invoice => ['sent', 'submitted', 'partially_paid'].includes(normalizeStatus(invoice.status, 'draft')));
+        const receivableInvoices = activeInvoices.filter(invoice => ['sent', 'submitted', 'partially_paid', 'partially_settled'].includes(normalizeStatus(invoice.status, 'draft')));
+        const validCreditNotes = (detail.creditNotes || []).filter(note => this.financeRecordOpen(note.status));
+        const activeCreditNotes = validCreditNotes.filter(note => !['cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(note.status, 'draft')));
+        const packageReadyCreditNotes = activeCreditNotes.filter(note => normalizeStatus(note.status, 'draft') === 'approved' && !note.data?.issuePackage);
+        const issuedCreditNotes = activeCreditNotes.filter(note => ['prepared', 'sent', 'delivered', 'issued'].includes(normalizeStatus(note.status, 'draft')));
+        const pendingCreditNotes = activeCreditNotes.filter(note => ['draft', 'pending_approval', 'approved'].includes(normalizeStatus(note.status, 'draft')));
         const openPayments = (detail.payments || []).filter(payment => this.financeRecordOpen(payment.status, activePaymentClosedStatuses));
         const dueOrOverduePayments = openPayments.filter(payment => this.financeDueOrOverdue(payment.dueAt));
         const paymentsDueForFollowUp = openPayments.filter(payment => {
@@ -16754,12 +17483,16 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         const quotedNetValue = normalizeNumber(latestQuote?.subtotal, 0);
         const quotedGrossValue = normalizeNumber(latestQuote?.total, quotedNetValue);
         const contractValue = normalizeNumber(detail.contractValue, normalizeNumber(detail.estimatedCost, 0));
-        const invoiceValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
+        const grossInvoiceValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.total || invoice.amount, 0), 0);
+        const creditedValue = issuedCreditNotes.reduce((sum, note) => sum + normalizeNumber(note.total, 0), 0);
+        const creditedNetValue = issuedCreditNotes.reduce((sum, note) => sum + normalizeNumber(note.amount, 0), 0);
+        const pendingCreditValue = pendingCreditNotes.reduce((sum, note) => sum + normalizeNumber(note.total, 0), 0);
+        const invoiceValue = roundMoney(Math.max(0, grossInvoiceValue - creditedValue));
         const invoiceReconciliations = receivableInvoices.map(invoice => ({ invoice, ...this.getInvoiceReconciliation(invoice.id) }));
         const nextReceivable = invoiceReconciliations.find(item => item.availableAmount > 1) || null;
         const receivableOutstandingValue = roundMoney(invoiceReconciliations.reduce((sum, item) => sum + item.outstandingAmount, 0));
         const pendingPaymentValue = roundMoney(invoiceReconciliations.reduce((sum, item) => sum + item.pendingAmount, 0));
-        const invoicedNetValue = validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.amount, 0), 0);
+        const invoicedNetValue = roundMoney(Math.max(0, validInvoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.amount, 0), 0) - creditedNetValue));
         const receivedValue = receivedPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const writtenOffValue = writtenOffPayments.reduce((sum, payment) => sum + normalizeNumber(payment.amount, 0), 0);
         const receivableInvoiceIds = new Set(receivableInvoices.map(invoice => invoice.id));
@@ -16779,6 +17512,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         const hasFinancialActivity = activeInvoices.length
           || openPayments.length
           || receivedPayments.length
+          || activeCreditNotes.length
           || expenses.length
           || timeLogs.length
           || activeBudgetLines.length
@@ -16811,6 +17545,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           paymentFollowUp,
           invoiceReady,
           invoicePackageReady,
+          creditNotePackageReady: packageReadyCreditNotes.length > 0,
           invoicePrepared: preparedInvoices.length > 0,
           handoffReady,
           needsCosts: missingCosts || missingBudget,
@@ -16827,6 +17562,13 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           invoiceId: packageReadyInvoices[0].id,
           requiresApproval: false
         });
+        if (packageReadyCreditNotes.length) nextActions.push({
+          type: 'prepare_credit_note_package',
+          label: 'Prepare immutable credit-note package',
+          creditNoteId: packageReadyCreditNotes[0].id,
+          invoiceId: packageReadyCreditNotes[0].invoiceId,
+          requiresApproval: false
+        });
         if (nextReceivable) nextActions.push({
           type: 'record_payment_reconciliation',
           label: 'Record received payment or write-off',
@@ -16837,6 +17579,22 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           pendingAmount: nextReceivable.pendingAmount,
           requiresApproval: true
         });
+        if (nextReceivable) {
+          const taxRate = roundMoney(normalizeNumber(nextReceivable.invoice.data?.taxRate, nextReceivable.invoice.amount
+            ? nextReceivable.invoice.taxAmount / nextReceivable.invoice.amount * 100
+            : 0));
+          nextActions.push({
+            type: 'create_credit_note',
+            label: 'Correct invoice with credit note',
+            invoiceId: nextReceivable.invoice.id,
+            invoiceReference: nextReceivable.invoice.data?.issuePackage?.issueReference || nextReceivable.invoice.id,
+            availableAmount: nextReceivable.availableAmount,
+            availableNetAmount: roundMoney(nextReceivable.availableAmount / (1 + taxRate / 100)),
+            taxRate,
+            structuredExportRequested: nextReceivable.invoice.data?.issuePackage?.structuredExportIncluded === true,
+            requiresApproval: true
+          });
+        }
         if (paymentFollowUp) nextActions.push({
           type: 'record_payment_follow_up',
           label: 'Record payment follow-up or confirmation',
@@ -16880,6 +17638,10 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
             issueableInvoices: packageReadyInvoices.length,
             packageReadyInvoices: packageReadyInvoices.length,
             preparedInvoices: preparedInvoices.length,
+            creditNotes: validCreditNotes.length,
+            issuedCreditNotes: issuedCreditNotes.length,
+            pendingCreditNotes: pendingCreditNotes.length,
+            packageReadyCreditNotes: packageReadyCreditNotes.length,
             receivableInvoices: receivableInvoices.length,
             openPayments: openPayments.length,
             dueOrOverduePayments: dueOrOverduePayments.length,
@@ -16897,7 +17659,11 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
             quotedNetValue,
             quotedGrossValue,
             invoiceValue,
+            grossInvoiceValue,
             invoicedNetValue,
+            creditedValue,
+            creditedNetValue,
+            pendingCreditValue,
             invoiceDraftAmount,
             uninvoicedValue: Math.max(0, grossRevenueBasis - invoiceValue),
             uninvoicedNetValue: invoiceDraftAmount,
@@ -16916,6 +17682,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
           },
           latest: {
             invoice: validInvoices[0] || null,
+            creditNote: validCreditNotes[0] || null,
             payment: openPayments[0] || receivedPayments[0] || null,
             budgetLine: activeBudgetLines[0] || null,
             purchaseOrder: openPurchaseOrders[0] || null,
@@ -16934,8 +17701,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       if (mode === 'payment') return row.flags?.paymentOutstanding === true || row.flags?.paymentFollowUp === true;
       if (mode === 'payment_followup') return row.flags?.paymentFollowUp === true;
       if (mode === 'payment_follow_up') return row.flags?.paymentFollowUp === true;
-      if (mode === 'invoice') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true;
-      if (mode === 'invoice_ready') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true;
+      if (mode === 'invoice') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true || row.flags?.creditNotePackageReady === true;
+      if (mode === 'invoice_ready') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true || row.flags?.creditNotePackageReady === true;
       if (mode === 'handoff') return row.flags?.handoffReady === true;
       if (mode === 'handoff_ready') return row.flags?.handoffReady === true;
       if (mode === 'costs') return row.flags?.needsCosts === true;
@@ -18357,6 +19124,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       timeLogs: this.db.prepare('SELECT * FROM time_logs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapTimeLog(row)),
       expenses: this.db.prepare('SELECT * FROM expenses WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapExpense(row)),
       invoices: this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapInvoice(row)),
+      creditNotes: this.db.prepare('SELECT * FROM credit_notes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCreditNote(row)),
       budgetLines: this.db.prepare('SELECT * FROM budget_lines WHERE job_id = ? ORDER BY cost_code ASC, created_at DESC').all(jobId).map(row => this.mapBudgetLine(row)),
       purchaseOrders: this.db.prepare('SELECT * FROM purchase_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapPurchaseOrder(row)),
       drawRequests: this.db.prepare('SELECT * FROM draw_requests WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapDrawRequest(row)),
@@ -18424,6 +19192,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       expenses: 'status',
       purchase_orders: 'status',
       invoices: 'status',
+      creditNotes: 'status',
       payments: 'status',
       draw_requests: 'status',
       lien_waivers: 'status',
@@ -21348,6 +22117,8 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     if (safetyWithoutApproval) issues.push({ severity: 'warning', message: `${safetyWithoutApproval} high-risk safety check(s) have no approval gate.` });
     const paymentWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM payments WHERE status IN ('paid', 'received', 'settled') AND approval_id IS NULL").get().count || 0);
     if (paymentWithoutApproval) issues.push({ severity: 'warning', message: `${paymentWithoutApproval} confirmed payment record(s) have no approval gate.` });
+    const creditNotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM credit_notes WHERE status IN ('approved', 'prepared', 'sent', 'delivered', 'issued') AND approval_id IS NULL").get().count || 0);
+    if (creditNotesWithoutApproval) issues.push({ severity: 'warning', message: `${creditNotesWithoutApproval} issued credit-note record(s) have no approval gate.` });
     const routeWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM route_plans WHERE route_risk IN ('high', 'critical') AND approval_id IS NULL").get().count || 0);
     if (routeWithoutApproval) issues.push({ severity: 'warning', message: `${routeWithoutApproval} high-risk route plan(s) have no approval gate.` });
     const procurementWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM procurement_orders WHERE amount > 0 AND status IN ('approved', 'ready_to_order', 'ordered', 'submitted', 'sent') AND approval_id IS NULL").get().count || 0);
@@ -21406,6 +22177,7 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
         financeHandoffs: this.count('finance_handoffs'),
         qualityChecks: this.count('quality_checks'),
         safetyChecks: this.count('safety_checks'),
+        creditNotes: this.count('credit_notes'),
         payments: this.count('payments'),
         aftercareItems: this.count('aftercare_items'),
         punchItems: this.count('punch_items'),
@@ -22146,6 +22918,24 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
     };
   }
 
+  mapCreditNote(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      invoiceId: row.invoice_id,
+      status: row.status,
+      currency: row.currency,
+      amount: normalizeNumber(row.amount, 0),
+      taxAmount: normalizeNumber(row.tax_amount, 0),
+      total: normalizeNumber(row.total, 0),
+      approvalId: row.approval_id,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapQualityCheck(row) {
     return {
       id: row.id,
@@ -22514,6 +23304,19 @@ ${documentReference}  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIInteg
       preview.total = mapped?.total ?? data.total ?? null;
       preview.amount = mapped?.amount ?? data.amount ?? null;
       preview.currency = mapped?.currency || 'EUR';
+    } else if (targetType === 'credit_note') {
+      const row = this.db.prepare('SELECT * FROM credit_notes WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapCreditNote(row) : null;
+      primaryEffect = `Approve credit note${mapped ? ` for ${mapped.total.toFixed(2)} ${mapped.currency}` : ''}.`;
+      addEffect('Authorize durable numbering and immutable issue-package preparation for the already reserved correction.');
+      addSafeguard('Does not alter the source invoice balance until the approved credit-note package is prepared.');
+      addSafeguard('Does not deliver the credit note, submit it through Peppol, refund funds, or contact the client automatically.');
+      riskLevel = 'high';
+      preview.invoiceId = mapped?.invoiceId || data.invoiceId || null;
+      preview.amount = mapped?.amount ?? data.amount ?? null;
+      preview.total = mapped?.total ?? data.total ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.reason = mapped?.data?.reason || null;
     } else if (targetType === 'assignment') {
       primaryEffect = `Approve worker assignment for ${data.workerName || data.workerId || 'worker'}.`;
       addEffect(`Set assignment to ${data.requestedStatus || 'planned'} for ${data.scheduledStart || 'the proposed start'} through ${data.scheduledEnd || 'the proposed end'}.`);

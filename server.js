@@ -2601,6 +2601,38 @@ app.post('/api/ledger/jobs/:id/invoices/:invoiceId/issue-package', (req, res) =>
   }, 201);
 });
 
+app.post('/api/ledger/jobs/:id/invoices/:invoiceId/credit-notes', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    creditNote: operatingLedger.createCreditNote(
+      req.params.id,
+      req.params.invoiceId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/credit-notes/:creditNoteId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareCreditNoteIssuePackage(
+      req.params.id,
+      req.params.creditNoteId,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id),
+      finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/quality-checks', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
