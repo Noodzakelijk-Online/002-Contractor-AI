@@ -1077,7 +1077,7 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     const retainedFormats = invoicePackage.documents.map(document => (
       ledger.getInvoiceIssueDocument(document.id, { audit: false }).document.data.format
     ));
-    assert.deepEqual(retainedFormats.sort(), ['html', 'ubl']);
+    assert.deepEqual(retainedFormats.sort(), ['html', 'ubl_2_1']);
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
