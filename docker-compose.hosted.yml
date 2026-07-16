@@ -1,0 +1,20 @@
+services:
+  contractor-ai:
+    build: .
+    ports:
+      - "127.0.0.1:${CONTRACTOR_AI_BIND_PORT:-3000}:3000"
+    env_file:
+      - .env.hosted
+    environment:
+      NODE_ENV: production
+      CONTRACTOR_AI_RUNTIME_MODE: hosted
+      CONTRACTOR_AI_DATABASE_URL: ${CONTRACTOR_AI_DATABASE_URL:?Set a managed EU PostgreSQL URL with sslmode=require or verify-full in .env.hosted}
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
