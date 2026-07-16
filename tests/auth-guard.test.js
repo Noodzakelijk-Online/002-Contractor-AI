@@ -810,6 +810,68 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(Object.hasOwn(fieldDailyLog.body.job, 'expenses'), false);
     assert.equal(Object.hasOwn(fieldDailyLog.body.job, 'clientEmail'), false);
 
+    const fieldObservationPayload = {
+      entryKey: 'field-observation-role-0001',
+      category: 'quality',
+      title: 'Roof edge fixing requires review',
+      severity: 'medium',
+      responsible: 'Role Field Worker',
+      dueAt: '2026-07-20',
+      notes: 'One retained fixing location differs from the approved setting-out record.',
+      evidenceDocumentIds: [fieldUploadBody.ledgerDocument.id],
+      actor: 'spoofed-owner'
+    };
+    const fieldObservation = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/observations`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify(fieldObservationPayload)
+    });
+    assert.equal(fieldObservation.response.status, 201);
+    assert.equal(fieldObservation.body.replayed, false);
+    assert.equal(fieldObservation.body.observation.replayed, false);
+    assert.equal(Object.hasOwn(fieldObservation.body.observation, 'data'), false);
+    assert.equal(Object.hasOwn(fieldObservation.body.observation, 'approvalId'), false);
+
+    const fieldObservationReplay = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/observations`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify(fieldObservationPayload)
+    });
+    assert.equal(fieldObservationReplay.response.status, 201);
+    assert.equal(fieldObservationReplay.body.replayed, true);
+    assert.equal(fieldObservationReplay.body.observation.id, fieldObservation.body.observation.id);
+
+    const fieldIncidentPayload = {
+      entryKey: 'field-incident-role-0001',
+      incidentType: 'near_miss',
+      title: 'Loose material moved beside access route',
+      severity: 'high',
+      occurredAt: '2026-07-16T08:30:00.000Z',
+      reportedBy: 'Role Field Worker',
+      description: 'A loose panel shifted beside the occupied access route.',
+      immediateAction: 'Work stopped and the access route was isolated.',
+      evidenceDocumentIds: [fieldUploadBody.ledgerDocument.id],
+      requiresApproval: true,
+      actor: 'spoofed-owner'
+    };
+    const fieldIncident = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/incidents`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify(fieldIncidentPayload)
+    });
+    assert.equal(fieldIncident.response.status, 201);
+    assert.equal(fieldIncident.body.replayed, false);
+    assert.equal(Object.hasOwn(fieldIncident.body.incident, 'data'), false);
+    assert.equal(Object.hasOwn(fieldIncident.body.incident, 'approval'), false);
+
+    const deniedOtherIncident = await request(baseUrl, `/api/ledger/jobs/${unassigned.body.job.id}/incidents`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify({ ...fieldIncidentPayload, entryKey: 'field-incident-denied-0001' })
+    });
+    assert.equal(deniedOtherIncident.response.status, 403);
+    assert.equal(deniedOtherIncident.body.error.code, 'field_job_scope_forbidden');
+
     const scopedFieldList = await request(baseUrl, '/api/ledger/jobs?limit=100', { headers: fieldHeaders });
     const scopedFieldJob = scopedFieldList.body.jobs.find(job => job.id === intake.body.job.id);
     assert.ok(scopedFieldJob);
@@ -834,8 +896,13 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(retainedDailyTime.workerId, 'field-worker-role-scope');
     assert.equal(retainedDailyTime.rate, 63);
     assert.equal(ownerDailyDetail.body.job.progress.filter(update => update.data?.entryKey === 'field-progress-role-0001').length, 1);
+    assert.equal(ownerDailyDetail.body.job.observations.filter(record => record.data?.entryKey === 'field-observation-role-0001').length, 1);
+    assert.equal(ownerDailyDetail.body.job.incidents.filter(record => record.data?.entryKey === 'field-incident-role-0001').length, 1);
+    assert.deepEqual(ownerDailyDetail.body.job.incidents.find(record => record.id === fieldIncident.body.incident.id).data.evidenceDocumentIds, [fieldUploadBody.ledgerDocument.id]);
     assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_progress' && event.entityId === fieldProgress.body.progress.id && event.actor === 'role:field_worker'));
     assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_field_daily_log' && event.actor === 'role:field_worker'));
+    assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_observation' && event.entityId === fieldObservation.body.observation.id && event.actor === 'role:field_worker'));
+    assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_incident' && event.entityId === fieldIncident.body.incident.id && event.actor === 'role:field_worker'));
 
     const deniedCompletion = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/progress`, {
       method: 'POST',

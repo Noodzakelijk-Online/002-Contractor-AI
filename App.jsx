@@ -187,9 +187,13 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
       ? 'daily-logs'
       : type === 'progress'
         ? 'progress'
-        : type === 'inspection_checklist' && inspectionId
-          ? `inspections/${encodeURIComponent(inspectionId)}/checklist-submissions`
-          : null
+        : type === 'observation'
+          ? 'observations'
+          : type === 'incident'
+            ? 'incidents'
+            : type === 'inspection_checklist' && inspectionId
+              ? `inspections/${encodeURIComponent(inspectionId)}/checklist-submissions`
+              : null
   if (!route) throw new Error('This queued field operation is not supported.')
   const requestPayload = { ...payload, entryKey: id }
   delete requestPayload.inspectionId
@@ -283,6 +287,36 @@ function emptyFieldProgress() {
     progressPercent: '',
     status: 'in_progress',
     note: '',
+  }
+}
+
+function emptyFieldRiskDraft(type = 'observation') {
+  if (type === 'incident') {
+    return {
+      entryKey: createFieldEvidenceDraftId(),
+      incidentType: 'near_miss',
+      title: '',
+      severity: 'medium',
+      occurredAt: toLocalDateTimeInput(new Date()),
+      reportedBy: '',
+      description: '',
+      immediateAction: '',
+      correctiveAction: '',
+      witnesses: '',
+      evidenceDocumentId: '',
+      reportable: false,
+    }
+  }
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    category: 'quality',
+    title: '',
+    severity: 'medium',
+    responsible: '',
+    dueAt: futureDateInput(2),
+    notes: '',
+    correctiveAction: '',
+    evidenceDocumentId: '',
   }
 }
 
@@ -3548,6 +3582,167 @@ function InspectionChecklistControl({
   )
 }
 
+function FieldRiskControl({
+  job,
+  canReport,
+  canCoordinate,
+  canApprove,
+  fieldScoped,
+  operator,
+  submitting,
+  onCreate,
+  onReview,
+  onOpenApprovals,
+}) {
+  const [view, setView] = useState('observation')
+  const [creating, setCreating] = useState(false)
+  const [draft, setDraft] = useState(() => emptyFieldRiskDraft('observation'))
+  const [online, setOnline] = useState(() => navigator.onLine !== false)
+  const observations = job.observations || EMPTY_LIST
+  const incidents = job.incidents || EMPTY_LIST
+  const records = view === 'incident' ? incidents : observations
+  const activeStatuses = view === 'incident'
+    ? new Set(['reported', 'under_review', 'escalated', 'pending_approval'])
+    : new Set(['open', 'in_progress', 'pending_approval'])
+  const openObservations = observations.filter((record) => ['open', 'in_progress', 'pending_approval'].includes(record.status)).length
+  const openIncidents = incidents.filter((record) => ['reported', 'under_review', 'escalated', 'pending_approval'].includes(record.status)).length
+  const highRiskOpen = [...observations, ...incidents].filter((record) =>
+    ['high', 'critical'].includes(record.severity) && !['resolved', 'closed'].includes(record.status),
+  ).length
+  const pendingApprovals = (job.approvals || EMPTY_LIST).filter((approval) =>
+    approval.status === 'pending' && ['observation_record', 'incident_record'].includes(approval.targetType),
+  ).length
+
+  useEffect(() => {
+    setView('observation')
+    setCreating(false)
+    setDraft(emptyFieldRiskDraft('observation'))
+  }, [job.id])
+
+  useEffect(() => {
+    const handleOnline = () => setOnline(true)
+    const handleOffline = () => setOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
+
+  const selectView = (nextView) => {
+    setView(nextView)
+    setCreating(false)
+    setDraft(emptyFieldRiskDraft(nextView))
+  }
+
+  const beginCreate = () => {
+    setDraft({
+      ...emptyFieldRiskDraft(view),
+      ...(view === 'incident' ? { reportedBy: operator?.name || '' } : { responsible: operator?.name || '' }),
+    })
+    setCreating(true)
+  }
+
+  async function submitRisk(event) {
+    event.preventDefault()
+    const result = await onCreate(view, draft)
+    if (result) {
+      setCreating(false)
+      setDraft(emptyFieldRiskDraft(view))
+    }
+  }
+
+  const openLifecycleReview = (record) => {
+    const status = view === 'incident' && record.status === 'reported' ? 'under_review' : 'resolved'
+    onReview(
+      { jobId: job.id, jobTitle: job.title },
+      {
+        type: view,
+        recordId: record.id,
+        record,
+        label: status === 'under_review' ? 'Start incident review' : `Resolve ${view}`,
+        status,
+      },
+    )
+  }
+
+  return (
+    <section className="job-workspace-section field-risk-control" data-testid="field-risk-control">
+      <div className="section-heading field-risk-heading">
+        <TriangleAlert size={18} />
+        <div>
+          <h3>Field risk register</h3>
+          <p>Observed quality, safety, environmental, and access conditions with retained evidence and accountable review.</p>
+        </div>
+        {canReport ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'incident' ? 'Report incident' : 'New observation'}</button> : null}
+      </div>
+
+      <div className="field-risk-summary" aria-label="Field risk summary">
+        <div><span>Open observations</span><strong>{openObservations}</strong></div>
+        <div><span>Open incidents</span><strong>{openIncidents}</strong></div>
+        <div><span>High risk</span><strong>{highRiskOpen}</strong></div>
+        <div><span>Pending review</span><strong>{pendingApprovals}</strong></div>
+      </div>
+
+      <div className="field-risk-tabs" role="tablist" aria-label="Field risk record type">
+        <button type="button" role="tab" aria-selected={view === 'observation'} className={view === 'observation' ? 'active' : ''} onClick={() => selectView('observation')}>Observations <span>{observations.length}</span></button>
+        <button type="button" role="tab" aria-selected={view === 'incident'} className={view === 'incident' ? 'active' : ''} onClick={() => selectView('incident')}>Incidents <span>{incidents.length}</span></button>
+      </div>
+
+      {creating ? (
+        <form className="field-risk-form form-grid compact-form" data-testid={`field-${view}-form`} onSubmit={submitRisk}>
+          {view === 'observation' ? (
+            <>
+              <label>Category<select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}><option value="quality">Quality</option><option value="safety">Safety</option><option value="environmental">Environmental</option><option value="access">Access</option><option value="coordination">Coordination</option></select></label>
+              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+              <label className="form-span">Observation title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Observed condition or deviation" /></label>
+              <label>Responsible person<input required minLength="2" maxLength="160" value={draft.responsible} onChange={(event) => setDraft({ ...draft, responsible: event.target.value })} /></label>
+              <label>Corrective due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">Observed facts<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="Location, condition, and direct observations" /></label>
+              <label className="form-span">Immediate control or corrective action<textarea maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
+            </>
+          ) : (
+            <>
+              <label>Incident type<select value={draft.incidentType} onChange={(event) => setDraft({ ...draft, incidentType: event.target.value })}><option value="near_miss">Near miss</option><option value="injury">Injury</option><option value="property_damage">Property damage</option><option value="environmental">Environmental</option><option value="security">Security</option><option value="unsafe_condition">Unsafe condition</option></select></label>
+              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+              <label className="form-span">Incident title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Concise factual incident title" /></label>
+              <label>Occurred at<input required type="datetime-local" value={draft.occurredAt} onChange={(event) => setDraft({ ...draft, occurredAt: event.target.value })} /></label>
+              <label>Reported by<input required minLength="2" maxLength="160" value={draft.reportedBy} onChange={(event) => setDraft({ ...draft, reportedBy: event.target.value })} /></label>
+              <label className="form-span">Incident facts<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="What happened, where, and what was directly observed" /></label>
+              <label className="form-span">Immediate action<textarea required minLength="4" maxLength="4000" value={draft.immediateAction} onChange={(event) => setDraft({ ...draft, immediateAction: event.target.value })} placeholder="Isolation, stop-work, first aid, or other action already taken" /></label>
+              <label>Corrective action<textarea maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
+              <label>Witnesses<textarea maxLength="2000" value={draft.witnesses} onChange={(event) => setDraft({ ...draft, witnesses: event.target.value })} placeholder="One name per line" /></label>
+              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.reportable} onChange={(event) => setDraft({ ...draft, reportable: event.target.checked })} />Potentially reportable; requires specialist review</label>
+            </>
+          )}
+          <label className="form-span">Linked evidence<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+          <p className="workflow-note form-span">This retains an internal report and review gate only. It does not notify external parties, clear a hazard, authorize work, or make a statutory filing.</p>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || draft.title.trim().length < 3 || (view === 'observation' ? draft.notes.trim().length < 4 || draft.responsible.trim().length < 2 : draft.description.trim().length < 4 || draft.immediateAction.trim().length < 4 || draft.reportedBy.trim().length < 2 || !toIsoDateTime(draft.occurredAt))}><ShieldCheck size={15} />{online ? (view === 'incident' ? 'Retain incident' : 'Retain observation') : view === 'incident' ? 'Save incident offline' : 'Save observation offline'}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+        </form>
+      ) : null}
+
+      <div className="field-risk-register">
+        {records.length ? records.map((record) => {
+          const pending = (job.approvals || EMPTY_LIST).find((approval) => approval.id === record.approvalId && approval.status === 'pending')
+          const detail = view === 'incident' ? record.data?.description : record.data?.notes
+          return (
+            <article className={`field-risk-row field-risk-${record.severity}`} key={record.id} data-testid={`field-risk-${record.id}`}>
+              <div className="field-risk-row-copy"><div><strong>{record.title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div><small>{formatStatus(view === 'incident' ? record.incidentType : record.category)} / {formatStatus(record.severity)} / {view === 'incident' ? formatDateTime(record.occurredAt) : `due ${formatDate(record.dueAt)}`}</small>{detail ? <p>{detail}</p> : null}</div>
+              <div className="field-risk-row-actions">
+                {pending ? <span className="tag tag-amber">Approval pending</span> : null}
+                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}
+                {!pending && canCoordinate && activeStatuses.has(record.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openLifecycleReview(record)}><ClipboardCheck size={14} />{view === 'incident' && record.status === 'reported' ? 'Start review' : 'Resolve'}</button> : null}
+              </div>
+            </article>
+          )
+        }) : <p className="workflow-note">No {view === 'incident' ? 'incident' : 'observation'} records are retained for this job.</p>}
+      </div>
+      {fieldScoped ? <p className="workflow-note">Assigned field workers can report observed facts. Resolution and approval remain office-controlled.</p> : null}
+    </section>
+  )
+}
+
 function FieldAssuranceWorkspace({
   field,
   jobs,
@@ -5485,6 +5680,10 @@ function App() {
         if (result.sent) {
           if (announce) notify(`${result.sent} queued field update(s) were recorded in the operating ledger.`)
           await refresh()
+          if (selectedJobId) {
+            const selected = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}`)
+            setSelectedJob(selected.job)
+          }
         }
         if (announce && result.stopped && result.stopped !== 'offline')
           setError(result.stopped.message || 'A queued field update could not be recorded.')
@@ -5494,7 +5693,7 @@ function App() {
         setOutboxSyncing(false)
       }
     },
-    [notify, outboxScope, refresh],
+    [notify, outboxScope, refresh, selectedJobId],
   )
 
   useEffect(() => {
@@ -6777,6 +6976,72 @@ function App() {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
           notify('Connection interrupted. The complete inspection checklist was saved locally for an exact retry.')
+          return { queued: true }
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return null
+        }
+      }
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function createFieldRisk(type, values) {
+    if (!selectedJobId || !['observation', 'incident'].includes(type)) return null
+    const { entryKey, evidenceDocumentId, ...fields } = values
+    const payload = type === 'incident'
+      ? {
+          ...fields,
+          occurredAt: toIsoDateTime(fields.occurredAt),
+          witnesses: String(fields.witnesses || '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+          evidenceDocumentIds: evidenceDocumentId ? [evidenceDocumentId] : [],
+          status: 'reported',
+          requiresApproval: true,
+          source: 'field_risk_register',
+        }
+      : {
+          ...fields,
+          evidenceDocumentIds: evidenceDocumentId ? [evidenceDocumentId] : [],
+          status: 'open',
+          source: 'field_risk_register',
+        }
+    const draft = {
+      id: entryKey,
+      type,
+      jobId: selectedJobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        notify(`${type === 'incident' ? 'Incident' : 'Observation'} saved locally for this operator and scheduled for exact retry after reconnection.`)
+        return { queued: true }
+      }
+      const result = await recordFieldOperation(draft)
+      setSelectedJob(result.job)
+      setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
+      notify(
+        result.replayed
+          ? `This ${type} was already retained; no duplicate record or approval was created.`
+          : type === 'incident'
+            ? 'Incident retained for human review. No external notification, work clearance, or statutory filing was made.'
+            : 'Observation retained in the field risk register.',
+      )
+      await refresh()
+      return result
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          notify(`Connection interrupted. The ${type} was saved locally for an exact retry.`)
           return { queued: true }
         } catch (outboxError) {
           setError(outboxError.message)
@@ -8271,7 +8536,7 @@ function App() {
         setError('Record a positive milestone amount, VAT rate, description, planned issue date, and due date.')
         return
       }
-      const plannedIssueAt = new Date(`${financeActionDraft.plannedIssueAt}T12:00:00`).toISOString()
+      const plannedIssueAt = new Date(`${financeActionDraft.plannedIssueAt}T00:00:00`).toISOString()
       const dueAt = new Date(`${financeActionDraft.dueAt}T23:59:59`).toISOString()
       if (Date.parse(dueAt) < Date.parse(plannedIssueAt)) {
         setError('The milestone due date must be on or after its planned issue date.')
@@ -11328,6 +11593,18 @@ function App() {
                   onCreateTemplate={createInspectionTemplate}
                   onSchedule={scheduleInspectionChecklist}
                   onSubmit={submitInspectionChecklist}
+                  onOpenApprovals={openApprovals}
+                />
+                <FieldRiskControl
+                  job={selectedJob}
+                  canReport={canCoordinate || capabilities.fieldEvidence === true}
+                  canCoordinate={canCoordinate}
+                  canApprove={capabilities.approvals === true}
+                  fieldScoped={fieldScoped}
+                  operator={operator}
+                  submitting={submitting}
+                  onCreate={createFieldRisk}
+                  onReview={openFieldReview}
                   onOpenApprovals={openApprovals}
                 />
                 {canCoordinate ? (

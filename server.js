@@ -2382,21 +2382,33 @@ app.post('/api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions',
 });
 
 app.post('/api/ledger/jobs/:id/observations', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    observation: recordForOperator(req, operatingLedger.createObservationRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
-    job: jobForOperator(req, req.params.id),
-    dashboard: dashboardForOperator(req)
-  }), 201);
+  return handleLedgerRequest(req, res, () => {
+    const observation = operatingLedger.createObservationRecord(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      observation: recordForOperator(req, observation),
+      replayed: observation.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/incidents', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    incident: recordForOperator(req, operatingLedger.createIncidentRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
-    job: jobForOperator(req, req.params.id),
-    dashboard: dashboardForOperator(req)
-  }), 201);
+  return handleLedgerRequest(req, res, () => {
+    const incident = operatingLedger.createIncidentRecord(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      incident: recordForOperator(req, incident),
+      replayed: incident.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/safety-meetings', (req, res) => {

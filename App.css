@@ -695,3 +695,50 @@
   .inspection-checklist-form > .form-actions, .inspection-template-editor > .form-actions { align-items: stretch; flex-direction: column; }
   .inspection-checklist-form > .form-actions button, .inspection-template-editor > .form-actions button { width: 100%; }
 }
+
+.field-risk-control { display: grid; gap: 14px; min-width: 0; }
+.field-risk-heading { align-items: center; }
+.field-risk-heading > .secondary-button { margin-left: auto; white-space: nowrap; }
+.field-risk-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dfe7e3; }
+.field-risk-summary div { display: grid; gap: 4px; min-width: 0; padding: 11px 12px; border-right: 1px solid #dfe7e3; }
+.field-risk-summary div:last-child { border-right: 0; }
+.field-risk-summary span { overflow-wrap: anywhere; color: #6a7973; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.field-risk-summary strong { color: #263b32; font-size: 17px; }
+.field-risk-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; border: 1px solid #cedbd5; border-radius: 6px; }
+.field-risk-tabs button { display: inline-flex; min-width: 0; min-height: 36px; align-items: center; justify-content: center; gap: 7px; color: #53675e; font: inherit; font-size: 11px; font-weight: 750; background: #fff; border: 0; border-right: 1px solid #d7e1dc; cursor: pointer; }
+.field-risk-tabs button:last-child { border-right: 0; }
+.field-risk-tabs button:hover { background: #f2f7f5; }
+.field-risk-tabs button:focus-visible { position: relative; z-index: 1; outline: 3px solid #96c9bc; outline-offset: -3px; }
+.field-risk-tabs button.active { color: #fff; background: #315f53; }
+.field-risk-tabs button span { min-width: 20px; padding: 2px 6px; color: inherit; background: rgb(255 255 255 / .16); border-radius: 999px; font-size: 9px; }
+.field-risk-form { gap: 12px; margin: 0; padding: 14px; background: #f7f9f8; border: 1px solid #dce5e1; }
+.field-risk-form .form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.field-risk-register { display: grid; border-top: 1px solid #dfe7e3; }
+.field-risk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; padding: 12px 0 12px 10px; border-bottom: 1px solid #e3eae7; border-left: 3px solid #8fa29a; }
+.field-risk-low { border-left-color: #5d8c7d; }
+.field-risk-medium { border-left-color: #c08a2f; }
+.field-risk-high, .field-risk-critical { background: #fff9f7; border-left-color: #b94238; }
+.field-risk-row-copy { display: grid; gap: 4px; min-width: 0; }
+.field-risk-row-copy > div { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+.field-risk-row-copy strong { min-width: 0; overflow-wrap: anywhere; color: #2a4037; font-size: 12px; }
+.field-risk-row-copy small { overflow-wrap: anywhere; color: #6c7c75; font-size: 10px; }
+.field-risk-row-copy p { margin: 0; overflow-wrap: anywhere; color: #526a61; font-size: 11px; line-height: 1.45; }
+.field-risk-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
+.field-risk-row-actions .secondary-button { min-height: 31px; padding: 0 8px; font-size: 10px; }
+.status-reported, .status-under_review, .status-in_progress { color: #235d70; background: #e5f2f6; }
+.status-escalated { color: #a4342d; background: #fae5e2; }
+
+@media (max-width: 760px) {
+  .field-risk-heading { align-items: flex-start; flex-wrap: wrap; }
+  .field-risk-heading > .secondary-button { width: calc(100% - 28px); margin-left: 28px; }
+  .field-risk-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-risk-summary div:nth-child(2n) { border-right: 0; }
+  .field-risk-summary div:nth-child(-n + 2) { border-bottom: 1px solid #dfe7e3; }
+  .field-risk-form { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .field-risk-form .form-span { grid-column: auto; }
+  .field-risk-form .form-actions { align-items: stretch; flex-direction: column; }
+  .field-risk-form .form-actions button { width: 100%; }
+  .field-risk-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .field-risk-row-actions { justify-content: flex-start; }
+  .field-risk-row-actions .secondary-button { flex: 1 1 120px; }
+}

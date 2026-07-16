@@ -15521,17 +15521,76 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.transaction(() => {
       this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const id = normalizeText(payload.id, '') || makeId('observation');
       const timestamp = nowIso();
       const requestedStatus = normalizeStatus(payload.status, 'open');
       const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'medium');
+      const category = normalizeStatus(payload.category, 'quality');
+      const title = normalizeText(payload.title, 'Field observation');
+      const responsible = normalizeText(payload.responsible || payload.owner, actor);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey && !/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('observation_entry_key_invalid', 'Observation retry key must contain 8 to 200 safe characters.');
+      }
+      const id = entryKey
+        ? `observation_${sha256Text(`${jobId}\0${entryKey}`).slice(0, 24)}`
+        : normalizeText(payload.id, '') || makeId('observation');
+      const existingRow = entryKey ? this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(id) : null;
+      const dueAt = payload.dueAt || payload.due_at || existingRow?.due_at || futureIsoDate(2);
+      const closedAt = payload.closedAt || payload.closed_at || existingRow?.closed_at || null;
+      const notes = normalizeText(payload.notes || payload.note, '') || null;
+      const correctiveAction = normalizeText(payload.correctiveAction || payload.corrective_action, '') || null;
+      const photos = normalizeList(payload.photos);
+      const evidenceDocumentIds = [...new Set(normalizeList(payload.evidenceDocumentIds || payload.evidence_document_ids).map(String))];
+      const sourceInspectionId = payload.sourceInspectionId || payload.source_inspection_id || null;
+      const sourceChecklistSubmissionId = payload.sourceChecklistSubmissionId || payload.source_checklist_submission_id || null;
+      const sourceChecklistItemKey = payload.sourceChecklistItemKey || payload.source_checklist_item_key || null;
+      const clientVisible = payload.clientVisible === true;
+      for (const documentId of evidenceDocumentIds) {
+        const document = this.db.prepare('SELECT id FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+        if (!document) {
+          throw ledgerInputError('observation_evidence_not_found', `Evidence document ${documentId} does not belong to this job.`);
+        }
+      }
       const needsApproval = payload.requiresApproval === true
-        || payload.clientVisible === true
+        || clientVisible
         || ['critical', 'high'].includes(severity)
         || ['closed', 'resolved', 'approved', 'client_visible'].includes(requestedStatus);
       const status = needsApproval && ['closed', 'resolved', 'approved', 'client_visible'].includes(requestedStatus)
         ? 'pending_approval'
         : requestedStatus;
+      const requestHash = entryKey ? sha256Json({
+        requestedStatus,
+        status,
+        severity,
+        category,
+        title,
+        responsible,
+        dueAt,
+        closedAt,
+        notes,
+        correctiveAction,
+        photos,
+        evidenceDocumentIds,
+        sourceInspectionId,
+        sourceChecklistSubmissionId,
+        sourceChecklistItemKey,
+        clientVisible,
+        needsApproval
+      }) : null;
+      if (existingRow) {
+        const existingData = fromJson(existingRow.data_json, {});
+        if (existingRow.job_id !== jobId || existingData.entryKey !== entryKey || existingData.requestHash !== requestHash) {
+          const error = new Error('Observation retry key was already used for different content');
+          error.statusCode = 409;
+          error.code = 'observation_entry_key_reused';
+          throw error;
+        }
+        const existing = this.mapObservation(existingRow);
+        const approval = existingRow.approval_id
+          ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existingRow.approval_id))
+          : null;
+        return { ...existing, approval, replayed: true };
+      }
 
       this.db.prepare(`
         INSERT INTO observation_records (id, job_id, category, title, status, severity, responsible, due_at, closed_at, approval_id, data_json, created_at, updated_at)
@@ -15539,24 +15598,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       `).run(
         id,
         jobId,
-        normalizeStatus(payload.category, 'quality'),
-        normalizeText(payload.title, 'Field observation'),
+        category,
+        title,
         status,
         severity,
-        payload.responsible || payload.owner || actor,
-        payload.dueAt || payload.due_at || futureIsoDate(2),
-        payload.closedAt || payload.closed_at || null,
+        responsible,
+        dueAt,
+        closedAt,
         null,
         toJson({
           requestedStatus,
-          notes: payload.notes || payload.note || null,
-          correctiveAction: payload.correctiveAction || payload.corrective_action || null,
-          photos: normalizeList(payload.photos),
-          evidenceDocumentIds: normalizeList(payload.evidenceDocumentIds || payload.evidence_document_ids),
-          sourceInspectionId: payload.sourceInspectionId || payload.source_inspection_id || null,
-          sourceChecklistSubmissionId: payload.sourceChecklistSubmissionId || payload.source_checklist_submission_id || null,
-          sourceChecklistItemKey: payload.sourceChecklistItemKey || payload.source_checklist_item_key || null,
-          clientVisible: payload.clientVisible === true
+          notes,
+          correctiveAction,
+          photos,
+          evidenceDocumentIds,
+          sourceInspectionId,
+          sourceChecklistSubmissionId,
+          sourceChecklistItemKey,
+          clientVisible,
+          entryKey: entryKey || null,
+          requestHash
         }),
         timestamp,
         timestamp
@@ -15569,7 +15630,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           targetId: id,
           jobId,
           approvalType: 'observation_review',
-          summary: `Review observation ${normalizeText(payload.title, 'field observation')}`,
+          summary: `Review observation ${title}`,
           reason: ['critical', 'high'].includes(severity)
             ? 'High-severity safety or quality observations require human review before work continues or closes.'
             : 'Closing or exposing observations can affect client expectations and requires approval.',
@@ -15580,9 +15641,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
       const observation = this.mapObservation(this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(id));
       if (options.audit !== false) {
-        this.audit({ entityType: 'observation_record', entityId: id, jobId, action: 'record_observation', actor, after: observation });
+        this.audit({
+          entityType: 'observation_record',
+          entityId: id,
+          jobId,
+          action: 'record_observation',
+          actor,
+          after: observation,
+          metadata: { entryKey: entryKey || null, externalCommitments: 0 }
+        });
       }
-      return { ...observation, approval };
+      return { ...observation, approval, replayed: false };
     });
   }
 
@@ -15590,16 +15659,73 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.transaction(() => {
       this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const id = makeId('incident');
       const timestamp = nowIso();
       const requestedStatus = normalizeStatus(payload.status, 'reported');
       const severity = normalizePriority(payload.severity || payload.riskLevel || payload.risk_level || 'high');
+      const incidentType = normalizeStatus(payload.incidentType || payload.incident_type, 'near_miss');
+      const title = normalizeText(payload.title, 'Safety incident');
+      const reportedBy = normalizeText(payload.reportedBy || payload.reported_by, actor);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey && !/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('incident_entry_key_invalid', 'Incident retry key must contain 8 to 200 safe characters.');
+      }
+      const id = entryKey
+        ? `incident_${sha256Text(`${jobId}\0${entryKey}`).slice(0, 24)}`
+        : normalizeText(payload.id, '') || makeId('incident');
+      const existingRow = entryKey ? this.db.prepare('SELECT * FROM incident_records WHERE id = ?').get(id) : null;
+      const occurredAt = payload.occurredAt || payload.occurred_at || existingRow?.occurred_at || timestamp;
+      const resolvedAt = payload.resolvedAt || payload.resolved_at || existingRow?.resolved_at || null;
+      const description = normalizeText(payload.description || payload.notes, '') || null;
+      const immediateAction = normalizeText(payload.immediateAction || payload.immediate_action, '') || null;
+      const correctiveAction = normalizeText(payload.correctiveAction || payload.corrective_action, '') || null;
+      const witnesses = normalizeList(payload.witnesses);
+      const photos = normalizeList(payload.photos);
+      const evidenceDocumentIds = [...new Set(normalizeList(payload.evidenceDocumentIds || payload.evidence_document_ids).map(String))];
+      const reportable = payload.reportable === true;
+      for (const documentId of evidenceDocumentIds) {
+        const document = this.db.prepare('SELECT id FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+        if (!document) {
+          throw ledgerInputError('incident_evidence_not_found', `Evidence document ${documentId} does not belong to this job.`);
+        }
+      }
       const needsApproval = payload.requiresApproval === true
         || ['critical', 'high'].includes(severity)
         || ['closed', 'resolved', 'approved', 'reportable', 'escalated'].includes(requestedStatus);
       const status = needsApproval && ['closed', 'resolved', 'approved', 'reportable', 'escalated'].includes(requestedStatus)
         ? 'pending_approval'
         : requestedStatus;
+      const requestHash = entryKey ? sha256Json({
+        requestedStatus,
+        status,
+        severity,
+        incidentType,
+        title,
+        reportedBy,
+        occurredAt,
+        resolvedAt,
+        description,
+        immediateAction,
+        correctiveAction,
+        witnesses,
+        photos,
+        evidenceDocumentIds,
+        reportable,
+        needsApproval
+      }) : null;
+      if (existingRow) {
+        const existingData = fromJson(existingRow.data_json, {});
+        if (existingRow.job_id !== jobId || existingData.entryKey !== entryKey || existingData.requestHash !== requestHash) {
+          const error = new Error('Incident retry key was already used for different content');
+          error.statusCode = 409;
+          error.code = 'incident_entry_key_reused';
+          throw error;
+        }
+        const existing = this.mapIncident(existingRow);
+        const approval = existingRow.approval_id
+          ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existingRow.approval_id))
+          : null;
+        return { ...existing, approval, replayed: true };
+      }
 
       this.db.prepare(`
         INSERT INTO incident_records (id, job_id, incident_type, title, status, severity, reported_by, occurred_at, resolved_at, approval_id, data_json, created_at, updated_at)
@@ -15607,22 +15733,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       `).run(
         id,
         jobId,
-        normalizeStatus(payload.incidentType || payload.incident_type, 'near_miss'),
-        normalizeText(payload.title, 'Safety incident'),
+        incidentType,
+        title,
         status,
         severity,
-        payload.reportedBy || payload.reported_by || actor,
-        payload.occurredAt || payload.occurred_at || timestamp,
-        payload.resolvedAt || payload.resolved_at || null,
+        reportedBy,
+        occurredAt,
+        resolvedAt,
         null,
         toJson({
           requestedStatus,
-          description: payload.description || payload.notes || null,
-          immediateAction: payload.immediateAction || payload.immediate_action || null,
-          correctiveAction: payload.correctiveAction || payload.corrective_action || null,
-          witnesses: normalizeList(payload.witnesses),
-          photos: normalizeList(payload.photos),
-          reportable: payload.reportable === true
+          description,
+          immediateAction,
+          correctiveAction,
+          witnesses,
+          photos,
+          evidenceDocumentIds,
+          reportable,
+          entryKey: entryKey || null,
+          requestHash
         }),
         timestamp,
         timestamp
@@ -15635,20 +15764,28 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           targetId: id,
           jobId,
           approvalType: 'incident_review',
-          summary: `Review incident ${normalizeText(payload.title, 'safety incident')}`,
+          summary: `Review incident ${title}`,
           reason: ['critical', 'high'].includes(severity)
             ? 'High-severity incidents require explicit human review and an audit trail before work continues or closes.'
             : 'Incident escalation or closure requires approval before the record is treated as resolved.',
-          data: { requestedStatus, severity, reportable: payload.reportable === true }
+          data: { requestedStatus, severity, reportable }
         }, { actor, audit: false });
         this.db.prepare('UPDATE incident_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
       }
 
       const incident = this.mapIncident(this.db.prepare('SELECT * FROM incident_records WHERE id = ?').get(id));
       if (options.audit !== false) {
-        this.audit({ entityType: 'incident_record', entityId: id, jobId, action: 'record_incident', actor, after: incident });
+        this.audit({
+          entityType: 'incident_record',
+          entityId: id,
+          jobId,
+          action: 'record_incident',
+          actor,
+          after: incident,
+          metadata: { entryKey: entryKey || null, externalCommitments: 0 }
+        });
       }
-      return { ...incident, approval };
+      return { ...incident, approval, replayed: false };
     });
   }
 
@@ -30228,7 +30365,49 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.invoiceId = data.invoiceId || null;
       preview.reference = data.reference || null;
       preview.reconciliation = data.reconciliation || null;
-    } else if (['quality_check', 'safety_check', 'inspection_record', 'observation_record', 'incident_record', 'safety_meeting', 'worker_orientation', 'jha_record', 'sds_sheet', 'site_access_log'].includes(targetType)) {
+    } else if (targetType === 'incident_record') {
+      const row = this.db.prepare('SELECT * FROM incident_records WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapIncident(row) : null;
+      const retained = mapped?.data || {};
+      const requestedStatus = retained.requestedStatus || data.requestedStatus || mapped?.status || 'reported';
+      primaryEffect = `Review ${mapped?.severity || data.severity || 'reported'} incident ${mapped?.title || approval.summary || ''}.`;
+      addEffect(`Accept the retained incident evidence and move the record to ${ledgerApprovalHumanTarget(requestedStatus).toLowerCase()} where the lifecycle permits it.`);
+      addSafeguard('Does not notify a regulator, emergency service, client, insurer, supplier, or worker automatically.');
+      addSafeguard('Does not clear the site, authorize work to resume, or replace a statutory incident assessment.');
+      riskLevel = 'high';
+      preview.title = mapped?.title || null;
+      preview.incidentType = mapped?.incidentType || null;
+      preview.severity = mapped?.severity || data.severity || null;
+      preview.status = mapped?.status || null;
+      preview.requestedStatus = requestedStatus;
+      preview.occurredAt = mapped?.occurredAt || null;
+      preview.reportedBy = mapped?.reportedBy || null;
+      preview.description = retained.description || null;
+      preview.immediateAction = retained.immediateAction || null;
+      preview.witnesses = retained.witnesses || [];
+      preview.evidenceDocumentIds = retained.evidenceDocumentIds || [];
+      preview.reportable = retained.reportable === true;
+    } else if (targetType === 'observation_record') {
+      const row = this.db.prepare('SELECT * FROM observation_records WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapObservation(row) : null;
+      const retained = mapped?.data || {};
+      const requestedStatus = retained.requestedStatus || data.requestedStatus || mapped?.status || 'open';
+      primaryEffect = `Review ${mapped?.severity || data.severity || 'field'} observation ${mapped?.title || approval.summary || ''}.`;
+      addEffect(`Accept the retained observation evidence and move the record to ${ledgerApprovalHumanTarget(requestedStatus).toLowerCase()} where the lifecycle permits it.`);
+      addSafeguard('Does not publish the observation to the client or notify any external party automatically.');
+      addSafeguard('Does not certify corrective work, clear a hazard, or override later field evidence.');
+      riskLevel = ['high', 'critical'].includes(mapped?.severity || data.severity) ? 'high' : 'medium';
+      preview.title = mapped?.title || null;
+      preview.category = mapped?.category || null;
+      preview.severity = mapped?.severity || data.severity || null;
+      preview.status = mapped?.status || null;
+      preview.requestedStatus = requestedStatus;
+      preview.responsible = mapped?.responsible || null;
+      preview.dueAt = mapped?.dueAt || null;
+      preview.notes = retained.notes || null;
+      preview.correctiveAction = retained.correctiveAction || null;
+      preview.evidenceDocumentIds = retained.evidenceDocumentIds || [];
+    } else if (['quality_check', 'safety_check', 'inspection_record', 'safety_meeting', 'worker_orientation', 'jha_record', 'sds_sheet', 'site_access_log'].includes(targetType)) {
       primaryEffect = `Approve ${ledgerApprovalHumanTarget(targetType)} evidence.`;
       addEffect('Move the field, safety, access, or quality record to its approved/completed state.');
       addSafeguard('Does not override future safety observations, client issues, or field blockers.');
