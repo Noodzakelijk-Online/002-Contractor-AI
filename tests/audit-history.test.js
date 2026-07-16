@@ -72,8 +72,9 @@ test('audit history filters retained chain records without changing integrity ev
   assert.deepEqual(byAction.events.map(event => event.entityId), ['job_beta', 'job_alpha']);
   const byDate = ledger.listAuditPage({ from: '2026-01-02', until: '2026-01-04', limit: 20 });
   assert.deepEqual(byDate.events.map(event => event.sequenceNumber), [5, 4, 3]);
-  const byEscapedSearch = ledger.listAuditPage({ query: '100%', limit: 20 });
+  const byEscapedSearch = ledger.listAuditPage({ query: 'retain_100%', limit: 20 });
   assert.deepEqual(byEscapedSearch.events.map(event => event.entityId), ['document_beta']);
+  assert.equal(byEscapedSearch.page.filters.query, 'retain_100%');
   assert.match(byEscapedSearch.events[0].eventHash, /^[a-f0-9]{64}$/);
   assert.equal(byEscapedSearch.events[0].previousHash.length, 64);
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
