@@ -2487,6 +2487,21 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON bid_packages(job_id, status, purchase_order_id, updated_at DESC);
       `);
     }
+  },
+  {
+    version: '029_purchase_order_issue_packages',
+    description: 'Allocate durable purchase-order numbers and retain immutable HTML and UBL order packages behind verified delivery evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS purchase_order_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_purchase_orders_issue_status
+          ON purchase_orders(status, updated_at DESC);
+      `);
+    }
   }
 ];
 
@@ -5433,6 +5448,10 @@ class ContractorOperatingLedger {
       : null;
     const purchaseOrder = purchaseOrderRow ? this.mapPurchaseOrder(purchaseOrderRow) : null;
     const source = purchaseOrder?.data?.source;
+    const orderIssueCommunicationRow = purchaseOrder?.issuePackage?.communicationId
+      ? this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(purchaseOrder.issuePackage.communicationId)
+      : null;
+    const orderIssueCommunication = orderIssueCommunicationRow ? this.mapCommunication(orderIssueCommunicationRow) : null;
     const expectedCommitmentHash = selectedParticipant && source?.terms
       ? sha256Json(this.bidCommitmentSnapshot({ ...bidPackage, selectedParticipant }, source.terms))
       : null;
@@ -5462,7 +5481,14 @@ class ContractorOperatingLedger {
         integrityValid: commitmentIntegrityValid,
         spendAuthorized: purchaseOrder.data?.spendAuthorized === true,
         awardIssued: purchaseOrder.data?.awardIssued === true,
-        externalCommitments: Number(purchaseOrder.data?.externalCommitments || 0)
+        orderIssued: purchaseOrder.data?.orderIssued === true,
+        externalCommitments: Number(purchaseOrder.data?.externalCommitments || 0),
+        issuePackage: purchaseOrder.issuePackage ? {
+          ...purchaseOrder.issuePackage,
+          communication: orderIssueCommunication,
+          communicationStatus: orderIssueCommunication?.status || null,
+          deliveryApprovalId: orderIssueCommunication?.approvalId || purchaseOrder.issuePackage.communicationApprovalId || null
+        } : null
       } : null,
       comparison: {
         invited: participants.length,
@@ -5481,7 +5507,11 @@ class ContractorOperatingLedger {
         selected: bidPackage.status === 'selected',
         commitmentPending: purchaseOrder?.status === 'pending_approval',
         commitmentReady: ['approved', 'ready_to_order'].includes(purchaseOrder?.status),
-        commitmentRejected: ['rejected', 'cancelled'].includes(purchaseOrder?.status)
+        commitmentRejected: ['rejected', 'cancelled'].includes(purchaseOrder?.status),
+        orderPackageReady: ['approved', 'ready_to_order'].includes(purchaseOrder?.status) && !purchaseOrder?.issuePackage,
+        orderDeliveryApprovalPending: orderIssueCommunication?.status === 'draft',
+        orderDeliveryApproved: orderIssueCommunication?.status === 'approved',
+        orderIssued: ['ordered', 'sent', 'issued'].includes(purchaseOrder?.status) && purchaseOrder?.data?.orderIssued === true
       }
     };
   }
@@ -5887,7 +5917,7 @@ class ContractorOperatingLedger {
         409
       );
     }
-    if (bidPackage.selectedParticipant.validUntil && Date.parse(bidPackage.selectedParticipant.validUntil) < Date.now()) {
+    if (data.orderIssued !== true && bidPackage.selectedParticipant.validUntil && Date.parse(bidPackage.selectedParticipant.validUntil) < Date.now()) {
       throw ledgerInputError(
         'bid_commitment_return_expired',
         'The selected bid return expired before commitment approval. Retain renewed return evidence and rebuild the commitment.',
@@ -9351,6 +9381,500 @@ class ContractorOperatingLedger {
 </html>`;
   }
 
+  allocatePurchaseOrderReference(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('purchase_order_issue_date_invalid', 'Purchase-order issue date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO purchase_order_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE purchase_order_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable purchase-order number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'purchase_order_number_allocation_failed';
+      throw error;
+    }
+    return `PO-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  purchaseOrderIssueLines(purchaseOrder) {
+    const items = Array.isArray(purchaseOrder?.items) ? purchaseOrder.items : [];
+    if (!items.length) {
+      throw ledgerInputError('purchase_order_items_required', 'Retain at least one priced purchase-order line before preparing an issue package.', { purchaseOrderId: purchaseOrder?.id }, 409);
+    }
+    const lines = items.map((item, index) => {
+      const quantity = Number(item?.quantity ?? 1);
+      const unitPrice = Number(item?.unitCost ?? item?.unitPrice ?? item?.price);
+      const description = normalizeText(item?.description || item?.name || item?.title, '');
+      if (!description) {
+        throw ledgerInputError('purchase_order_item_description_required', `Purchase-order line ${index + 1} requires a description.`);
+      }
+      if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1_000_000) {
+        throw ledgerInputError('purchase_order_item_quantity_invalid', `Purchase-order line ${index + 1} requires a positive bounded quantity.`);
+      }
+      if (!Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 1_000_000_000) {
+        throw ledgerInputError('purchase_order_item_price_invalid', `Purchase-order line ${index + 1} requires a valid non-negative unit cost.`);
+      }
+      return {
+        id: String(index + 1),
+        description,
+        quantity,
+        unit: normalizeText(item?.unit, 'unit'),
+        unitCode: 'C62',
+        unitPrice: roundMoney(unitPrice),
+        lineAmount: roundMoney(quantity * unitPrice),
+        costCode: normalizeText(item?.costCode || item?.cost_code, '') || null
+      };
+    });
+    const lineTotal = roundMoney(lines.reduce((sum, line) => sum + line.lineAmount, 0));
+    if (Math.abs(lineTotal - roundMoney(purchaseOrder.amount)) > 0.01) {
+      throw ledgerInputError(
+        'purchase_order_line_total_mismatch',
+        'The retained purchase-order lines do not equal the approved net commitment.',
+        { purchaseOrderId: purchaseOrder.id, lineTotal, approvedAmount: roundMoney(purchaseOrder.amount) },
+        409
+      );
+    }
+    return lines;
+  }
+
+  purchaseOrderIssueBasis(purchaseOrder) {
+    const source = purchaseOrder?.data?.source || null;
+    return {
+      id: purchaseOrder.id,
+      jobId: purchaseOrder.jobId,
+      approvalId: purchaseOrder.approvalId,
+      supplier: purchaseOrder.supplier,
+      tradePartnerId: purchaseOrder.tradePartnerId,
+      currency: purchaseOrder.currency,
+      amount: roundMoney(purchaseOrder.amount),
+      requiredBy: purchaseOrder.requiredBy || null,
+      notes: purchaseOrder.data?.notes || null,
+      lines: this.purchaseOrderIssueLines(purchaseOrder),
+      source: source ? {
+        type: source.type || null,
+        bidPackageId: source.bidPackageId || null,
+        participantId: source.participantId || null,
+        selectionApprovalId: source.selectionApprovalId || null,
+        comparisonHash: source.comparisonHash || null,
+        commitmentHash: source.commitmentHash || null,
+        terms: source.terms || null
+      } : null
+    };
+  }
+
+  assertPurchaseOrderIssueCurrent(purchaseOrder, snapshot) {
+    if (!purchaseOrder || !snapshot?.purchaseOrder) {
+      throw ledgerInputError('purchase_order_issue_package_incomplete', 'The retained purchase-order issue package is incomplete.', {}, 409);
+    }
+    if (!['approved', 'ready_to_order', 'ordered', 'sent', 'issued'].includes(normalizeStatus(purchaseOrder.status, ''))) {
+      throw ledgerInputError('purchase_order_not_ready_for_issue', 'The purchase order is not approved for issue.', { purchaseOrderId: purchaseOrder.id, status: purchaseOrder.status }, 409);
+    }
+    if (purchaseOrder.data?.spendAuthorized !== true) {
+      throw ledgerInputError('purchase_order_spend_approval_required', 'The exact purchase-order envelope must be approved before issue.', { purchaseOrderId: purchaseOrder.id }, 409);
+    }
+    const retainedBasisHash = normalizeText(snapshot.purchaseOrderBasisHash, '');
+    const currentBasisHash = sha256Json(this.purchaseOrderIssueBasis(purchaseOrder));
+    if (!retainedBasisHash || retainedBasisHash !== currentBasisHash) {
+      throw ledgerInputError(
+        'purchase_order_issue_package_stale',
+        'The purchase order no longer matches its retained issue package. Prepare a corrected revision before delivery.',
+        { purchaseOrderId: purchaseOrder.id },
+        409
+      );
+    }
+    if (purchaseOrder.data?.orderIssued === true) return null;
+    const row = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(purchaseOrder.id);
+    this.assertBidPackageCommitmentCurrent(row);
+    return this.assertTradePartnerReadyForCommitment(row, 'purchase-order issue');
+  }
+
+  preparePurchaseOrderIssuePackage(jobId, purchaseOrderId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ? AND job_id = ?').get(purchaseOrderId, jobId);
+      if (!row) throw ledgerInputError('purchase_order_not_found', 'Purchase order not found for this job.', { purchaseOrderId }, 404);
+      const purchaseOrder = this.mapPurchaseOrder(row);
+      const identityKey = sha256Text(`${jobId}\0${purchaseOrderId}`);
+      const htmlDocumentId = `doc_po_${identityKey.slice(0, 24)}`;
+      const ublDocumentId = `doc_po_ubl_${identityKey.slice(0, 20)}`;
+      const communicationId = `comm_po_${identityKey.slice(0, 24)}`;
+      const retainedHtml = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(htmlDocumentId, jobId);
+      if (retainedHtml) {
+        const htmlPackage = this.getPurchaseOrderIssueDocument(htmlDocumentId, { audit: false });
+        const ublPackage = this.getPurchaseOrderIssueDocument(ublDocumentId, { audit: false });
+        const communication = this.getCommunication(communicationId);
+        if (communication.jobId !== jobId || communication.data?.sourceRecordId !== purchaseOrderId) {
+          throw ledgerInputError('purchase_order_issue_package_incomplete', 'The retained purchase-order package is missing its controlled delivery draft.', { purchaseOrderId }, 409);
+        }
+        this.verifyCommunicationAttachments(communicationId);
+        const approvalRow = communication.approvalId
+          ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(communication.approvalId)
+          : null;
+        return {
+          purchaseOrder: this.getPurchaseOrder(purchaseOrderId),
+          document: htmlPackage.document,
+          documents: [htmlPackage.document, ublPackage.document],
+          htmlDocument: htmlPackage.document,
+          ublDocument: ublPackage.document,
+          communication,
+          approval: approvalRow ? this.mapApproval(approvalRow) : null,
+          issueReference: htmlPackage.document.data.issueReference,
+          packageHash: htmlPackage.packageHash,
+          replayed: true,
+          deliveryMode: 'approval_and_verified_receipt',
+          transportSubmitted: ['sent', 'delivered'].includes(normalizeStatus(communication.status, '')),
+          externalCommitments: Number(this.getPurchaseOrder(purchaseOrderId).data?.externalCommitments || 0)
+        };
+      }
+
+      const partner = this.assertPurchaseOrderIssueCurrent(purchaseOrder, {
+        purchaseOrder: { id: purchaseOrder.id },
+        purchaseOrderBasisHash: sha256Json(this.purchaseOrderIssueBasis(purchaseOrder))
+      });
+      const organization = this.getOrganizationProfile();
+      if (!organization.readiness.ready) {
+        const error = ledgerInputError('organization_profile_incomplete', 'Complete the business identity before preparing a purchase-order package.', { missing: organization.readiness.missing }, 409);
+        throw error;
+      }
+      const recipient = normalizeText(payload.recipient || payload.email || partner.email, '');
+      if (!recipient || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+        throw ledgerInputError(
+          'purchase_order_recipient_required',
+          'Retain a valid supplier email or provide a verified order recipient before preparing the delivery draft.',
+          { tradePartnerId: partner.id },
+          409
+        );
+      }
+      const preparedAt = nowIso();
+      const issueReference = this.allocatePurchaseOrderReference(preparedAt);
+      const basis = this.purchaseOrderIssueBasis(purchaseOrder);
+      const purchaseOrderBasisHash = sha256Json(basis);
+      const snapshot = {
+        packageVersion: 1,
+        packageType: 'purchase_order',
+        issueReference,
+        preparedAt,
+        issueDate: preparedAt.slice(0, 10),
+        preparedBy: options.actor || 'Contractor.AI',
+        structuredProfile: 'OASIS UBL 2.1 Order',
+        networkProfileCertified: false,
+        transportStatus: 'not_submitted',
+        purchaseOrderBasisHash,
+        buyer: {
+          legalName: organization.legalName,
+          tradingName: organization.tradingName,
+          registrationNumber: organization.registrationNumber,
+          vatNumber: organization.vatNumber,
+          email: organization.email,
+          phone: organization.phone,
+          address: organization.address,
+          postalCode: organization.postalCode,
+          city: organization.city,
+          country: organization.country
+        },
+        seller: {
+          id: partner.id,
+          legalName: partner.name,
+          contactName: partner.contactName || null,
+          registrationNumber: partner.registrationNumber,
+          vatNumber: partner.vatNumber,
+          email: recipient,
+          phone: partner.phone,
+          address: partner.address,
+          postalCode: partner.data?.postalCode || null,
+          city: partner.city,
+          country: partner.country || 'NL',
+          complianceSnapshot: this.tradePartnerComplianceSnapshot(partner)
+        },
+        job: {
+          id: job.id,
+          title: job.title,
+          address: job.address,
+          city: job.city,
+          country: job.country
+        },
+        purchaseOrder: basis
+      };
+      const packageHash = sha256Json(snapshot);
+      const html = this.renderPurchaseOrderIssuePackageHtml(snapshot, packageHash);
+      const ubl = this.renderPurchaseOrderUbl(snapshot, packageHash);
+      const htmlDocument = this.addDocument(jobId, {
+        type: 'purchase_order_issue_package',
+        title: `Purchase order ${issueReference}`,
+        filename: `${issueReference}.html`,
+        mimeType: 'text/html; charset=utf-8',
+        sizeBytes: Buffer.byteLength(html, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          format: 'html',
+          sourceRecordType: 'purchase_order',
+          sourceRecordId: purchaseOrderId,
+          issueReference,
+          packageHash,
+          contentHash: sha256Text(html),
+          snapshot,
+          safeguards: { deliveryMode: 'approval_and_verified_receipt', transportSubmitted: false, externalCommitments: 0 }
+        }
+      }, { actor: options.actor, audit: true, id: htmlDocumentId, ignoreExisting: true });
+      const ublDocument = this.addDocument(jobId, {
+        type: 'purchase_order_ubl_package',
+        title: `UBL order ${issueReference}`,
+        filename: `${issueReference}.xml`,
+        mimeType: 'application/xml; charset=utf-8',
+        sizeBytes: Buffer.byteLength(ubl, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          format: 'ubl_2_1_order',
+          sourceRecordType: 'purchase_order',
+          sourceRecordId: purchaseOrderId,
+          issueReference,
+          packageHash,
+          contentHash: sha256Text(ubl),
+          snapshot,
+          networkProfileCertified: false,
+          safeguards: { deliveryMode: 'approval_and_verified_receipt', transportSubmitted: false, externalCommitments: 0 }
+        }
+      }, { actor: options.actor, audit: true, id: ublDocumentId, ignoreExisting: true });
+      const communication = this.addCommunication(jobId, {
+        channel: normalizeStatus(payload.channel, 'email'),
+        direction: 'outbound',
+        status: 'draft',
+        subject: `Purchase order ${issueReference} - ${job.title}`,
+        body: `Dear ${partner.contactName || partner.name},\n\nPlease find purchase order ${issueReference} for ${job.title}. The human-readable and UBL 2.1 Order packages are attached.\n\nThe order is externally committed only when a configured delivery provider returns a retained receipt.`,
+        recipient,
+        expectsReply: true,
+        requiresApproval: true,
+        data: {
+          source: 'purchase_order_issue_package',
+          sourceRecordId: purchaseOrderId,
+          issueReference,
+          packageHash,
+          purchaseOrderBasisHash,
+          attachmentDocumentIds: [htmlDocumentId, ublDocumentId],
+          deliveryMode: 'approval_and_verified_receipt',
+          structuredExportIncluded: true,
+          networkProfileCertified: false,
+          transportSubmitted: false,
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: true, id: communicationId, ignoreExisting: true });
+      const timestamp = nowIso();
+      this.db.prepare('UPDATE purchase_orders SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson({
+        ...purchaseOrder.data,
+        issuePackage: {
+          issueReference,
+          packageHash,
+          purchaseOrderBasisHash,
+          htmlDocumentId,
+          ublDocumentId,
+          communicationId: communication.id,
+          communicationApprovalId: communication.approvalId || communication.approval?.id || null,
+          preparedAt,
+          transportStatus: 'not_submitted',
+          networkProfileCertified: false
+        },
+        orderIssued: false,
+        awardIssued: false,
+        externalCommitments: 0
+      }), timestamp, purchaseOrderId);
+      this.audit({
+        entityType: 'purchase_order_issue_package',
+        entityId: htmlDocumentId,
+        jobId,
+        action: 'prepare_purchase_order_issue_package',
+        actor: options.actor || 'Contractor.AI',
+        after: {
+          purchaseOrderId,
+          issueReference,
+          packageHash,
+          purchaseOrderBasisHash,
+          documentIds: [htmlDocumentId, ublDocumentId],
+          communicationId: communication.id,
+          approvalId: communication.approvalId || communication.approval?.id || null,
+          transportSubmitted: false,
+          externalCommitments: 0
+        }
+      });
+      return {
+        purchaseOrder: this.getPurchaseOrder(purchaseOrderId),
+        document: htmlDocument,
+        documents: [htmlDocument, ublDocument],
+        htmlDocument,
+        ublDocument,
+        communication,
+        approval: communication.approval || null,
+        issueReference,
+        packageHash,
+        replayed: false,
+        deliveryMode: 'approval_and_verified_receipt',
+        transportSubmitted: false,
+        externalCommitments: 0
+      };
+    });
+  }
+
+  getPurchaseOrderIssueDocument(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (!['purchase_order_issue_package', 'purchase_order_ubl_package'].includes(document.type)) {
+      throw ledgerInputError('purchase_order_issue_package_required', 'Document is not a generated purchase-order issue package.', { documentId }, 409);
+    }
+    const snapshot = document.data?.snapshot;
+    const retainedHash = normalizeText(document.data?.packageHash, '');
+    if (!snapshot || !retainedHash || sha256Json(snapshot) !== retainedHash) {
+      throw ledgerInputError('purchase_order_issue_package_integrity_failed', 'The retained purchase-order package failed snapshot verification.', { documentId }, 409);
+    }
+    const content = document.type === 'purchase_order_ubl_package'
+      ? this.renderPurchaseOrderUbl(snapshot, retainedHash)
+      : this.renderPurchaseOrderIssuePackageHtml(snapshot, retainedHash);
+    if (!document.data?.contentHash || sha256Text(content) !== document.data.contentHash) {
+      throw ledgerInputError('purchase_order_issue_package_integrity_failed', 'The retained purchase-order package failed content verification.', { documentId }, 409);
+    }
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId: document.jobId,
+        action: 'download_purchase_order_issue_package',
+        actor: options.actor || 'authenticated_operator',
+        after: { issueReference: document.data.issueReference, packageHash: retainedHash, format: document.data.format }
+      });
+    }
+    return {
+      document,
+      content,
+      filename: document.filename || `${document.data.issueReference || 'purchase-order'}.${document.type === 'purchase_order_ubl_package' ? 'xml' : 'html'}`,
+      mimeType: document.mimeType || (document.type === 'purchase_order_ubl_package' ? 'application/xml; charset=utf-8' : 'text/html; charset=utf-8'),
+      packageHash: retainedHash
+    };
+  }
+
+  renderPurchaseOrderIssuePackageHtml(snapshot, packageHash) {
+    const buyer = snapshot.buyer || {};
+    const seller = snapshot.seller || {};
+    const job = snapshot.job || {};
+    const order = snapshot.purchaseOrder || {};
+    const money = value => {
+      try {
+        return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: order.currency || 'EUR' }).format(Number(value || 0));
+      } catch {
+        return `${Number(value || 0).toFixed(2)} ${order.currency || 'EUR'}`;
+      }
+    };
+    const date = value => {
+      if (!value) return 'Not specified';
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value) : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const lines = (order.lines || []).map(line => `<tr><td>${escapeHtml(line.id)}</td><td>${escapeHtml(line.description)}</td><td>${escapeHtml(line.quantity)} ${escapeHtml(line.unit)}</td><td class="number">${escapeHtml(money(line.unitPrice))}</td><td class="number">${escapeHtml(money(line.lineAmount))}</td></tr>`).join('');
+    const buyerName = buyer.tradingName || buyer.legalName || 'Buyer';
+    const buyerAddress = [buyer.address, buyer.postalCode, buyer.city, buyer.country].filter(Boolean).map(escapeHtml).join(', ');
+    const sellerAddress = [seller.address, seller.postalCode, seller.city, seller.country].filter(Boolean).map(escapeHtml).join(', ');
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 940px; margin: 0 auto; padding: 42px; font-size: 13px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 28px; padding-bottom: 22px; border-bottom: 3px solid #176b57; }
+    h1 { margin: 0; color: #174d40; font-size: 28px; }
+    h2 { margin: 28px 0 8px; color: #23483d; font-size: 17px; }
+    p { margin: 4px 0; }
+    .muted, small { color: #65756f; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties, .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin-top: 22px; }
+    .summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .summary div { padding: 12px; background: #f2f6f4; }
+    .summary span { display: block; color: #65756f; font-size: 10px; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px; border-bottom: 1px solid #dfe7e3; text-align: left; vertical-align: top; }
+    th { color: #53645e; background: #f2f6f4; font-size: 10px; text-transform: uppercase; }
+    .number { text-align: right; }
+    .total { margin: 18px 0 0 auto; width: min(320px, 100%); padding: 14px; text-align: right; background: #edf6f2; }
+    .notice { margin-top: 28px; padding: 14px; border-left: 4px solid #c88b1b; background: #fff8e8; }
+    footer { margin-top: 32px; padding-top: 14px; overflow-wrap: anywhere; color: #65756f; border-top: 1px solid #dfe7e3; font-size: 10px; }
+    @media print { body { padding: 18px; } }
+  </style>
+</head>
+<body>
+  <header><div><p class="muted">${escapeHtml(buyerName)}</p><h1>Purchase order</h1><p>${escapeHtml(job.title)}</p></div><div class="reference"><strong>${escapeHtml(snapshot.issueReference)}</strong><span>${escapeHtml(date(snapshot.issueDate))}</span></div></header>
+  <section class="parties"><div><h2>Buyer</h2><p><strong>${escapeHtml(buyer.legalName || buyerName)}</strong></p><p>${buyerAddress}</p><p>${escapeHtml(buyer.email || '')}</p><p>Registration ${escapeHtml(buyer.registrationNumber || 'not retained')} / VAT ${escapeHtml(buyer.vatNumber || 'not retained')}</p></div><div><h2>Supplier</h2><p><strong>${escapeHtml(seller.legalName)}</strong></p><p>${sellerAddress}</p><p>${escapeHtml(seller.email || '')}</p><p>Registration ${escapeHtml(seller.registrationNumber || 'not retained')} / VAT ${escapeHtml(seller.vatNumber || 'not retained')}</p></div></section>
+  <section class="summary"><div><span>Project</span><strong>${escapeHtml(job.id)}</strong></div><div><span>Required by</span><strong>${escapeHtml(date(order.requiredBy))}</strong></div><div><span>Currency</span><strong>${escapeHtml(order.currency)}</strong></div><div><span>Source approval</span><strong>${escapeHtml(order.approvalId)}</strong></div></section>
+  <h2>Ordered scope</h2><table><thead><tr><th>Line</th><th>Description</th><th>Quantity</th><th class="number">Unit cost</th><th class="number">Net amount</th></tr></thead><tbody>${lines}</tbody></table>
+  <div class="total"><span class="muted">Approved net commitment</span><h2>${escapeHtml(money(order.amount))}</h2><p class="muted">VAT is not calculated by this purchase-order record.</p></div>
+  ${order.notes ? `<h2>Purchasing notes</h2><p>${escapeHtml(order.notes)}</p>` : ''}
+  <div class="notice"><strong>Controlled issue</strong><p>This package becomes an external supplier commitment only when its separately approved delivery draft receives a configured provider receipt. UBL preparation does not claim Peppol certification or network submission.</p></div>
+  <footer>Contractor.AI package SHA-256 ${escapeHtml(packageHash)}<br>Purchase-order basis SHA-256 ${escapeHtml(snapshot.purchaseOrderBasisHash)}<br>Package version ${escapeHtml(snapshot.packageVersion)}</footer>
+</body>
+</html>`;
+  }
+
+  renderPurchaseOrderUbl(snapshot, packageHash) {
+    const buyer = snapshot.buyer || {};
+    const seller = snapshot.seller || {};
+    const job = snapshot.job || {};
+    const order = snapshot.purchaseOrder || {};
+    const currency = normalizeText(order.currency, 'EUR').toUpperCase();
+    const amount = value => roundMoney(value).toFixed(2);
+    const quantity = value => String(normalizeNumber(value, 0)).replace(/\.0+$/, '');
+    const optional = (tag, value) => normalizeText(value, '') ? `<${tag}>${escapeXml(value)}</${tag}>` : '';
+    const lines = (order.lines || []).map(line => `
+  <cac:OrderLine><cac:LineItem>
+    <cbc:ID>${escapeXml(line.id)}</cbc:ID>
+    <cbc:Quantity unitCode="${escapeXml(line.unitCode || 'C62')}">${escapeXml(quantity(line.quantity))}</cbc:Quantity>
+    <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(line.lineAmount))}</cbc:LineExtensionAmount>
+    ${line.costCode ? `<cbc:AccountingCost>${escapeXml(line.costCode)}</cbc:AccountingCost>` : ''}
+    <cac:Price><cbc:PriceAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(line.unitPrice))}</cbc:PriceAmount><cbc:BaseQuantity unitCode="${escapeXml(line.unitCode || 'C62')}">1</cbc:BaseQuantity></cac:Price>
+    <cac:Item><cbc:Description>${escapeXml(line.description)}</cbc:Description><cbc:Name>${escapeXml(line.description)}</cbc:Name></cac:Item>
+  </cac:LineItem></cac:OrderLine>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Order xmlns="urn:oasis:names:specification:ubl:schema:xsd:Order-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:UBLVersionID>2.1</cbc:UBLVersionID>
+  <cbc:ID>${escapeXml(snapshot.issueReference)}</cbc:ID>
+  <cbc:IssueDate>${escapeXml(snapshot.issueDate)}</cbc:IssueDate>
+  <cbc:OrderTypeCode>220</cbc:OrderTypeCode>
+  <cbc:Note>Contractor.AI SHA-256 ${escapeXml(packageHash)}. This export is not a Peppol certification or transport receipt.</cbc:Note>
+  <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
+  <cac:AdditionalDocumentReference><cbc:ID>ContractorAIIntegrity</cbc:ID><cbc:DocumentDescription>Purchase-order basis SHA-256 ${escapeXml(snapshot.purchaseOrderBasisHash)}</cbc:DocumentDescription></cac:AdditionalDocumentReference>
+  <cac:ProjectReference><cbc:ID>${escapeXml(job.id)}</cbc:ID></cac:ProjectReference>
+  <cac:BuyerCustomerParty><cac:Party>
+    <cac:PartyIdentification><cbc:ID>${escapeXml(buyer.registrationNumber)}</cbc:ID></cac:PartyIdentification>
+    <cac:PartyName><cbc:Name>${escapeXml(buyer.tradingName || buyer.legalName)}</cbc:Name></cac:PartyName>
+    <cac:PostalAddress>${optional('cbc:StreetName', buyer.address)}${optional('cbc:CityName', buyer.city)}${optional('cbc:PostalZone', buyer.postalCode)}<cac:Country><cbc:IdentificationCode>${escapeXml(buyer.country || 'NL')}</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
+    ${buyer.vatNumber ? `<cac:PartyTaxScheme><cbc:CompanyID>${escapeXml(buyer.vatNumber)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>` : ''}
+    <cac:PartyLegalEntity><cbc:RegistrationName>${escapeXml(buyer.legalName)}</cbc:RegistrationName><cbc:CompanyID>${escapeXml(buyer.registrationNumber)}</cbc:CompanyID></cac:PartyLegalEntity>
+    <cac:Contact>${optional('cbc:Telephone', buyer.phone)}${optional('cbc:ElectronicMail', buyer.email)}</cac:Contact>
+  </cac:Party></cac:BuyerCustomerParty>
+  <cac:SellerSupplierParty><cac:Party>
+    <cac:PartyIdentification><cbc:ID>${escapeXml(seller.registrationNumber)}</cbc:ID></cac:PartyIdentification>
+    <cac:PartyName><cbc:Name>${escapeXml(seller.legalName)}</cbc:Name></cac:PartyName>
+    <cac:PostalAddress>${optional('cbc:StreetName', seller.address)}${optional('cbc:CityName', seller.city)}${optional('cbc:PostalZone', seller.postalCode)}<cac:Country><cbc:IdentificationCode>${escapeXml(seller.country || 'NL')}</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
+    ${seller.vatNumber ? `<cac:PartyTaxScheme><cbc:CompanyID>${escapeXml(seller.vatNumber)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>` : ''}
+    <cac:PartyLegalEntity><cbc:RegistrationName>${escapeXml(seller.legalName)}</cbc:RegistrationName><cbc:CompanyID>${escapeXml(seller.registrationNumber)}</cbc:CompanyID></cac:PartyLegalEntity>
+    <cac:Contact>${optional('cbc:Name', seller.contactName)}${optional('cbc:Telephone', seller.phone)}${optional('cbc:ElectronicMail', seller.email)}</cac:Contact>
+  </cac:Party></cac:SellerSupplierParty>
+  <cac:Delivery><cac:RequestedDeliveryPeriod><cbc:EndDate>${escapeXml(String(order.requiredBy || snapshot.issueDate).slice(0, 10))}</cbc:EndDate></cac:RequestedDeliveryPeriod><cac:DeliveryLocation><cac:Address>${optional('cbc:StreetName', job.address)}${optional('cbc:CityName', job.city)}<cac:Country><cbc:IdentificationCode>${escapeXml(job.country || 'NL')}</cbc:IdentificationCode></cac:Country></cac:Address></cac:DeliveryLocation></cac:Delivery>
+  <cac:AnticipatedMonetaryTotal><cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(order.amount))}</cbc:LineExtensionAmount><cbc:PayableAmount currencyID="${escapeXml(currency)}">${escapeXml(amount(order.amount))}</cbc:PayableAmount></cac:AnticipatedMonetaryTotal>${lines}
+</Order>`;
+  }
+
   allocateInvoiceReference(preparedAt = nowIso()) {
     const periodYear = new Date(preparedAt).getUTCFullYear();
     if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
@@ -10104,6 +10628,9 @@ class ContractorOperatingLedger {
     }
     if (['credit_note_issue_package', 'credit_note_ubl_package'].includes(document.type)) {
       return this.getCreditNoteIssueDocument(documentId, options);
+    }
+    if (['purchase_order_issue_package', 'purchase_order_ubl_package'].includes(document.type)) {
+      return this.getPurchaseOrderIssueDocument(documentId, options);
     }
     return this.getInvoiceIssueDocument(documentId, options);
   }
@@ -14471,7 +14998,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     const communication = this.mapCommunication(row);
     const source = communication.data?.source;
-    if (!['quote_issue_package', 'invoice_issue_package', 'credit_note_issue_package', 'handover_issue_package'].includes(source)) return communication;
+    if (!['quote_issue_package', 'invoice_issue_package', 'credit_note_issue_package', 'handover_issue_package', 'purchase_order_issue_package'].includes(source)) return communication;
 
     const attachmentIds = Array.isArray(communication.data?.attachmentDocumentIds)
       ? communication.data.attachmentDocumentIds.filter(Boolean)
@@ -14491,6 +15018,58 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 409;
         error.code = 'quote_issue_package_attachment_mismatch';
         throw error;
+      }
+      return communication;
+    }
+
+    if (source === 'purchase_order_issue_package') {
+      if (attachmentIds.length !== 2 || new Set(attachmentIds).size !== 2) {
+        throw ledgerInputError(
+          'purchase_order_issue_package_attachment_invalid',
+          'The purchase-order delivery draft must retain exactly one HTML and one UBL Order attachment.',
+          { communicationId },
+          409
+        );
+      }
+      const packages = attachmentIds.map(documentId => this.getPurchaseOrderIssueDocument(documentId, { audit: false }));
+      const expectedTypes = new Set(['purchase_order_issue_package', 'purchase_order_ubl_package']);
+      for (const issuePackage of packages) {
+        expectedTypes.delete(issuePackage.document.type);
+        if (issuePackage.document.jobId !== communication.jobId
+          || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
+          || issuePackage.packageHash !== communication.data?.packageHash) {
+          throw ledgerInputError(
+            'purchase_order_issue_package_attachment_mismatch',
+            'The purchase-order delivery draft no longer matches its retained issue package.',
+            { communicationId, documentId: issuePackage.document.id },
+            409
+          );
+        }
+      }
+      if (expectedTypes.size) {
+        throw ledgerInputError(
+          'purchase_order_issue_package_attachment_invalid',
+          'The purchase-order delivery draft is missing a required issue format.',
+          { communicationId, missingTypes: [...expectedTypes] },
+          409
+        );
+      }
+      const htmlPackage = packages.find(issuePackage => issuePackage.document.type === 'purchase_order_issue_package');
+      const purchaseOrder = this.getPurchaseOrder(communication.data?.sourceRecordId);
+      this.assertPurchaseOrderIssueCurrent(purchaseOrder, htmlPackage.document.data.snapshot);
+      const issueData = purchaseOrder.data?.issuePackage || {};
+      if (issueData.packageHash !== communication.data?.packageHash
+        || issueData.purchaseOrderBasisHash !== communication.data?.purchaseOrderBasisHash
+        || issueData.htmlDocumentId !== htmlPackage.document.id
+        || issueData.ublDocumentId !== packages.find(issuePackage => issuePackage.document.type === 'purchase_order_ubl_package')?.document.id
+        || issueData.communicationId !== communication.id
+        || normalizeText(communication.data?.recipient, '') !== normalizeText(htmlPackage.document.data.snapshot?.seller?.email, '')) {
+        throw ledgerInputError(
+          'purchase_order_issue_package_attachment_mismatch',
+          'The purchase-order source, recipient, and retained delivery package no longer match.',
+          { communicationId, purchaseOrderId: purchaseOrder.id },
+          409
+        );
       }
       return communication;
     }
@@ -14663,6 +15242,94 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             providerMessageId: data.deliveryReceipt.providerMessageId
           }
         }), nowIso(), creditNoteRow.id);
+    }
+    if (existing.data?.source === 'purchase_order_issue_package' && existing.data?.sourceRecordId) {
+      if (!normalizeText(data.deliveryReceipt.providerMessageId, '') && !payload.receipt) {
+        throw ledgerInputError(
+          'purchase_order_delivery_evidence_required',
+          'Purchase-order delivery requires a provider message identifier or retained provider receipt.',
+          { communicationId: row.id },
+          400
+        );
+      }
+      const purchaseOrderRow = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ? AND job_id = ?')
+        .get(existing.data.sourceRecordId, row.job_id);
+      if (!purchaseOrderRow) {
+        throw ledgerInputError(
+          'purchase_order_issue_package_source_missing',
+          'The delivered purchase-order communication is no longer linked to its source order.',
+          { communicationId: row.id, purchaseOrderId: existing.data.sourceRecordId },
+          409
+        );
+      }
+      const beforePurchaseOrder = this.mapPurchaseOrder(purchaseOrderRow);
+      const attachmentIds = normalizeList(existing.data?.attachmentDocumentIds);
+      const htmlDocumentId = attachmentIds.find(documentId => {
+        const document = this.db.prepare('SELECT type FROM documents WHERE id = ?').get(documentId);
+        return document?.type === 'purchase_order_issue_package';
+      });
+      const issuePackage = this.getPurchaseOrderIssueDocument(htmlDocumentId, { audit: false });
+      this.assertPurchaseOrderIssueCurrent(beforePurchaseOrder, issuePackage.document.data.snapshot);
+      const purchaseOrderData = beforePurchaseOrder.data || {};
+      const issuedAt = sentAt;
+      this.db.prepare("UPDATE purchase_orders SET status = 'ordered', data_json = ?, updated_at = ? WHERE id = ?").run(
+        toJson({
+          ...purchaseOrderData,
+          issuePackage: {
+            ...(purchaseOrderData.issuePackage || {}),
+            transportStatus: 'delivered_by_verified_integration',
+            deliveredAt: issuedAt,
+            deliveryIntegration: integration,
+            providerMessageId: data.deliveryReceipt.providerMessageId,
+            deliveryReceipt: payload.receipt || null
+          },
+          orderIssued: true,
+          orderIssuedAt: issuedAt,
+          awardIssued: true,
+          externalCommitments: 1
+        }),
+        nowIso(),
+        purchaseOrderRow.id
+      );
+      const bidPackageRow = this.db.prepare('SELECT * FROM bid_packages WHERE purchase_order_id = ?').get(purchaseOrderRow.id);
+      if (bidPackageRow) {
+        const bidData = fromJson(bidPackageRow.data_json, {});
+        this.db.prepare('UPDATE bid_packages SET data_json = ?, updated_at = ? WHERE id = ?').run(
+          toJson({
+            ...bidData,
+            commitment: {
+              ...(bidData.commitment || {}),
+              orderIssued: true,
+              orderIssuedAt: issuedAt,
+              awardIssued: true,
+              externalCommitments: 1
+            },
+            spendAuthorized: true,
+            awardIssued: true,
+            externalCommitments: 1
+          }),
+          nowIso(),
+          bidPackageRow.id
+        );
+      }
+      const afterPurchaseOrder = this.getPurchaseOrder(purchaseOrderRow.id);
+      this.audit({
+        entityType: 'purchase_order',
+        entityId: purchaseOrderRow.id,
+        jobId: row.job_id,
+        action: 'issue_purchase_order_by_verified_delivery',
+        actor: options.actor || 'verified_integration',
+        before: beforePurchaseOrder,
+        after: afterPurchaseOrder,
+        metadata: {
+          communicationId: row.id,
+          issueReference: purchaseOrderData.issuePackage?.issueReference || null,
+          integration,
+          providerMessageId: data.deliveryReceipt.providerMessageId,
+          orderIssued: true,
+          externalCommitments: 1
+        }
+      });
     }
     const communication = this.mapCommunication(this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(row.id));
     this.audit({
@@ -18952,6 +19619,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ORDER BY created_at DESC
       LIMIT ?
     `).all(jobId, jobId, limit).map(row => this.mapPurchaseOrder(row));
+  }
+
+  getPurchaseOrder(purchaseOrderId) {
+    const row = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(String(purchaseOrderId || ''));
+    if (!row) throw ledgerInputError('purchase_order_not_found', 'Purchase order not found.', { purchaseOrderId }, 404);
+    return this.mapPurchaseOrder(row);
+  }
+
+  getCommunication(communicationId) {
+    const row = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(String(communicationId || ''));
+    if (!row) throw ledgerInputError('communication_not_found', 'Communication record not found.', { communicationId }, 404);
+    return this.mapCommunication(row);
   }
 
   supplierInvoiceDuplicateKey({ tradePartnerId = null, supplier = '', invoiceNumber = '' } = {}) {
@@ -24852,7 +25531,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           && financeTargetTypes.has(normalizeStatus(approval.targetType, ''))
         );
         const invoiceDeliveryApprovals = (detail.communications || [])
-          .filter(communication => ['invoice_issue_package', 'credit_note_issue_package'].includes(communication.data?.source) && communication.approvalId)
+          .filter(communication => ['invoice_issue_package', 'credit_note_issue_package', 'purchase_order_issue_package'].includes(communication.data?.source) && communication.approvalId)
           .map(communication => (detail.approvals || []).find(approval => approval.id === communication.approvalId))
           .filter(approval => approval && normalizeStatus(approval.status, 'pending') === 'pending');
         const pendingFinanceApprovals = [...financeApprovals, ...invoiceDeliveryApprovals]
@@ -24882,6 +25561,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const dueBillingMilestones = approvedBillingMilestones.filter(milestone => this.financeDueOrOverdue(milestone.plannedIssueAt));
         const nextBillingMilestone = dueBillingMilestones[0] || null;
         const openPurchaseOrders = (detail.purchaseOrders || []).filter(order => this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received']));
+        const packageReadyPurchaseOrders = openPurchaseOrders.filter(order => (
+          ['approved', 'ready_to_order'].includes(normalizeStatus(order.status, ''))
+          && order.spendAuthorized === true
+          && !order.issuePackage
+        ));
+        const preparedPurchaseOrders = openPurchaseOrders.filter(order => Boolean(order.issuePackage));
+        const purchaseOrderDeliveryCandidates = preparedPurchaseOrders
+          .map(purchaseOrder => ({
+            purchaseOrder,
+            communication: (detail.communications || []).find(communication => (
+              communication.id === purchaseOrder.issuePackage?.communicationId
+              && communication.data?.source === 'purchase_order_issue_package'
+              && communication.data?.sourceRecordId === purchaseOrder.id
+            )) || null
+          }))
+          .filter(candidate => (
+            candidate.purchaseOrder.orderIssued !== true
+            && normalizeStatus(candidate.communication?.status, '') === 'approved'
+          ));
         const validSupplierInvoices = (detail.supplierInvoices || []).filter(invoice => this.financeRecordOpen(invoice.status, ['cancelled', 'canceled', 'rejected', 'void']));
         const pendingSupplierInvoices = validSupplierInvoices.filter(invoice => normalizeStatus(invoice.status, '') === 'pending_approval');
         const payableSupplierInvoices = validSupplierInvoices.filter(invoice => ['approved', 'partially_paid'].includes(normalizeStatus(invoice.status, '')));
@@ -24994,6 +25692,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           invoiceReady,
           invoicePackageReady,
           creditNotePackageReady: packageReadyCreditNotes.length > 0,
+          purchaseOrderPackageReady: packageReadyPurchaseOrders.length > 0,
+          purchaseOrderDeliveryReady: purchaseOrderDeliveryCandidates.length > 0,
           invoicePrepared: preparedInvoices.length > 0,
           handoffReady,
           needsCosts: missingCosts || missingBudget,
@@ -25017,6 +25717,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           invoiceId: packageReadyCreditNotes[0].invoiceId,
           requiresApproval: false
         });
+        if (packageReadyPurchaseOrders.length) nextActions.push({
+          type: 'prepare_purchase_order_package',
+          label: 'Prepare immutable purchase-order package',
+          purchaseOrderId: packageReadyPurchaseOrders[0].id,
+          supplier: packageReadyPurchaseOrders[0].supplier,
+          recipient: packageReadyPurchaseOrders[0].tradePartnerId
+            ? this.db.prepare('SELECT email FROM trade_partners WHERE id = ?').get(packageReadyPurchaseOrders[0].tradePartnerId)?.email || null
+            : null,
+          requiresApproval: false
+        });
+        if (purchaseOrderDeliveryCandidates.length) {
+          const { purchaseOrder, communication } = purchaseOrderDeliveryCandidates[0];
+          nextActions.push({
+            type: 'record_purchase_order_delivery',
+            label: 'Record verified purchase-order delivery',
+            purchaseOrderId: purchaseOrder.id,
+            communicationId: communication.id,
+            issueReference: purchaseOrder.issuePackage?.issueReference || null,
+            supplier: purchaseOrder.supplier,
+            recipient: communication.data?.recipient || null,
+            requiresApproval: false
+          });
+        }
         if (nextReceivable) nextActions.push({
           type: 'record_payment_reconciliation',
           label: 'Record received payment or write-off',
@@ -25142,6 +25865,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             approvedBillingMilestones: approvedBillingMilestones.length,
             dueBillingMilestones: dueBillingMilestones.length,
             openPurchaseOrders: openPurchaseOrders.length,
+            packageReadyPurchaseOrders: packageReadyPurchaseOrders.length,
+            preparedPurchaseOrders: preparedPurchaseOrders.length,
+            purchaseOrderDeliveriesReady: purchaseOrderDeliveryCandidates.length,
             supplierInvoices: validSupplierInvoices.length,
             pendingSupplierInvoices: pendingSupplierInvoices.length,
             payableSupplierInvoices: payableSupplierInvoices.length,
@@ -25194,7 +25920,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             payment: openPayments[0] || receivedPayments[0] || null,
             budgetLine: activeBudgetLines[0] || null,
             billingMilestone: nextBillingMilestone || approvedBillingMilestones[0] || activeBillingMilestones[0] || null,
-            purchaseOrder: openPurchaseOrders[0] || null,
+            purchaseOrder: purchaseOrderDeliveryCandidates[0]?.purchaseOrder
+              || packageReadyPurchaseOrders[0]
+              || preparedPurchaseOrders[0]
+              || openPurchaseOrders[0]
+              || null,
             supplierInvoice: validSupplierInvoices[0] || null,
             supplierInvoicePayment: pendingSupplierPayments[0] || paidSupplierPayments[0] || null,
             drawRequest: openDrawRequests[0] || null,
@@ -30627,7 +31357,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         : null;
       const expectedApprovalStatus = purchaseOrder.status === 'pending_approval'
         ? 'pending'
-        : ['approved', 'ready_to_order'].includes(purchaseOrder.status)
+        : ['approved', 'ready_to_order', 'ordered', 'sent', 'issued'].includes(purchaseOrder.status)
           ? 'approved'
           : ['rejected', 'cancelled'].includes(purchaseOrder.status)
             ? purchaseOrder.status
@@ -30635,8 +31365,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (!approval || (expectedApprovalStatus && approval.status !== expectedApprovalStatus)) {
         issues.push({ severity: 'error', message: `Bid package ${row.package_number} purchasing commitment lacks its matching approval decision.` });
       }
-      if (bidPackage.commitment.awardIssued || bidPackage.commitment.externalCommitments !== 0) {
-        issues.push({ severity: 'error', message: `Bid package ${row.package_number} incorrectly claims an externally issued award or commitment.` });
+      const delivery = bidPackage.commitment.issuePackage?.communication;
+      const verifiedOrderIssue = ['ordered', 'sent', 'issued'].includes(purchaseOrder.status)
+        && purchaseOrder.data?.orderIssued === true
+        && purchaseOrder.data?.issuePackage?.transportStatus === 'delivered_by_verified_integration'
+        && delivery?.status === 'sent'
+        && Boolean(delivery?.data?.deliveryReceipt?.integration)
+        && bidPackage.commitment.awardIssued === true
+        && bidPackage.commitment.externalCommitments === 1;
+      const claimsExternalIssue = bidPackage.commitment.awardIssued === true || bidPackage.commitment.externalCommitments !== 0;
+      if (claimsExternalIssue !== verifiedOrderIssue) {
+        issues.push({ severity: 'error', message: `Bid package ${row.package_number} has an unverified or inconsistent externally issued order claim.` });
+      }
+    }
+    const purchaseOrdersWithPackages = this.db.prepare(`
+      SELECT * FROM purchase_orders
+      WHERE data_json LIKE '%"issuePackage"%'
+      ORDER BY created_at
+    `).all();
+    for (const row of purchaseOrdersWithPackages) {
+      const purchaseOrder = this.mapPurchaseOrder(row);
+      const issuePackage = purchaseOrder.issuePackage;
+      try {
+        const html = this.getPurchaseOrderIssueDocument(issuePackage?.htmlDocumentId, { audit: false });
+        const ubl = this.getPurchaseOrderIssueDocument(issuePackage?.ublDocumentId, { audit: false });
+        const communication = this.getCommunication(issuePackage?.communicationId);
+        if (html.document.type !== 'purchase_order_issue_package'
+          || ubl.document.type !== 'purchase_order_ubl_package'
+          || html.packageHash !== issuePackage.packageHash
+          || ubl.packageHash !== issuePackage.packageHash
+          || communication.data?.packageHash !== issuePackage.packageHash
+          || communication.data?.sourceRecordId !== purchaseOrder.id) {
+          throw new Error('package linkage mismatch');
+        }
+        this.assertPurchaseOrderIssueCurrent(purchaseOrder, html.document.data.snapshot);
+        const delivered = issuePackage.transportStatus === 'delivered_by_verified_integration';
+        if (delivered !== (communication.status === 'sent' && purchaseOrder.orderIssued && purchaseOrder.externalCommitments === 1)) {
+          throw new Error('delivery state mismatch');
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Purchase order ${purchaseOrder.id} failed issue-package verification: ${error.code || error.message}.` });
       }
     }
     const quotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'draft' AND approval_id IS NULL").get().count || 0);
@@ -30994,6 +31762,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         bidPackages: this.count('bid_packages'),
         bidPackageParticipants: this.count('bid_package_participants'),
         bidCommitments: Number(this.db.prepare('SELECT COUNT(*) AS count FROM bid_packages WHERE purchase_order_id IS NOT NULL').get().count || 0),
+        purchaseOrderIssuePackages: Number(this.db.prepare(`SELECT COUNT(*) AS count FROM purchase_orders WHERE data_json LIKE '%"issuePackage"%'`).get().count || 0),
         takeoffs: this.count('takeoff_sheets'),
         takeoffItems: this.count('takeoff_items'),
         tradePartners: this.count('trade_partners'),
@@ -31997,6 +32766,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       items: fromJson(row.items_json, []),
       tradePartnerId: data.tradePartnerId || null,
       partnerComplianceSnapshot: data.partnerComplianceSnapshot || null,
+      issuePackage: data.issuePackage || null,
+      spendAuthorized: data.spendAuthorized === true,
+      orderIssued: data.orderIssued === true,
+      awardIssued: data.awardIssued === true,
+      externalCommitments: Number(data.externalCommitments || 0),
       data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -32271,6 +33045,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       items: fromJson(row.items_json, []),
       tradePartnerId: data.tradePartnerId || null,
       partnerComplianceSnapshot: data.partnerComplianceSnapshot || null,
+      issuePackage: data.issuePackage || null,
+      spendAuthorized: data.spendAuthorized === true,
+      orderIssued: data.orderIssued === true,
+      awardIssued: data.awardIssued === true,
+      externalCommitments: normalizeNumber(data.externalCommitments, 0),
       data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -32511,14 +33290,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     } else if (targetType === 'communication') {
       const message = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = message ? this.mapCommunication(message) : null;
-      primaryEffect = `Approve ${mapped?.channel || data.channel || 'message'} draft: ${mapped?.subject || data.subject || approval.summary || 'client update'}.`;
-      addEffect('Mark the outbound communication draft as approved.');
-      addSafeguard('Does not send the message automatically; sending remains a separate explicit action.');
+      const purchaseOrderIssue = mapped?.data?.source === 'purchase_order_issue_package';
+      primaryEffect = purchaseOrderIssue
+        ? `Approve purchase-order transmission ${mapped.data.issueReference || ''} to ${mapped.data.recipient || 'the retained supplier recipient'}.`
+        : `Approve ${mapped?.channel || data.channel || 'message'} draft: ${mapped?.subject || data.subject || approval.summary || 'client update'}.`;
+      addEffect(purchaseOrderIssue
+        ? 'Authorize the frozen HTML and UBL 2.1 Order attachments for the exact retained recipient.'
+        : 'Mark the outbound communication draft as approved.');
+      addSafeguard(purchaseOrderIssue
+        ? 'Does not transmit the order or create an external supplier commitment without a configured provider receipt.'
+        : 'Does not send the message automatically; sending remains a separate explicit action.');
+      if (purchaseOrderIssue) addSafeguard('The purchase-order source hash, amount, lines, supplier compliance, recipient, and both attachments are rechecked when approval resolves.');
       riskLevel = 'high';
       preview.subject = mapped?.subject || data.subject || null;
       preview.channel = mapped?.channel || data.channel || null;
       preview.body = mapped?.body || null;
       preview.recipient = mapped?.data?.recipient || data.recipient || null;
+      if (purchaseOrderIssue) {
+        preview.purchaseOrderId = mapped.data.sourceRecordId;
+        preview.issueReference = mapped.data.issueReference;
+        preview.packageHash = mapped.data.packageHash;
+        preview.purchaseOrderBasisHash = mapped.data.purchaseOrderBasisHash;
+        preview.attachmentDocumentIds = mapped.data.attachmentDocumentIds || [];
+      }
     } else if (targetType === 'job_archive') {
       primaryEffect = `Archive ${data.jobTitle || approval.jobTitle || 'this job'} from active operating workflows.`;
       addEffect(`Set job status and phase to archived from ${data.previousStatus || 'its retained state'}.`);

@@ -9,19 +9,45 @@ async function createVerifiedPartner(request, name, suffix) {
     data: {
       name,
       partnerType: 'supplier',
+      contactName: 'Browser order desk',
+      email: `browser-orders-${suffix}@supplier.example`,
+      phone: '+31 10 555 12 34',
+      address: 'Browser supplier street 8',
+      city: 'Rotterdam',
+      country: 'NL',
       registrationNumber: `665544${suffix}`,
       vatNumber: `NL45678901${suffix}B01`,
       verificationReference: `BROWSER-BID-VERIFY-${suffix}`,
-      verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
+      verifiedAt: new Date(Date.now() - 86_400_000).toISOString(),
+      data: { postalCode: '3011 AA' }
     }
   });
   expect(response.ok()).toBeTruthy();
   return (await response.json()).partner;
 }
 
-test('operator compares bid returns and approves a preferred bidder without issuing an award', async ({ page, request }) => {
+test('operator carries a selected bid through approved purchase-order delivery', async ({ page, request }) => {
   const key = Date.now();
   const title = `Browser tender ${key}`;
+  const organizationResponse = await request.put('/api/ledger/organization', {
+    data: {
+      legalName: 'Browser Order Contractor B.V.',
+      tradingName: 'Browser Order Contractor',
+      registrationNumber: '12345678',
+      vatNumber: 'NL123456789B01',
+      email: 'browser-orders@contractor.example',
+      phone: '+31 20 555 12 34',
+      address: 'Browser contractor street 14',
+      postalCode: '1012 AB',
+      city: 'Amsterdam',
+      country: 'NL',
+      iban: 'NL91ABNA0417164300',
+      bic: 'ABNANL2A',
+      defaultPaymentTermsDays: 30,
+      defaultQuoteValidityDays: 30
+    }
+  });
+  expect(organizationResponse.ok()).toBeTruthy();
   const firstPartner = await createVerifiedPartner(request, `Browser Delta ${key} BV`, '1');
   const secondPartner = await createVerifiedPartner(request, `Browser Kanaal ${key} BV`, '2');
   const opportunityResponse = await request.post('/api/ledger/opportunities', {
@@ -145,19 +171,66 @@ test('operator compares bid returns and approves a preferred bidder without issu
   await expect(commitmentPanel).toContainText('Source verified');
   await expect(commitmentPanel).toContainText('approved and ready for a separate ordering action');
 
+  await detail.getByRole('button', { name: 'Prepare order package' }).click();
+  const orderPackageModal = page.getByTestId('bid-order-package-modal');
+  await expect(orderPackageModal.getByText(/generic OASIS UBL 2.1 Order attachments/i)).toBeVisible();
+  await expect(orderPackageModal.getByLabel('Supplier recipient')).toHaveValue(secondPartner.email);
+  await orderPackageModal.getByRole('button', { name: 'Freeze package and request approval' }).click();
+  await expect(page.getByText(/Purchase-order package PO-\d{4}-\d{6} retained.*Transmission still requires approval and a verified provider receipt/i)).toBeVisible();
+  let orderPackagePanel = commitmentPanel.getByTestId('bid-order-package');
+  await expect(orderPackagePanel).toContainText(/PO-\d{4}-\d{6}/);
+  await expect(orderPackagePanel).toContainText(secondPartner.email);
+  await expect(orderPackagePanel).toContainText(/draft/i);
+  await expect(orderPackagePanel.getByRole('link', { name: /Download purchase order PO-/ })).toBeVisible();
+  await expect(orderPackagePanel.getByRole('link', { name: /Download purchase order UBL PO-/ })).toBeVisible();
+
+  await detail.getByRole('button', { name: 'Review transmission' }).click();
+  const transmissionApproval = page.locator('.approval-item').filter({ hasText: 'Approve email update before sending' });
+  await expect(transmissionApproval).toHaveCount(1);
+  await transmissionApproval.getByRole('button', { name: 'Review and approve' }).click();
+  const transmissionApprovalModal = page.getByTestId('approval-review-modal');
+  await expect(transmissionApprovalModal.getByText(/Approve purchase-order transmission/i)).toBeVisible();
+  await expect(transmissionApprovalModal.getByText(/does not transmit the order or create an external supplier commitment/i)).toBeVisible();
+  await transmissionApprovalModal.getByLabel('Reviewer reason').fill('Browser QA verified the frozen recipient, order reference, exact lines, and both package formats.');
+  await transmissionApprovalModal.getByRole('button', { name: 'Confirm approval' }).click();
+  await expect(page.getByText('Approval approved. The ledger and audit trail were updated.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await pipeline.getByRole('tab', { name: 'Bid packages' }).click();
+  await convertedRow.getByRole('button', { name: /Open bid package BID-/ }).first().click();
+  commitmentPanel = detail.getByTestId('bid-commitment');
+  await expect(detail).toContainText('Transmission approved; provider receipt required');
+  await detail.getByRole('button', { name: 'Record delivery receipt' }).click();
+  const receiptModal = page.getByTestId('bid-order-delivery-modal');
+  await expect(receiptModal.getByText(/does not perform the delivery itself or initiate payment/i)).toBeVisible();
+  await receiptModal.getByLabel('Configured integration ID').fill('playwright_test_provider');
+  await receiptModal.getByLabel('Provider message ID').fill(`browser-order-message-${key}`);
+  await receiptModal.getByRole('button', { name: 'Record verified receipt' }).click();
+  await expect(page.getByText(/Verified provider receipt retained for PO-\d{4}-\d{6}.*order is now an external commitment.*no payment was initiated/i)).toBeVisible();
+  commitmentPanel = detail.getByTestId('bid-commitment');
+  orderPackagePanel = commitmentPanel.getByTestId('bid-order-package');
+  await expect(detail).toContainText('Order issued with verified provider receipt');
+  await expect(commitmentPanel).toContainText('The retained order was issued only after transmission approval');
+  await expect(orderPackagePanel).toContainText('Provider receipt retained');
+
   const portfolio = await request.get('/api/ledger/bid-packages?includeClosed=true&limit=500');
   expect(portfolio.ok()).toBeTruthy();
   const retained = (await portfolio.json()).bidPackages.find((item) => item.title === 'Mechanical services package');
   expect(retained).toMatchObject({
     status: 'selected',
     jobId: convertedJob.id,
-    data: { spendAuthorized: true, externalCommitments: 0 },
+    data: { spendAuthorized: true, externalCommitments: 1 },
     commitment: {
-      status: 'ready_to_order',
+      status: 'ordered',
       integrityValid: true,
       spendAuthorized: true,
-      awardIssued: false,
-      externalCommitments: 0
+      orderIssued: true,
+      awardIssued: true,
+      externalCommitments: 1,
+      issuePackage: expect.objectContaining({
+        transportStatus: 'delivered_by_verified_integration',
+        providerMessageId: `browser-order-message-${key}`
+      })
     }
   });
   const jobResponse = await request.get(`/api/ledger/jobs/${convertedJob.id}`);
@@ -165,8 +238,10 @@ test('operator compares bid returns and approves a preferred bidder without issu
   const retainedJob = (await jobResponse.json()).job;
   expect(retainedJob.purchaseOrders).toContainEqual(expect.objectContaining({
     id: retained.commitment.purchaseOrderId,
-    status: 'ready_to_order',
-    data: expect.objectContaining({ awardIssued: false, externalCommitments: 0 })
+    status: 'ordered',
+    orderIssued: true,
+    externalCommitments: 1,
+    data: expect.objectContaining({ awardIssued: true, externalCommitments: 1 })
   }));
 
   await page.setViewportSize({ width: 390, height: 844 });

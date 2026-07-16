@@ -101,6 +101,7 @@ const FIELD_ASSURANCE_REVIEW_PRIORITY = [
 ]
 const FINANCE_ACTION_LABELS = {
   create_credit_note: 'Credit invoice',
+  record_purchase_order_delivery: 'Record order delivery',
   record_supplier_invoice: 'Supplier invoice',
   record_supplier_payment: 'Supplier payment',
   record_payment_reconciliation: 'Record payment',
@@ -730,6 +731,14 @@ function emptyBidCommitmentDraft() {
   }
 }
 
+function emptyBidOrderDraft() {
+  return { recipient: '', channel: 'email' }
+}
+
+function emptyBidOrderDeliveryDraft() {
+  return { integration: '', providerMessageId: '', sentAt: toLocalDateTimeInput(new Date().toISOString()) }
+}
+
 function emptyRfiDraft() {
   return {
     title: '',
@@ -1037,6 +1046,9 @@ function BidPackageWorkspace({
   onReviewApproval,
   onPrepareCommitment,
   onReviewCommitment,
+  onPrepareOrderPackage,
+  onReviewOrderDelivery,
+  onRecordOrderDelivery,
 }) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('open')
@@ -1148,6 +1160,21 @@ function BidPackageWorkspace({
                   <ShieldCheck size={15} /> Review commitment
                 </button>
               ) : null}
+              {selectedBidPackage.flags?.orderPackageReady && canCoordinate ? (
+                <button className="primary-button" disabled={submitting} onClick={() => onPrepareOrderPackage(selectedBidPackage)}>
+                  <PackageCheck size={15} /> Prepare order package
+                </button>
+              ) : null}
+              {selectedBidPackage.flags?.orderDeliveryApprovalPending && canApprove ? (
+                <button className="primary-button" disabled={submitting} onClick={() => onReviewOrderDelivery(selectedBidPackage)}>
+                  <ShieldCheck size={15} /> Review transmission
+                </button>
+              ) : null}
+              {selectedBidPackage.flags?.orderDeliveryApproved && canCoordinate ? (
+                <button className="primary-button" disabled={submitting} onClick={() => onRecordOrderDelivery(selectedBidPackage)}>
+                  <MailCheck size={15} /> Record delivery receipt
+                </button>
+              ) : null}
               <button className="icon-button" aria-label="Close bid package detail" onClick={() => onSelect(null)}><X size={17} /></button>
             </div>
           </div>
@@ -1157,8 +1184,14 @@ function BidPackageWorkspace({
             <div>
               <span>Control</span>
               <strong>
-                {selectedBidPackage.commitment?.status === 'ready_to_order'
-                  ? 'Purchasing envelope approved; no award sent'
+                {selectedBidPackage.flags?.orderIssued
+                  ? 'Order issued with verified provider receipt'
+                  : selectedBidPackage.flags?.orderDeliveryApproved
+                    ? 'Transmission approved; provider receipt required'
+                    : selectedBidPackage.flags?.orderDeliveryApprovalPending
+                      ? 'Order package retained; transmission approval pending'
+                      : selectedBidPackage.commitment?.status === 'ready_to_order'
+                        ? 'Purchasing envelope approved; no award sent'
                   : selectedBidPackage.commitment?.status === 'pending_approval'
                     ? 'Commitment approval pending; no award sent'
                     : selectedBidPackage.flags?.commitmentRejected
@@ -1190,11 +1223,45 @@ function BidPackageWorkspace({
                 <div><dt>Hash</dt><dd><code>{shortHash(selectedBidPackage.commitmentHash)}</code></dd></div>
               </dl>
               <p>
-                {selectedBidPackage.commitment.spendAuthorized
-                  ? 'The exact internal spend envelope is approved and ready for a separate ordering action.'
-                  : 'Approval is required before this exact internal spend envelope becomes ready to order.'}{' '}
-                No supplier contact, award, order transmission, subcontract signature, or payment occurred.
+                {selectedBidPackage.commitment.orderIssued
+                  ? 'The retained order was issued only after transmission approval and a configured provider receipt. No payment or subcontract signature was performed.'
+                  : <>{selectedBidPackage.commitment.spendAuthorized
+                    ? 'The exact internal spend envelope is approved and ready for a separate ordering action.'
+                    : 'Approval is required before this exact internal spend envelope becomes ready to order.'}{' '}
+                    No supplier contact, award, order transmission, subcontract signature, or payment occurred.</>}
               </p>
+              {selectedBidPackage.commitment.issuePackage ? (
+                <div className="bid-order-package" data-testid="bid-order-package">
+                  <div>
+                    <span className="eyebrow">Controlled order package</span>
+                    <strong>{selectedBidPackage.commitment.issuePackage.issueReference}</strong>
+                    <small>
+                      {selectedBidPackage.commitment.issuePackage.communication?.data?.recipient || 'Supplier recipient retained'} / {formatStatus(selectedBidPackage.commitment.issuePackage.transportStatus)}
+                    </small>
+                  </div>
+                  <div className="bid-order-package-actions">
+                    <span className={`tag ${selectedBidPackage.commitment.orderIssued ? 'tag-green' : 'tag-amber'}`}>
+                      {selectedBidPackage.commitment.orderIssued ? 'Provider receipt retained' : formatStatus(selectedBidPackage.commitment.issuePackage.communicationStatus || 'draft')}
+                    </span>
+                    <a
+                      className="secondary-button"
+                      aria-label={`Download purchase order ${selectedBidPackage.commitment.issuePackage.issueReference}`}
+                      href={`/api/ledger/documents/${encodeURIComponent(selectedBidPackage.commitment.issuePackage.htmlDocumentId)}/issue-package`}
+                      download
+                    >
+                      <FileDown size={15} /> Order
+                    </a>
+                    <a
+                      className="secondary-button"
+                      aria-label={`Download purchase order UBL ${selectedBidPackage.commitment.issuePackage.issueReference}`}
+                      href={`/api/ledger/documents/${encodeURIComponent(selectedBidPackage.commitment.issuePackage.ublDocumentId)}/issue-package`}
+                      download
+                    >
+                      <FileDown size={15} /> UBL
+                    </a>
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
           <div className="bid-participant-list">
@@ -1266,6 +1333,9 @@ function PipelineWorkspace({
   onReviewBidApproval,
   onPrepareBidCommitment,
   onReviewBidCommitment,
+  onPrepareBidOrderPackage,
+  onReviewBidOrderDelivery,
+  onRecordBidOrderDelivery,
 }) {
   const [query, setQuery] = useState('')
   const [stage, setStage] = useState('open')
@@ -1504,6 +1574,9 @@ function PipelineWorkspace({
           onReviewApproval={onReviewBidApproval}
           onPrepareCommitment={onPrepareBidCommitment}
           onReviewCommitment={onReviewBidCommitment}
+          onPrepareOrderPackage={onPrepareBidOrderPackage}
+          onReviewOrderDelivery={onReviewBidOrderDelivery}
+          onRecordOrderDelivery={onRecordBidOrderDelivery}
         />
       )}
     </section>
@@ -2839,7 +2912,7 @@ function FinanceWorkspace({
   canApprove,
   submitting,
   onDraftInvoice,
-  onPrepareInvoice,
+  onPreparePackage,
   onAction,
   onOpenApprovals,
   onOpen,
@@ -2888,17 +2961,20 @@ function FinanceWorkspace({
           const draftInvoiceAction = canAct ? item.nextActions?.find((action) => action.type === 'draft_invoice') : null
           const canDraftInvoice = Boolean(draftInvoiceAction) && !item.counts?.draftInvoices
           const prepareAction = canAct
-            ? item.nextActions?.find((action) => ['prepare_invoice_package', 'prepare_credit_note_package'].includes(action.type))
+            ? item.nextActions?.find((action) =>
+                ['prepare_invoice_package', 'prepare_credit_note_package', 'prepare_purchase_order_package'].includes(action.type),
+              )
             : null
           const issuePackage = item.latest?.invoice?.data?.issuePackage
           const creditNotePackage = item.latest?.creditNote?.data?.issuePackage
+          const purchaseOrderPackage = item.latest?.purchaseOrder?.issuePackage
           const financeActions = canAct
             ? item.nextActions
                 ?.filter(
                   (action) =>
                     action.type !== 'review_finance_approval' &&
                     action.type !== 'draft_invoice' &&
-                    !['prepare_invoice_package', 'prepare_credit_note_package'].includes(action.type) &&
+                    !['prepare_invoice_package', 'prepare_credit_note_package', 'prepare_purchase_order_package'].includes(action.type) &&
                     FINANCE_ACTION_LABELS[action.type],
                 )
                 .slice(0, 3)
@@ -2981,6 +3057,11 @@ function FinanceWorkspace({
                   ) : null}
                   {issuePackage ? <span className="tag tag-green">{issuePackage.issueReference}</span> : null}
                   {creditNotePackage ? <span className="tag tag-green">{creditNotePackage.issueReference}</span> : null}
+                  {purchaseOrderPackage ? (
+                    <span className={`tag ${item.latest?.purchaseOrder?.orderIssued ? 'tag-green' : 'tag-amber'}`}>
+                      {purchaseOrderPackage.issueReference} {item.latest?.purchaseOrder?.orderIssued ? 'issued' : 'prepared'}
+                    </span>
+                  ) : null}
                   {item.counts?.pendingApprovals ? (
                     <span className="tag tag-amber">
                       {item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}
@@ -3019,12 +3100,22 @@ function FinanceWorkspace({
                 {prepareAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Prepare ${prepareAction.type === 'prepare_credit_note_package' ? 'credit note' : 'invoice'} package for ${job.title}`}
+                    aria-label={`Prepare ${
+                      prepareAction.type === 'prepare_credit_note_package'
+                        ? 'credit note'
+                        : prepareAction.type === 'prepare_purchase_order_package'
+                          ? 'purchase order'
+                          : 'invoice'
+                    } package for ${job.title}`}
                     disabled={submitting}
-                    onClick={() => onPrepareInvoice(item, prepareAction)}
+                    onClick={() => onPreparePackage(item, prepareAction)}
                   >
                     <PackageCheck size={16} />
-                    {prepareAction.type === 'prepare_credit_note_package' ? 'Prepare credit' : 'Prepare package'}
+                    {prepareAction.type === 'prepare_credit_note_package'
+                      ? 'Prepare credit'
+                      : prepareAction.type === 'prepare_purchase_order_package'
+                        ? 'Prepare order'
+                        : 'Prepare package'}
                   </button>
                 ) : null}
                 {issuePackage?.htmlDocumentId ? (
@@ -3069,6 +3160,28 @@ function FinanceWorkspace({
                   >
                     <FileDown size={16} />
                     Credit UBL
+                  </a>
+                ) : null}
+                {purchaseOrderPackage?.htmlDocumentId ? (
+                  <a
+                    className="secondary-button"
+                    aria-label={`Download purchase order ${purchaseOrderPackage.issueReference} for ${job.title}`}
+                    href={`/api/ledger/documents/${encodeURIComponent(purchaseOrderPackage.htmlDocumentId)}/issue-package`}
+                    download
+                  >
+                    <FileDown size={16} />
+                    Order
+                  </a>
+                ) : null}
+                {purchaseOrderPackage?.ublDocumentId ? (
+                  <a
+                    className="secondary-button"
+                    aria-label={`Download purchase order UBL ${purchaseOrderPackage.issueReference} for ${job.title}`}
+                    href={`/api/ledger/documents/${encodeURIComponent(purchaseOrderPackage.ublDocumentId)}/issue-package`}
+                    download
+                  >
+                    <FileDown size={16} />
+                    Order UBL
                   </a>
                 ) : null}
                 {financeActions.map((action) => (
@@ -6350,6 +6463,8 @@ function App() {
   const [bidSelectionRationale, setBidSelectionRationale] = useState('')
   const [bidAddPartnerIds, setBidAddPartnerIds] = useState([])
   const [bidCommitmentDraft, setBidCommitmentDraft] = useState(() => emptyBidCommitmentDraft())
+  const [bidOrderDraft, setBidOrderDraft] = useState(() => emptyBidOrderDraft())
+  const [bidOrderDeliveryDraft, setBidOrderDeliveryDraft] = useState(() => emptyBidOrderDeliveryDraft())
   const [approvalFocus, setApprovalFocus] = useState(null)
   const [approvalReview, setApprovalReview] = useState(null)
   const [approvalReason, setApprovalReason] = useState('')
@@ -6397,6 +6512,8 @@ function App() {
   const [invoiceDraft, setInvoiceDraft] = useState(() => emptyInvoiceDraft())
   const [financeAction, setFinanceAction] = useState(null)
   const [financeActionDraft, setFinanceActionDraft] = useState(emptyFinanceActionDraft)
+  const [financeOrderDelivery, setFinanceOrderDelivery] = useState(null)
+  const [financeOrderDeliveryDraft, setFinanceOrderDeliveryDraft] = useState(() => emptyBidOrderDeliveryDraft())
   const [clientEditor, setClientEditor] = useState(null)
   const [clientDraft, setClientDraft] = useState(() => emptyClientDraft())
   const [clientAction, setClientAction] = useState(null)
@@ -7331,6 +7448,111 @@ function App() {
       jobId: bidPackage.jobId || null,
       jobTitle: `${bidPackage.packageNumber} purchasing commitment`,
     })
+  }
+
+  function openBidOrderPackage(bidPackage) {
+    setBidOrderDraft({
+      ...emptyBidOrderDraft(),
+      recipient: bidPackage.selectedParticipant?.partner?.email || '',
+    })
+    setBidPackageAction({ type: 'order_package', bidPackage })
+  }
+
+  async function submitBidOrderPackage(event) {
+    event.preventDefault()
+    if (bidPackageAction?.type !== 'order_package') return
+    const { bidPackage } = bidPackageAction
+    const purchaseOrderId = bidPackage.commitment?.purchaseOrderId
+    if (!bidPackage.jobId || !purchaseOrderId || !bidOrderDraft.recipient.trim()) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(bidPackage.jobId)}/purchase-orders/${encodeURIComponent(purchaseOrderId)}/issue-package`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            recipient: bidOrderDraft.recipient.trim(),
+            channel: bidOrderDraft.channel,
+          }),
+        },
+      )
+      setBidPackageAction(null)
+      setBidOrderDraft(emptyBidOrderDraft())
+      if (result.bidPackage) setSelectedBidPackage(result.bidPackage)
+      setData((current) => {
+        if (!current) return current
+        const next = {
+          ...current,
+          dashboard: result.dashboard || current.dashboard,
+          finance: result.finance || current.finance,
+          bidPackages: result.bidPackage ? upsertById(current.bidPackages, result.bidPackage) : current.bidPackages,
+          approvals: result.approval ? upsertById(current.approvals, result.approval) : current.approvals,
+        }
+        return result.job ? reconcileJobCollections(next, result.job) : next
+      })
+      if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
+      notify(result.replayed
+        ? `Purchase-order package ${result.issueReference} reopened. Its delivery approval and attachments remain retained.`
+        : `Purchase-order package ${result.issueReference} retained. Transmission still requires approval and a verified provider receipt.`)
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function reviewBidOrderDelivery(bidPackage) {
+    openApprovals({
+      approvalId: bidPackage.commitment?.issuePackage?.deliveryApprovalId,
+      jobId: bidPackage.jobId || null,
+      jobTitle: `${bidPackage.packageNumber} order transmission`,
+    })
+  }
+
+  function openBidOrderDelivery(bidPackage) {
+    setBidOrderDeliveryDraft(emptyBidOrderDeliveryDraft())
+    setBidPackageAction({ type: 'order_delivery', bidPackage })
+  }
+
+  async function submitBidOrderDelivery(event) {
+    event.preventDefault()
+    if (bidPackageAction?.type !== 'order_delivery') return
+    const communicationId = bidPackageAction.bidPackage.commitment?.issuePackage?.communicationId
+    if (!communicationId || !bidOrderDeliveryDraft.integration.trim() || !bidOrderDeliveryDraft.providerMessageId.trim()) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/communications/${encodeURIComponent(communicationId)}/delivery-receipt`, {
+        method: 'POST',
+        body: JSON.stringify({
+          integration: bidOrderDeliveryDraft.integration.trim(),
+          providerMessageId: bidOrderDeliveryDraft.providerMessageId.trim(),
+          sentAt: bidOrderDeliveryDraft.sentAt ? toIsoDateTime(bidOrderDeliveryDraft.sentAt) : null,
+        }),
+      })
+      setBidPackageAction(null)
+      setBidOrderDeliveryDraft(emptyBidOrderDeliveryDraft())
+      if (result.bidPackage) setSelectedBidPackage(result.bidPackage)
+      setData((current) => {
+        if (!current) return current
+        const next = {
+          ...current,
+          dashboard: result.dashboard || current.dashboard,
+          finance: result.finance || current.finance,
+          bidPackages: result.bidPackage ? upsertById(current.bidPackages, result.bidPackage) : current.bidPackages,
+        }
+        return result.job ? reconcileJobCollections(next, result.job) : next
+      })
+      if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
+      notify(`Verified provider receipt retained for ${result.purchaseOrder?.issuePackage?.issueReference || 'the purchase order'}. The order is now an external commitment; no payment was initiated.`)
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   async function runCycle() {
@@ -9863,24 +10085,38 @@ function App() {
     }
   }
 
-  async function prepareInvoicePackage(item, action) {
+  async function prepareFinancePackage(item, action) {
     const creditNotePackage = action?.type === 'prepare_credit_note_package'
-    if (!item?.jobId || (creditNotePackage ? !action?.creditNoteId : !action?.invoiceId)) {
-      setError(`The approved ${creditNotePackage ? 'credit note' : 'invoice'} is not linked to a retained finance row.`)
+    const purchaseOrderPackage = action?.type === 'prepare_purchase_order_package'
+    const sourceId = purchaseOrderPackage ? action?.purchaseOrderId : creditNotePackage ? action?.creditNoteId : action?.invoiceId
+    const sourceLabel = purchaseOrderPackage ? 'purchase order' : creditNotePackage ? 'credit note' : 'invoice'
+    if (!item?.jobId || !sourceId) {
+      setError(`The approved ${sourceLabel} is not linked to a retained finance row.`)
       return
     }
     setSubmitting(true)
     try {
-      const route = creditNotePackage
-        ? `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/credit-notes/${encodeURIComponent(action.creditNoteId)}/issue-package`
-        : `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/invoices/${encodeURIComponent(action.invoiceId)}/issue-package`
+      const route = purchaseOrderPackage
+        ? `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/purchase-orders/${encodeURIComponent(action.purchaseOrderId)}/issue-package`
+        : creditNotePackage
+          ? `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/credit-notes/${encodeURIComponent(action.creditNoteId)}/issue-package`
+          : `/api/ledger/jobs/${encodeURIComponent(item.jobId)}/invoices/${encodeURIComponent(action.invoiceId)}/issue-package`
       const result = await api(route, {
         method: 'POST',
-        body: JSON.stringify({ actor: 'office_operator' }),
+        body: JSON.stringify({
+          actor: 'office_operator',
+          ...(purchaseOrderPackage ? { recipient: action.recipient || undefined, channel: 'email' } : {}),
+        }),
       })
-      notify(
-        `${creditNotePackage ? 'Credit note' : 'Invoice'} ${result.issueReference} retained with ${result.structuredExportIncluded ? 'HTML and UBL attachments' : 'a human-readable attachment'}. ${creditNotePackage ? 'The receivable was adjusted; delivery' : 'Delivery'} still requires approval and a verified receipt.`,
-      )
+      if (purchaseOrderPackage) {
+        notify(
+          `Purchase order ${result.issueReference} retained with HTML and generic OASIS UBL 2.1 attachments. Transmission still requires approval and a verified provider receipt.`,
+        )
+      } else {
+        notify(
+          `${creditNotePackage ? 'Credit note' : 'Invoice'} ${result.issueReference} retained with ${result.structuredExportIncluded ? 'HTML and UBL attachments' : 'a human-readable attachment'}. ${creditNotePackage ? 'The receivable was adjusted; delivery' : 'Delivery'} still requires approval and a verified receipt.`,
+        )
+      }
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -9892,6 +10128,15 @@ function App() {
   function openFinanceControl(item, action) {
     if (!item?.jobId || !action?.type || !FINANCE_ACTION_LABELS[action.type]) {
       setError('The finance action is not linked to a supported ledger workflow.')
+      return
+    }
+    if (action.type === 'record_purchase_order_delivery') {
+      if (!action.communicationId || !action.purchaseOrderId) {
+        setError('The approved purchase-order delivery is missing its retained communication link.')
+        return
+      }
+      setFinanceOrderDelivery({ item, action })
+      setFinanceOrderDeliveryDraft(emptyBidOrderDeliveryDraft())
       return
     }
     const paymentAmount = Number(
@@ -9938,6 +10183,45 @@ function App() {
   function closeFinanceControl() {
     setFinanceAction(null)
     setFinanceActionDraft(emptyFinanceActionDraft())
+  }
+
+  function closeFinanceOrderDelivery() {
+    setFinanceOrderDelivery(null)
+    setFinanceOrderDeliveryDraft(emptyBidOrderDeliveryDraft())
+  }
+
+  async function submitFinanceOrderDelivery(event) {
+    event.preventDefault()
+    const communicationId = financeOrderDelivery?.action?.communicationId
+    if (
+      !communicationId ||
+      !financeOrderDeliveryDraft.integration.trim() ||
+      !financeOrderDeliveryDraft.providerMessageId.trim() ||
+      !financeOrderDeliveryDraft.sentAt
+    ) {
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      await api(`/api/ledger/communications/${encodeURIComponent(communicationId)}/delivery-receipt`, {
+        method: 'POST',
+        body: JSON.stringify({
+          integration: financeOrderDeliveryDraft.integration.trim(),
+          providerMessageId: financeOrderDeliveryDraft.providerMessageId.trim(),
+          sentAt: toIsoDateTime(financeOrderDeliveryDraft.sentAt),
+        }),
+      })
+      notify(
+        `Verified provider receipt retained for ${financeOrderDelivery.action.issueReference || 'the purchase order'}. The order is now an external commitment; no payment was initiated.`,
+      )
+      closeFinanceOrderDelivery()
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   async function submitFinanceControl(event) {
@@ -11016,6 +11300,9 @@ function App() {
                 onReviewBidApproval={reviewBidApproval}
                 onPrepareBidCommitment={openBidCommitment}
                 onReviewBidCommitment={reviewBidCommitment}
+                onPrepareBidOrderPackage={openBidOrderPackage}
+                onReviewBidOrderDelivery={reviewBidOrderDelivery}
+                onRecordBidOrderDelivery={openBidOrderDelivery}
               />
             ) : null}
 
@@ -11197,7 +11484,7 @@ function App() {
                 canApprove={capabilities.approvals === true}
                 submitting={submitting}
                 onDraftInvoice={openInvoiceDraft}
-                onPrepareInvoice={prepareInvoicePackage}
+                onPreparePackage={prepareFinancePackage}
                 onAction={openFinanceControl}
                 onOpenApprovals={openApprovals}
                 onOpen={openJobWorkspace}
@@ -14963,6 +15250,136 @@ function App() {
         </div>
       ) : null}
 
+      {bidPackageAction?.type === 'order_package' ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section
+            className="modal bid-order-package-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bid-order-package-modal-title"
+            data-testid="bid-order-package-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && !submitting) setBidPackageAction(null)
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Controlled order issue</p>
+                <h2 id="bid-order-package-modal-title">Prepare purchase-order package</h2>
+                <p>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.commitment?.purchaseOrder?.supplier}</p>
+              </div>
+              <button className="icon-button" aria-label="Close purchase-order package" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidOrderPackage}>
+              <div className="bid-commitment-review">
+                <div><span>Approved net</span><strong>{currency.format(bidPackageAction.bidPackage.commitment?.purchaseOrder?.amount || 0)}</strong></div>
+                <div><span>Required by</span><strong>{formatDate(bidPackageAction.bidPackage.commitment?.purchaseOrder?.requiredBy)}</strong></div>
+                <div><span>Source</span><strong>{bidPackageAction.bidPackage.commitment?.purchaseOrder?.data?.source?.terms?.costCode || 'SUBCONTRACT'}</strong></div>
+                <div><span>Integrity</span><strong>{bidPackageAction.bidPackage.commitment?.integrityValid ? 'Current source verified' : 'Source verification failed'}</strong></div>
+              </div>
+              <div className="form-grid bid-commitment-form">
+                <label>
+                  Supplier recipient
+                  <input
+                    autoFocus
+                    required
+                    type="email"
+                    value={bidOrderDraft.recipient}
+                    onChange={(event) => setBidOrderDraft({ ...bidOrderDraft, recipient: event.target.value })}
+                    placeholder="orders@supplier.example"
+                  />
+                </label>
+                <label>
+                  Delivery channel
+                  <select value={bidOrderDraft.channel} onChange={(event) => setBidOrderDraft({ ...bidOrderDraft, channel: event.target.value })}>
+                    <option value="email">Email integration</option>
+                    <option value="supplier_portal">Supplier portal integration</option>
+                  </select>
+                </label>
+                <p className="workflow-note form-span">
+                  This freezes a durable PO number plus human-readable HTML and generic OASIS UBL 2.1 Order attachments. It creates a separate transmission approval and does not send, certify Peppol delivery, sign a subcontract, or move money.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !bidOrderDraft.recipient.trim()}>
+                  <PackageCheck size={15} /> {submitting ? 'Preparing...' : 'Freeze package and request approval'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {bidPackageAction?.type === 'order_delivery' ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section
+            className="modal bid-order-delivery-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bid-order-delivery-modal-title"
+            data-testid="bid-order-delivery-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && !submitting) setBidPackageAction(null)
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Verified delivery evidence</p>
+                <h2 id="bid-order-delivery-modal-title">Record provider receipt</h2>
+                <p>{bidPackageAction.bidPackage.commitment?.issuePackage?.issueReference} / {bidPackageAction.bidPackage.commitment?.issuePackage?.communication?.data?.recipient}</p>
+              </div>
+              <button className="icon-button" aria-label="Close provider receipt" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidOrderDelivery}>
+              <div className="form-grid bid-commitment-form">
+                <label>
+                  Configured integration ID
+                  <input
+                    autoFocus
+                    required
+                    minLength="2"
+                    maxLength="120"
+                    value={bidOrderDeliveryDraft.integration}
+                    onChange={(event) => setBidOrderDeliveryDraft({ ...bidOrderDeliveryDraft, integration: event.target.value })}
+                    placeholder="verified_supplier_gateway"
+                  />
+                </label>
+                <label>
+                  Provider message ID
+                  <input
+                    required
+                    minLength="3"
+                    maxLength="240"
+                    value={bidOrderDeliveryDraft.providerMessageId}
+                    onChange={(event) => setBidOrderDeliveryDraft({ ...bidOrderDeliveryDraft, providerMessageId: event.target.value })}
+                    placeholder="provider-order-000123"
+                  />
+                </label>
+                <label>
+                  Provider sent at
+                  <input
+                    required
+                    type="datetime-local"
+                    value={bidOrderDeliveryDraft.sentAt}
+                    onChange={(event) => setBidOrderDeliveryDraft({ ...bidOrderDeliveryDraft, sentAt: event.target.value })}
+                  />
+                </label>
+                <p className="workflow-note form-span">
+                  Record this only after the configured provider has returned delivery evidence for the approved recipient and package. This action marks the purchase order as externally committed; it does not perform the delivery itself or initiate payment.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || bidOrderDeliveryDraft.integration.trim().length < 2 || bidOrderDeliveryDraft.providerMessageId.trim().length < 3 || !bidOrderDeliveryDraft.sentAt}>
+                  <MailCheck size={15} /> {submitting ? 'Recording...' : 'Record verified receipt'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
       {bidPackageAction?.type === 'add_participants' ? (
         <div className="modal-backdrop bid-package-backdrop" role="presentation">
           <section className="modal bid-add-participants-modal" role="dialog" aria-modal="true" aria-labelledby="bid-add-participants-title" data-testid="bid-add-participants-modal">
@@ -15626,6 +16043,96 @@ function App() {
                       : clientAction.type === 'selection'
                         ? 'Request selection approval'
                         : 'Request resolution approval'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+      {financeOrderDelivery ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="modal finance-order-delivery-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="finance-order-delivery-title"
+            data-testid="finance-order-delivery-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && !submitting) closeFinanceOrderDelivery()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Verified supplier delivery</p>
+                <h2 id="finance-order-delivery-title">Record provider receipt</h2>
+                <p>
+                  {financeOrderDelivery.action.issueReference || 'Purchase order'} /{' '}
+                  {financeOrderDelivery.action.recipient || financeOrderDelivery.action.supplier || 'retained supplier'}
+                </p>
+              </div>
+              <button className="icon-button" aria-label="Close order delivery" onClick={closeFinanceOrderDelivery}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitFinanceOrderDelivery}>
+              <div className="form-grid">
+                <label>
+                  Configured integration ID
+                  <input
+                    autoFocus
+                    required
+                    minLength="2"
+                    maxLength="120"
+                    value={financeOrderDeliveryDraft.integration}
+                    onChange={(event) =>
+                      setFinanceOrderDeliveryDraft({ ...financeOrderDeliveryDraft, integration: event.target.value })
+                    }
+                    placeholder="verified_supplier_gateway"
+                  />
+                </label>
+                <label>
+                  Provider message ID
+                  <input
+                    required
+                    minLength="3"
+                    maxLength="240"
+                    value={financeOrderDeliveryDraft.providerMessageId}
+                    onChange={(event) =>
+                      setFinanceOrderDeliveryDraft({ ...financeOrderDeliveryDraft, providerMessageId: event.target.value })
+                    }
+                    placeholder="provider-order-000123"
+                  />
+                </label>
+                <label>
+                  Provider sent at
+                  <input
+                    required
+                    type="datetime-local"
+                    value={financeOrderDeliveryDraft.sentAt}
+                    onChange={(event) =>
+                      setFinanceOrderDeliveryDraft({ ...financeOrderDeliveryDraft, sentAt: event.target.value })
+                    }
+                  />
+                </label>
+                <p className="workflow-note form-span">
+                  Record this only after the configured provider has returned delivery evidence for the approved recipient and immutable
+                  order attachments. This records an existing delivery receipt; it does not contact the supplier or initiate payment.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={closeFinanceOrderDelivery}>
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={
+                    submitting ||
+                    financeOrderDeliveryDraft.integration.trim().length < 2 ||
+                    financeOrderDeliveryDraft.providerMessageId.trim().length < 3 ||
+                    !financeOrderDeliveryDraft.sentAt
+                  }
+                >
+                  <MailCheck size={15} /> {submitting ? 'Recording...' : 'Record verified receipt'}
                 </button>
               </div>
             </form>

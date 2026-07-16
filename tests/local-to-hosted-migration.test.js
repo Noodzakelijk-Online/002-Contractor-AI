@@ -111,10 +111,17 @@ function createBackupFixture(t, suffix = 'success') {
   const tradePartner = source.upsertTradePartner({
     name: `Migration Supplier ${suffix}`,
     partnerType: 'supplier',
+    contactName: 'Migration order desk',
+    email: `migration-supplier-${suffix}@example.test`,
+    phone: '+31 10 555 12 34',
+    address: 'Migration supplier street 8',
+    city: 'Rotterdam',
+    country: 'NL',
     registrationNumber: '66778899',
     vatNumber: 'NL123456789B01',
     verificationReference: `Migration fixture registry check ${suffix}`,
-    verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
+    verifiedAt: new Date(Date.now() - 86_400_000).toISOString(),
+    data: { postalCode: '3011 AA' }
   }, { actor: 'migration_fixture' });
   const purchaseOrder = source.createPurchaseOrder(job.id, {
     supplier: tradePartner.name,
@@ -304,6 +311,21 @@ function createBackupFixture(t, suffix = 'success') {
     resolvedBy: 'migration_fixture_approver',
     reason: 'Migration purchasing envelope, source hash, and current partner compliance verified.'
   });
+  const bidOrderPackage = source.preparePurchaseOrderIssuePackage(
+    bidJob.id,
+    preparedBidCommitment.purchaseOrder.id,
+    {},
+    { actor: 'migration_fixture' }
+  );
+  source.resolveApproval(bidOrderPackage.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration order recipient and both immutable attachments verified.'
+  });
+  source.recordCommunicationDelivery(bidOrderPackage.communication.id, {
+    integration: 'migration_verified_order_provider',
+    providerMessageId: `migration-order-${suffix}`
+  }, { actor: 'migration_fixture_provider' });
   const bidCommitment = source.getBidPackage(bidPackage.id).commitment;
   source.close();
 
@@ -330,7 +352,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, bidCommitment, bidJob, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
+  return { backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -420,7 +442,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '028_bid_commitment_bridge');
+  assert.equal(migration.migrationVersion, '029_purchase_order_issue_packages');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -471,16 +493,23 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     const migratedBidPackage = hosted.getBidPackage(fixture.bidPackage.id);
     assert.equal(migratedBidPackage.jobId, fixture.bidJob.id);
     assert.equal(migratedBidPackage.commitment.purchaseOrderId, fixture.bidCommitment.purchaseOrderId);
-    assert.equal(migratedBidPackage.commitment.status, 'ready_to_order');
+    assert.equal(migratedBidPackage.commitment.status, 'ordered');
     assert.equal(migratedBidPackage.commitment.integrityValid, true);
     assert.equal(migratedBidPackage.commitment.spendAuthorized, true);
-    assert.equal(migratedBidPackage.commitment.awardIssued, false);
-    assert.equal(migratedBidPackage.commitment.externalCommitments, 0);
+    assert.equal(migratedBidPackage.commitment.orderIssued, true);
+    assert.equal(migratedBidPackage.commitment.awardIssued, true);
+    assert.equal(migratedBidPackage.commitment.externalCommitments, 1);
+    assert.equal(migratedBidPackage.commitment.issuePackage.providerMessageId, 'migration-order-success');
     assert.equal(migratedBidPackage.commitment.purchaseOrder.data.source.commitmentHash, migratedBidPackage.commitmentHash);
+    const migratedOrderUbl = hosted.getPurchaseOrderIssueDocument(fixture.bidOrderPackage.ublDocument.id, { audit: false });
+    assert.equal(migratedOrderUbl.packageHash, fixture.bidOrderPackage.packageHash);
+    assert.match(migratedOrderUbl.content, /urn:oasis:names:specification:ubl:schema:xsd:Order-2/);
     const migratedBidJob = hosted.getJobDetail(fixture.bidJob.id);
     assert.ok(migratedBidJob.purchaseOrders.some(item =>
       item.id === fixture.bidCommitment.purchaseOrderId
-      && item.status === 'ready_to_order'
+      && item.status === 'ordered'
+      && item.orderIssued === true
+      && item.externalCommitments === 1
       && item.data.source.type === 'bid_package_commitment'
     ));
     const migratedSupplierInvoice = detail.supplierInvoices.find(item => item.id === fixture.supplierInvoice.id);

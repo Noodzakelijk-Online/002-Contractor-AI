@@ -3211,6 +3211,25 @@ app.post('/api/ledger/jobs/:id/purchase-orders', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.preparePurchaseOrderIssuePackage(
+      req.params.id,
+      req.params.purchaseOrderId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'finance') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      bidPackage: operatingLedger.getBidPackageByPurchaseOrder(req.params.purchaseOrderId),
+      job: operatingLedger.getJobDetail(req.params.id),
+      finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/supplier-invoices', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3378,11 +3397,17 @@ app.get('/api/ledger/approvals', (req, res) => {
 app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
-    const bidPackage = approval.targetType === 'bid_package_selection'
-      ? operatingLedger.getBidPackage(approval.targetId)
-      : approval.targetType === 'purchase_order'
-        ? operatingLedger.getBidPackageByPurchaseOrder(approval.targetId)
-        : null;
+    let bidPackage = null;
+    if (approval.targetType === 'bid_package_selection') {
+      bidPackage = operatingLedger.getBidPackage(approval.targetId);
+    } else if (approval.targetType === 'purchase_order') {
+      bidPackage = operatingLedger.getBidPackageByPurchaseOrder(approval.targetId);
+    } else if (approval.targetType === 'communication') {
+      const communication = operatingLedger.getCommunication(approval.targetId);
+      if (communication.data?.source === 'purchase_order_issue_package') {
+        bidPackage = operatingLedger.getBidPackageByPurchaseOrder(communication.data.sourceRecordId);
+      }
+    }
     return {
       success: true,
       approval,
@@ -3901,7 +3926,18 @@ app.post('/api/ledger/communications/:id/delivery-receipt', (req, res) => {
       sentAt: payload.sentAt || payload.sent_at || null,
       receipt: payload.receipt || null
     }, { actor: payload.actor || actorFromRequest(req, 'delivery_receipt_api') });
-    return { success: true, communication, job: operatingLedger.getJobDetail(communication.jobId), dashboard: operatingLedger.dashboardSummary() };
+    const purchaseOrder = communication.data?.source === 'purchase_order_issue_package'
+      ? operatingLedger.getPurchaseOrder(communication.data.sourceRecordId)
+      : null;
+    return {
+      success: true,
+      communication,
+      purchaseOrder,
+      bidPackage: purchaseOrder ? operatingLedger.getBidPackageByPurchaseOrder(purchaseOrder.id) : null,
+      job: operatingLedger.getJobDetail(communication.jobId),
+      finance: purchaseOrder ? operatingLedger.listFinanceReadiness({ limit: 100 }) : null,
+      dashboard: operatingLedger.dashboardSummary()
+    };
   });
 });
 app.post('/api/emergency/activate', (req, res) => res.status(410).json({
@@ -4929,6 +4965,16 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         structuredReadinessChecks: true,
         networkSubmission: false,
         deliveryReceiptApprovalRequired: true
+      },
+      purchasing: {
+        durableNumbering: true,
+        immutableHtmlPackage: true,
+        ubl21OrderExport: true,
+        peppolCertified: false,
+        networkSubmission: false,
+        deliveryApprovalRequired: true,
+        verifiedProviderReceiptRequired: true,
+        externalCommitmentClaim: 'verified_delivery_only'
       },
       automation: {
         ledgerOnly: true,

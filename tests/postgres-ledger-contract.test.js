@@ -1046,7 +1046,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '028_bid_commitment_bridge');
+    assert.equal(migrations.currentVersion, '029_purchase_order_issue_packages');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1127,7 +1127,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('028_bid_commitment_bridge'));
+  assert.deepEqual(versions, Array(4).fill('029_purchase_order_issue_packages'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -1510,13 +1510,37 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
   const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
   try {
     const key = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const organization = ledger.updateOrganizationProfile({
+      legalName: `PostgreSQL Order Contractor ${key} B.V.`,
+      tradingName: 'PostgreSQL Order Contractor',
+      registrationNumber: String(Date.now()).slice(-8),
+      vatNumber: `NL${String(Date.now()).slice(-9)}B01`,
+      email: `postgres-orders-${key}@example.test`,
+      phone: '+31 20 555 12 34',
+      address: 'Hosted order street 14',
+      postalCode: '1012 AB',
+      city: 'Amsterdam',
+      country: 'NL',
+      iban: 'NL91ABNA0417164300',
+      bic: 'ABNANL2A',
+      defaultPaymentTermsDays: 30,
+      defaultQuoteValidityDays: 30
+    }, { actor: 'postgres_bid_test' });
+    assert.equal(organization.readiness.ready, true);
     const partner = ledger.upsertTradePartner({
       name: `PostgreSQL tender partner ${key}`,
       partnerType: 'supplier',
+      contactName: 'Hosted order desk',
+      email: `postgres-supplier-${key}@example.test`,
+      phone: '+31 10 555 12 34',
+      address: 'Hosted supplier street 8',
+      city: 'Rotterdam',
+      country: 'NL',
       registrationNumber: `PG-${key}`,
       vatNumber: 'NL123456789B01',
       verificationReference: `PG-BID-VERIFY-${key}`,
-      verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
+      verifiedAt: new Date(Date.now() - 86_400_000).toISOString(),
+      data: { postalCode: '3011 AA' }
     }, { actor: 'postgres_bid_test' });
     const opportunity = ledger.createOpportunity({
       clientName: `PostgreSQL tender client ${key}`,
@@ -1569,8 +1593,36 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(committed.commitment.awardIssued, false);
     assert.equal(committed.commitment.externalCommitments, 0);
     assert.equal(committed.commitment.purchaseOrder.data.source.commitmentHash, committed.commitmentHash);
+    const orderPackage = ledger.preparePurchaseOrderIssuePackage(
+      converted.job.id,
+      commitment.purchaseOrder.id,
+      {},
+      { actor: 'postgres_bid_test' }
+    );
+    assert.match(orderPackage.issueReference, /^PO-\d{4}-\d{6}$/);
+    assert.equal(orderPackage.documents.length, 2);
+    assert.equal(orderPackage.purchaseOrder.orderIssued, false);
+    assert.equal(orderPackage.externalCommitments, 0);
+    assert.equal(ledger.preparePurchaseOrderIssuePackage(converted.job.id, commitment.purchaseOrder.id).replayed, true);
+    const orderUbl = ledger.getPurchaseOrderIssueDocument(orderPackage.ublDocument.id, { audit: false });
+    assert.match(orderUbl.content, /urn:oasis:names:specification:ubl:schema:xsd:Order-2/);
+    ledger.resolveApproval(orderPackage.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_bid_approver',
+      reason: 'Hosted order recipient and both frozen package formats verified.'
+    });
+    ledger.recordCommunicationDelivery(orderPackage.communication.id, {
+      integration: 'postgres_verified_order_provider',
+      providerMessageId: `postgres-order-${key}`
+    }, { actor: 'postgres_verified_integration' });
+    const issued = ledger.getBidPackage(bidPackage.id);
+    assert.equal(issued.commitment.status, 'ordered');
+    assert.equal(issued.commitment.orderIssued, true);
+    assert.equal(issued.commitment.awardIssued, true);
+    assert.equal(issued.commitment.externalCommitments, 1);
+    assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '028_bid_commitment_bridge');
+    assert.equal(ledger.migrationStatus().currentVersion, '029_purchase_order_issue_packages');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

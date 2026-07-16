@@ -46,6 +46,16 @@ test('finance dashboard plans and invoices retained billing milestones without e
   assert.match(dashboardSource, /Approved source/);
 });
 
+test('finance dashboard completes standalone purchase orders through approved immutable packages and provider receipts', () => {
+  assert.match(dashboardSource, /prepare_purchase_order_package/);
+  assert.match(dashboardSource, /record_purchase_order_delivery/);
+  assert.match(dashboardSource, /purchase-orders\/\$\{encodeURIComponent\(action\.purchaseOrderId\)\}\/issue-package/);
+  assert.match(dashboardSource, /data-testid="finance-order-delivery-modal"/);
+  assert.match(dashboardSource, /communications\/\$\{encodeURIComponent\(communicationId\)\}\/delivery-receipt/);
+  assert.match(dashboardSource, /Download purchase order UBL/);
+  assert.match(dashboardSource, /This records an existing delivery receipt; it does not contact the supplier or initiate payment/);
+});
+
 test('field updates use a bounded operator-scoped IndexedDB outbox only for interrupted requests', () => {
   assert.match(outboxSource, /const DATABASE_VERSION = 2/);
   assert.match(outboxSource, /indexedDB\.open\(DATABASE_NAME, DATABASE_VERSION\)/);

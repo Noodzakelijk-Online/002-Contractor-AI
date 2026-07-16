@@ -341,6 +341,15 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup bid-commitment constraints are incomplete: ${missingCommitmentIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('029_purchase_order_issue_packages')) {
+        if (!retainedTables.has('purchase_order_number_sequences')) {
+          throw new Error('Backup purchase-order issue schema is incomplete: purchase_order_number_sequences.');
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        if (!retainedIndexes.has('idx_purchase_orders_issue_status')) {
+          throw new Error('Backup purchase-order issue constraints are incomplete: idx_purchase_orders_issue_status.');
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {
