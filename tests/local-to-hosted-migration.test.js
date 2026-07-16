@@ -246,6 +246,22 @@ function createBackupFixture(t, suffix = 'success') {
   });
   source.recordAuthenticationFailure(crypto.createHash('sha256').update(`migration-rate-limit-${suffix}`).digest('hex'));
   source.recordApiRateLimitRequest(crypto.createHash('sha256').update(`migration-api-rate-limit-${suffix}`).digest('hex'));
+  const takeoff = source.createTakeoff(job.id, {
+    title: 'Migration measured scope',
+    items: [{
+      description: 'Measured wall finish',
+      measurementType: 'area',
+      length: 12.5,
+      width: 2.8,
+      wastePercent: 7.5,
+      unitCost: 14.25,
+      unitPrice: 31.75,
+      costCode: 'MIG-FIN-100'
+    }]
+  }, { actor: 'migration_fixture' });
+  const convertedTakeoff = source.convertTakeoffToQuote(job.id, takeoff.id, {
+    validUntil: '2026-12-31'
+  }, { actor: 'migration_fixture' });
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -271,7 +287,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, billingMilestone, controlledDocument, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, taskDependency, tradePartner };
+  return { backupDir, backupId, billingMilestone, controlledDocument, convertedTakeoff, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -361,7 +377,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '026_preconstruction_bid_packages');
+  assert.equal(migration.migrationVersion, '027_quantity_takeoffs');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -385,6 +401,12 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
       && document.data.isCurrent === true
     ));
     assert.equal(detail.estimatedHours, 123.123456789);
+    const migratedTakeoff = detail.takeoffs.find(item => item.id === fixture.takeoff.id);
+    assert.equal(migratedTakeoff.status, 'converted');
+    assert.equal(migratedTakeoff.integrityValid, true);
+    assert.equal(migratedTakeoff.quoteId, fixture.convertedTakeoff.quote.id);
+    assert.equal(migratedTakeoff.items[0].quantity, 37.625);
+    assert.equal(detail.quotes.find(item => item.id === migratedTakeoff.quoteId).data.source.snapshotHash, migratedTakeoff.snapshotHash);
     const migratedBillingMilestone = detail.billingMilestones.find(item => item.id === fixture.billingMilestone.id);
     assert.equal(migratedBillingMilestone.status, 'approved');
     assert.equal(migratedBillingMilestone.amount, 123456.78);

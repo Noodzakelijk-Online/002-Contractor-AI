@@ -110,6 +110,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   preconstruction: [
     { key: 'intake', label: 'Client intake', table: 'job_requests', detailKey: 'request' },
     { key: 'bid_package', label: 'Bid / tender package', table: 'bid_packages', detailKey: 'bidPackages' },
+    { key: 'takeoff', label: 'Quantity takeoff', table: 'takeoff_sheets', detailKey: 'takeoffs' },
     { key: 'quote', label: 'Quote or estimate', table: 'quotes', detailKey: 'quotes' },
     { key: 'site_visit', label: 'Site visit / survey', table: 'site_visits', detailKey: 'siteVisits' },
     { key: 'materials', label: 'Material scope', table: 'material_requirements', detailKey: 'materials' },
@@ -348,6 +349,97 @@ const BID_PARTICIPANT_STATUSES = new Set([
   'selected',
   'not_selected'
 ]);
+
+const TAKEOFF_STATUSES = new Set(['draft', 'converted', 'cancelled']);
+const TAKEOFF_MEASUREMENT_TYPES = new Set(['count', 'linear', 'area', 'volume', 'manual']);
+const TAKEOFF_CATEGORIES = new Set(['material', 'labor', 'equipment', 'subcontract', 'other']);
+
+function roundQuantity(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 10_000) / 10_000;
+}
+
+function takeoffNumber(value, label, options = {}) {
+  const number = Number(value);
+  const minimum = options.minimum ?? 0;
+  const maximum = options.maximum ?? 1_000_000;
+  if (!Number.isFinite(number) || number < minimum || number > maximum) {
+    throw ledgerInputError('takeoff_measurement_invalid', `${label} must be between ${minimum} and ${maximum}.`);
+  }
+  return number;
+}
+
+function normalizeTakeoffItem(payload = {}) {
+  const description = normalizeText(payload.description || payload.name, '');
+  if (description.length < 2 || description.length > 240) {
+    throw ledgerInputError('takeoff_item_description_invalid', 'Takeoff item description must be between 2 and 240 characters.');
+  }
+  const measurementType = normalizeStatus(payload.measurementType || payload.measurement_type, 'manual');
+  if (!TAKEOFF_MEASUREMENT_TYPES.has(measurementType)) {
+    throw ledgerInputError('takeoff_measurement_type_invalid', `Measurement type must be one of: ${[...TAKEOFF_MEASUREMENT_TYPES].join(', ')}.`);
+  }
+  const category = normalizeStatus(payload.category, 'material');
+  if (!TAKEOFF_CATEGORIES.has(category)) {
+    throw ledgerInputError('takeoff_category_invalid', `Takeoff category must be one of: ${[...TAKEOFF_CATEGORIES].join(', ')}.`);
+  }
+  const count = takeoffNumber(payload.count ?? payload.countValue ?? payload.count_value ?? 1, 'Count', { minimum: 0.0001 });
+  const length = takeoffNumber(payload.length ?? payload.lengthValue ?? payload.length_value ?? 0, 'Length');
+  const width = takeoffNumber(payload.width ?? payload.widthValue ?? payload.width_value ?? 0, 'Width');
+  const height = takeoffNumber(payload.height ?? payload.heightValue ?? payload.height_value ?? 0, 'Height');
+  const wastePercent = takeoffNumber(payload.wastePercent ?? payload.waste_percent ?? 0, 'Waste percentage', { maximum: 1000 });
+  let measuredQuantity;
+  if (measurementType === 'manual') {
+    measuredQuantity = takeoffNumber(payload.quantity, 'Quantity', { minimum: 0.0001, maximum: 1_000_000_000 });
+  } else if (measurementType === 'count') {
+    measuredQuantity = count;
+  } else if (measurementType === 'linear') {
+    if (length <= 0) throw ledgerInputError('takeoff_length_required', 'A positive length is required for a linear measurement.');
+    measuredQuantity = count * length;
+  } else if (measurementType === 'area') {
+    if (length <= 0 || width <= 0) throw ledgerInputError('takeoff_area_dimensions_required', 'Positive length and width are required for an area measurement.');
+    measuredQuantity = count * length * width;
+  } else {
+    if (length <= 0 || width <= 0 || height <= 0) {
+      throw ledgerInputError('takeoff_volume_dimensions_required', 'Positive length, width, and height are required for a volume measurement.');
+    }
+    measuredQuantity = count * length * width * height;
+  }
+  const quantity = roundQuantity(measuredQuantity * (1 + wastePercent / 100));
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1_000_000_000) {
+    throw ledgerInputError('takeoff_quantity_invalid', 'Calculated takeoff quantity is outside the supported range.');
+  }
+  const unitCost = takeoffNumber(payload.unitCost ?? payload.unit_cost ?? 0, 'Unit cost', { maximum: 1_000_000_000 });
+  const unitPrice = takeoffNumber(payload.unitPrice ?? payload.unit_price ?? 0, 'Unit price', { maximum: 1_000_000_000 });
+  const totalCost = roundMoney(quantity * unitCost);
+  const totalPrice = roundMoney(quantity * unitPrice);
+  if (!Number.isFinite(totalCost) || !Number.isFinite(totalPrice) || totalCost > 1_000_000_000_000 || totalPrice > 1_000_000_000_000) {
+    throw ledgerInputError('takeoff_total_invalid', 'Calculated takeoff totals exceed the supported range.');
+  }
+  const defaultUnit = { count: 'ea', linear: 'm', area: 'm2', volume: 'm3', manual: 'unit' }[measurementType];
+  const unit = normalizeText(payload.unit, defaultUnit);
+  const costCode = normalizeText(payload.costCode || payload.cost_code, 'estimate');
+  const sourceReference = normalizeText(payload.sourceReference || payload.source_reference, '');
+  if (unit.length < 1 || unit.length > 24) throw ledgerInputError('takeoff_unit_invalid', 'Takeoff unit must be between 1 and 24 characters.');
+  if (costCode.length > 80) throw ledgerInputError('takeoff_cost_code_invalid', 'Takeoff cost code must be 80 characters or fewer.');
+  if (sourceReference.length > 240) throw ledgerInputError('takeoff_source_reference_invalid', 'Takeoff source reference must be 240 characters or fewer.');
+  return {
+    description,
+    category,
+    measurementType,
+    unit,
+    count,
+    length,
+    width,
+    height,
+    wastePercent,
+    quantity,
+    unitCost,
+    unitPrice,
+    totalCost,
+    totalPrice,
+    costCode: costCode || 'estimate',
+    sourceReference: sourceReference || null
+  };
+}
 
 function normalizeBidPackageStatus(value, fallback = 'draft') {
   const status = normalizeStatus(value, fallback);
@@ -2317,6 +2409,66 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON bid_package_participants(bid_package_id, status, total, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_bid_participants_partner
           ON bid_package_participants(trade_partner_id, status, updated_at DESC);
+      `);
+    }
+  },
+  {
+    version: '027_quantity_takeoffs',
+    description: 'Retain server-calculated quantity takeoffs and tamper-evident conversion into approval-gated estimates.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS takeoff_sheets (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          tax_rate DOUBLE PRECISION NOT NULL DEFAULT 21,
+          total_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+          subtotal DOUBLE PRECISION NOT NULL DEFAULT 0,
+          tax_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+          total DOUBLE PRECISION NOT NULL DEFAULT 0,
+          quote_id TEXT REFERENCES quotes(id) ON DELETE SET NULL,
+          snapshot_hash TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_takeoff_sheets_job
+          ON takeoff_sheets(job_id, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_takeoff_sheets_quote
+          ON takeoff_sheets(quote_id)
+          WHERE quote_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS takeoff_items (
+          id TEXT PRIMARY KEY,
+          takeoff_id TEXT NOT NULL REFERENCES takeoff_sheets(id) ON DELETE CASCADE,
+          sequence_number INTEGER NOT NULL,
+          category TEXT NOT NULL DEFAULT 'material',
+          description TEXT NOT NULL,
+          measurement_type TEXT NOT NULL DEFAULT 'manual',
+          unit TEXT NOT NULL DEFAULT 'unit',
+          count_value DOUBLE PRECISION NOT NULL DEFAULT 1,
+          length_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+          width_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+          height_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+          waste_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+          quantity DOUBLE PRECISION NOT NULL,
+          unit_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+          unit_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+          total_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+          total_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+          cost_code TEXT NOT NULL DEFAULT 'estimate',
+          source_reference TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(takeoff_id, sequence_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_takeoff_items_sheet
+          ON takeoff_items(takeoff_id, sequence_number);
+        CREATE INDEX IF NOT EXISTS idx_takeoff_items_cost_code
+          ON takeoff_items(cost_code, category);
       `);
     }
   }
@@ -7695,6 +7847,313 @@ class ContractorOperatingLedger {
     });
   }
 
+  requireTakeoff(jobId, takeoffId) {
+    const row = this.db.prepare('SELECT * FROM takeoff_sheets WHERE id = ? AND job_id = ?').get(takeoffId, jobId);
+    if (!row) throw ledgerInputError('takeoff_not_found', 'Quantity takeoff was not found for this job.', null, 404);
+    return row;
+  }
+
+  assertTakeoffEditable(row) {
+    if (row.status !== 'draft' || row.quote_id || row.snapshot_hash) {
+      throw ledgerInputError('takeoff_read_only', 'Converted or cancelled takeoffs are immutable.', null, 409);
+    }
+  }
+
+  refreshTakeoffTotals(takeoffId) {
+    const row = this.db.prepare('SELECT tax_rate FROM takeoff_sheets WHERE id = ?').get(takeoffId);
+    if (!row) throw ledgerInputError('takeoff_not_found', 'Quantity takeoff was not found.', null, 404);
+    const totals = this.db.prepare(`
+      SELECT COALESCE(SUM(total_cost), 0) AS total_cost, COALESCE(SUM(total_price), 0) AS subtotal
+      FROM takeoff_items WHERE takeoff_id = ?
+    `).get(takeoffId);
+    const totalCost = roundMoney(totals.total_cost || 0);
+    const subtotal = roundMoney(totals.subtotal || 0);
+    const taxAmount = roundMoney(subtotal * (normalizeNumber(row.tax_rate, 0) / 100));
+    const total = roundMoney(subtotal + taxAmount);
+    this.db.prepare(`
+      UPDATE takeoff_sheets
+      SET total_cost = ?, subtotal = ?, tax_amount = ?, total = ?, updated_at = ?
+      WHERE id = ?
+    `).run(totalCost, subtotal, taxAmount, total, nowIso(), takeoffId);
+    return { totalCost, subtotal, taxAmount, total };
+  }
+
+  insertTakeoffItem(takeoffId, payload = {}) {
+    const itemCount = Number(this.db.prepare('SELECT COUNT(*) AS count FROM takeoff_items WHERE takeoff_id = ?').get(takeoffId).count || 0);
+    if (itemCount >= 50) throw ledgerInputError('takeoff_item_limit', 'A takeoff can retain at most 50 measurement rows.');
+    const normalized = normalizeTakeoffItem(payload);
+    const sequence = Number(this.db.prepare('SELECT COALESCE(MAX(sequence_number), 0) AS value FROM takeoff_items WHERE takeoff_id = ?').get(takeoffId).value || 0) + 1;
+    const id = makeId('takeoff_item');
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO takeoff_items (
+        id, takeoff_id, sequence_number, category, description, measurement_type, unit,
+        count_value, length_value, width_value, height_value, waste_percent, quantity,
+        unit_cost, unit_price, total_cost, total_price, cost_code, source_reference,
+        data_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, takeoffId, sequence, normalized.category, normalized.description, normalized.measurementType, normalized.unit,
+      normalized.count, normalized.length, normalized.width, normalized.height, normalized.wastePercent, normalized.quantity,
+      normalized.unitCost, normalized.unitPrice, normalized.totalCost, normalized.totalPrice, normalized.costCode,
+      normalized.sourceReference, toJson({ calculation: 'server_derived' }), timestamp, timestamp
+    );
+    return this.mapTakeoffItem(this.db.prepare('SELECT * FROM takeoff_items WHERE id = ?').get(id));
+  }
+
+  createTakeoff(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const title = normalizeText(payload.title || payload.name, '');
+      if (title.length < 2 || title.length > 160) {
+        throw ledgerInputError('takeoff_title_invalid', 'Takeoff title must be between 2 and 160 characters.');
+      }
+      const notes = normalizeText(payload.notes, '');
+      if (notes.length > 4000) throw ledgerInputError('takeoff_notes_too_long', 'Takeoff notes must be 4,000 characters or fewer.');
+      const currency = normalizeCommercialCurrency(payload.currency);
+      const taxRate = normalizeCommercialTaxRate(payload.taxRate ?? payload.tax_rate, 21);
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (items.length > 50) throw ledgerInputError('takeoff_item_limit', 'A takeoff can retain at most 50 measurement rows.');
+      const id = makeId('takeoff');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO takeoff_sheets (
+          id, job_id, title, status, currency, tax_rate, total_cost, subtotal,
+          tax_amount, total, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'draft', ?, ?, 0, 0, 0, 0, ?, ?, ?)
+      `).run(
+        id, jobId, title, currency, taxRate,
+        toJson({ notes: notes || null, calculation: 'server_derived', externalCommitments: 0 }),
+        timestamp, timestamp
+      );
+      for (const item of items) this.insertTakeoffItem(id, item);
+      this.refreshTakeoffTotals(id);
+      const takeoff = this.getTakeoff(jobId, id);
+      this.audit({
+        entityType: 'takeoff',
+        entityId: id,
+        jobId,
+        action: 'create_quantity_takeoff',
+        actor: options.actor || 'Contractor.AI',
+        after: takeoff,
+        metadata: { itemCount: takeoff.itemCount, externalCommitments: 0 }
+      });
+      return takeoff;
+    });
+  }
+
+  updateTakeoff(jobId, takeoffId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.requireTakeoff(jobId, takeoffId);
+      this.assertTakeoffEditable(row);
+      const before = this.getTakeoff(jobId, takeoffId);
+      const title = payload.title === undefined ? row.title : normalizeText(payload.title, '');
+      if (title.length < 2 || title.length > 160) {
+        throw ledgerInputError('takeoff_title_invalid', 'Takeoff title must be between 2 and 160 characters.');
+      }
+      const currentData = fromJson(row.data_json, {});
+      const notes = payload.notes === undefined ? normalizeText(currentData.notes, '') : normalizeText(payload.notes, '');
+      if (notes.length > 4000) throw ledgerInputError('takeoff_notes_too_long', 'Takeoff notes must be 4,000 characters or fewer.');
+      const currency = payload.currency === undefined ? row.currency : normalizeCommercialCurrency(payload.currency);
+      const taxRate = payload.taxRate === undefined && payload.tax_rate === undefined
+        ? normalizeNumber(row.tax_rate, 21)
+        : normalizeCommercialTaxRate(payload.taxRate ?? payload.tax_rate, 21);
+      this.db.prepare(`
+        UPDATE takeoff_sheets SET title = ?, currency = ?, tax_rate = ?, data_json = ?, updated_at = ? WHERE id = ?
+      `).run(title, currency, taxRate, toJson({ ...currentData, notes: notes || null }), nowIso(), takeoffId);
+      this.refreshTakeoffTotals(takeoffId);
+      const takeoff = this.getTakeoff(jobId, takeoffId);
+      this.audit({ entityType: 'takeoff', entityId: takeoffId, jobId, action: 'update_quantity_takeoff', actor: options.actor || 'Contractor.AI', before, after: takeoff });
+      return takeoff;
+    });
+  }
+
+  addTakeoffItem(jobId, takeoffId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.requireTakeoff(jobId, takeoffId);
+      this.assertTakeoffEditable(row);
+      const item = this.insertTakeoffItem(takeoffId, payload);
+      this.refreshTakeoffTotals(takeoffId);
+      const takeoff = this.getTakeoff(jobId, takeoffId);
+      this.audit({ entityType: 'takeoff_item', entityId: item.id, jobId, action: 'add_takeoff_measurement', actor: options.actor || 'Contractor.AI', after: item, metadata: { takeoffId } });
+      return { item, takeoff };
+    });
+  }
+
+  updateTakeoffItem(jobId, takeoffId, itemId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const takeoffRow = this.requireTakeoff(jobId, takeoffId);
+      this.assertTakeoffEditable(takeoffRow);
+      const row = this.db.prepare('SELECT * FROM takeoff_items WHERE id = ? AND takeoff_id = ?').get(itemId, takeoffId);
+      if (!row) throw ledgerInputError('takeoff_item_not_found', 'Takeoff measurement was not found.', null, 404);
+      const before = this.mapTakeoffItem(row);
+      const normalized = normalizeTakeoffItem({ ...before, ...payload });
+      this.db.prepare(`
+        UPDATE takeoff_items SET
+          category = ?, description = ?, measurement_type = ?, unit = ?, count_value = ?,
+          length_value = ?, width_value = ?, height_value = ?, waste_percent = ?, quantity = ?,
+          unit_cost = ?, unit_price = ?, total_cost = ?, total_price = ?, cost_code = ?,
+          source_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND takeoff_id = ?
+      `).run(
+        normalized.category, normalized.description, normalized.measurementType, normalized.unit, normalized.count,
+        normalized.length, normalized.width, normalized.height, normalized.wastePercent, normalized.quantity,
+        normalized.unitCost, normalized.unitPrice, normalized.totalCost, normalized.totalPrice, normalized.costCode,
+        normalized.sourceReference, toJson({ ...before.data, calculation: 'server_derived' }), nowIso(), itemId, takeoffId
+      );
+      this.refreshTakeoffTotals(takeoffId);
+      const item = this.mapTakeoffItem(this.db.prepare('SELECT * FROM takeoff_items WHERE id = ?').get(itemId));
+      const takeoff = this.getTakeoff(jobId, takeoffId);
+      this.audit({ entityType: 'takeoff_item', entityId: itemId, jobId, action: 'update_takeoff_measurement', actor: options.actor || 'Contractor.AI', before, after: item, metadata: { takeoffId } });
+      return { item, takeoff };
+    });
+  }
+
+  removeTakeoffItem(jobId, takeoffId, itemId, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const takeoffRow = this.requireTakeoff(jobId, takeoffId);
+      this.assertTakeoffEditable(takeoffRow);
+      const row = this.db.prepare('SELECT * FROM takeoff_items WHERE id = ? AND takeoff_id = ?').get(itemId, takeoffId);
+      if (!row) throw ledgerInputError('takeoff_item_not_found', 'Takeoff measurement was not found.', null, 404);
+      const before = this.mapTakeoffItem(row);
+      this.db.prepare('DELETE FROM takeoff_items WHERE id = ? AND takeoff_id = ?').run(itemId, takeoffId);
+      this.refreshTakeoffTotals(takeoffId);
+      const takeoff = this.getTakeoff(jobId, takeoffId);
+      this.audit({ entityType: 'takeoff_item', entityId: itemId, jobId, action: 'remove_takeoff_measurement', actor: options.actor || 'Contractor.AI', before, after: null, metadata: { takeoffId } });
+      return { removedItemId: itemId, takeoff };
+    });
+  }
+
+  takeoffSnapshot(takeoff) {
+    return {
+      id: takeoff.id,
+      jobId: takeoff.jobId,
+      title: takeoff.title,
+      currency: takeoff.currency,
+      taxRate: takeoff.taxRate,
+      totalCost: takeoff.totalCost,
+      subtotal: takeoff.subtotal,
+      taxAmount: takeoff.taxAmount,
+      total: takeoff.total,
+      items: (takeoff.items || []).map(item => ({
+        id: item.id,
+        sequenceNumber: item.sequenceNumber,
+        category: item.category,
+        description: item.description,
+        measurementType: item.measurementType,
+        unit: item.unit,
+        count: item.count,
+        length: item.length,
+        width: item.width,
+        height: item.height,
+        wastePercent: item.wastePercent,
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        unitPrice: item.unitPrice,
+        totalCost: item.totalCost,
+        totalPrice: item.totalPrice,
+        costCode: item.costCode,
+        sourceReference: item.sourceReference
+      }))
+    };
+  }
+
+  getTakeoff(jobId, takeoffId) {
+    const row = this.requireTakeoff(jobId, takeoffId);
+    const takeoff = this.mapTakeoff(row);
+    takeoff.items = this.db.prepare('SELECT * FROM takeoff_items WHERE takeoff_id = ? ORDER BY sequence_number').all(takeoffId).map(item => this.mapTakeoffItem(item));
+    takeoff.itemCount = takeoff.items.length;
+    takeoff.marginAmount = roundMoney(takeoff.subtotal - takeoff.totalCost);
+    takeoff.marginPercent = takeoff.subtotal > 0 ? roundQuantity((takeoff.marginAmount / takeoff.subtotal) * 100) : 0;
+    takeoff.integrityValid = takeoff.snapshotHash ? sha256Json(this.takeoffSnapshot(takeoff)) === takeoff.snapshotHash : null;
+    return takeoff;
+  }
+
+  listTakeoffs(jobId) {
+    this.requireJob(jobId, { allowInactive: true });
+    return this.db.prepare('SELECT id FROM takeoff_sheets WHERE job_id = ? ORDER BY updated_at DESC').all(jobId)
+      .map(row => this.getTakeoff(jobId, row.id));
+  }
+
+  listAllTakeoffs(options = {}) {
+    const limit = Math.min(5_000, Math.max(1, Number(options.limit || 500)));
+    return this.db.prepare('SELECT id, job_id FROM takeoff_sheets ORDER BY updated_at DESC LIMIT ?').all(limit)
+      .map(row => this.getTakeoff(row.job_id, row.id));
+  }
+
+  listAllTakeoffItems(options = {}) {
+    const limit = Math.min(10_000, Math.max(1, Number(options.limit || 5_000)));
+    return this.db.prepare('SELECT * FROM takeoff_items ORDER BY takeoff_id, sequence_number LIMIT ?').all(limit)
+      .map(row => this.mapTakeoffItem(row));
+  }
+
+  convertTakeoffToQuote(jobId, takeoffId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.requireTakeoff(jobId, takeoffId);
+      const current = this.getTakeoff(jobId, takeoffId);
+      if (row.status === 'converted') {
+        if (!current.integrityValid) throw ledgerInputError('takeoff_integrity_failed', 'Converted takeoff no longer matches its retained snapshot hash.', null, 409);
+        const quote = row.quote_id ? this.mapQuote(this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(row.quote_id, jobId)) : null;
+        if (!quote) throw ledgerInputError('takeoff_quote_missing', 'Converted takeoff no longer references its estimate.', null, 409);
+        const source = quote.data?.source;
+        if (source?.type !== 'quantity_takeoff' || source?.id !== takeoffId || source?.snapshotHash !== current.snapshotHash) {
+          throw ledgerInputError('takeoff_quote_trace_invalid', 'Converted takeoff estimate trace no longer matches the retained snapshot.', null, 409);
+        }
+        return { replayed: true, takeoff: current, quote, externalCommitments: 0 };
+      }
+      this.assertTakeoffEditable(row);
+      if (!current.items.length) throw ledgerInputError('takeoff_items_required', 'Add at least one measurement before preparing an estimate.');
+      if (current.subtotal <= 0) throw ledgerInputError('takeoff_price_required', 'A positive sell price is required before preparing an estimate.');
+      const snapshotHash = sha256Json(this.takeoffSnapshot(current));
+      const actor = options.actor || 'Contractor.AI';
+      const notes = [normalizeText(current.data?.notes, ''), normalizeText(payload.notes, '')].filter(Boolean).join('\n\n');
+      const quote = this.createQuote(jobId, {
+        currency: current.currency,
+        taxRate: current.taxRate,
+        validUntil: payload.validUntil || payload.valid_until || null,
+        notes: notes || `Estimate prepared from quantity takeoff ${current.title}.`,
+        lineItems: current.items.map(item => ({
+          description: `${item.description} (${item.quantity} ${item.unit})`,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          costCode: item.costCode
+        }))
+      }, {
+        actor,
+        source: { type: 'quantity_takeoff', id: takeoffId, snapshotHash }
+      });
+      const data = fromJson(row.data_json, {});
+      this.db.prepare(`
+        UPDATE takeoff_sheets
+        SET status = 'converted', quote_id = ?, snapshot_hash = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'draft' AND quote_id IS NULL AND snapshot_hash IS NULL
+      `).run(
+        quote.id,
+        snapshotHash,
+        toJson({ ...data, convertedAt: nowIso(), convertedBy: actor, quoteApprovalId: quote.approvalId, externalCommitments: 0 }),
+        nowIso(),
+        takeoffId
+      );
+      const takeoff = this.getTakeoff(jobId, takeoffId);
+      this.audit({
+        entityType: 'takeoff',
+        entityId: takeoffId,
+        jobId,
+        action: 'convert_takeoff_to_quote',
+        actor,
+        before: current,
+        after: takeoff,
+        metadata: { quoteId: quote.id, approvalId: quote.approvalId, snapshotHash, externalCommitments: 0 }
+      });
+      return { replayed: false, takeoff, quote, externalCommitments: 0 };
+    });
+  }
+
   createQuote(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       const job = this.requireJob(jobId);
@@ -7734,7 +8193,7 @@ class ContractorOperatingLedger {
         total,
         validUntil,
         toJson(lineItems, []),
-        toJson({ notes: notes || null, calculation: 'server_derived' }),
+        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null }),
         timestamp,
         timestamp
       );
@@ -25824,6 +26283,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       tasks: this.db.prepare('SELECT * FROM job_tasks WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapTask(row)),
       taskDependencies: this.db.prepare('SELECT * FROM task_dependencies WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapTaskDependency(row)),
       scheduleBaselines: this.db.prepare('SELECT * FROM schedule_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapScheduleBaseline(row)),
+      takeoffs: this.listTakeoffs(jobId),
       quotes: this.db.prepare('SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapQuote(row)),
       siteVisits: this.db.prepare('SELECT * FROM site_visits WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapSiteVisit(row)),
       changeOrders: this.db.prepare('SELECT * FROM change_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapChangeOrder(row)),
@@ -25929,6 +26389,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const statusColumn = {
       job_requests: 'status',
       bid_packages: 'status',
+      takeoff_sheets: 'status',
       quotes: 'status',
       site_visits: 'status',
       material_requirements: 'status',
@@ -30056,6 +30517,52 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (nonCompliantCommittedSpend) {
       issues.push({ severity: 'error', message: `${nonCompliantCommittedSpend} active purchasing commitment(s) lack a current compliant trade partner.` });
     }
+    const takeoffRows = this.db.prepare('SELECT * FROM takeoff_sheets ORDER BY created_at').all();
+    for (const takeoffRow of takeoffRows) {
+      if (!TAKEOFF_STATUSES.has(takeoffRow.status)) {
+        issues.push({ severity: 'error', message: `Quantity takeoff ${takeoffRow.id} has an unsupported lifecycle status.` });
+        continue;
+      }
+      const takeoff = this.getTakeoff(takeoffRow.job_id, takeoffRow.id);
+      const expectedCost = roundMoney(takeoff.items.reduce((sum, item) => sum + item.totalCost, 0));
+      const expectedSubtotal = roundMoney(takeoff.items.reduce((sum, item) => sum + item.totalPrice, 0));
+      const expectedTax = roundMoney(expectedSubtotal * (takeoff.taxRate / 100));
+      const expectedTotal = roundMoney(expectedSubtotal + expectedTax);
+      if (
+        Math.abs(expectedCost - takeoff.totalCost) > 0.01
+        || Math.abs(expectedSubtotal - takeoff.subtotal) > 0.01
+        || Math.abs(expectedTax - takeoff.taxAmount) > 0.01
+        || Math.abs(expectedTotal - takeoff.total) > 0.01
+      ) {
+        issues.push({ severity: 'error', message: `Quantity takeoff ${takeoff.id} totals no longer match its retained measurement rows.` });
+      }
+      for (const item of takeoff.items) {
+        try {
+          const expected = normalizeTakeoffItem(item);
+          if (
+            Math.abs(expected.quantity - item.quantity) > 0.0001
+            || Math.abs(expected.totalCost - item.totalCost) > 0.01
+            || Math.abs(expected.totalPrice - item.totalPrice) > 0.01
+          ) {
+            issues.push({ severity: 'error', message: `Quantity takeoff item ${item.id} failed server-calculation verification.` });
+          }
+        } catch {
+          issues.push({ severity: 'error', message: `Quantity takeoff item ${item.id} contains an invalid retained measurement.` });
+        }
+      }
+      if (takeoff.status === 'converted') {
+        const quoteRow = takeoff.quoteId ? this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(takeoff.quoteId, takeoff.jobId) : null;
+        const quoteSource = fromJson(quoteRow?.data_json, {}).source;
+        if (!takeoff.snapshotHash || takeoff.integrityValid !== true) {
+          issues.push({ severity: 'error', message: `Converted quantity takeoff ${takeoff.id} failed retained snapshot verification.` });
+        }
+        if (!quoteRow || quoteSource?.type !== 'quantity_takeoff' || quoteSource?.id !== takeoff.id || quoteSource?.snapshotHash !== takeoff.snapshotHash) {
+          issues.push({ severity: 'error', message: `Converted quantity takeoff ${takeoff.id} lacks its same-job traceable estimate.` });
+        }
+      } else if (takeoff.quoteId || takeoff.snapshotHash) {
+        issues.push({ severity: 'error', message: `Unconverted quantity takeoff ${takeoff.id} retains an invalid estimate or snapshot link.` });
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -30070,6 +30577,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         opportunityActivities: this.count('opportunity_activities'),
         bidPackages: this.count('bid_packages'),
         bidPackageParticipants: this.count('bid_package_participants'),
+        takeoffs: this.count('takeoff_sheets'),
+        takeoffItems: this.count('takeoff_items'),
         tradePartners: this.count('trade_partners'),
         organizationProfiles: this.count('organization_profile'),
         jobs: this.count('jobs'),
@@ -30445,6 +30954,55 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       validUntil: row.valid_until,
       approvalId: row.approval_id,
       lineItems: fromJson(row.line_items_json, []),
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapTakeoff(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      title: row.title,
+      status: row.status,
+      currency: row.currency,
+      taxRate: normalizeNumber(row.tax_rate, 0),
+      totalCost: normalizeNumber(row.total_cost, 0),
+      subtotal: normalizeNumber(row.subtotal, 0),
+      taxAmount: normalizeNumber(row.tax_amount, 0),
+      total: normalizeNumber(row.total, 0),
+      quoteId: row.quote_id || null,
+      snapshotHash: row.snapshot_hash || null,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapTakeoffItem(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      takeoffId: row.takeoff_id,
+      sequenceNumber: normalizeNumber(row.sequence_number, 0),
+      category: row.category,
+      description: row.description,
+      measurementType: row.measurement_type,
+      unit: row.unit,
+      count: normalizeNumber(row.count_value, 0),
+      length: normalizeNumber(row.length_value, 0),
+      width: normalizeNumber(row.width_value, 0),
+      height: normalizeNumber(row.height_value, 0),
+      wastePercent: normalizeNumber(row.waste_percent, 0),
+      quantity: normalizeNumber(row.quantity, 0),
+      unitCost: normalizeNumber(row.unit_cost, 0),
+      unitPrice: normalizeNumber(row.unit_price, 0),
+      totalCost: normalizeNumber(row.total_cost, 0),
+      totalPrice: normalizeNumber(row.total_price, 0),
+      costCode: row.cost_code,
+      sourceReference: row.source_reference || null,
       data: fromJson(row.data_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at

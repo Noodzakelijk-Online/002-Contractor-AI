@@ -37,6 +37,7 @@ import {
   Plus,
   ReceiptEuro,
   RefreshCw,
+  Ruler,
   Search,
   Send,
   ShieldCheck,
@@ -634,6 +635,66 @@ function emptyOpportunityActivityDraft() {
     dueAt: '',
     notes: '',
   }
+}
+
+function emptyTakeoffDraft(job = null) {
+  return {
+    title: job?.title ? `${job.title} measured scope` : '',
+    taxRate: '21',
+    notes: '',
+  }
+}
+
+function emptyTakeoffItemDraft(item = null) {
+  return {
+    id: item?.id || '',
+    description: item?.description || '',
+    category: item?.category || 'material',
+    measurementType: item?.measurementType || 'area',
+    count: item ? String(item.count ?? 1) : '1',
+    length: item ? String(item.length ?? 0) : '',
+    width: item ? String(item.width ?? 0) : '',
+    height: item ? String(item.height ?? 0) : '',
+    quantity: item ? String(item.quantity ?? 0) : '',
+    unit: item?.unit || 'm2',
+    wastePercent: item ? String(item.wastePercent ?? 0) : '0',
+    unitCost: item ? String(item.unitCost ?? 0) : '',
+    unitPrice: item ? String(item.unitPrice ?? 0) : '',
+    costCode: item?.costCode || 'estimate',
+    sourceReference: item?.sourceReference || '',
+  }
+}
+
+function emptyTakeoffConversionDraft() {
+  return { validUntil: futureDateInput(30), notes: '' }
+}
+
+function takeoffDraftQuantity(draft = {}) {
+  const type = draft.measurementType || 'manual'
+  const count = Number(draft.count)
+  const length = Number(draft.length)
+  const width = Number(draft.width)
+  const height = Number(draft.height)
+  const manual = Number(draft.quantity)
+  const waste = Number(draft.wastePercent)
+  let quantity = 0
+  if (type === 'manual') quantity = manual
+  else if (type === 'count') quantity = count
+  else if (type === 'linear') quantity = count * length
+  else if (type === 'area') quantity = count * length * width
+  else if (type === 'volume') quantity = count * length * width * height
+  if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(waste) || waste < 0) return 0
+  return Math.round(quantity * (1 + waste / 100) * 10_000) / 10_000
+}
+
+function takeoffMeasurementSummary(item = {}) {
+  const dimensions = []
+  if (item.measurementType !== 'manual') dimensions.push(`${item.count || 0}x`)
+  if (['linear', 'area', 'volume'].includes(item.measurementType)) dimensions.push(`${item.length || 0} m`)
+  if (['area', 'volume'].includes(item.measurementType)) dimensions.push(`x ${item.width || 0} m`)
+  if (item.measurementType === 'volume') dimensions.push(`x ${item.height || 0} m`)
+  if (item.wastePercent) dimensions.push(`+ ${item.wastePercent}% waste`)
+  return dimensions.length ? dimensions.join(' ') : 'Manual retained quantity'
 }
 
 function emptyBidPackageDraft() {
@@ -2963,6 +3024,131 @@ function FinanceWorkspace({
           <Empty title="No finance work" detail="Active and completed ledger jobs will appear here with their finance readiness state." />
         ) : null}
       </div>
+    </section>
+  )
+}
+
+function TakeoffControl({
+  job,
+  canCoordinate,
+  submitting,
+  onNewTakeoff,
+  onAddItem,
+  onEditItem,
+  onRemoveItem,
+  onConvert,
+}) {
+  const takeoffs = job.takeoffs || EMPTY_LIST
+  const draftCount = takeoffs.filter((takeoff) => takeoff.status === 'draft').length
+  const convertedCount = takeoffs.filter((takeoff) => takeoff.status === 'converted').length
+  const draftValue = takeoffs
+    .filter((takeoff) => takeoff.status === 'draft')
+    .reduce((sum, takeoff) => sum + Number(takeoff.subtotal || 0), 0)
+
+  return (
+    <section className="job-workspace-section takeoff-control" data-testid="takeoff-control">
+      <div className="section-heading takeoff-heading">
+        <Ruler size={18} />
+        <div>
+          <h3>Quantity takeoff</h3>
+          <p>Measure retained scope and convert one sealed basis into the approval-gated estimate workflow.</p>
+        </div>
+        {canCoordinate ? (
+          <button type="button" className="secondary-button" disabled={submitting} onClick={onNewTakeoff}>
+            <Plus size={15} />
+            New takeoff
+          </button>
+        ) : null}
+      </div>
+      <div className="takeoff-summary" aria-label="Quantity takeoff summary">
+        <div><span>Sheets</span><strong>{takeoffs.length}</strong></div>
+        <div><span>Drafts</span><strong>{draftCount}</strong></div>
+        <div><span>Converted</span><strong>{convertedCount}</strong></div>
+        <div><span>Draft sell value</span><strong>{currency.format(draftValue)}</strong></div>
+      </div>
+      {takeoffs.length ? (
+        <div className="takeoff-register">
+          {takeoffs.map((takeoff) => (
+            <article className="takeoff-sheet" key={takeoff.id} data-testid={`takeoff-sheet-${takeoff.id}`}>
+              <div className="takeoff-sheet-heading">
+                <div>
+                  <div className="takeoff-sheet-title">
+                    <strong>{takeoff.title}</strong>
+                    <span className={`status status-${takeoff.status}`}>{formatStatus(takeoff.status)}</span>
+                    {takeoff.status === 'converted' ? (
+                      <span className={`tag ${takeoff.integrityValid ? 'tag-green' : 'tag-red'}`}>
+                        {takeoff.integrityValid ? 'Snapshot verified' : 'Integrity failed'}
+                      </span>
+                    ) : null}
+                  </div>
+                  <small>
+                    {takeoff.itemCount || 0} measurement{takeoff.itemCount === 1 ? '' : 's'} / VAT {takeoff.taxRate || 0}%
+                    {takeoff.quoteId ? ` / estimate ${takeoff.quoteId}` : ''}
+                  </small>
+                </div>
+                {canCoordinate && takeoff.status === 'draft' ? (
+                  <div className="takeoff-sheet-actions">
+                    <button type="button" className="secondary-button" disabled={submitting || takeoff.itemCount >= 50} onClick={() => onAddItem(takeoff)}>
+                      <Plus size={14} />
+                      Measurement
+                    </button>
+                    <button type="button" className="secondary-button" disabled={submitting || !takeoff.itemCount || takeoff.subtotal <= 0} onClick={() => onConvert(takeoff)}>
+                      <ArrowUpRight size={14} />
+                      Prepare estimate
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+              <div className="takeoff-values" aria-label={`${takeoff.title} totals`}>
+                <div><span>Cost</span><strong>{currency.format(takeoff.totalCost || 0)}</strong></div>
+                <div><span>Sell net</span><strong>{currency.format(takeoff.subtotal || 0)}</strong></div>
+                <div><span>Margin</span><strong>{currency.format(takeoff.marginAmount || 0)} / {takeoff.marginPercent || 0}%</strong></div>
+                <div><span>Gross</span><strong>{currency.format(takeoff.total || 0)}</strong></div>
+              </div>
+              {takeoff.items?.length ? (
+                <div className="takeoff-items" role="table" aria-label={`${takeoff.title} measurements`}>
+                  {takeoff.items.map((item) => (
+                    <div className="takeoff-item" role="row" key={item.id}>
+                      <div className="takeoff-item-copy" role="cell">
+                        <div>
+                          <strong>{item.description}</strong>
+                          <span className="tag">{formatStatus(item.category)}</span>
+                        </div>
+                        <small>{takeoffMeasurementSummary(item)} / {item.sourceReference || 'No drawing reference'}</small>
+                      </div>
+                      <div className="takeoff-item-quantity" role="cell">
+                        <span>Quantity</span>
+                        <strong>{item.quantity} {item.unit}</strong>
+                      </div>
+                      <div className="takeoff-item-money" role="cell">
+                        <span>{currency.format(item.unitPrice || 0)} / {item.unit}</span>
+                        <strong>{currency.format(item.totalPrice || 0)}</strong>
+                      </div>
+                      {canCoordinate && takeoff.status === 'draft' ? (
+                        <div className="takeoff-item-actions" role="cell">
+                          <button type="button" className="icon-button" aria-label={`Edit ${item.description}`} disabled={submitting} onClick={() => onEditItem(takeoff, item)}>
+                            <Pencil size={15} />
+                          </button>
+                          <button type="button" className="icon-button" aria-label={`Remove ${item.description}`} disabled={submitting} onClick={() => onRemoveItem(takeoff, item)}>
+                            <X size={15} />
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="workflow-note">No measurements retained yet. Add a count, length, area, volume, or manual quantity.</p>
+              )}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <Empty title="No quantity takeoffs" detail="Create a measured scope before preparing an estimate from drawings, surveys, or site dimensions." />
+      )}
+      <p className="workflow-note">
+        Takeoff conversion seals the measured basis and creates an internal quote approval. It does not issue a proposal, contact the client, or alter contract value.
+      </p>
     </section>
   )
 }
@@ -6102,6 +6288,10 @@ function App() {
   const [taskDraft, setTaskDraft] = useState(emptyTaskDraft)
   const [taskAction, setTaskAction] = useState(null)
   const [taskActionNote, setTaskActionNote] = useState('')
+  const [takeoffDialog, setTakeoffDialog] = useState(null)
+  const [takeoffDraft, setTakeoffDraft] = useState(() => emptyTakeoffDraft())
+  const [takeoffItemDraft, setTakeoffItemDraft] = useState(() => emptyTakeoffItemDraft())
+  const [takeoffConversionDraft, setTakeoffConversionDraft] = useState(emptyTakeoffConversionDraft)
   const [commercialDraftMode, setCommercialDraftMode] = useState(null)
   const [quoteDraft, setQuoteDraft] = useState(emptyQuoteDraft)
   const [changeOrderDraft, setChangeOrderDraft] = useState(emptyChangeOrderDraft)
@@ -6407,6 +6597,17 @@ function App() {
     commercialLinesValid &&
     (commercialDraftMode !== 'change_order' ||
       (changeOrderDraft.title.trim().length >= 2 && changeOrderDraft.scopeDelta.trim().length >= 3))
+  const takeoffPreviewQuantity = takeoffDraftQuantity(takeoffItemDraft)
+  const takeoffPreviewCost = roundMoney(takeoffPreviewQuantity * (Number(takeoffItemDraft.unitCost) || 0))
+  const takeoffPreviewSell = roundMoney(takeoffPreviewQuantity * (Number(takeoffItemDraft.unitPrice) || 0))
+  const takeoffItemDraftReady =
+    takeoffItemDraft.description.trim().length >= 2 &&
+    takeoffPreviewQuantity > 0 &&
+    Number.isFinite(Number(takeoffItemDraft.unitCost)) &&
+    Number(takeoffItemDraft.unitCost) >= 0 &&
+    Number.isFinite(Number(takeoffItemDraft.unitPrice)) &&
+    Number(takeoffItemDraft.unitPrice) >= 0 &&
+    takeoffItemDraft.unit.trim().length > 0
   const initialDataLoading = !hasLoadedDataRef.current
   const visibleNavItems = useMemo(
     () =>
@@ -6569,7 +6770,8 @@ function App() {
       !commercialDialogReturnFocusRef.current ||
       submitting ||
       commercialDraftMode ||
-      commercialAcceptance
+      commercialAcceptance ||
+      takeoffDialog
     )
       return
     const opener = commercialDialogOpenerRef.current
@@ -6578,7 +6780,7 @@ function App() {
     requestAnimationFrame(() => {
       if (opener?.isConnected && !opener.disabled) opener.focus()
     })
-  }, [commercialAcceptance, commercialDraftMode, submitting])
+  }, [commercialAcceptance, commercialDraftMode, submitting, takeoffDialog])
 
   useEffect(() => {
     if (!notice || loading || submitting || outboxSyncing) return undefined
@@ -7418,6 +7620,164 @@ function App() {
     } catch (requestError) {
       setError(requestError.message)
       return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openTakeoffCreate() {
+    if (!selectedJob) return
+    commercialDialogReturnFocusRef.current = false
+    commercialDialogOpenerRef.current = document.activeElement
+    setTakeoffDraft(emptyTakeoffDraft(selectedJob))
+    setTakeoffDialog({ mode: 'create' })
+  }
+
+  function openTakeoffItem(takeoff, item = null) {
+    commercialDialogReturnFocusRef.current = false
+    commercialDialogOpenerRef.current = document.activeElement
+    setTakeoffItemDraft(emptyTakeoffItemDraft(item))
+    setTakeoffDialog({ mode: item ? 'edit_item' : 'add_item', takeoff, item })
+  }
+
+  function openTakeoffRemoval(takeoff, item) {
+    commercialDialogReturnFocusRef.current = false
+    commercialDialogOpenerRef.current = document.activeElement
+    setTakeoffDialog({ mode: 'remove_item', takeoff, item })
+  }
+
+  function openTakeoffConversion(takeoff) {
+    commercialDialogReturnFocusRef.current = false
+    commercialDialogOpenerRef.current = document.activeElement
+    setTakeoffConversionDraft(emptyTakeoffConversionDraft())
+    setTakeoffDialog({ mode: 'convert', takeoff })
+  }
+
+  function closeTakeoffDialog() {
+    if (submitting) return
+    setTakeoffDialog(null)
+    setTakeoffDraft(emptyTakeoffDraft())
+    setTakeoffItemDraft(emptyTakeoffItemDraft())
+    setTakeoffConversionDraft(emptyTakeoffConversionDraft())
+    restoreCommercialDialogFocus()
+  }
+
+  function changeTakeoffMeasurementType(measurementType) {
+    const unit = { count: 'ea', linear: 'm', area: 'm2', volume: 'm3', manual: 'unit' }[measurementType]
+    setTakeoffItemDraft((current) => ({ ...current, measurementType, unit }))
+  }
+
+  async function submitTakeoff(event) {
+    event.preventDefault()
+    if (!selectedJobId || takeoffDraft.title.trim().length < 2) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/takeoffs`, {
+        method: 'POST',
+        body: JSON.stringify({
+          title: takeoffDraft.title.trim(),
+          taxRate: Number(takeoffDraft.taxRate),
+          currency: 'EUR',
+          notes: takeoffDraft.notes.trim() || null,
+        }),
+      })
+      setSelectedJob(result.job)
+      setTakeoffDialog(null)
+      restoreCommercialDialogFocus()
+      notify('Quantity takeoff retained as an internal draft. No estimate or external commitment was created.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function submitTakeoffItem(event) {
+    event.preventDefault()
+    if (!selectedJobId || !takeoffDialog?.takeoff || !takeoffItemDraftReady) return
+    const editing = takeoffDialog.mode === 'edit_item'
+    const base = `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/takeoffs/${encodeURIComponent(takeoffDialog.takeoff.id)}/items`
+    const route = editing ? `${base}/${encodeURIComponent(takeoffDialog.item.id)}` : base
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(route, {
+        method: editing ? 'PUT' : 'POST',
+        body: JSON.stringify({
+          description: takeoffItemDraft.description.trim(),
+          category: takeoffItemDraft.category,
+          measurementType: takeoffItemDraft.measurementType,
+          count: Number(takeoffItemDraft.count),
+          length: Number(takeoffItemDraft.length) || 0,
+          width: Number(takeoffItemDraft.width) || 0,
+          height: Number(takeoffItemDraft.height) || 0,
+          quantity: Number(takeoffItemDraft.quantity) || 0,
+          unit: takeoffItemDraft.unit.trim(),
+          wastePercent: Number(takeoffItemDraft.wastePercent) || 0,
+          unitCost: Number(takeoffItemDraft.unitCost) || 0,
+          unitPrice: Number(takeoffItemDraft.unitPrice) || 0,
+          costCode: takeoffItemDraft.costCode.trim() || 'estimate',
+          sourceReference: takeoffItemDraft.sourceReference.trim() || null,
+        }),
+      })
+      setSelectedJob(result.job)
+      setTakeoffDialog(null)
+      restoreCommercialDialogFocus()
+      notify(editing ? 'Takeoff measurement recalculated and retained.' : 'Takeoff measurement calculated and retained.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function removeTakeoffItem() {
+    if (!selectedJobId || takeoffDialog?.mode !== 'remove_item') return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/takeoffs/${encodeURIComponent(takeoffDialog.takeoff.id)}/items/${encodeURIComponent(takeoffDialog.item.id)}/remove`,
+        { method: 'POST', body: JSON.stringify({}) },
+      )
+      setSelectedJob(result.job)
+      setTakeoffDialog(null)
+      restoreCommercialDialogFocus()
+      notify('Takeoff measurement removed and sheet totals recalculated.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function convertTakeoff(event) {
+    event.preventDefault()
+    if (!selectedJobId || takeoffDialog?.mode !== 'convert') return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/takeoffs/${encodeURIComponent(takeoffDialog.takeoff.id)}/convert`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            validUntil: takeoffConversionDraft.validUntil,
+            notes: takeoffConversionDraft.notes.trim() || null,
+          }),
+        },
+      )
+      setSelectedJob(result.job)
+      setTakeoffDialog(null)
+      restoreCommercialDialogFocus()
+      notify(`Measured scope sealed and estimate retained at ${currency.format(result.quote.subtotal)} net. Approval is required before issue.`)
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
     } finally {
       setSubmitting(false)
     }
@@ -12881,6 +13241,18 @@ function App() {
                   </div>
                 </div>
                 {!fieldScoped ? (
+                  <TakeoffControl
+                    job={selectedJob}
+                    canCoordinate={canCoordinate}
+                    submitting={submitting}
+                    onNewTakeoff={openTakeoffCreate}
+                    onAddItem={(takeoff) => openTakeoffItem(takeoff)}
+                    onEditItem={openTakeoffItem}
+                    onRemoveItem={openTakeoffRemoval}
+                    onConvert={openTakeoffConversion}
+                  />
+                ) : null}
+                {!fieldScoped ? (
                   <CommercialControl
                     job={selectedJob}
                     canCoordinate={canCoordinate}
@@ -13297,6 +13669,290 @@ function App() {
           </section>
         </div>
       ) : null}
+      {takeoffDialog?.mode === 'create' ? (
+        <div className="modal-backdrop commercial-backdrop" role="presentation">
+          <section
+            className="modal takeoff-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="takeoff-create-title"
+            data-testid="takeoff-create-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeTakeoffDialog()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Measured scope</p>
+                <h2 id="takeoff-create-title">New quantity takeoff</h2>
+                <p>{selectedJob?.title} / internal draft</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close quantity takeoff" onClick={closeTakeoffDialog}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitTakeoff}>
+              <div className="takeoff-modal-body form-grid">
+                <label className="form-span">
+                  Takeoff title
+                  <input
+                    autoFocus
+                    required
+                    minLength="2"
+                    maxLength="160"
+                    value={takeoffDraft.title}
+                    onChange={(event) => setTakeoffDraft({ ...takeoffDraft, title: event.target.value })}
+                  />
+                </label>
+                <label>
+                  VAT rate (%)
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={takeoffDraft.taxRate}
+                    onChange={(event) => setTakeoffDraft({ ...takeoffDraft, taxRate: event.target.value })}
+                  />
+                </label>
+                <label className="form-span">
+                  Internal notes
+                  <textarea
+                    maxLength="4000"
+                    value={takeoffDraft.notes}
+                    onChange={(event) => setTakeoffDraft({ ...takeoffDraft, notes: event.target.value })}
+                    placeholder="Record drawing revisions, survey assumptions, exclusions, or estimator context."
+                  />
+                </label>
+                <p className="workflow-note form-span">This creates an empty internal measurement sheet. It does not create or issue an estimate.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+                <button className="primary-button" disabled={submitting || takeoffDraft.title.trim().length < 2}>
+                  <Ruler size={16} />
+                  {submitting ? 'Saving...' : 'Retain takeoff'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {['add_item', 'edit_item'].includes(takeoffDialog?.mode) ? (
+        <div className="modal-backdrop commercial-backdrop" role="presentation">
+          <section
+            className="modal takeoff-item-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="takeoff-item-title"
+            data-testid="takeoff-item-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeTakeoffDialog()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Server-calculated measurement</p>
+                <h2 id="takeoff-item-title">{takeoffDialog.mode === 'edit_item' ? 'Edit measurement' : 'Add measurement'}</h2>
+                <p>{takeoffDialog.takeoff.title}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close takeoff measurement" onClick={closeTakeoffDialog}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitTakeoffItem}>
+              <div className="takeoff-modal-body">
+                <div className="form-grid takeoff-item-form">
+                  <label className="form-span">
+                    Description
+                    <input
+                      autoFocus
+                      required
+                      minLength="2"
+                      maxLength="240"
+                      value={takeoffItemDraft.description}
+                      onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, description: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Category
+                    <select value={takeoffItemDraft.category} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, category: event.target.value })}>
+                      <option value="material">Material</option>
+                      <option value="labor">Labor</option>
+                      <option value="equipment">Equipment</option>
+                      <option value="subcontract">Subcontract</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  <label>
+                    Measurement type
+                    <select value={takeoffItemDraft.measurementType} onChange={(event) => changeTakeoffMeasurementType(event.target.value)}>
+                      <option value="count">Count</option>
+                      <option value="linear">Linear</option>
+                      <option value="area">Area</option>
+                      <option value="volume">Volume</option>
+                      <option value="manual">Manual quantity</option>
+                    </select>
+                  </label>
+                  {takeoffItemDraft.measurementType === 'manual' ? (
+                    <label>
+                      Quantity
+                      <input required type="number" min="0.0001" max="1000000000" step="0.0001" value={takeoffItemDraft.quantity} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, quantity: event.target.value })} />
+                    </label>
+                  ) : (
+                    <label>
+                      Count
+                      <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.count} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, count: event.target.value })} />
+                    </label>
+                  )}
+                  {['linear', 'area', 'volume'].includes(takeoffItemDraft.measurementType) ? (
+                    <label>
+                      Length (m)
+                      <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.length} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, length: event.target.value })} />
+                    </label>
+                  ) : null}
+                  {['area', 'volume'].includes(takeoffItemDraft.measurementType) ? (
+                    <label>
+                      Width (m)
+                      <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.width} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, width: event.target.value })} />
+                    </label>
+                  ) : null}
+                  {takeoffItemDraft.measurementType === 'volume' ? (
+                    <label>
+                      Height (m)
+                      <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.height} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, height: event.target.value })} />
+                    </label>
+                  ) : null}
+                  <label>
+                    Waste (%)
+                    <input required type="number" min="0" max="1000" step="0.01" value={takeoffItemDraft.wastePercent} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, wastePercent: event.target.value })} />
+                  </label>
+                  <label>
+                    Unit
+                    <input required maxLength="24" value={takeoffItemDraft.unit} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, unit: event.target.value })} />
+                  </label>
+                  <label>
+                    Unit cost
+                    <input required type="number" min="0" max="1000000000" step="0.01" value={takeoffItemDraft.unitCost} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, unitCost: event.target.value })} />
+                  </label>
+                  <label>
+                    Unit sell price
+                    <input required type="number" min="0" max="1000000000" step="0.01" value={takeoffItemDraft.unitPrice} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, unitPrice: event.target.value })} />
+                  </label>
+                  <label>
+                    Cost code
+                    <input maxLength="80" value={takeoffItemDraft.costCode} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, costCode: event.target.value })} />
+                  </label>
+                  <label>
+                    Drawing / source reference
+                    <input maxLength="240" value={takeoffItemDraft.sourceReference} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, sourceReference: event.target.value })} />
+                  </label>
+                </div>
+                <div className="takeoff-preview" aria-label="Calculated measurement preview">
+                  <div><span>Quantity</span><strong>{takeoffPreviewQuantity || 0} {takeoffItemDraft.unit}</strong></div>
+                  <div><span>Extended cost</span><strong>{currency.format(takeoffPreviewCost)}</strong></div>
+                  <div><span>Extended sell</span><strong>{currency.format(takeoffPreviewSell)}</strong></div>
+                </div>
+                <p className="workflow-note">The ledger recalculates quantity, cost, and sell totals. Browser preview values are not authoritative.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !takeoffItemDraftReady}>
+                  <Ruler size={16} />
+                  {submitting ? 'Saving...' : takeoffDialog.mode === 'edit_item' ? 'Recalculate measurement' : 'Retain measurement'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {takeoffDialog?.mode === 'remove_item' ? (
+        <div className="modal-backdrop commercial-backdrop" role="presentation">
+          <section
+            className="modal takeoff-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="takeoff-remove-title"
+            data-testid="takeoff-remove-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeTakeoffDialog()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Draft correction</p>
+                <h2 id="takeoff-remove-title">Remove measurement?</h2>
+                <p>{takeoffDialog.item.description}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close measurement removal" onClick={closeTakeoffDialog}><X size={18} /></button>
+            </div>
+            <div className="takeoff-modal-body">
+              <p className="workflow-note">The draft sheet will be recalculated. This does not affect any converted estimate.</p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+              <button type="button" className="danger-button" disabled={submitting} onClick={removeTakeoffItem}>
+                <X size={16} />
+                {submitting ? 'Removing...' : 'Remove measurement'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {takeoffDialog?.mode === 'convert' ? (
+        <div className="modal-backdrop commercial-backdrop" role="presentation">
+          <section
+            className="modal takeoff-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="takeoff-convert-title"
+            data-testid="takeoff-convert-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeTakeoffDialog()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Immutable estimate basis</p>
+                <h2 id="takeoff-convert-title">Prepare estimate</h2>
+                <p>{takeoffDialog.takeoff.title}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close estimate preparation" onClick={closeTakeoffDialog}><X size={18} /></button>
+            </div>
+            <form onSubmit={convertTakeoff}>
+              <div className="takeoff-modal-body">
+                <div className="takeoff-preview">
+                  <div><span>Measurements</span><strong>{takeoffDialog.takeoff.itemCount}</strong></div>
+                  <div><span>Cost</span><strong>{currency.format(takeoffDialog.takeoff.totalCost || 0)}</strong></div>
+                  <div><span>Estimate net</span><strong>{currency.format(takeoffDialog.takeoff.subtotal || 0)}</strong></div>
+                </div>
+                <div className="form-grid">
+                  <label>
+                    Valid until
+                    <input autoFocus required type="date" min={new Date().toISOString().slice(0, 10)} value={takeoffConversionDraft.validUntil} onChange={(event) => setTakeoffConversionDraft({ ...takeoffConversionDraft, validUntil: event.target.value })} />
+                  </label>
+                  <label className="form-span">
+                    Estimate notes
+                    <textarea maxLength="4000" value={takeoffConversionDraft.notes} onChange={(event) => setTakeoffConversionDraft({ ...takeoffConversionDraft, notes: event.target.value })} placeholder="Add reviewer context, exclusions, or estimate assumptions." />
+                  </label>
+                </div>
+                <p className="workflow-note">Conversion seals this sheet with a SHA-256 snapshot and makes its measurements read-only. It creates an internal quote approval only.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !takeoffConversionDraft.validUntil}>
+                  <ShieldCheck size={16} />
+                  {submitting ? 'Preparing...' : 'Seal and prepare estimate'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
       {commercialDraftMode ? (
         <div className="modal-backdrop commercial-backdrop" role="presentation">
           <section

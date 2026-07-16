@@ -411,6 +411,84 @@
 @media (max-width: 760px) { .commercial-summary { grid-template-columns: 1fr; }.commercial-summary > div { border-right: 0; border-bottom: 1px solid #e2eae6; }.commercial-summary > div:last-child { border-bottom: 0; }.commercial-actions button { flex: 1; }.commercial-record > div { align-items: flex-start; flex-direction: column; }.commercial-row-actions { width: 100%; }.commercial-row-actions button { flex: 1 1 145px; }.commercial-draft-body, .commercial-acceptance-form { padding: 16px; }.commercial-line-heading { align-items: stretch; flex-direction: column; }.commercial-line-heading button { width: 100%; }.commercial-line-item { grid-template-columns: minmax(0, 1fr) 34px; }.commercial-line-item label { grid-column: 1; }.commercial-line-item label:nth-child(4) { grid-column: 1; }.commercial-line-remove { grid-column: 2; grid-row: 1; }.commercial-total-strip { grid-template-columns: 1fr; }.commercial-total-strip span { border-right: 0; border-bottom: 1px solid #e0e9e5; }.commercial-total-strip span:last-child { border-bottom: 0; }.commercial-draft-modal .modal-actions, .commercial-acceptance-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }.commercial-draft-modal .modal-actions button, .commercial-acceptance-modal .modal-actions button { width: 100%; } }
 @media (max-width: 760px) { .organization-profile-form { grid-template-columns: 1fr; }.organization-profile-missing, .organization-profile-ready { margin: 0 16px 16px; }.commercial-row-actions a { flex: 1 1 145px; } }
 
+.takeoff-control { display: grid; gap: 15px; min-width: 0; overflow: hidden; }
+.takeoff-heading { align-items: center; }
+.takeoff-heading > div { min-width: 0; }
+.takeoff-heading > .secondary-button { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
+.takeoff-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dfe7e3; }
+.takeoff-summary > div { display: grid; gap: 4px; min-width: 0; padding: 11px 13px; border-right: 1px solid #dfe7e3; }
+.takeoff-summary > div:last-child { border-right: 0; }
+.takeoff-summary span, .takeoff-values span, .takeoff-preview span, .takeoff-item-quantity span { overflow-wrap: anywhere; color: #6b7a74; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.takeoff-summary strong { overflow-wrap: anywhere; color: #263c33; font-size: 17px; }
+.takeoff-register { display: grid; gap: 12px; min-width: 0; }
+.takeoff-sheet { min-width: 0; overflow: hidden; background: #fff; border: 1px solid #d8e2de; border-left: 3px solid #4f7e70; border-radius: 6px; }
+.takeoff-sheet:has(.status-converted) { border-left-color: #376f85; }
+.takeoff-sheet-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; min-width: 0; padding: 13px 14px; background: #f8faf9; border-bottom: 1px solid #e2e9e6; }
+.takeoff-sheet-heading > div:first-child { min-width: 0; }
+.takeoff-sheet-title { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+.takeoff-sheet-title > strong { min-width: 0; overflow-wrap: anywhere; color: #263c33; font-size: 13px; }
+.takeoff-sheet-heading small { display: block; margin-top: 5px; overflow-wrap: anywhere; color: #6f7f79; font-size: 10px; line-height: 1.45; }
+.takeoff-sheet-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.takeoff-sheet-actions .secondary-button { min-height: 31px; padding: 0 9px; font-size: 10px; }
+.takeoff-values { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: #fff; border-bottom: 1px solid #e2e9e6; }
+.takeoff-values > div { display: grid; gap: 3px; min-width: 0; padding: 10px 13px; border-right: 1px solid #e5ebe8; }
+.takeoff-values > div:last-child { border-right: 0; }
+.takeoff-values strong { min-width: 0; overflow-wrap: anywhere; color: #2b443a; font-size: 11px; }
+.takeoff-items { display: grid; min-width: 0; }
+.takeoff-item { display: grid; grid-template-columns: minmax(220px, 1.7fr) minmax(90px, .55fr) minmax(120px, .65fr) auto; align-items: center; gap: 12px; min-width: 0; padding: 11px 13px; border-bottom: 1px solid #e8eeeb; }
+.takeoff-item:last-child { border-bottom: 0; }
+.takeoff-item-copy { display: grid; gap: 4px; min-width: 0; }
+.takeoff-item-copy > div { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+.takeoff-item-copy strong { min-width: 0; overflow-wrap: anywhere; color: #2a4037; font-size: 11px; }
+.takeoff-item-copy small { overflow-wrap: anywhere; color: #71817a; font-size: 9px; line-height: 1.4; }
+.takeoff-item-copy .tag { padding: 3px 6px; font-size: 9px; }
+.takeoff-item-quantity, .takeoff-item-money { display: grid; gap: 3px; min-width: 0; }
+.takeoff-item-quantity strong, .takeoff-item-money strong { overflow-wrap: anywhere; color: #2c443a; font-size: 11px; }
+.takeoff-item-money span { overflow-wrap: anywhere; color: #71817a; font-size: 9px; }
+.takeoff-item-actions { display: flex; align-items: center; gap: 5px; }
+.takeoff-item-actions .icon-button { width: 30px; height: 30px; }
+.status-converted { color: #315f76; background: #e3eef3; }
+.takeoff-modal { width: min(640px, 100%); }
+.takeoff-item-modal { width: min(920px, 100%); }
+.takeoff-confirm-modal { width: min(600px, 100%); }
+.takeoff-modal-body { display: grid; gap: 15px; max-height: min(68vh, 720px); overflow: auto; padding: 20px 22px; }
+.takeoff-modal-body.form-grid { display: grid; }
+.takeoff-modal-body label { display: grid; gap: 5px; min-width: 0; color: #40564e; font-size: 10px; font-weight: 750; }
+.takeoff-item-form { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.takeoff-item-form .form-span { grid-column: 1 / -1; }
+.takeoff-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid #d8e5df; border-left: 3px solid #376f85; }
+.takeoff-preview > div { display: grid; gap: 4px; min-width: 0; padding: 11px 12px; border-right: 1px solid #e0e9e5; }
+.takeoff-preview > div:last-child { border-right: 0; }
+.takeoff-preview strong { overflow-wrap: anywhere; color: #26473c; font-size: 13px; }
+
+@media (max-width: 920px) {
+  .takeoff-item { grid-template-columns: minmax(0, 1fr) minmax(90px, .45fr) minmax(110px, .55fr) auto; }
+  .takeoff-item-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .takeoff-heading { align-items: flex-start; flex-wrap: wrap; }
+  .takeoff-heading > .secondary-button { width: calc(100% - 28px); margin-left: 28px; }
+  .takeoff-summary, .takeoff-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .takeoff-summary > div:nth-child(2n), .takeoff-values > div:nth-child(2n) { border-right: 0; }
+  .takeoff-summary > div:nth-child(-n + 2), .takeoff-values > div:nth-child(-n + 2) { border-bottom: 1px solid #dfe7e3; }
+  .takeoff-sheet-heading { flex-direction: column; }
+  .takeoff-sheet-actions { width: 100%; justify-content: stretch; }
+  .takeoff-sheet-actions .secondary-button { flex: 1 1 140px; }
+  .takeoff-item { grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+  .takeoff-item-copy { grid-column: 1 / -1; }
+  .takeoff-item-quantity, .takeoff-item-money { grid-column: 1; }
+  .takeoff-item-actions { grid-column: 2; grid-row: 2 / span 2; align-self: center; }
+  .takeoff-modal-body { padding: 16px; }
+  .takeoff-item-form { grid-template-columns: minmax(0, 1fr); }
+  .takeoff-item-form .form-span { grid-column: auto; }
+  .takeoff-preview { grid-template-columns: 1fr; }
+  .takeoff-preview > div { border-right: 0; border-bottom: 1px solid #e0e9e5; }
+  .takeoff-preview > div:last-child { border-bottom: 0; }
+  .takeoff-modal .modal-actions, .takeoff-item-modal .modal-actions, .takeoff-confirm-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }
+  .takeoff-modal .modal-actions button, .takeoff-item-modal .modal-actions button, .takeoff-confirm-modal .modal-actions button { width: 100%; }
+}
+
 .finance-summary { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .finance-values { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .invoice-preview { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }

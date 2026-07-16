@@ -1046,7 +1046,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '026_preconstruction_bid_packages');
+    assert.equal(migrations.currentVersion, '027_quantity_takeoffs');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1127,12 +1127,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('026_preconstruction_bid_packages'));
+  assert.deepEqual(versions, Array(4).fill('027_quantity_takeoffs'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 26);
+    assert.equal(Number(migrationCount.count), 27);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1158,6 +1158,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
         )
     `).rows[0];
     assert.equal(Number(inspectionChecklistIndexCount.count), 4);
+    const takeoffTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('takeoff_sheets', 'takeoff_items')
+    `).rows[0];
+    assert.equal(Number(takeoffTableCount.count), 2);
     const tableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1542,7 +1548,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(selected.status, 'selected');
     assert.equal(selected.selectedParticipant.id, returned.participant.id);
     assert.equal(selected.data.spendAuthorized, false);
-    assert.equal(ledger.migrationStatus().currentVersion, '026_preconstruction_bid_packages');
+    assert.equal(ledger.migrationStatus().currentVersion, '027_quantity_takeoffs');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -1721,5 +1727,53 @@ test('PostgreSQL idempotency receipt has one owner after concurrent lease reclai
     for (const claimant of claimants) {
       if (!claimant.child.killed && claimant.child.exitCode === null) claimant.child.kill();
     }
+  }
+});
+
+test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceability', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const marker = Date.now();
+    const job = ledger.createIntake({
+      clientName: `Hosted takeoff client ${marker}`,
+      title: `Hosted quantity takeoff ${marker}`,
+      assignAutomatically: false
+    }, { actor: 'postgres_takeoff_test' });
+    const takeoff = ledger.createTakeoff(job.id, {
+      title: 'Hosted measured scope',
+      taxRate: 21,
+      items: [
+        {
+          description: 'Hosted floor finish',
+          measurementType: 'area',
+          count: 2,
+          length: 4.25,
+          width: 3.5,
+          wastePercent: 8,
+          unitCost: 19.5,
+          unitPrice: 34.75,
+          costCode: 'PG-FIN-100'
+        },
+        {
+          description: 'Hosted door sets',
+          measurementType: 'count',
+          count: 4,
+          unitCost: 275,
+          unitPrice: 440,
+          costCode: 'PG-JOIN-100'
+        }
+      ]
+    }, { actor: 'postgres_takeoff_test' });
+    assert.deepEqual(takeoff.items.map(item => item.quantity), [32.13, 4]);
+    const converted = ledger.convertTakeoffToQuote(job.id, takeoff.id, {
+      validUntil: '2026-12-31'
+    }, { actor: 'postgres_takeoff_test' });
+    assert.equal(converted.takeoff.integrityValid, true);
+    assert.equal(converted.quote.subtotal, converted.takeoff.subtotal);
+    assert.equal(converted.quote.data.source.snapshotHash, converted.takeoff.snapshotHash);
+    assert.equal(ledger.convertTakeoffToQuote(job.id, takeoff.id).replayed, true);
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
   }
 });

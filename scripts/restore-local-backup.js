@@ -297,6 +297,36 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup preconstruction-bid constraints are incomplete: ${missingBidIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('027_quantity_takeoffs')) {
+        const takeoffTables = ['takeoff_sheets', 'takeoff_items'];
+        const missingTakeoffTables = takeoffTables.filter(table => !retainedTables.has(table));
+        if (missingTakeoffTables.length) {
+          throw new Error(`Backup quantity-takeoff schema is incomplete: ${missingTakeoffTables.join(', ')}.`);
+        }
+        const sheetColumns = new Set(database.prepare('PRAGMA table_info(takeoff_sheets)').all().map(row => row.name));
+        const missingSheetColumns = ['job_id', 'status', 'total_cost', 'subtotal', 'quote_id', 'snapshot_hash']
+          .filter(column => !sheetColumns.has(column));
+        if (missingSheetColumns.length) {
+          throw new Error(`Backup quantity-takeoff columns are incomplete: ${missingSheetColumns.join(', ')}.`);
+        }
+        const itemColumns = new Set(database.prepare('PRAGMA table_info(takeoff_items)').all().map(row => row.name));
+        const missingItemColumns = ['takeoff_id', 'measurement_type', 'quantity', 'unit_cost', 'unit_price', 'total_cost', 'total_price']
+          .filter(column => !itemColumns.has(column));
+        if (missingItemColumns.length) {
+          throw new Error(`Backup takeoff-item columns are incomplete: ${missingItemColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const takeoffIndexes = [
+          'idx_takeoff_sheets_job',
+          'idx_takeoff_sheets_quote',
+          'idx_takeoff_items_sheet',
+          'idx_takeoff_items_cost_code'
+        ];
+        const missingTakeoffIndexes = takeoffIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingTakeoffIndexes.length) {
+          throw new Error(`Backup quantity-takeoff constraints are incomplete: ${missingTakeoffIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

@@ -176,7 +176,7 @@ test('job workspace exposes approval-safe commercial drafting and acceptance evi
   assert.match(dashboardSource, /commercialDialogOpenerRef\.current = document\.activeElement/);
   assert.match(dashboardSource, /commercialDialogReturnFocusRef = useRef\(false\)/);
   assert.match(dashboardSource, /if \(opener\?\.isConnected && !opener\.disabled\) opener\.focus\(\)/);
-  assert.match(dashboardSource, /\[commercialAcceptance, commercialDraftMode, submitting\]/);
+  assert.match(dashboardSource, /\[commercialAcceptance, commercialDraftMode, submitting, takeoffDialog\]/);
   assert.match(dashboardSource, /if \(selectedJobId\) closeJobWorkspace\(\)/);
 });
 

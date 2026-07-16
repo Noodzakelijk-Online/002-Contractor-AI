@@ -1541,6 +1541,7 @@ app.get('/api/session', (req, res) => {
         intake: role === 'owner' || role === 'office_operator',
         pipeline: !fieldWorker,
         tenders: !fieldWorker,
+        takeoffs: !fieldWorker,
         schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
@@ -2268,6 +2269,80 @@ app.post('/api/ledger/jobs/:id/schedule-baselines', (req, res) => {
     }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/takeoffs', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    takeoffs: operatingLedger.listTakeoffs(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/takeoffs', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    takeoff: operatingLedger.createTakeoff(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/takeoffs/:takeoffId', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    takeoff: operatingLedger.getTakeoff(req.params.id, req.params.takeoffId)
+  }));
+});
+
+app.put('/api/ledger/jobs/:id/takeoffs/:takeoffId', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    takeoff: operatingLedger.updateTakeoff(req.params.id, req.params.takeoffId, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.addTakeoffItem(req.params.id, req.params.takeoffId, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.put('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.updateTakeoffItem(req.params.id, req.params.takeoffId, req.params.itemId, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/remove', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.removeTakeoffItem(req.params.id, req.params.takeoffId, req.params.itemId, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.convertTakeoffToQuote(req.params.id, req.params.takeoffId, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
 });
 
@@ -4053,6 +4128,8 @@ function operationalExport() {
     opportunityActivities: operatingLedger.listOpportunityActivities({ limit: 1_000 }),
     bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
     bidPackageParticipants: operatingLedger.listBidPackageParticipants({ limit: 5_000 }),
+    takeoffSheets: operatingLedger.listAllTakeoffs({ limit: 5_000 }),
+    takeoffItems: operatingLedger.listAllTakeoffItems({ limit: 10_000 }),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
@@ -4111,6 +4188,8 @@ function validateOperationalExport(snapshot) {
     'opportunityActivities',
     'bidPackages',
     'bidPackageParticipants',
+    'takeoffSheets',
+    'takeoffItems',
     'inspectionTemplates',
     'inspectionChecklistSubmissions'
   ]) {
@@ -4162,6 +4241,8 @@ function validateOperationalExport(snapshot) {
       opportunityActivities: Array.isArray(snapshot.opportunityActivities) ? snapshot.opportunityActivities.length : 0,
       bidPackages: Array.isArray(snapshot.bidPackages) ? snapshot.bidPackages.length : 0,
       bidPackageParticipants: Array.isArray(snapshot.bidPackageParticipants) ? snapshot.bidPackageParticipants.length : 0,
+      takeoffSheets: Array.isArray(snapshot.takeoffSheets) ? snapshot.takeoffSheets.length : 0,
+      takeoffItems: Array.isArray(snapshot.takeoffItems) ? snapshot.takeoffItems.length : 0,
       tradePartners: snapshot.tradePartners.length,
       supplierInvoices: snapshot.supplierInvoices.length,
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
