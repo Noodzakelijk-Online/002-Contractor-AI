@@ -73,7 +73,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);

@@ -186,9 +186,14 @@ async function recordFieldEvidence({ id, jobId, notes, riskLevel, file }) {
 
 async function recordFieldOperation({ id, type, jobId, payload }) {
   const inspectionId = type === 'inspection_checklist' ? String(payload?.inspectionId || '') : ''
+  const attendanceSessionId = type === 'attendance_check_out' ? String(payload?.sessionId || '') : ''
   const route =
     type === 'daily_log'
       ? 'daily-logs'
+      : type === 'attendance_check_in'
+        ? 'attendance/check-in'
+        : type === 'attendance_check_out' && attendanceSessionId
+          ? `attendance/${encodeURIComponent(attendanceSessionId)}/check-out`
       : type === 'production_entry'
         ? 'production-entries'
       : type === 'progress'
@@ -205,6 +210,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   if (!route) throw new Error('This queued field operation is not supported.')
   const requestPayload = { ...payload, entryKey: id }
   delete requestPayload.inspectionId
+  delete requestPayload.sessionId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
     body: JSON.stringify(requestPayload),
@@ -295,6 +301,15 @@ function emptyFieldProgress() {
     progressPercent: '',
     status: 'in_progress',
     note: '',
+  }
+}
+
+function emptyAttendanceDraft() {
+  return {
+    jobId: '',
+    workerId: '',
+    note: '',
+    accessPoint: '',
   }
 }
 
@@ -999,12 +1014,14 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'field') {
-    const [field, workers] = await Promise.all([
+    const [field, attendance, workers] = await Promise.all([
       api('/api/ledger/field-assurance?limit=100'),
+      api('/api/ledger/attendance?limit=250'),
       fieldScoped ? Promise.resolve(null) : api('/api/ledger/workers?limit=500'),
     ])
     return {
       field,
+      attendance: attendance.attendance || { rows: [], summary: {} },
       ...(workers
         ? { workers: workers.workers || [], workerSummary: workers.summary || {} }
         : {}),
@@ -6948,6 +6965,7 @@ function App() {
   const [evidence, setEvidence] = useState({ jobId: '', notes: '', riskLevel: 'medium' })
   const [fieldProgress, setFieldProgress] = useState(emptyFieldProgress)
   const [fieldDailyLog, setFieldDailyLog] = useState(emptyFieldDailyLog)
+  const [attendanceDraft, setAttendanceDraft] = useState(emptyAttendanceDraft)
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
   const [outboxSyncing, setOutboxSyncing] = useState(false)
@@ -7006,6 +7024,7 @@ function App() {
           finance: { jobs: [], summary: {} },
           clients: { jobs: [], summary: {} },
           field: { rows: [] },
+          attendance: { rows: [], summary: {} },
           inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
@@ -7042,6 +7061,7 @@ function App() {
           finance: { jobs: [], summary: {} },
           clients: { jobs: [], summary: {} },
           field: { rows: [] },
+          attendance: { rows: [], summary: {} },
           inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
@@ -7141,6 +7161,7 @@ function App() {
   const tradePartners = data?.tradePartners ?? EMPTY_LIST
   const approvals = data?.approvals ?? EMPTY_LIST
   const inspectionTemplates = data?.inspectionTemplates ?? EMPTY_LIST
+  const attendance = data?.attendance || { rows: EMPTY_LIST, summary: {} }
   const visibleApprovals = useMemo(() => {
     if (!approvalFocus) return approvals
     if (approvalFocus.approvalId) return approvals.filter((approval) => approval.id === approvalFocus.approvalId)
@@ -7149,6 +7170,15 @@ function App() {
   const activeJobs = useMemo(
     () => jobs.filter((job) => !['archived', 'completed', 'cancelled', 'rejected'].includes(job.status)).slice(0, 8),
     [jobs],
+  )
+  const attendanceWorkerId = fieldScoped ? operator.worker?.id || null : attendanceDraft.workerId || null
+  const currentAttendanceSession = useMemo(
+    () => (attendance.rows || []).find((session) => (
+      session.status === 'checked_in'
+      && (!attendanceDraft.jobId || session.jobId === attendanceDraft.jobId)
+      && (!attendanceWorkerId || session.workerId === attendanceWorkerId)
+    )) || null,
+    [attendance.rows, attendanceDraft.jobId, attendanceWorkerId],
   )
   const taskAssigneeOptions = Array.from(
     new Map(
@@ -8193,6 +8223,68 @@ function App() {
           await refreshOutboxState()
           setFieldProgress(emptyFieldProgress())
           notify('Connection interrupted. Field progress was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function recordAttendance(event) {
+    event.preventDefault()
+    if (!attendanceDraft.jobId) {
+      setError('Choose an assigned job before recording site attendance.')
+      return
+    }
+    if (!fieldScoped && !attendanceDraft.workerId) {
+      setError('Choose the assigned crew member whose attendance is being recorded.')
+      return
+    }
+    const checkingOut = Boolean(currentAttendanceSession)
+    const draft = {
+      id: createFieldEvidenceDraftId(),
+      type: checkingOut ? 'attendance_check_out' : 'attendance_check_in',
+      jobId: attendanceDraft.jobId,
+      payload: {
+        ...(checkingOut ? { sessionId: currentAttendanceSession.id } : {}),
+        ...(fieldScoped ? {} : { workerId: attendanceDraft.workerId }),
+        occurredAt: new Date().toISOString(),
+        note: attendanceDraft.note.trim() || null,
+        accessPoint: attendanceDraft.accessPoint.trim() || null,
+        source: 'attendance_control',
+      },
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setAttendanceDraft((current) => ({ ...current, note: '', accessPoint: '' }))
+        notify(`${checkingOut ? 'Check-out' : 'Check-in'} was saved locally for an exact retry.`)
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      setData((current) => current ? { ...current, attendance: result.attendance || current.attendance } : current)
+      setAttendanceDraft((current) => ({ ...current, note: '', accessPoint: '' }))
+      notify(
+        result.replayed
+          ? `This ${checkingOut ? 'check-out' : 'check-in'} was already retained; no duplicate was created.`
+          : `${checkingOut ? 'Check-out' : 'Check-in'} retained on the live labor board.`,
+      )
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setAttendanceDraft((current) => ({ ...current, note: '', accessPoint: '' }))
+          notify(`Connection interrupted. ${checkingOut ? 'Check-out' : 'Check-in'} was saved locally for an exact retry.`)
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -12197,6 +12289,115 @@ function App() {
                     {outboxQuarantined ? <span className="tag">{outboxQuarantined} other scope</span> : null}
                   </div>
                 </div>
+                <section className="attendance-control" data-testid="attendance-control">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Site attendance</h2>
+                      <p>Assignment and approved access are checked before presence reaches the labor board.</p>
+                    </div>
+                    <div className="attendance-summary" aria-label="Attendance summary">
+                      <span className="tag tag-green">{attendance.summary?.checkedIn || 0} on site</span>
+                      {attendance.summary?.stale ? <span className="tag tag-amber">{attendance.summary.stale} review</span> : null}
+                    </div>
+                  </div>
+                  <form className="attendance-form" onSubmit={recordAttendance}>
+                    <div className="form-grid">
+                      <label>
+                        Job
+                        <select
+                          required
+                          value={attendanceDraft.jobId}
+                          onChange={(event) => setAttendanceDraft({ ...attendanceDraft, jobId: event.target.value })}
+                        >
+                          <option value="">Select an assigned job</option>
+                          {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                        </select>
+                      </label>
+                      {!fieldScoped ? (
+                        <label>
+                          Crew member
+                          <select
+                            required
+                            value={attendanceDraft.workerId}
+                            onChange={(event) => setAttendanceDraft({ ...attendanceDraft, workerId: event.target.value })}
+                          >
+                            <option value="">Select assigned crew</option>
+                            {workers.filter((worker) => !['retired', 'inactive', 'offline', 'unavailable'].includes(worker.status)).map((worker) => (
+                              <option key={worker.id} value={worker.id}>{worker.name}</option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+                      <label>
+                        Access point
+                        <input
+                          maxLength="160"
+                          value={attendanceDraft.accessPoint}
+                          onChange={(event) => setAttendanceDraft({ ...attendanceDraft, accessPoint: event.target.value })}
+                          placeholder="Gate or site entrance"
+                        />
+                      </label>
+                      <label className="form-span">
+                        Attendance note
+                        <textarea
+                          maxLength="2000"
+                          value={attendanceDraft.note}
+                          onChange={(event) => setAttendanceDraft({ ...attendanceDraft, note: event.target.value })}
+                          placeholder="Optional handover or access note"
+                        />
+                      </label>
+                    </div>
+                    <div className="modal-actions">
+                      <button className={`primary-button ${currentAttendanceSession ? 'attendance-checkout-button' : ''}`} disabled={submitting}>
+                        {currentAttendanceSession ? <LogOut size={16} /> : <Timer size={16} />}
+                        {submitting
+                          ? 'Recording...'
+                          : navigator.onLine === false
+                            ? `Save ${currentAttendanceSession ? 'check-out' : 'check-in'} offline`
+                            : currentAttendanceSession
+                              ? 'Check out'
+                              : 'Check in'}
+                      </button>
+                    </div>
+                  </form>
+                  <div className="attendance-board" aria-live="polite">
+                    {(attendance.rows || []).slice(0, 12).map((session) => {
+                      const job = jobs.find((item) => item.id === session.jobId)
+                      return (
+                        <div className="attendance-row" key={session.id}>
+                          <span className={`attendance-presence ${session.status === 'checked_in' ? 'attendance-present' : ''}`} aria-hidden="true" />
+                          <div>
+                            <strong>{session.workerName || 'Crew member'}</strong>
+                            <small>{job?.title || session.jobId} / {formatDateTime(session.effectiveCheckInAt)}</small>
+                          </div>
+                          <div className="attendance-row-state">
+                            <span className={`status status-${session.stale ? 'attention' : session.status}`}>{session.stale ? 'review' : formatStatus(session.status)}</span>
+                            {session.status === 'checked_in' ? (
+                              <button
+                                type="button"
+                                className="icon-button"
+                                title="Select for check-out"
+                                aria-label={`Select ${session.workerName || 'crew member'} for check-out`}
+                                onClick={() => setAttendanceDraft({
+                                  jobId: session.jobId,
+                                  workerId: fieldScoped ? '' : session.workerId,
+                                  note: '',
+                                  accessPoint: session.accessPoint || '',
+                                })}
+                              >
+                                <ChevronRight size={16} />
+                              </button>
+                            ) : <span>{session.durationHours?.toFixed?.(2) || '0.00'} h</span>}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {!attendance.rows?.length ? (
+                      <div className="attendance-empty"><Users size={20} /><span>No retained attendance sessions.</span></div>
+                    ) : null}
+                  </div>
+                  <p className="attendance-policy">Operational self-reported presence only. Payroll, statutory registers, and location tracking remain separate.</p>
+                </section>
                 <form className="evidence-form daily-site-log" data-testid="daily-site-log-form" onSubmit={recordFieldDailyLog}>
                   <div className="panel-heading">
                     <div>

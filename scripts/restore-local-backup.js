@@ -390,6 +390,25 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('033_site_attendance')) {
+        for (const table of ['attendance_sessions', 'attendance_adjustments']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup site-attendance schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_attendance_sessions_job_time',
+          'idx_attendance_sessions_worker_status',
+          'idx_attendance_sessions_worker_open',
+          'idx_attendance_adjustments_session_status',
+          'idx_attendance_adjustments_pending'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup site-attendance constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

@@ -525,6 +525,74 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(preparedReplacement.job.orientations.find(record => record.assignmentId === replacementAssignment.id).workerId, replacementWorker.id);
     assert.equal(preparedReplacement.job.siteAccessLogs.find(record => record.assignmentId === replacementAssignment.id).workerId, replacementWorker.id);
 
+    const attendanceWorker = ledger.upsertWorker({
+      name: `PostgreSQL attendance crew ${Date.now()}`,
+      role: 'Site installer',
+      status: 'available'
+    }, { actor: 'postgres_contract_test' });
+    let attendanceAssignment = ledger.addAssignment(job.id, {
+      workerId: attendanceWorker.id,
+      status: 'active'
+    }, { actor: 'postgres_contract_test' });
+    if (attendanceAssignment.approval?.id) {
+      ledger.resolveApproval(attendanceAssignment.approval.id, {
+        status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted attendance assignment verified.'
+      });
+      attendanceAssignment = ledger.getJobDetail(job.id).assignments.find(record => record.id === attendanceAssignment.id);
+    }
+    const attendanceOrientation = ledger.createWorkerOrientation(job.id, {
+      assignmentId: attendanceAssignment.id,
+      workerId: attendanceWorker.id,
+      workerName: attendanceWorker.name,
+      status: 'completed'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(attendanceOrientation.approvalId, {
+      status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted orientation evidence verified.'
+    });
+    const attendanceAccess = ledger.createSiteAccessLog(job.id, {
+      assignmentId: attendanceAssignment.id,
+      workerId: attendanceWorker.id,
+      workerName: attendanceWorker.name,
+      orientationId: attendanceOrientation.id,
+      orientationValid: true,
+      status: 'cleared'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(attendanceAccess.approvalId, {
+      status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted site access evidence verified.'
+    });
+    const attendanceCheckInAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const attendanceCheckOutAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const attendanceSession = ledger.recordAttendanceCheckIn(job.id, {
+      assignmentId: attendanceAssignment.id,
+      workerId: attendanceWorker.id,
+      occurredAt: attendanceCheckInAt,
+      entryKey: `postgres-attendance-in-${Date.now()}`
+    }, { actor: 'postgres_contract_test' }).session;
+    const attendanceReplay = ledger.recordAttendanceCheckIn(job.id, {
+      assignmentId: attendanceAssignment.id,
+      workerId: attendanceWorker.id,
+      occurredAt: attendanceCheckInAt,
+      entryKey: attendanceSession.checkInEntryKey
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(attendanceReplay.replayed, true);
+    ledger.recordAttendanceCheckOut(job.id, attendanceSession.id, {
+      workerId: attendanceWorker.id,
+      occurredAt: attendanceCheckOutAt,
+      entryKey: `postgres-attendance-out-${Date.now()}`
+    }, { actor: 'postgres_contract_test' });
+    const attendanceAdjustment = ledger.requestAttendanceAdjustment(job.id, attendanceSession.id, {
+      checkInAt: new Date(Date.parse(attendanceCheckInAt) + 5 * 60 * 1000).toISOString(),
+      checkOutAt: attendanceCheckOutAt,
+      reason: 'Hosted gate clock offset verified for parity testing.'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(attendanceAdjustment.approval.id, {
+      status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted attendance adjustment evidence verified.'
+    });
+    const hostedAttendance = ledger.getAttendanceSession(attendanceSession.id);
+    assert.equal(hostedAttendance.adjustment.status, 'approved');
+    assert.equal(hostedAttendance.checkInAt, attendanceCheckInAt);
+    assert.notEqual(hostedAttendance.effectiveCheckInAt, hostedAttendance.checkInAt);
+
     const tradePartner = ledger.upsertTradePartner({
       name: `PostgreSQL supplier ${Date.now()}`,
       partnerType: 'supplier'
@@ -1087,7 +1155,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '032_production_control');
+    assert.equal(migrations.currentVersion, '033_site_attendance');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1168,12 +1236,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('032_production_control'));
+  assert.deepEqual(versions, Array(4).fill('033_site_attendance'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 32);
+    assert.equal(Number(migrationCount.count), 33);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1674,7 +1742,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '032_production_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '033_site_attendance');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

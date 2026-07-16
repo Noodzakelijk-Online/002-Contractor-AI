@@ -1189,11 +1189,15 @@ function allowsOperatorRequest(role, req) {
         || pathName === '/api/readiness'
         || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
+        || pathName === '/api/ledger/attendance'
+        || /^\/api\/ledger\/jobs\/[^/]+\/attendance$/.test(pathName)
         || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
     }
     if (req.method === 'POST' && pathName === '/api/ledger/upload') return true;
     if (req.method === 'PATCH' && /^\/api\/ledger\/jobs\/[^/]+\/lifecycle\/task\/[^/]+$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/check-in$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/[^/]+\/check-out$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs)$/.test(pathName);
   }
 
@@ -1226,7 +1230,7 @@ function scopedLedgerJobs(req, filters = {}) {
 }
 
 const FIELD_RECORD_PRIVATE_KEYS = new Set([
-  'amount', 'approval', 'approvalId', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
+  'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
   'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
   'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
   'snapshotHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
@@ -1311,6 +1315,11 @@ function projectFieldJobDetail(req, detail) {
     productionBaselines: projectFieldRecords(detail.productionBaselines),
     productionEntries: projectFieldRecords(detail.productionEntries),
     productionControl: projectFieldRecord(detail.productionControl),
+    attendanceSessions: projectFieldRecords(
+      scopeWorkerId
+        ? (detail.attendanceSessions || []).filter(session => String(session.workerId || '') === String(scopeWorkerId))
+        : []
+    ),
     timeLogs: projectFieldRecords(timeLogs),
     qualityChecks: projectFieldRecords(detail.qualityChecks),
     safetyChecks: projectFieldRecords(detail.safetyChecks),
@@ -1347,6 +1356,24 @@ function timeLogPayloadForOperator(req, payload = {}) {
     rate: identity.hourlyRate,
     hourlyRate: identity.hourlyRate,
     hourly_rate: identity.hourlyRate
+  };
+}
+
+function attendancePayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field attendance requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName
   };
 }
 
@@ -2629,6 +2656,83 @@ app.post('/api/ledger/jobs/:id/site-access', (req, res) => {
     siteAccessLog: operatingLedger.createSiteAccessLog(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/attendance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}) };
+    if (req.operator?.role === 'field_worker' && req.operator.scope?.workerId) {
+      filters.workerId = req.operator.scope.workerId;
+    }
+    const board = operatingLedger.listAttendanceBoard(filters);
+    if (req.operator?.role === 'field_worker') {
+      board.rows = board.rows.filter(row => fieldWorkerCanAccessJob(req, row.jobId)).map(projectFieldRecord);
+      board.summary = {
+        sessions: board.rows.length,
+        checkedIn: board.rows.filter(row => row.status === 'checked_in').length,
+        checkedOut: board.rows.filter(row => row.status === 'checked_out').length,
+        stale: board.rows.filter(row => row.stale).length,
+        adjusted: board.rows.filter(row => row.adjustment).length,
+        retainedHours: board.rows.reduce((sum, row) => sum + (row.status === 'checked_out' ? Number(row.durationHours || 0) : 0), 0)
+      };
+    }
+    return { success: true, attendance: board };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/attendance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}), jobId: req.params.id };
+    if (req.operator?.role === 'field_worker' && req.operator.scope?.workerId) filters.workerId = req.operator.scope.workerId;
+    return { success: true, attendance: recordForOperator(req, operatingLedger.listAttendanceBoard(filters)) };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/attendance/check-in', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = attendancePayloadForOperator(req, req.body || {});
+    const result = operatingLedger.recordAttendanceCheckIn(req.params.id, payload, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      session: recordForOperator(req, result.session),
+      attendance: recordForOperator(req, result.board),
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/attendance/:sessionId/check-out', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = attendancePayloadForOperator(req, req.body || {});
+    const result = operatingLedger.recordAttendanceCheckOut(req.params.id, req.params.sessionId, payload, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      session: recordForOperator(req, result.session),
+      attendance: recordForOperator(req, result.board),
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/attendance/:sessionId/adjustments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestAttendanceAdjustment(req.params.id, req.params.sessionId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    attendance: operatingLedger.listAttendanceBoard({ jobId: req.params.id }),
+    job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
+    dashboard: operatingLedger.dashboardSummary(),
+    externalCommitments: 0
   }), 201);
 });
 
@@ -4292,6 +4396,8 @@ function operationalExport() {
     costForecastSnapshots: operatingLedger.listAllCostForecastSnapshots({ limit: 5_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
+    attendanceSessions: operatingLedger.listAttendanceSessions({ limit: 10_000 }),
+    attendanceAdjustments: operatingLedger.listAttendanceAdjustments({ limit: 10_000 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
@@ -4351,6 +4457,8 @@ function validateOperationalExport(snapshot) {
     'takeoffItems',
     'purchaseOrders',
     'costForecastSnapshots',
+    'attendanceSessions',
+    'attendanceAdjustments',
     'inspectionTemplates',
     'inspectionChecklistSubmissions'
   ]) {
@@ -4412,6 +4520,8 @@ function validateOperationalExport(snapshot) {
       costForecastSnapshots: Array.isArray(snapshot.costForecastSnapshots) ? snapshot.costForecastSnapshots.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
+      attendanceSessions: Array.isArray(snapshot.attendanceSessions) ? snapshot.attendanceSessions.length : 0,
+      attendanceAdjustments: Array.isArray(snapshot.attendanceAdjustments) ? snapshot.attendanceAdjustments.length : 0,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
@@ -5023,6 +5133,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         progressEntryKey: 'durable',
         productionEntryKey: 'durable',
         productionEntryReversal: 'approval_gated_compensating_record',
+        attendanceEntryKey: 'durable',
+        attendanceAdjustment: 'approval_gated_compensating_record',
         dailyLogEntryKey: 'durable',
         taskLifecycle: 'retained',
         taskCompletionEvidenceRequired: true,
@@ -5095,6 +5207,19 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         reversalMode: 'approval_gated_compensating_record',
         autonomousVarianceReview: 'internal_task_only',
         performanceThreshold: 0.8,
+        externalCommitments: 0
+      },
+      attendanceControl: {
+        assignmentScoped: true,
+        approvedSiteAccessRequired: true,
+        replaySafeFieldCapture: true,
+        offlineRetentionHours: 48,
+        liveLaborBoard: true,
+        adjustmentMode: 'approval_gated_compensating_record',
+        autonomousStaleSessionReview: 'internal_task_only',
+        payrollDerived: false,
+        geolocationCaptured: false,
+        statutoryAttendanceRegister: false,
         externalCommitments: 0
       },
       invoicing: {

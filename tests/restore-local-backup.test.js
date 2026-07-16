@@ -172,6 +172,20 @@ test('backup verification rejects a migration 032 ledger with missing production
   );
 });
 
+test('backup verification rejects a migration 033 ledger with missing site-attendance constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-site-attendance-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Site attendance schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_attendance_sessions_worker_open');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /site-attendance constraints are incomplete: idx_attendance_sessions_worker_open/i
+  );
+});
+
 test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-restore safety copy', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));

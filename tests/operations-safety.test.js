@@ -127,6 +127,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(Array.isArray(exported.body.costForecastSnapshots));
   assert.ok(Array.isArray(exported.body.productionBaselines));
   assert.ok(Array.isArray(exported.body.productionEntries));
+  assert.ok(Array.isArray(exported.body.attendanceSessions));
+  assert.ok(Array.isArray(exported.body.attendanceAdjustments));
   assert.ok(Array.isArray(exported.body.supplierInvoices));
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
   assert.ok(Array.isArray(exported.body.taskDependencies));
@@ -152,6 +154,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.counts.costForecastSnapshots, exported.body.costForecastSnapshots.length);
   assert.equal(exportValidation.body.counts.productionBaselines, exported.body.productionBaselines.length);
   assert.equal(exportValidation.body.counts.productionEntries, exported.body.productionEntries.length);
+  assert.equal(exportValidation.body.counts.attendanceSessions, exported.body.attendanceSessions.length);
+  assert.equal(exportValidation.body.counts.attendanceAdjustments, exported.body.attendanceAdjustments.length);
   assert.equal(exportValidation.body.counts.supplierInvoices, exported.body.supplierInvoices.length);
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
   assert.equal(exportValidation.body.counts.taskDependencies, exported.body.taskDependencies.length);
@@ -293,7 +297,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '032_production_control');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '033_site_attendance');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 

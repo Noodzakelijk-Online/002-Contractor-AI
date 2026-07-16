@@ -136,6 +136,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'production_output', label: 'Installed production output', table: 'production_entries', detailKey: 'productionEntries', readyStatuses: ['recorded'] },
     { key: 'field_report', label: 'Daily report', table: 'field_reports', detailKey: 'fieldReports' },
     { key: 'time', label: 'Time tracking', table: 'time_logs', detailKey: 'timeLogs' },
+    { key: 'attendance', label: 'Site attendance and labor map', table: 'attendance_sessions', detailKey: 'attendanceSessions', readyStatuses: ['checked_in', 'checked_out'] },
     { key: 'materials', label: 'Material tracking', table: 'material_requirements', detailKey: 'materials' },
     { key: 'equipment', label: 'Tool/equipment tracking', table: 'tool_reservations', detailKey: 'tools' },
     { key: 'evidence', label: 'Photo evidence', table: 'documents', detailKey: 'documents' },
@@ -523,6 +524,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     production_baseline: 'production_control',
     production_output: 'production_control',
     time: 'time_log_form',
+    attendance: 'attendance_control',
     evidence: 'document_form',
     instructions: 'worker_instruction_form',
     orientation: 'orientation_form',
@@ -591,6 +593,7 @@ const CAPABILITY_MANUAL_COMMITMENT_REQUIREMENTS = new Set([
   'assignment',
   'orientation',
   'site_access',
+  'attendance',
   'inspection',
   'change_order',
   'rfi',
@@ -2611,6 +2614,62 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON production_entries(job_id, work_date DESC, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_production_entries_baseline_line
           ON production_entries(baseline_id, line_key, status);
+      `);
+    }
+  },
+  {
+    version: '033_site_attendance',
+    description: 'Retain replay-safe assignment attendance, live labor-board state, and approval-backed compensating adjustments.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS attendance_sessions (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          assignment_id TEXT NOT NULL,
+          worker_id TEXT NOT NULL,
+          check_in_at TEXT NOT NULL,
+          check_out_at TEXT,
+          status TEXT NOT NULL DEFAULT 'checked_in',
+          check_in_entry_key TEXT NOT NULL,
+          check_in_entry_fingerprint TEXT NOT NULL,
+          check_out_entry_key TEXT,
+          check_out_entry_fingerprint TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(assignment_id) REFERENCES assignments(id),
+          FOREIGN KEY(worker_id) REFERENCES workers(id),
+          UNIQUE(worker_id, check_in_entry_key),
+          UNIQUE(worker_id, check_out_entry_key)
+        );
+        CREATE TABLE IF NOT EXISTS attendance_adjustments (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          requested_check_in_at TEXT NOT NULL,
+          requested_check_out_at TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          approval_id TEXT,
+          snapshot_hash TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(approval_id) REFERENCES approvals(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_attendance_sessions_job_time
+          ON attendance_sessions(job_id, check_in_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_attendance_sessions_worker_status
+          ON attendance_sessions(worker_id, status, check_in_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_sessions_worker_open
+          ON attendance_sessions(worker_id) WHERE status = 'checked_in';
+        CREATE INDEX IF NOT EXISTS idx_attendance_adjustments_session_status
+          ON attendance_adjustments(session_id, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_adjustments_pending
+          ON attendance_adjustments(session_id) WHERE status = 'pending_approval';
       `);
     }
   }
@@ -13336,6 +13395,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 400;
         throw error;
       }
+      const openAttendance = this.db.prepare("SELECT id, worker_id, check_in_at FROM attendance_sessions WHERE assignment_id = ? AND status = 'checked_in'").get(assignmentId);
+      if (openAttendance) {
+        throw ledgerInputError(
+          'assignment_open_attendance',
+          'Check out the worker before releasing, completing, or cancelling this assignment.',
+          { assignmentId, attendanceSessionId: openAttendance.id, workerId: openAttendance.worker_id, checkInAt: openAttendance.check_in_at },
+          409
+        );
+      }
       const timestamp = nowIso();
       const before = this.mapAssignment(row);
       const data = fromJson(row.data_json, {});
@@ -15252,6 +15320,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 409;
         error.code = 'job_already_archived';
         throw error;
+      }
+      const openAttendance = this.db.prepare("SELECT id, worker_id, check_in_at FROM attendance_sessions WHERE job_id = ? AND status = 'checked_in' ORDER BY check_in_at ASC").all(jobId);
+      if (openAttendance.length) {
+        throw ledgerInputError(
+          'job_archive_open_attendance',
+          `Check out ${openAttendance.length} worker${openAttendance.length === 1 ? '' : 's'} before requesting job archive.`,
+          { sessions: openAttendance.map(row => ({ id: row.id, workerId: row.worker_id, checkInAt: row.check_in_at })) },
+          409
+        );
       }
 
       const pending = this.db.prepare(`
@@ -18537,6 +18614,353 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       sourceHash,
       warnings
     };
+  }
+
+  normalizeAttendanceTimestamp(value, label, options = {}) {
+    const fallback = options.fallback || null;
+    const parsed = new Date(normalizeText(value, fallback || ''));
+    if (Number.isNaN(parsed.getTime())) {
+      throw ledgerInputError('attendance_timestamp_invalid', `${label} must be a valid date and time.`);
+    }
+    const now = options.now ? new Date(options.now) : new Date();
+    if (Number.isNaN(now.getTime())) throw ledgerInputError('attendance_clock_invalid', 'Attendance clock reference is invalid.');
+    if (parsed.getTime() > now.getTime() + 5 * 60 * 1000) {
+      throw ledgerInputError('attendance_timestamp_future', `${label} cannot be more than five minutes in the future.`);
+    }
+    if (options.maxAgeHours && parsed.getTime() < now.getTime() - options.maxAgeHours * 60 * 60 * 1000) {
+      throw ledgerInputError('attendance_timestamp_too_old', `${label} is outside the ${options.maxAgeHours}-hour offline retention window.`);
+    }
+    return parsed.toISOString();
+  }
+
+  requireAttendanceEntryKey(value) {
+    const entryKey = normalizeText(value, '');
+    if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+      throw ledgerInputError('attendance_entry_key_invalid', 'Attendance entry key must contain 8 to 200 letters, numbers, dots, colons, underscores, or dashes.');
+    }
+    return entryKey;
+  }
+
+  requireAttendanceAssignment(jobId, payload = {}) {
+    const assignment = this.resolveCrewAssignment(jobId, payload);
+    if (!assignment || !assignment.workerId) {
+      throw ledgerInputError('attendance_assignment_required', 'An active worker assignment is required before site attendance can be recorded.', { jobId }, 409);
+    }
+    if (!['planned', 'scheduled', 'active', 'in_progress', 'approved'].includes(normalizeStatus(assignment.status, ''))) {
+      throw ledgerInputError('attendance_assignment_inactive', `Attendance cannot be recorded for an assignment in ${assignment.status} state.`, { assignmentId: assignment.id }, 409);
+    }
+    const worker = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(assignment.workerId);
+    if (!worker || ['retired', 'inactive', 'offline', 'unavailable'].includes(normalizeStatus(worker.status, 'available'))) {
+      throw ledgerInputError('attendance_worker_unavailable', 'The assigned worker is not active for site attendance.', { workerId: assignment.workerId }, 409);
+    }
+    return { assignment, worker: this.mapWorker(worker) };
+  }
+
+  requireAttendanceSiteAccess(jobId, assignment) {
+    const access = this.db.prepare(`
+      SELECT * FROM site_access_logs
+      WHERE job_id = ? AND orientation_valid = 1
+        AND status IN ('checked_in', 'cleared', 'approved', 'granted')
+      ORDER BY updated_at DESC
+    `).all(jobId).map(row => this.mapSiteAccessLog(row)).find(record => this.crewEvidenceIdentityMatches(record, assignment));
+    if (!access) {
+      throw ledgerInputError(
+        'attendance_site_access_required',
+        'Approved assignment-scoped site access is required before check-in.',
+        { jobId, assignmentId: assignment.id, workerId: assignment.workerId },
+        409
+      );
+    }
+    return access;
+  }
+
+  recordAttendanceCheckIn(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const { assignment, worker } = this.requireAttendanceAssignment(jobId, payload);
+      const siteAccess = this.requireAttendanceSiteAccess(jobId, assignment);
+      const entryKey = this.requireAttendanceEntryKey(payload.entryKey || payload.entry_key);
+      const checkInAt = this.normalizeAttendanceTimestamp(
+        payload.occurredAt || payload.occurred_at || payload.checkInAt || payload.check_in_at,
+        'Check-in time',
+        { fallback: nowIso(), maxAgeHours: 48 }
+      );
+      const note = normalizeText(payload.note || payload.notes, '');
+      if (note.length > 2_000) throw ledgerInputError('attendance_note_too_long', 'Attendance note must be 2,000 characters or fewer.');
+      const accessPoint = normalizeText(payload.accessPoint || payload.access_point, '');
+      if (accessPoint.length > 160) throw ledgerInputError('attendance_access_point_too_long', 'Access point must be 160 characters or fewer.');
+      const entryFingerprint = sha256Json({ jobId, assignmentId: assignment.id, workerId: assignment.workerId, checkInAt, note, accessPoint });
+      const replay = this.db.prepare('SELECT * FROM attendance_sessions WHERE worker_id = ? AND check_in_entry_key = ?').get(assignment.workerId, entryKey);
+      if (replay) {
+        if (replay.check_in_entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('attendance_entry_key_reused', 'Attendance entry key was already used for different check-in content.', { entryKey }, 409);
+        }
+        return { session: this.getAttendanceSession(replay.id), board: this.listAttendanceBoard({ jobId }), replayed: true };
+      }
+      const open = this.db.prepare("SELECT * FROM attendance_sessions WHERE worker_id = ? AND status = 'checked_in'").get(assignment.workerId);
+      if (open) {
+        throw ledgerInputError('attendance_worker_already_checked_in', 'This worker already has an open attendance session.', { sessionId: open.id, jobId: open.job_id }, 409);
+      }
+      const id = makeId('attendance');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO attendance_sessions (
+          id, job_id, assignment_id, worker_id, check_in_at, check_out_at, status,
+          check_in_entry_key, check_in_entry_fingerprint, check_out_entry_key,
+          check_out_entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, 'checked_in', ?, ?, NULL, NULL, ?, ?, ?)
+      `).run(
+        id, jobId, assignment.id, assignment.workerId, checkInAt, entryKey, entryFingerprint,
+        toJson({
+          workerName: worker.name,
+          assignmentRole: assignment.role || worker.role || null,
+          siteAccessLogId: siteAccess.id,
+          accessPoint: accessPoint || null,
+          checkInNote: note || null,
+          source: payload.source || 'attendance_control',
+          selfReportedPresence: true,
+          payrollDerived: false,
+          geolocationCaptured: false
+        }),
+        timestamp,
+        timestamp
+      );
+      const session = this.getAttendanceSession(id);
+      this.audit({
+        entityType: 'attendance_session', entityId: id, jobId, action: 'attendance_check_in', actor,
+        after: session,
+        metadata: { assignmentId: assignment.id, workerId: assignment.workerId, entryKey, entryFingerprint, externalCommitments: 0 }
+      });
+      return { session, board: this.listAttendanceBoard({ jobId }), replayed: false };
+    });
+  }
+
+  recordAttendanceCheckOut(jobId, sessionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM attendance_sessions WHERE id = ? AND job_id = ?').get(sessionId, jobId);
+      if (!row) throw ledgerInputError('attendance_session_not_found', 'Attendance session not found for this job.', { sessionId }, 404);
+      const requestedWorkerId = normalizeText(payload.workerId || payload.worker_id, '');
+      if (requestedWorkerId && requestedWorkerId !== row.worker_id) {
+        throw ledgerInputError('attendance_worker_scope_conflict', 'This attendance session belongs to another worker.', { sessionId }, 403);
+      }
+      const entryKey = this.requireAttendanceEntryKey(payload.entryKey || payload.entry_key);
+      const checkOutAt = this.normalizeAttendanceTimestamp(
+        payload.occurredAt || payload.occurred_at || payload.checkOutAt || payload.check_out_at,
+        'Check-out time',
+        { fallback: nowIso(), maxAgeHours: 48 }
+      );
+      const note = normalizeText(payload.note || payload.notes, '');
+      if (note.length > 2_000) throw ledgerInputError('attendance_note_too_long', 'Attendance note must be 2,000 characters or fewer.');
+      const entryFingerprint = sha256Json({ jobId, sessionId, workerId: row.worker_id, checkOutAt, note });
+      if (row.status === 'checked_out') {
+        if (row.check_out_entry_key === entryKey && row.check_out_entry_fingerprint === entryFingerprint) {
+          return { session: this.getAttendanceSession(row.id), board: this.listAttendanceBoard({ jobId }), replayed: true };
+        }
+        if (row.check_out_entry_key === entryKey) {
+          throw ledgerInputError('attendance_entry_key_reused', 'Attendance entry key was already used for different check-out content.', { entryKey }, 409);
+        }
+        throw ledgerInputError('attendance_session_already_closed', 'This attendance session is already checked out.', { sessionId }, 409);
+      }
+      if (row.status !== 'checked_in') {
+        throw ledgerInputError('attendance_session_state_conflict', `Attendance cannot be checked out from ${row.status} state.`, { sessionId }, 409);
+      }
+      if (Date.parse(checkOutAt) < Date.parse(row.check_in_at)) {
+        throw ledgerInputError('attendance_checkout_before_checkin', 'Check-out time cannot be before check-in time.');
+      }
+      if (Date.parse(checkOutAt) - Date.parse(row.check_in_at) > 48 * 60 * 60 * 1000) {
+        throw ledgerInputError('attendance_session_too_long', 'Attendance sessions longer than 48 hours require an office adjustment.');
+      }
+      const before = this.mapAttendanceSession(row);
+      const timestamp = nowIso();
+      const data = fromJson(row.data_json, {});
+      this.db.prepare(`
+        UPDATE attendance_sessions
+        SET check_out_at = ?, status = 'checked_out', check_out_entry_key = ?,
+          check_out_entry_fingerprint = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'checked_in'
+      `).run(checkOutAt, entryKey, entryFingerprint, toJson({ ...data, checkOutNote: note || null }), timestamp, row.id);
+      const session = this.getAttendanceSession(row.id);
+      this.audit({
+        entityType: 'attendance_session', entityId: row.id, jobId, action: 'attendance_check_out', actor,
+        before, after: session,
+        metadata: { workerId: row.worker_id, entryKey, entryFingerprint, externalCommitments: 0 }
+      });
+      return { session, board: this.listAttendanceBoard({ jobId }), replayed: false };
+    });
+  }
+
+  getAttendanceSession(sessionId) {
+    const row = this.db.prepare('SELECT * FROM attendance_sessions WHERE id = ?').get(String(sessionId || ''));
+    if (!row) throw ledgerInputError('attendance_session_not_found', 'Attendance session not found.', { sessionId }, 404);
+    const adjustment = this.db.prepare(`
+      SELECT * FROM attendance_adjustments
+      WHERE session_id = ? AND status = 'approved'
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(row.id);
+    return this.mapAttendanceSession(row, adjustment);
+  }
+
+  listAttendanceSessions(filters = {}) {
+    const limit = safeLimit(filters.limit, 500, 5_000);
+    const clauses = [];
+    const params = [];
+    if (filters.jobId || filters.job_id) { clauses.push('job_id = ?'); params.push(filters.jobId || filters.job_id); }
+    if (filters.workerId || filters.worker_id) { clauses.push('worker_id = ?'); params.push(filters.workerId || filters.worker_id); }
+    if (filters.status) { clauses.push('status = ?'); params.push(normalizeStatus(filters.status, 'checked_in')); }
+    if (filters.date) { clauses.push('substr(check_in_at, 1, 10) = ?'); params.push(normalizeText(filters.date, nowIso().slice(0, 10))); }
+    const rows = this.db.prepare(`
+      SELECT * FROM attendance_sessions
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY check_in_at DESC, created_at DESC LIMIT ?
+    `).all(...params, limit);
+    return rows.map(row => {
+      const adjustment = this.db.prepare(`
+        SELECT * FROM attendance_adjustments
+        WHERE session_id = ? AND status = 'approved'
+        ORDER BY updated_at DESC LIMIT 1
+      `).get(row.id);
+      return this.mapAttendanceSession(row, adjustment);
+    });
+  }
+
+  listAttendanceAdjustments(filters = {}) {
+    const limit = safeLimit(filters.limit, 500, 5_000);
+    const clauses = [];
+    const params = [];
+    if (filters.jobId || filters.job_id) { clauses.push('job_id = ?'); params.push(filters.jobId || filters.job_id); }
+    if (filters.sessionId || filters.session_id) { clauses.push('session_id = ?'); params.push(filters.sessionId || filters.session_id); }
+    if (filters.status) { clauses.push('status = ?'); params.push(normalizeStatus(filters.status, 'pending_approval')); }
+    return this.db.prepare(`
+      SELECT * FROM attendance_adjustments
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY created_at DESC LIMIT ?
+    `).all(...params, limit).map(row => this.mapAttendanceAdjustment(row));
+  }
+
+  listAttendanceBoard(filters = {}) {
+    const sessions = this.listAttendanceSessions(filters);
+    const now = Date.parse(filters.asOf || filters.as_of || nowIso());
+    const rows = sessions.map(session => {
+      const effectiveEnd = session.effectiveCheckOutAt ? Date.parse(session.effectiveCheckOutAt) : now;
+      const durationHours = Number.isFinite(effectiveEnd)
+        ? roundQuantity(Math.max(0, effectiveEnd - Date.parse(session.effectiveCheckInAt)) / (60 * 60 * 1000))
+        : 0;
+      const stale = session.status === 'checked_in' && durationHours >= 12;
+      return { ...session, durationHours, stale, warning: stale ? 'Check-out review required' : null };
+    });
+    return {
+      generatedAt: nowIso(),
+      rows,
+      summary: {
+        sessions: rows.length,
+        checkedIn: rows.filter(row => row.status === 'checked_in').length,
+        checkedOut: rows.filter(row => row.status === 'checked_out').length,
+        stale: rows.filter(row => row.stale).length,
+        adjusted: rows.filter(row => row.adjustment).length,
+        retainedHours: roundQuantity(rows.filter(row => row.status === 'checked_out').reduce((sum, row) => sum + row.durationHours, 0))
+      },
+      policy: {
+        purpose: 'Operational self-reported site presence and labor coordination only.',
+        payrollDerived: false,
+        geolocationCaptured: false,
+        statutoryAttendanceRegister: false,
+        corrections: 'approval_backed_compensating_record'
+      }
+    };
+  }
+
+  requestAttendanceAdjustment(jobId, sessionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM attendance_sessions WHERE id = ? AND job_id = ?').get(sessionId, jobId);
+      if (!row) throw ledgerInputError('attendance_session_not_found', 'Attendance session not found for this job.', { sessionId }, 404);
+      if (row.status !== 'checked_out' || !row.check_out_at) {
+        throw ledgerInputError('attendance_adjustment_requires_closed_session', 'Check out the attendance session before requesting a time adjustment.', { sessionId }, 409);
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 5 || reason.length > 2_000) {
+        throw ledgerInputError('attendance_adjustment_reason_invalid', 'Attendance adjustment requires a reason between 5 and 2,000 characters.');
+      }
+      const requestedCheckInAt = this.normalizeAttendanceTimestamp(payload.checkInAt || payload.check_in_at || row.check_in_at, 'Adjusted check-in time');
+      const requestedCheckOutAt = this.normalizeAttendanceTimestamp(payload.checkOutAt || payload.check_out_at || row.check_out_at, 'Adjusted check-out time');
+      if (Date.parse(requestedCheckOutAt) < Date.parse(requestedCheckInAt)) {
+        throw ledgerInputError('attendance_adjustment_order_invalid', 'Adjusted check-out time cannot be before adjusted check-in time.');
+      }
+      if (requestedCheckInAt === row.check_in_at && requestedCheckOutAt === row.check_out_at) {
+        throw ledgerInputError('attendance_adjustment_no_change', 'Attendance adjustment must change at least one retained time.');
+      }
+      const pending = this.db.prepare("SELECT * FROM attendance_adjustments WHERE session_id = ? AND status = 'pending_approval'").get(sessionId);
+      if (pending) {
+        return {
+          adjustment: this.mapAttendanceAdjustment(pending),
+          approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)),
+          replayed: true
+        };
+      }
+      const snapshot = {
+        format: 'contractor-ai-attendance-adjustment/v1',
+        sessionId,
+        jobId,
+        original: { checkInAt: row.check_in_at, checkOutAt: row.check_out_at },
+        requested: { checkInAt: requestedCheckInAt, checkOutAt: requestedCheckOutAt },
+        reason
+      };
+      const snapshotHash = sha256Json(snapshot);
+      const id = makeId('attendance_adjustment');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO attendance_adjustments (
+          id, session_id, job_id, requested_check_in_at, requested_check_out_at, reason,
+          status, approval_id, snapshot_hash, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending_approval', NULL, ?, ?, ?, ?)
+      `).run(id, sessionId, jobId, requestedCheckInAt, requestedCheckOutAt, reason, snapshotHash, toJson({ snapshot, requestedBy: actor }), timestamp, timestamp);
+      const approval = this.createApproval({
+        targetType: 'attendance_adjustment', targetId: id, jobId,
+        approvalType: 'attendance_adjustment',
+        summary: `Review attendance adjustment for ${fromJson(row.data_json, {}).workerName || row.worker_id}`,
+        reason: 'The raw check-in and check-out remain retained. Approval applies a compensating operational view without changing payroll or statutory records.',
+        data: { sessionId, workerId: row.worker_id, snapshotHash, original: snapshot.original, requested: snapshot.requested, reason, externalCommitments: 0 }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE attendance_adjustments SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const adjustment = this.mapAttendanceAdjustment(this.db.prepare('SELECT * FROM attendance_adjustments WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'attendance_adjustment', entityId: id, jobId, action: 'request_attendance_adjustment', actor,
+        after: adjustment,
+        metadata: { sessionId, approvalId: approval.id, snapshotHash, externalCommitments: 0 }
+      });
+      return { adjustment, approval, replayed: false };
+    });
+  }
+
+  applyAttendanceAdjustment(adjustmentId) {
+    const row = this.db.prepare('SELECT * FROM attendance_adjustments WHERE id = ?').get(adjustmentId);
+    if (!row) throw ledgerInputError('attendance_adjustment_not_found', 'Attendance adjustment not found.', { adjustmentId }, 404);
+    if (row.status === 'approved') return this.mapAttendanceAdjustment(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('attendance_adjustment_state_conflict', `Attendance adjustment cannot be approved from ${row.status}.`, { adjustmentId }, 409);
+    }
+    const data = fromJson(row.data_json, {});
+    if (!data.snapshot || sha256Json(data.snapshot) !== row.snapshot_hash) {
+      throw ledgerInputError('attendance_adjustment_integrity_failed', 'Attendance adjustment snapshot failed integrity verification.', { adjustmentId }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'attendance_adjustment' || approval.target_id !== adjustmentId) {
+      throw ledgerInputError('attendance_adjustment_approval_required', 'A matching approved decision is required before applying an attendance adjustment.', { adjustmentId }, 409);
+    }
+    const before = this.mapAttendanceAdjustment(row);
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE attendance_adjustments SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'pending_approval'").run(timestamp, adjustmentId);
+    const after = this.mapAttendanceAdjustment(this.db.prepare('SELECT * FROM attendance_adjustments WHERE id = ?').get(adjustmentId));
+    this.audit({
+      entityType: 'attendance_adjustment', entityId: adjustmentId, jobId: row.job_id, action: 'approve_attendance_adjustment',
+      actor: approval.resolved_by || 'approval', before, after,
+      metadata: { sessionId: row.session_id, approvalId: approval.id, externalCommitments: 0 }
+    });
+    return after;
   }
 
   organizationElectronicAddress(organization = {}) {
@@ -25156,6 +25580,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'attendance_adjustment') {
+        this.db.prepare(`
+          UPDATE attendance_adjustments
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM attendance_adjustments WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'change_order') {
         this.db.prepare(`
           UPDATE change_orders
@@ -25426,6 +25870,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyProductionBaselineApproval(targetId);
     } else if (targetType === 'production_entry_reversal') {
       this.applyProductionEntryReversal(targetId);
+    } else if (targetType === 'attendance_adjustment') {
+      this.applyAttendanceAdjustment(targetId);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -29308,6 +29754,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       progress: this.db.prepare('SELECT * FROM progress_updates WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapProgress(row)),
       productionBaselines: this.db.prepare('SELECT * FROM production_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapProductionBaseline(row)),
       productionEntries: this.db.prepare('SELECT * FROM production_entries WHERE job_id = ? ORDER BY work_date DESC, created_at DESC').all(jobId).map(row => this.mapProductionEntry(row)),
+      attendanceSessions: this.listAttendanceSessions({ jobId, limit: 500 }),
       communications: this.db.prepare('SELECT * FROM communication_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCommunication(row)),
       timeLogs: this.db.prepare('SELECT * FROM time_logs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapTimeLog(row)),
       expenses: this.db.prepare('SELECT * FROM expenses WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapExpense(row)),
@@ -30703,6 +31150,33 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'draft_field_report', jobId: job.id, severity: 'medium', message: `${job.title} needs today's field report for jobsite evidence and office visibility.` });
     }
 
+    const staleAttendance = this.db.prepare(`
+      SELECT sessions.id, sessions.job_id, sessions.worker_id, sessions.check_in_at,
+        jobs.title, workers.name AS worker_name
+      FROM attendance_sessions sessions
+      JOIN jobs ON jobs.id = sessions.job_id
+      JOIN workers ON workers.id = sessions.worker_id
+      WHERE sessions.status = 'checked_in' AND sessions.check_in_at <= ?
+      ORDER BY sessions.check_in_at ASC
+      LIMIT 10
+    `).all(new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString());
+    for (const session of staleAttendance) {
+      const taskId = `task_${sha256Text(`attendance-review:${session.id}`).slice(0, 24)}`;
+      const existingTask = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (existingTask) continue;
+      const openHours = Math.max(12, Math.round((Date.now() - Date.parse(session.check_in_at)) / (60 * 60 * 1000)));
+      actions.push({
+        type: 'review_stale_attendance',
+        jobId: session.job_id,
+        attendanceSessionId: session.id,
+        workerId: session.worker_id,
+        workerName: session.worker_name,
+        taskId,
+        severity: openHours >= 18 ? 'high' : 'medium',
+        message: `${session.worker_name} remains checked in to ${session.title} after ${openHours} hours. Create an internal review task without altering retained attendance.`
+      });
+    }
+
     const clientReplyCandidates = this.db.prepare(`
       SELECT communication_records.*, jobs.title AS job_title
       FROM communication_records
@@ -31800,7 +32274,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -31845,6 +32319,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_incident',
       'safety_review',
       'review_productivity_variance',
+      'review_stale_attendance',
       'aftercare_follow_up',
       'recurring_job_due',
       'refresh_learning_profile'
@@ -33074,6 +33549,35 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const attendanceReviews = preview.filter(action => action.type === 'review_stale_attendance').slice(0, 10);
+        for (const action of attendanceReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`attendance-review:${action.attendanceSessionId}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review open attendance: ${action.workerName || 'crew member'}`,
+            description: `${action.message} Confirm the actual departure time with the worker, check out the session, and request an approval-backed adjustment only when retained times require correction.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'attendance_monitor',
+            data: {
+              attendanceSessionId: action.attendanceSessionId,
+              workerId: action.workerId || null,
+              internalOnly: true,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_attendance_review_task', actor, after: task,
+            metadata: { attendanceSessionId: action.attendanceSessionId, workerId: action.workerId || null, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -33384,6 +33888,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         )
     `).get().count || 0);
     if (productionReversalsWithoutApproval) issues.push({ severity: 'error', message: `${productionReversalsWithoutApproval} reversed production entry record(s) lack a matching approval decision.` });
+    const invalidAttendanceSessions = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM attendance_sessions sessions
+      LEFT JOIN assignments ON assignments.id = sessions.assignment_id
+      LEFT JOIN workers ON workers.id = sessions.worker_id
+      WHERE assignments.id IS NULL OR workers.id IS NULL
+        OR assignments.job_id <> sessions.job_id OR assignments.worker_id <> sessions.worker_id
+        OR sessions.check_in_at IS NULL
+        OR (sessions.status = 'checked_in' AND sessions.check_out_at IS NOT NULL)
+        OR (sessions.status = 'checked_out' AND (
+          sessions.check_out_at IS NULL OR sessions.check_out_entry_key IS NULL
+          OR sessions.check_out_entry_fingerprint IS NULL OR sessions.check_out_at < sessions.check_in_at
+        ))
+    `).get().count || 0);
+    if (invalidAttendanceSessions) issues.push({ severity: 'error', message: `${invalidAttendanceSessions} attendance session(s) violate assignment, worker, or retained-time invariants.` });
+    const approvedAttendanceAdjustmentsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM attendance_adjustments adjustments
+      LEFT JOIN attendance_sessions sessions ON sessions.id = adjustments.session_id
+      LEFT JOIN approvals ON approvals.id = adjustments.approval_id
+      WHERE adjustments.status = 'approved' AND (
+        sessions.id IS NULL OR sessions.job_id <> adjustments.job_id
+        OR approvals.id IS NULL OR approvals.status <> 'approved'
+        OR approvals.target_type <> 'attendance_adjustment' OR approvals.target_id <> adjustments.id
+      )
+    `).get().count || 0);
+    if (approvedAttendanceAdjustmentsWithoutApproval) issues.push({ severity: 'error', message: `${approvedAttendanceAdjustmentsWithoutApproval} attendance adjustment(s) lack a matching approved decision.` });
+    for (const adjustment of this.db.prepare("SELECT * FROM attendance_adjustments WHERE status IN ('pending_approval', 'approved')").all()) {
+      const data = fromJson(adjustment.data_json, {});
+      if (!data.snapshot || sha256Json(data.snapshot) !== adjustment.snapshot_hash) {
+        issues.push({ severity: 'error', message: `Attendance adjustment ${adjustment.id} failed retained snapshot verification.` });
+      }
+    }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
     if (jobsWithoutClient) issues.push({ severity: 'error', message: `${jobsWithoutClient} job(s) are missing clients.` });
     const invalidOpportunityProbabilities = Number(this.db.prepare(`
@@ -33948,6 +34485,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         costForecastSnapshots: this.count('cost_forecast_snapshots'),
         productionBaselines: this.count('production_baselines'),
         productionEntries: this.count('production_entries'),
+        attendanceSessions: this.count('attendance_sessions'),
+        attendanceAdjustments: this.count('attendance_adjustments'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -35262,6 +35801,55 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapAttendanceAdjustment(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      jobId: row.job_id,
+      requestedCheckInAt: row.requested_check_in_at,
+      requestedCheckOutAt: row.requested_check_out_at,
+      reason: row.reason,
+      status: row.status,
+      approvalId: row.approval_id,
+      snapshotHash: row.snapshot_hash,
+      integrityValid: Boolean(data.snapshot && sha256Json(data.snapshot) === row.snapshot_hash),
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapAttendanceSession(row, adjustmentRow = null) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const adjustment = adjustmentRow ? this.mapAttendanceAdjustment(adjustmentRow) : null;
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      assignmentId: row.assignment_id,
+      workerId: row.worker_id,
+      workerName: data.workerName || null,
+      assignmentRole: data.assignmentRole || null,
+      checkInAt: row.check_in_at,
+      checkOutAt: row.check_out_at,
+      effectiveCheckInAt: adjustment?.requestedCheckInAt || row.check_in_at,
+      effectiveCheckOutAt: adjustment?.requestedCheckOutAt || row.check_out_at,
+      status: row.status,
+      checkInEntryKey: row.check_in_entry_key,
+      checkInEntryFingerprint: row.check_in_entry_fingerprint,
+      checkOutEntryKey: row.check_out_entry_key,
+      checkOutEntryFingerprint: row.check_out_entry_fingerprint,
+      accessPoint: data.accessPoint || null,
+      siteAccessLogId: data.siteAccessLogId || null,
+      adjustment,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapPurchaseOrder(row) {
     const data = fromJson(row.data_json);
     return {
@@ -35977,6 +36565,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.quantity = mapped?.quantity ?? data.quantity ?? null;
       preview.crewHours = mapped?.crewHours ?? data.crewHours ?? null;
       preview.reason = data.reason || null;
+    } else if (targetType === 'attendance_adjustment') {
+      const row = this.db.prepare('SELECT * FROM attendance_adjustments WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapAttendanceAdjustment(row) : null;
+      primaryEffect = `Apply a compensating attendance-time view for session ${mapped?.sessionId || data.sessionId || ''}.`;
+      addEffect(`Use ${mapped?.requestedCheckInAt || data.requested?.checkInAt || ''} to ${mapped?.requestedCheckOutAt || data.requested?.checkOutAt || ''} on the operational labor board.`);
+      addSafeguard('The raw check-in, raw check-out, replay fingerprints, request reason, decision, and audit history remain unchanged and retained.');
+      addSafeguard('Does not create or modify payroll, statutory attendance, invoices, location data, or external commitments.');
+      riskLevel = 'high';
+      preview.sessionId = mapped?.sessionId || data.sessionId || null;
+      preview.workerId = data.workerId || null;
+      preview.original = data.original || null;
+      preview.requested = data.requested || null;
+      preview.reason = mapped?.reason || data.reason || null;
     } else if (targetType === 'cost_forecast') {
       const row = this.db.prepare('SELECT * FROM cost_forecast_snapshots WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapCostForecastSnapshot(row) : null;

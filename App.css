@@ -131,6 +131,36 @@
   .client-directory-actions { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 160px)); width: auto; justify-content: end; }
 }
 
+.attendance-control { border-top: 1px solid #dfe8e4; border-bottom: 1px solid #dfe8e4; background: #fbfcfc; }
+.attendance-control > .panel-heading { align-items: flex-start; }
+.attendance-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.attendance-form { border-top: 1px solid #e8eeeb; }
+.attendance-form .form-grid { padding-bottom: 12px; }
+.attendance-form textarea { min-height: 70px; }
+.attendance-form .modal-actions { justify-content: flex-end; padding: 0 22px 18px; }
+.attendance-checkout-button { background: #253b34; }
+.attendance-board { border-top: 1px solid #e4ebe8; }
+.attendance-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 64px; padding: 10px 22px; border-bottom: 1px solid #edf1ef; }
+.attendance-row:last-child { border-bottom: 0; }
+.attendance-row > div { display: grid; min-width: 0; gap: 3px; }
+.attendance-row strong { overflow: hidden; color: #25372f; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.attendance-row small { overflow: hidden; color: #74817c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.attendance-presence { width: 8px; height: 8px; background: #aab5b1; border-radius: 50%; }
+.attendance-present { background: #11836d; box-shadow: 0 0 0 3px rgb(17 131 109 / .12); }
+.attendance-row-state { grid-auto-flow: column; align-items: center; justify-content: end; gap: 8px; color: #687771; font-size: 12px; }
+.attendance-row-state .icon-button { width: 30px; height: 30px; }
+.attendance-empty { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 84px; color: #6b7b75; font-size: 12px; }
+.attendance-policy { margin: 0; padding: 11px 22px; color: #687771; background: #f4f7f6; border-top: 1px solid #e4ebe8; font-size: 11px; line-height: 1.45; }
+
+@media (max-width: 760px) {
+  .attendance-summary { width: 100%; justify-content: flex-start; }
+  .attendance-form .modal-actions { padding: 0 16px 16px; }
+  .attendance-form .primary-button { width: 100%; min-height: 42px; }
+  .attendance-row { padding: 10px 14px; }
+  .attendance-row small { white-space: normal; }
+  .attendance-policy { padding: 11px 14px; }
+}
+
 .production-control { display: grid; gap: 15px; min-width: 0; overflow: hidden; }
 .production-heading > div { flex: 1; min-width: 0; }
 .production-heading > .secondary-button { margin-left: auto; flex: 0 0 auto; }

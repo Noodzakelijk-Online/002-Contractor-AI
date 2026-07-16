@@ -370,6 +370,54 @@ function createBackupFixture(t, suffix = 'success') {
     note: 'Migration production evidence retained for hosted parity.'
   }, { actor: 'migration_fixture' }).entry;
   const productionBaseline = source.calculateProductionPerformance(job.id).activeBaseline;
+  const attendanceWorker = source.upsertWorker({
+    name: `Migration attendance worker ${suffix}`,
+    role: 'Installer',
+    status: 'available'
+  }, { actor: 'migration_fixture' });
+  let attendanceAssignment = source.addAssignment(job.id, {
+    workerId: attendanceWorker.id,
+    status: 'active'
+  }, { actor: 'migration_fixture' });
+  if (attendanceAssignment.approval?.id) {
+    source.resolveApproval(attendanceAssignment.approval.id, {
+      status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration attendance assignment verified.'
+    });
+    attendanceAssignment = source.getJobDetail(job.id).assignments.find(item => item.id === attendanceAssignment.id);
+  }
+  const attendanceOrientation = source.createWorkerOrientation(job.id, {
+    assignmentId: attendanceAssignment.id,
+    workerId: attendanceWorker.id,
+    workerName: attendanceWorker.name,
+    status: 'completed'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(attendanceOrientation.approvalId, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration attendance orientation verified.'
+  });
+  const attendanceAccess = source.createSiteAccessLog(job.id, {
+    assignmentId: attendanceAssignment.id,
+    workerId: attendanceWorker.id,
+    workerName: attendanceWorker.name,
+    orientationId: attendanceOrientation.id,
+    orientationValid: true,
+    status: 'cleared'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(attendanceAccess.approvalId, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration attendance access verified.'
+  });
+  const attendanceCheckInAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const attendanceCheckOutAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const attendanceSession = source.recordAttendanceCheckIn(job.id, {
+    assignmentId: attendanceAssignment.id,
+    workerId: attendanceWorker.id,
+    occurredAt: attendanceCheckInAt,
+    entryKey: `migration-attendance-in-${suffix}`
+  }, { actor: 'migration_fixture' }).session;
+  source.recordAttendanceCheckOut(job.id, attendanceSession.id, {
+    workerId: attendanceWorker.id,
+    occurredAt: attendanceCheckOutAt,
+    entryKey: `migration-attendance-out-${suffix}`
+  }, { actor: 'migration_fixture' });
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -395,7 +443,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
+  return { attendanceSession, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -485,7 +533,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '032_production_control');
+  assert.equal(migration.migrationVersion, '033_site_attendance');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -535,6 +583,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(detail.productionControl.lines[0].installedQuantity, 62.5);
     assert.equal(detail.productionControl.lines[0].crewHours, 48);
     assert.ok(detail.productionEntries.some(item => item.id === fixture.productionEntry.id && item.entryFingerprint === fixture.productionEntry.entryFingerprint));
+    const migratedAttendance = detail.attendanceSessions.find(item => item.id === fixture.attendanceSession.id);
+    assert.equal(migratedAttendance.status, 'checked_out');
+    assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);
+    assert.equal(migratedAttendance.data.payrollDerived, false);
     const migratedDocument = detail.documents.find(item => item.id === fixture.document.id);
     assert.match(migratedDocument.storageRef, /^s3:\/\/migration-test\/migrated-1-/);
     assert.notEqual(migratedDocument.storageRef, fixture.localStorageRef);
