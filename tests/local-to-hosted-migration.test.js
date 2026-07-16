@@ -422,7 +422,13 @@ function createBackupFixture(t, suffix = 'success') {
   week.setUTCHours(0, 0, 0, 0);
   week.setUTCDate(week.getUTCDate() - (week.getUTCDay() || 7) - 6);
   const timesheetPeriodStart = week.toISOString().slice(0, 10);
-  source.addTimeLog(job.id, {
+  const timesheetJob = source.createIntake({
+    title: `Migration timesheet job ${suffix}`,
+    client: { name: `Migration timesheet client ${suffix}` },
+    status: 'in_progress',
+    assignAutomatically: false
+  }, { actor: 'migration_fixture' });
+  source.addTimeLog(timesheetJob.id, {
     workerId: attendanceWorker.id,
     workDate: timesheetPeriodStart,
     hours: 7.5,
