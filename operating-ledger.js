@@ -31695,7 +31695,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     const productionJobs = this.db.prepare(`
-      SELECT DISTINCT baselines.job_id, jobs.title
+      SELECT DISTINCT baselines.job_id, jobs.title, jobs.updated_at
       FROM production_baselines baselines
       JOIN jobs ON jobs.id = baselines.job_id
       WHERE baselines.status = 'approved'
