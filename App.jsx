@@ -5703,6 +5703,7 @@ function App() {
   const equipmentInspectionOpenerRef = useRef(null)
   const equipmentMaintenanceOpenerRef = useRef(null)
   const commercialDialogOpenerRef = useRef(null)
+  const commercialDialogReturnFocusRef = useRef(false)
   const noticeSequenceRef = useRef(0)
   const hasLoadedDataRef = useRef(false)
   const sectionRef = useRef('today')
@@ -6088,6 +6089,22 @@ function App() {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  useEffect(() => {
+    if (
+      !commercialDialogReturnFocusRef.current ||
+      submitting ||
+      commercialDraftMode ||
+      commercialAcceptance
+    )
+      return
+    const opener = commercialDialogOpenerRef.current
+    commercialDialogReturnFocusRef.current = false
+    commercialDialogOpenerRef.current = null
+    requestAnimationFrame(() => {
+      if (opener?.isConnected && !opener.disabled) opener.focus()
+    })
+  }, [commercialAcceptance, commercialDraftMode, submitting])
 
   useEffect(() => {
     if (!notice || loading || submitting || outboxSyncing) return undefined
@@ -6764,6 +6781,7 @@ function App() {
 
   function openCommercialDraft(mode) {
     if (!selectedJob) return
+    commercialDialogReturnFocusRef.current = false
     commercialDialogOpenerRef.current = document.activeElement
     setCommercialDraftMode(mode)
     if (mode === 'quote') setQuoteDraft(emptyQuoteDraft(selectedJob))
@@ -6771,9 +6789,7 @@ function App() {
   }
 
   function restoreCommercialDialogFocus() {
-    const opener = commercialDialogOpenerRef.current
-    commercialDialogOpenerRef.current = null
-    requestAnimationFrame(() => opener?.focus?.())
+    commercialDialogReturnFocusRef.current = true
   }
 
   function closeCommercialDialog() {
@@ -6897,6 +6913,7 @@ function App() {
       prepareQuoteIssuePackage(record)
       return
     }
+    commercialDialogReturnFocusRef.current = false
     commercialDialogOpenerRef.current = document.activeElement
     setCommercialAcceptance({ type, record })
     setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
