@@ -1,0 +1,9 @@
+node_modules
+dist
+data
+.git
+.env
+.pytest_cache
+advanced_ai_backend
+contractor_ai_backend
+god_mode_contractor_ai
