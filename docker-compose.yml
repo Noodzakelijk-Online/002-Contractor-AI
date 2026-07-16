@@ -1,0 +1,19 @@
+services:
+  contractor-ai:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      CONTRACTOR_AI_RUNTIME_MODE: ${CONTRACTOR_AI_RUNTIME_MODE:-local}
+      CONTRACTOR_AI_STORAGE_MODE: ${CONTRACTOR_AI_STORAGE_MODE:-local}
+      CONTRACTOR_AI_REQUIRE_AUTH: ${CONTRACTOR_AI_REQUIRE_AUTH:-false}
+    volumes:
+      - contractor-ai-data:/var/lib/contractor-ai
+    restart: unless-stopped
+
+volumes:
+  contractor-ai-data:
