@@ -502,6 +502,11 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(commandPlan.response.status, 200);
   assert.equal(commandPlan.body.success, true);
   assert.equal(commandPlan.body.summary.externalCommitments, 0);
+  assert.deepEqual(commandPlan.body.scope, {
+    jobLimit: 12,
+    consideredJobs: 1,
+    jobIds: [commandJobId]
+  });
   const safeCapabilityCommand = commandPlan.body.actions.find(action =>
     action.actionType === 'draft_capability_gap'
     && action.safeDraftable === true
@@ -518,6 +523,7 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(commandApply.body.success, true);
   assert.equal(commandApply.body.summary.externalCommitments, 0);
   assert.ok(commandApply.body.commandPlan);
+  assert.ok(commandApply.body.commandPlan.scope.consideredJobs <= 12);
   assert.equal(commandApply.body.commandPlan.actions.some(action => action.id === safeCapabilityCommand.id), false);
   assert.ok(commandApply.body.applied.some(item =>
     item.type === 'draft_capability_gap'

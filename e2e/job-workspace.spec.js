@@ -2803,6 +2803,10 @@ test('owner applies an exact safe automation draft and runs the durable cycle', 
   );
   expect(safeCommand).toBeTruthy();
 
+  await page.route('**/api/ledger/command-plan?limit=100&jobLimit=12', async route => {
+    await new Promise(resolve => setTimeout(resolve, 6_000));
+    await route.continue();
+  });
   await page.goto('/');
   await page.getByRole('button', { name: 'Operations' }).click();
   await expect(page.getByTestId('storage-readiness')).toContainText('local / verified');
@@ -2815,7 +2819,7 @@ test('owner applies an exact safe automation draft and runs the durable cycle', 
   await expect(automation.getByRole('button', { name: 'Apply selected' })).toBeDisabled();
 
   const safeCheckbox = automation.getByRole('checkbox', { name: `Select ${safeCommand.message}`, exact: true });
-  await expect(safeCheckbox).toBeEnabled();
+  await expect(safeCheckbox).toBeEnabled({ timeout: 15_000 });
   await safeCheckbox.check();
   await expect(automation.getByRole('button', { name: 'Apply 1 draft' })).toBeEnabled();
   await automation.getByRole('button', { name: 'Apply 1 draft' }).click();

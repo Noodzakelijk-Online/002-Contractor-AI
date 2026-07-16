@@ -189,6 +189,7 @@ async function recordFieldEvidence({ id, jobId, notes, riskLevel, file }) {
 async function recordFieldOperation({ id, type, jobId, payload }) {
   const inspectionId = type === 'inspection_checklist' ? String(payload?.inspectionId || '') : ''
   const attendanceSessionId = type === 'attendance_check_out' ? String(payload?.sessionId || '') : ''
+  const custodySessionId = type === 'equipment_return' ? String(payload?.custodySessionId || '') : ''
   const route =
     type === 'daily_log'
       ? 'daily-logs'
@@ -200,6 +201,10 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? 'production-entries'
       : type === 'material_receipt'
         ? 'material-receipts'
+      : type === 'equipment_check_out'
+        ? 'equipment-custody/check-out'
+      : type === 'equipment_return' && custodySessionId
+        ? `equipment-custody/${encodeURIComponent(custodySessionId)}/return`
       : type === 'progress'
         ? 'progress'
         : type === 'observation'
@@ -215,6 +220,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const requestPayload = { ...payload, entryKey: id }
   delete requestPayload.inspectionId
   delete requestPayload.sessionId
+  delete requestPayload.custodySessionId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
     body: JSON.stringify(requestPayload),
@@ -704,6 +710,41 @@ function emptyOpportunityActivityDraft() {
   }
 }
 
+function emptyEquipmentCheckoutDraft(plan = null) {
+  const dueBackAt = plan?.reservation?.neededUntil
+    ? toLocalDateTimeInput(new Date(plan.reservation.neededUntil))
+    : toLocalDateTimeInput(new Date(Date.now() + 8 * 60 * 60 * 1000))
+  return {
+    jobId: plan?.reservation?.jobId || '',
+    reservationId: plan?.reservation?.id || '',
+    workerId: '',
+    checkedOutAt: toLocalDateTimeInput(new Date()),
+    dueBackAt,
+    checkedOutBy: '',
+    condition: 'good',
+    location: '',
+    meter: '',
+    evidenceReference: '',
+    notes: '',
+    entryKey: createFieldEvidenceDraftId(),
+  }
+}
+
+function emptyEquipmentReturnDraft(session = null) {
+  return {
+    jobId: session?.jobId || '',
+    custodySessionId: session?.id || '',
+    returnedAt: toLocalDateTimeInput(new Date()),
+    returnedBy: '',
+    condition: 'serviceable',
+    location: session?.checkoutLocation || '',
+    meter: session?.checkoutMeter === null || session?.checkoutMeter === undefined ? '' : String(session.checkoutMeter),
+    evidenceReference: '',
+    notes: '',
+    entryKey: createFieldEvidenceDraftId(),
+  }
+}
+
 function emptyWorkerCredentialDraft(worker = null) {
   return {
     workerId: worker?.id || '',
@@ -1079,8 +1120,15 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       return { materialReceiving: result.materialReceiving || { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} } }
     }
     if (resourceView === 'equipment') {
-      const result = await api('/api/ledger/tools?limit=500')
-      return { tools: result.tools || [], toolSummary: result.summary || {} }
+      const [result, custody] = await Promise.all([
+        api('/api/ledger/tools?limit=500'),
+        api('/api/ledger/equipment-custody?limit=500'),
+      ])
+      return {
+        tools: result.tools || [],
+        toolSummary: result.summary || {},
+        equipmentCustody: custody.equipmentCustody || { summary: {}, sessions: [], active: [], exceptions: [], actions: [], policy: {} },
+      }
     }
     if (resourceView === 'partners') {
       const result = await api('/api/ledger/trade-partners?includeRetired=true&limit=200')
@@ -1126,13 +1174,12 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'operations') {
-    const [templates, scheduler, organization, backups, capabilities, commandPlan, archivedJobs] = await Promise.all([
+    const [templates, scheduler, organization, backups, capabilities, archivedJobs] = await Promise.all([
       api('/api/ledger/inspection-templates'),
       api('/api/ledger/scheduler').catch(() => null),
       api('/api/ledger/organization'),
       api('/api/operations/backups').catch(() => ({ backups: [] })),
       api('/api/operations/capabilities').catch(() => null),
-      api('/api/ledger/command-plan?limit=100').catch(() => null),
       api('/api/ledger/jobs?archiveOnly=true&limit=100').catch(() => ({ jobs: [] })),
     ])
     return {
@@ -1141,7 +1188,6 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       organization: organization.organization,
       backups: backups.backups || [],
       operationsCapabilities: capabilities,
-      commandPlan,
       archivedJobs: archivedJobs.jobs || [],
     }
   }
@@ -2581,6 +2627,7 @@ function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, s
 function EquipmentDirectory({
   tools,
   summary,
+  custody,
   canCoordinate,
   canApprove,
   submitting,
@@ -2589,6 +2636,8 @@ function EquipmentDirectory({
   onInspect,
   onMaintain,
   onRetire,
+  onCheckout,
+  onReturn,
   onOpenApprovals,
 }) {
   const [query, setQuery] = useState('')
@@ -2640,10 +2689,53 @@ function EquipmentDirectory({
           <strong>{summary?.attention || 0}</strong>
         </div>
         <div>
-          <span>Retirement review</span>
-          <strong>{summary?.pendingRetirement || 0}</strong>
+          <span>Checked out</span>
+          <strong>{custody?.summary?.checkedOut || 0}</strong>
         </div>
       </div>
+      <section className="equipment-custody-register" data-testid="equipment-custody-register">
+        <div className="qualification-band-heading">
+          <div>
+            <h3>Physical custody</h3>
+            <p>Every yard-to-crew handoff has one custodian, return deadline, condition record, and retained evidence reference.</p>
+          </div>
+          <div className="equipment-custody-heading-actions">
+            {custody?.summary?.overdue ? <span className="tag tag-amber">{custody.summary.overdue} overdue</span> : null}
+            {custody?.summary?.exceptions ? <span className="tag tag-red">{custody.summary.exceptions} quarantined</span> : null}
+            {canCoordinate ? (
+              <button className="primary-button" disabled={submitting} onClick={onCheckout}>
+                <ArrowUpRight size={15} /> Check out
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <div className="equipment-custody-list">
+          {(custody?.sessions || []).slice(0, 12).map((session) => (
+            <article className="equipment-custody-row" key={session.id}>
+              <span className={`equipment-custody-marker ${session.status === 'exception' || session.overdue ? 'equipment-custody-marker-alert' : ''}`} aria-hidden="true" />
+              <div>
+                <div className="equipment-title">
+                  <h4>{session.toolName}</h4>
+                  <span className={`status status-${session.overdue ? 'attention' : session.status}`}>{session.overdue ? 'overdue' : formatStatus(session.status)}</span>
+                </div>
+                <p>{session.jobTitle} / {session.workerName || session.checkedOutBy}</p>
+              </div>
+              <div className="equipment-custody-values">
+                <span>Out <strong>{formatDateTime(session.checkedOutAt)}</strong></span>
+                <span>Due <strong>{session.dueBackAt ? formatDateTime(session.dueBackAt) : 'Open'}</strong></span>
+                <span>Condition <strong>{formatStatus(session.returnCondition || session.checkoutCondition)}</strong></span>
+                <span>Location <strong>{session.returnLocation || session.checkoutLocation || 'Not retained'}</strong></span>
+              </div>
+              {canCoordinate && session.status === 'checked_out' ? (
+                <button className="secondary-button" disabled={submitting} onClick={() => onReturn(session)}>
+                  <PackageCheck size={15} /> Return
+                </button>
+              ) : null}
+            </article>
+          ))}
+          {!custody?.sessions?.length ? <Empty title="No custody history" detail="Check out reserved equipment to retain its physical handoff and return." /> : null}
+        </div>
+      </section>
       <div className="trade-partner-toolbar equipment-toolbar">
         <label className="search-control">
           <Search size={16} />
@@ -2668,7 +2760,7 @@ function EquipmentDirectory({
           ))}
         </div>
         {canCoordinate ? (
-          <button className="primary-button" disabled={submitting} onClick={onCreate}>
+          <button className="secondary-button" disabled={submitting} onClick={onCreate}>
             <Plus size={16} />
             Add equipment
           </button>
@@ -3157,6 +3249,7 @@ function ResourcesWorkspace({
   materialReceiving,
   tools,
   toolSummary,
+  equipmentCustody,
   tradePartners,
   tradePartnerSummary,
   timesheets,
@@ -3187,6 +3280,8 @@ function ResourcesWorkspace({
   onInspectEquipment,
   onMaintainEquipment,
   onRetireEquipment,
+  onCheckoutEquipment,
+  onReturnEquipment,
   onCreatePartner,
   onEditPartner,
   onRetirePartner,
@@ -3370,6 +3465,7 @@ function ResourcesWorkspace({
         <EquipmentDirectory
           tools={tools}
           summary={toolSummary}
+          custody={equipmentCustody}
           canCoordinate={canCoordinate}
           canApprove={canApprove}
           submitting={submitting}
@@ -3378,6 +3474,8 @@ function ResourcesWorkspace({
           onInspect={onInspectEquipment}
           onMaintain={onMaintainEquipment}
           onRetire={onRetireEquipment}
+          onCheckout={onCheckoutEquipment}
+          onReturn={onReturnEquipment}
           onOpenApprovals={onOpenApprovals}
         />
       ) : isAvailability ? (
@@ -6363,6 +6461,8 @@ function AutomationControl({
   commandPlan,
   scheduler,
   jobs,
+  loading,
+  error,
   view,
   selectedIds,
   submitting,
@@ -6371,6 +6471,7 @@ function AutomationControl({
   onSelectVisible,
   onApply,
   onRun,
+  onRetry,
   onOpenApprovals,
   onOpen,
 }) {
@@ -6438,17 +6539,17 @@ function AutomationControl({
         <div className="automation-commands">
           <button
             className="secondary-button"
-            disabled={submitting || !visibleSafeIds.length}
+            disabled={submitting || loading || !visibleSafeIds.length}
             onClick={() => onSelectVisible(allVisibleSafeSelected ? [] : visibleSafeIds)}
           >
             {allVisibleSafeSelected ? <X size={15} /> : <Check size={15} />}
             {allVisibleSafeSelected ? 'Clear visible' : 'Select safe'}
           </button>
-          <button className="primary-button" disabled={submitting || !selectedIds.length} onClick={onApply}>
+          <button className="primary-button" disabled={submitting || loading || !selectedIds.length} onClick={onApply}>
             <ClipboardCheck size={16} />
             {selectedIds.length ? `Apply ${selectedIds.length} draft${selectedIds.length === 1 ? '' : 's'}` : 'Apply selected'}
           </button>
-          <button className="secondary-button" disabled={submitting || schedulerJob?.status === 'running'} onClick={onRun}>
+          <button className="secondary-button" disabled={submitting || loading || schedulerJob?.status === 'running'} onClick={onRun}>
             <Activity size={16} />
             Run due cycle
           </button>
@@ -6464,6 +6565,19 @@ function AutomationControl({
         </div>
       ) : null}
       <div className="automation-list">
+        {loading && !commandPlan ? (
+          <div className="loading" role="status">
+            <LoaderCircle className="spin" size={22} />
+            Preparing the bounded command plan
+          </div>
+        ) : null}
+        {error && !commandPlan ? (
+          <div className="audit-history-error" role="alert">
+            <TriangleAlert size={16} />
+            <span>{error}</span>
+            <button className="secondary-button" onClick={onRetry}>Retry</button>
+          </div>
+        ) : null}
         {actions.map((action) => {
           const job =
             jobs.find((candidate) => candidate.id === action.jobId) ||
@@ -6513,7 +6627,7 @@ function AutomationControl({
             </article>
           )
         })}
-        {!actions.length ? (
+        {!loading && !error && !actions.length ? (
           <Empty title="No matching automation work" detail="The selected command-plan view has no retained action waiting." />
         ) : null}
       </div>
@@ -7583,6 +7697,8 @@ function App() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [sectionLoading, setSectionLoading] = useState(false)
+  const [commandPlanLoading, setCommandPlanLoading] = useState(false)
+  const [commandPlanError, setCommandPlanError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [showIntake, setShowIntake] = useState(false)
   const [opportunityEditor, setOpportunityEditor] = useState(null)
@@ -7654,6 +7770,11 @@ function App() {
   const [equipmentMaintenanceDraft, setEquipmentMaintenanceDraft] = useState(emptyEquipmentMaintenanceDraft)
   const [equipmentRetirement, setEquipmentRetirement] = useState(null)
   const [equipmentRetirementReason, setEquipmentRetirementReason] = useState('')
+  const [equipmentCheckoutEditor, setEquipmentCheckoutEditor] = useState(false)
+  const [equipmentCheckoutDraft, setEquipmentCheckoutDraft] = useState(() => emptyEquipmentCheckoutDraft())
+  const [equipmentCheckoutPlans, setEquipmentCheckoutPlans] = useState([])
+  const [equipmentReturnEditor, setEquipmentReturnEditor] = useState(null)
+  const [equipmentReturnDraft, setEquipmentReturnDraft] = useState(() => emptyEquipmentReturnDraft())
   const [tradePartnerEditor, setTradePartnerEditor] = useState(null)
   const [tradePartnerDraft, setTradePartnerDraft] = useState(emptyTradePartnerDraft)
   const [tradePartnerRetirement, setTradePartnerRetirement] = useState(null)
@@ -7690,6 +7811,10 @@ function App() {
   const [fieldDailyLog, setFieldDailyLog] = useState(emptyFieldDailyLog)
   const [fieldMaterialReceipt, setFieldMaterialReceipt] = useState(() => emptyMaterialReceiptDraft())
   const [fieldMaterialReceiptPlans, setFieldMaterialReceiptPlans] = useState([])
+  const [fieldEquipmentCheckout, setFieldEquipmentCheckout] = useState(() => emptyEquipmentCheckoutDraft())
+  const [fieldEquipmentReturn, setFieldEquipmentReturn] = useState(() => emptyEquipmentReturnDraft())
+  const [fieldEquipmentPlans, setFieldEquipmentPlans] = useState([])
+  const [fieldEquipmentCustody, setFieldEquipmentCustody] = useState([])
   const [attendanceDraft, setAttendanceDraft] = useState(emptyAttendanceDraft)
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
@@ -7750,6 +7875,7 @@ function App() {
           toolSummary: {},
           inventory: { jobs: [], summary: {} },
           materialReceiving: { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} },
+          equipmentCustody: { summary: {}, sessions: [], active: [], exceptions: [], actions: [], policy: {} },
           tradePartners: [],
           tradePartnerSummary: {},
           finance: { jobs: [], summary: {} },
@@ -7791,6 +7917,7 @@ function App() {
           toolSummary: {},
           inventory: { jobs: [], summary: {} },
           materialReceiving: { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} },
+          equipmentCustody: { summary: {}, sessions: [], active: [], exceptions: [], actions: [], policy: {} },
           tradePartners: [],
           tradePartnerSummary: {},
           finance: { jobs: [], summary: {} },
@@ -7907,6 +8034,8 @@ function App() {
     [jobs],
   )
   const selectedFieldMaterialReceiptPlan = fieldMaterialReceiptPlans.find(plan => plan.purchaseOrder?.id === fieldMaterialReceipt.purchaseOrderId) || null
+  const selectedEquipmentCheckoutPlan = equipmentCheckoutPlans.find(plan => plan.reservation?.id === equipmentCheckoutDraft.reservationId) || null
+  const selectedFieldEquipmentPlan = fieldEquipmentPlans.find(plan => plan.reservation?.id === fieldEquipmentCheckout.reservationId) || null
   const attendanceWorkerId = fieldScoped ? operator.worker?.id || null : attendanceDraft.workerId || null
   const currentAttendanceSession = useMemo(
     () => (attendance.rows || []).find((session) => (
@@ -7991,6 +8120,29 @@ function App() {
     [capabilities],
   )
 
+  async function refreshOperationsCommandPlan(sequence = sectionLoadSequenceRef.current) {
+    setCommandPlanLoading(true)
+    setCommandPlanError('')
+    try {
+      const commandPlan = await api('/api/ledger/command-plan?limit=100&jobLimit=12')
+      if (sequence !== sectionLoadSequenceRef.current || sectionRef.current !== 'operations') return
+      setData((current) => current ? { ...current, commandPlan } : current)
+    } catch (requestError) {
+      if (sequence === sectionLoadSequenceRef.current && sectionRef.current === 'operations') {
+        setCommandPlanError(requestError.message)
+      }
+    } finally {
+      if (sequence === sectionLoadSequenceRef.current && sectionRef.current === 'operations') {
+        setCommandPlanLoading(false)
+      }
+    }
+  }
+
+  function refreshCurrentView() {
+    void refresh()
+    if (sectionRef.current === 'operations') void refreshOperationsCommandPlan()
+  }
+
   async function refreshSection(next, nextResourceView = resourceViewRef.current) {
     if (next === 'today') return
     const sequence = ++sectionLoadSequenceRef.current
@@ -8001,6 +8153,7 @@ function App() {
       if (sequence !== sectionLoadSequenceRef.current) return
       if (patch.organization) setOrganizationProfileDraft(organizationDraft(patch.organization))
       setData((current) => current ? { ...current, ...patch } : current)
+      if (next === 'operations') void refreshOperationsCommandPlan(sequence)
     } catch (requestError) {
       if (sequence === sectionLoadSequenceRef.current) setError(requestError.message)
     } finally {
@@ -8820,6 +8973,7 @@ function App() {
         body: JSON.stringify({
           actionIds: selectedCommandIds,
           limit: selectedCommandIds.length,
+          jobLimit: 12,
           actor: 'owner_command_plan',
         }),
       })
@@ -9122,6 +9276,184 @@ function App() {
           setFieldMaterialReceipt(emptyMaterialReceiptDraft())
           setFieldMaterialReceiptPlans([])
           notify('Connection interrupted. The complete delivery ticket was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function selectFieldEquipmentJob(jobId) {
+    setFieldEquipmentCheckout({ ...emptyEquipmentCheckoutDraft(), jobId })
+    setFieldEquipmentReturn(emptyEquipmentReturnDraft())
+    setFieldEquipmentPlans([])
+    setFieldEquipmentCustody([])
+    if (!jobId || navigator.onLine === false) return
+    setError('')
+    try {
+      const [planResult, custodyResult] = await Promise.all([
+        api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/equipment-custody-plan`),
+        api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/equipment-custody`),
+      ])
+      const plans = planResult.plans || []
+      const activeCustody = (custodyResult.custody || []).filter(session => session.status === 'checked_out')
+      setFieldEquipmentPlans(plans)
+      setFieldEquipmentCustody(activeCustody)
+      const firstReady = plans.find(plan => plan.checkoutReady)
+      if (firstReady) {
+        setFieldEquipmentCheckout({
+          ...emptyEquipmentCheckoutDraft(firstReady),
+          jobId,
+          location: firstReady.tool?.currentLocation || '',
+        })
+      }
+      if (activeCustody.length === 1) setFieldEquipmentReturn(emptyEquipmentReturnDraft(activeCustody[0]))
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  function selectFieldEquipmentPlan(reservationId) {
+    const plan = fieldEquipmentPlans.find(item => item.reservation?.id === reservationId)
+    if (!plan) {
+      setFieldEquipmentCheckout({ ...emptyEquipmentCheckoutDraft(), jobId: fieldEquipmentCheckout.jobId })
+      return
+    }
+    setFieldEquipmentCheckout({
+      ...emptyEquipmentCheckoutDraft(plan),
+      jobId: fieldEquipmentCheckout.jobId,
+      location: plan.tool?.currentLocation || '',
+    })
+  }
+
+  async function recordFieldEquipmentCheckout(event) {
+    event.preventDefault()
+    const meter = fieldEquipmentCheckout.meter === '' ? null : Number(fieldEquipmentCheckout.meter)
+    if (!fieldEquipmentCheckout.jobId || !fieldEquipmentCheckout.reservationId || fieldEquipmentCheckout.evidenceReference.trim().length < 3
+      || (!fieldScoped && fieldEquipmentCheckout.checkedOutBy.trim().length < 2)
+      || (meter !== null && (!Number.isFinite(meter) || meter < 0))) {
+      setError('Choose a checkout-ready reservation and retain the physical custodian, handoff evidence, and a valid meter value.')
+      return
+    }
+    const jobId = fieldEquipmentCheckout.jobId
+    const payload = {
+      reservationId: fieldEquipmentCheckout.reservationId,
+      checkedOutAt: toIsoDateTime(fieldEquipmentCheckout.checkedOutAt),
+      dueBackAt: fieldEquipmentCheckout.dueBackAt ? toIsoDateTime(fieldEquipmentCheckout.dueBackAt) : null,
+      ...(fieldScoped ? {} : { checkedOutBy: fieldEquipmentCheckout.checkedOutBy.trim() }),
+      condition: fieldEquipmentCheckout.condition,
+      location: fieldEquipmentCheckout.location.trim() || null,
+      meter,
+      evidenceReference: fieldEquipmentCheckout.evidenceReference.trim(),
+      notes: fieldEquipmentCheckout.notes.trim() || null,
+    }
+    const draft = {
+      id: fieldEquipmentCheckout.entryKey,
+      type: 'equipment_check_out',
+      jobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setFieldEquipmentCheckout(emptyEquipmentCheckoutDraft())
+        setFieldEquipmentPlans([])
+        setFieldEquipmentCustody([])
+        notify('Equipment handoff was saved locally with its custody evidence and will sync after reconnection.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      notify(result.replayed
+        ? 'This equipment handoff was already retained; no duplicate custody session was created.'
+        : `${result.custody.toolName} custody was retained for ${result.custody.checkedOutBy}.`)
+      await selectFieldEquipmentJob(jobId)
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setFieldEquipmentCheckout(emptyEquipmentCheckoutDraft())
+          setFieldEquipmentPlans([])
+          setFieldEquipmentCustody([])
+          notify('Connection interrupted. The equipment handoff was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function recordFieldEquipmentReturn(event) {
+    event.preventDefault()
+    const meter = fieldEquipmentReturn.meter === '' ? null : Number(fieldEquipmentReturn.meter)
+    const exceptional = ['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition)
+    if (!fieldEquipmentReturn.jobId || !fieldEquipmentReturn.custodySessionId || fieldEquipmentReturn.evidenceReference.trim().length < 3
+      || (!fieldScoped && fieldEquipmentReturn.returnedBy.trim().length < 2)
+      || (meter !== null && (!Number.isFinite(meter) || meter < 0))
+      || (exceptional && fieldEquipmentReturn.notes.trim().length < 8)) {
+      setError('Retain the return condition and evidence, a valid meter, and findings for damaged, unsafe, or lost equipment.')
+      return
+    }
+    const jobId = fieldEquipmentReturn.jobId
+    const payload = {
+      custodySessionId: fieldEquipmentReturn.custodySessionId,
+      returnedAt: toIsoDateTime(fieldEquipmentReturn.returnedAt),
+      ...(fieldScoped ? {} : { returnedBy: fieldEquipmentReturn.returnedBy.trim() }),
+      condition: fieldEquipmentReturn.condition,
+      location: fieldEquipmentReturn.location.trim() || null,
+      meter,
+      evidenceReference: fieldEquipmentReturn.evidenceReference.trim(),
+      notes: fieldEquipmentReturn.notes.trim() || null,
+    }
+    const draft = {
+      id: fieldEquipmentReturn.entryKey,
+      type: 'equipment_return',
+      jobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setFieldEquipmentReturn(emptyEquipmentReturnDraft())
+        setFieldEquipmentCustody([])
+        notify('Equipment return was saved locally with its condition evidence and will sync after reconnection.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      notify(result.replayed
+        ? 'This equipment return was already retained; no duplicate evidence was created.'
+        : exceptional
+          ? `${result.custody.toolName} was quarantined for internal review.`
+          : `${result.custody.toolName} was returned and released for availability.`)
+      await selectFieldEquipmentJob(jobId)
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setFieldEquipmentReturn(emptyEquipmentReturnDraft())
+          setFieldEquipmentCustody([])
+          notify('Connection interrupted. The complete equipment return was saved locally for an exact retry.')
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -12049,6 +12381,174 @@ function App() {
     }
   }
 
+  function openEquipmentCheckout() {
+    equipmentDialogOpenerRef.current = document.activeElement
+    setEquipmentCheckoutEditor(true)
+    setEquipmentCheckoutDraft(emptyEquipmentCheckoutDraft())
+    setEquipmentCheckoutPlans([])
+  }
+
+  function closeEquipmentCheckout() {
+    if (submitting) return
+    const opener = equipmentDialogOpenerRef.current
+    equipmentDialogOpenerRef.current = null
+    setEquipmentCheckoutEditor(false)
+    setEquipmentCheckoutDraft(emptyEquipmentCheckoutDraft())
+    setEquipmentCheckoutPlans([])
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function selectEquipmentCheckoutJob(jobId) {
+    const initial = { ...emptyEquipmentCheckoutDraft(), jobId }
+    setEquipmentCheckoutDraft(initial)
+    setEquipmentCheckoutPlans([])
+    if (!jobId) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/equipment-custody-plan`)
+      const plans = result.plans || []
+      setEquipmentCheckoutPlans(plans)
+      const firstReady = plans.find(plan => plan.checkoutReady)
+      if (firstReady) {
+        setEquipmentCheckoutDraft({
+          ...emptyEquipmentCheckoutDraft(firstReady),
+          jobId,
+          location: firstReady.tool?.currentLocation || '',
+        })
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function selectEquipmentCheckoutPlan(reservationId) {
+    const plan = equipmentCheckoutPlans.find(item => item.reservation?.id === reservationId)
+    if (!plan) {
+      setEquipmentCheckoutDraft({ ...emptyEquipmentCheckoutDraft(), jobId: equipmentCheckoutDraft.jobId })
+      return
+    }
+    setEquipmentCheckoutDraft({
+      ...emptyEquipmentCheckoutDraft(plan),
+      jobId: equipmentCheckoutDraft.jobId,
+      location: plan.tool?.currentLocation || '',
+    })
+  }
+
+  async function saveEquipmentCheckout(event) {
+    event.preventDefault()
+    const meter = equipmentCheckoutDraft.meter === '' ? null : Number(equipmentCheckoutDraft.meter)
+    if (!equipmentCheckoutDraft.jobId || !equipmentCheckoutDraft.reservationId || equipmentCheckoutDraft.checkedOutBy.trim().length < 2
+      || equipmentCheckoutDraft.evidenceReference.trim().length < 3 || (meter !== null && (!Number.isFinite(meter) || meter < 0))) {
+      setError('Choose a checkout-ready reservation and retain the custodian, handoff evidence, and a valid meter value.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(equipmentCheckoutDraft.jobId)}/equipment-custody/check-out`, {
+        method: 'POST',
+        body: JSON.stringify({
+          reservationId: equipmentCheckoutDraft.reservationId,
+          checkedOutAt: toIsoDateTime(equipmentCheckoutDraft.checkedOutAt),
+          dueBackAt: equipmentCheckoutDraft.dueBackAt ? toIsoDateTime(equipmentCheckoutDraft.dueBackAt) : null,
+          checkedOutBy: equipmentCheckoutDraft.checkedOutBy.trim(),
+          condition: equipmentCheckoutDraft.condition,
+          location: equipmentCheckoutDraft.location.trim() || null,
+          meter,
+          evidenceReference: equipmentCheckoutDraft.evidenceReference.trim(),
+          entryKey: equipmentCheckoutDraft.entryKey,
+          notes: equipmentCheckoutDraft.notes.trim() || null,
+          actor: 'office_operator',
+        }),
+      })
+      setEquipmentCheckoutEditor(false)
+      setEquipmentCheckoutDraft(emptyEquipmentCheckoutDraft())
+      setEquipmentCheckoutPlans([])
+      setData((current) => current ? {
+        ...current,
+        equipmentCustody: result.equipmentCustody || current.equipmentCustody,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(result.replayed
+        ? 'This equipment handoff was already retained; no duplicate custody session was created.'
+        : `${result.custody.toolName} checked out to ${result.custody.checkedOutBy}.`)
+      await refreshSection('resources', 'equipment')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openEquipmentReturn(session) {
+    equipmentDialogOpenerRef.current = document.activeElement
+    setEquipmentReturnEditor(session)
+    setEquipmentReturnDraft(emptyEquipmentReturnDraft(session))
+  }
+
+  function closeEquipmentReturn() {
+    if (submitting) return
+    const opener = equipmentDialogOpenerRef.current
+    equipmentDialogOpenerRef.current = null
+    setEquipmentReturnEditor(null)
+    setEquipmentReturnDraft(emptyEquipmentReturnDraft())
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function saveEquipmentReturn(event) {
+    event.preventDefault()
+    const meter = equipmentReturnDraft.meter === '' ? null : Number(equipmentReturnDraft.meter)
+    const exceptional = ['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition)
+    if (!equipmentReturnEditor || equipmentReturnDraft.returnedBy.trim().length < 2
+      || equipmentReturnDraft.evidenceReference.trim().length < 3 || (meter !== null && (!Number.isFinite(meter) || meter < 0))
+      || (exceptional && equipmentReturnDraft.notes.trim().length < 8)) {
+      setError('Retain the returning person, condition evidence, a valid meter, and findings for damaged, unsafe, or lost equipment.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(equipmentReturnDraft.jobId)}/equipment-custody/${encodeURIComponent(equipmentReturnDraft.custodySessionId)}/return`, {
+        method: 'POST',
+        body: JSON.stringify({
+          returnedAt: toIsoDateTime(equipmentReturnDraft.returnedAt),
+          returnedBy: equipmentReturnDraft.returnedBy.trim(),
+          condition: equipmentReturnDraft.condition,
+          location: equipmentReturnDraft.location.trim() || null,
+          meter,
+          evidenceReference: equipmentReturnDraft.evidenceReference.trim(),
+          entryKey: equipmentReturnDraft.entryKey,
+          notes: equipmentReturnDraft.notes.trim() || null,
+          actor: 'office_operator',
+        }),
+      })
+      setEquipmentReturnEditor(null)
+      setEquipmentReturnDraft(emptyEquipmentReturnDraft())
+      setData((current) => current ? {
+        ...current,
+        equipmentCustody: result.equipmentCustody || current.equipmentCustody,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(result.replayed
+        ? 'This equipment return was already retained; no duplicate evidence was created.'
+        : exceptional
+          ? `${result.custody.toolName} returned as ${formatStatus(result.custody.returnCondition)} and moved to quarantine review.`
+          : `${result.custody.toolName} returned and released for availability.`)
+      await refreshSection('resources', 'equipment')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function requestCostForecastSnapshot(item) {
     if (!item?.jobId) {
       setError('The cost forecast is not linked to a retained job.')
@@ -13002,7 +13502,7 @@ function App() {
                 <span>{operator.name || formatStatus(operator.role)}</span>
               </span>
             ) : null}
-            <button className="icon-button" aria-label="Refresh data" onClick={refresh} disabled={loading || sectionLoading}>
+            <button className="icon-button" aria-label="Refresh data" onClick={refreshCurrentView} disabled={loading || sectionLoading}>
               <RefreshCw size={18} className={loading || sectionLoading ? 'spin' : ''} />
             </button>
             {operator.authenticated ? (
@@ -13032,7 +13532,7 @@ function App() {
           <div className="error-banner">
             <TriangleAlert size={18} />
             <span>{error}</span>
-            <button onClick={refresh}>Retry</button>
+            <button onClick={refreshCurrentView}>Retry</button>
           </div>
         ) : null}
 
@@ -13422,6 +13922,7 @@ function App() {
                 materialReceiving={data.materialReceiving}
                 tools={tools}
                 toolSummary={data.toolSummary}
+                equipmentCustody={data.equipmentCustody}
                 tradePartners={tradePartners}
                 tradePartnerSummary={data.tradePartnerSummary}
                 timesheets={data.timesheets}
@@ -13452,6 +13953,8 @@ function App() {
                 onInspectEquipment={openEquipmentInspection}
                 onMaintainEquipment={openEquipmentMaintenance}
                 onRetireEquipment={openEquipmentRetirement}
+                onCheckoutEquipment={openEquipmentCheckout}
+                onReturnEquipment={openEquipmentReturn}
                 onCreatePartner={() => openTradePartnerEditor()}
                 onEditPartner={openTradePartnerEditor}
                 onRetirePartner={openTradePartnerRetirement}
@@ -13667,6 +14170,163 @@ function App() {
                     ) : null}
                   </div>
                   <p className="attendance-policy">Operational self-reported presence only. Payroll, statutory registers, and location tracking remain separate.</p>
+                </section>
+                <section className="equipment-handoff-control" data-testid="field-equipment-custody">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Equipment handoff</h2>
+                      <p>Physical custody and return condition</p>
+                    </div>
+                    <div className="equipment-handoff-summary" aria-live="polite">
+                      {fieldEquipmentCustody.length ? <span className="tag tag-amber">{fieldEquipmentCustody.length} checked out</span> : null}
+                      <Wrench size={20} />
+                    </div>
+                  </div>
+                  <div className="equipment-field-selector">
+                    <label>
+                      Job
+                      <select required value={fieldEquipmentCheckout.jobId || fieldEquipmentReturn.jobId} onChange={(event) => void selectFieldEquipmentJob(event.target.value)}>
+                        <option value="">Select an active job</option>
+                        {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                      </select>
+                    </label>
+                    {navigator.onLine === false && !fieldEquipmentPlans.length && !fieldEquipmentCustody.length ? (
+                      <p className="workflow-note">Reconnect to load the retained reservations and active custody for this job.</p>
+                    ) : null}
+                  </div>
+                  {fieldEquipmentCustody.length ? (
+                    <div className="equipment-field-custody-list" aria-label="Active equipment custody">
+                      {fieldEquipmentCustody.map((session) => (
+                        <div className="equipment-field-custody-row" key={session.id}>
+                          <span className={`equipment-custody-marker ${session.overdue ? 'equipment-custody-marker-alert' : ''}`} aria-hidden="true" />
+                          <div>
+                            <strong>{session.toolName}</strong>
+                            <small>{session.workerName || session.checkedOutBy} / due {session.dueBackAt ? formatDateTime(session.dueBackAt) : 'open'}</small>
+                          </div>
+                          <button type="button" className="secondary-button" disabled={submitting} onClick={() => setFieldEquipmentReturn(emptyEquipmentReturnDraft(session))}>
+                            <PackageCheck size={15} /> Return
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {fieldEquipmentReturn.custodySessionId ? (
+                    <form className="equipment-field-form equipment-return-form" data-testid="field-equipment-return-form" onSubmit={recordFieldEquipmentReturn}>
+                      <div className="equipment-field-form-heading">
+                        <strong>Return {fieldEquipmentCustody.find(session => session.id === fieldEquipmentReturn.custodySessionId)?.toolName || 'equipment'}</strong>
+                        <button type="button" className="icon-button" aria-label="Cancel equipment return" onClick={() => setFieldEquipmentReturn(emptyEquipmentReturnDraft())}><X size={16} /></button>
+                      </div>
+                      <div className="form-grid">
+                        <label>
+                          Returned at
+                          <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldEquipmentReturn.returnedAt} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, returnedAt: event.target.value })} />
+                        </label>
+                        {!fieldScoped ? (
+                          <label>
+                            Returned by
+                            <input required minLength="2" maxLength="160" value={fieldEquipmentReturn.returnedBy} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, returnedBy: event.target.value })} />
+                          </label>
+                        ) : null}
+                        <label>
+                          Return condition
+                          <select value={fieldEquipmentReturn.condition} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, condition: event.target.value })}>
+                            <option value="serviceable">Serviceable</option>
+                            <option value="good">Good</option>
+                            <option value="damaged">Damaged</option>
+                            <option value="unsafe">Unsafe</option>
+                            <option value="lost">Lost</option>
+                          </select>
+                        </label>
+                        <label>
+                          Return location
+                          <input maxLength="240" value={fieldEquipmentReturn.location} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, location: event.target.value })} placeholder="Depot, yard, or quarantine bay" />
+                        </label>
+                        <label>
+                          Meter
+                          <input type="number" min="0" step="any" inputMode="decimal" value={fieldEquipmentReturn.meter} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, meter: event.target.value })} />
+                        </label>
+                        <label className="form-span">
+                          Return evidence reference
+                          <input required minLength="3" maxLength="240" value={fieldEquipmentReturn.evidenceReference} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                        </label>
+                        <label className="form-span">
+                          Return findings
+                          <textarea required={['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition)} minLength={['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition) ? 8 : undefined} maxLength="2000" value={fieldEquipmentReturn.notes} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, notes: event.target.value })} placeholder="Condition, missing parts, or isolation detail" />
+                        </label>
+                      </div>
+                      <div className="modal-actions">
+                        <button className="primary-button" disabled={submitting}>
+                          <PackageCheck size={16} />
+                          {submitting ? 'Recording...' : navigator.onLine === false ? 'Save return offline' : 'Retain return'}
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
+                  {fieldEquipmentPlans.length ? (
+                    <form className="equipment-field-form equipment-checkout-form" data-testid="field-equipment-checkout-form" onSubmit={recordFieldEquipmentCheckout}>
+                      <div className="equipment-field-form-heading"><strong>Check out reserved equipment</strong></div>
+                      <div className="form-grid">
+                        <label className="form-span">
+                          Reservation
+                          <select required value={fieldEquipmentCheckout.reservationId} onChange={(event) => selectFieldEquipmentPlan(event.target.value)}>
+                            <option value="">Select a checkout-ready reservation</option>
+                            {fieldEquipmentPlans.map((plan) => (
+                              <option key={plan.reservation.id} value={plan.reservation.id} disabled={!plan.checkoutReady}>
+                                {plan.tool.name} / {plan.checkoutReady ? 'ready' : plan.activeCustody ? 'already checked out' : `${formatStatus(plan.tool.status)} - blocked`}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Checked out at
+                          <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldEquipmentCheckout.checkedOutAt} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, checkedOutAt: event.target.value })} />
+                        </label>
+                        <label>
+                          Due back
+                          <input type="datetime-local" min={fieldEquipmentCheckout.checkedOutAt} value={fieldEquipmentCheckout.dueBackAt} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, dueBackAt: event.target.value })} />
+                        </label>
+                        {!fieldScoped ? (
+                          <label>
+                            Physical custodian
+                            <input required minLength="2" maxLength="160" value={fieldEquipmentCheckout.checkedOutBy} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, checkedOutBy: event.target.value })} />
+                          </label>
+                        ) : null}
+                        <label>
+                          Checkout condition
+                          <select value={fieldEquipmentCheckout.condition} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, condition: event.target.value })}>
+                            <option value="good">Good</option>
+                            <option value="serviceable">Serviceable</option>
+                          </select>
+                        </label>
+                        <label>
+                          Handoff location
+                          <input maxLength="240" value={fieldEquipmentCheckout.location} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, location: event.target.value })} placeholder="Depot, yard, or project gate" />
+                        </label>
+                        <label>
+                          Meter
+                          <input type="number" min="0" step="any" inputMode="decimal" value={fieldEquipmentCheckout.meter} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, meter: event.target.value })} />
+                        </label>
+                        <label className="form-span">
+                          Handoff evidence reference
+                          <input required minLength="3" maxLength="240" value={fieldEquipmentCheckout.evidenceReference} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                        </label>
+                        <label className="form-span">
+                          Handoff note
+                          <textarea maxLength="2000" value={fieldEquipmentCheckout.notes} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, notes: event.target.value })} placeholder="Keys, accessories, restrictions, or visible condition" />
+                        </label>
+                      </div>
+                      <div className="modal-actions">
+                        <button className="primary-button" disabled={submitting || !selectedFieldEquipmentPlan?.checkoutReady}>
+                          <ArrowUpRight size={16} />
+                          {submitting ? 'Recording...' : navigator.onLine === false ? 'Save handoff offline' : 'Retain checkout'}
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
+                  {fieldEquipmentCheckout.jobId && navigator.onLine !== false && !fieldEquipmentPlans.length && !fieldEquipmentCustody.length ? (
+                    <Empty title="No equipment handoff available" detail="This job has no checkout-ready retained equipment reservation." />
+                  ) : null}
+                  <p className="attendance-policy">Custody records are internal operational evidence. External hire, spend, and statutory inspection remain separately governed.</p>
                 </section>
                 <form className="evidence-form material-receipt-form" data-testid="field-material-receipt-form" onSubmit={recordFieldMaterialReceipt}>
                   <div className="panel-heading">
@@ -14264,6 +14924,8 @@ function App() {
                   commandPlan={data.commandPlan}
                   scheduler={data.scheduler}
                   jobs={jobs}
+                  loading={commandPlanLoading}
+                  error={commandPlanError}
                   view={commandPlanView}
                   selectedIds={selectedCommandIds}
                   submitting={submitting}
@@ -14272,6 +14934,7 @@ function App() {
                   onSelectVisible={setSelectedCommandIds}
                   onApply={applySelectedCommands}
                   onRun={runCycle}
+                  onRetry={() => refreshOperationsCommandPlan()}
                   onOpenApprovals={openApprovals}
                   onOpen={openJobWorkspace}
                 />
@@ -15173,10 +15836,11 @@ function App() {
                   Operational status
                   <select
                     value={equipmentDraft.status}
+                    disabled={Boolean(equipmentEditor?.activeCustody)}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, status: event.target.value })}
                   >
                     <option value="available">Available</option>
-                    <option value="in_use">In use</option>
+                    <option value="in_use" disabled={!equipmentEditor?.activeCustody}>In use (custody controlled)</option>
                     <option value="maintenance">Maintenance</option>
                     <option value="inspection_due">Inspection due</option>
                     <option value="inactive">Inactive</option>
@@ -15194,6 +15858,7 @@ function App() {
                 <label>
                   Current location
                   <input
+                    disabled={Boolean(equipmentEditor?.activeCustody)}
                     value={equipmentDraft.currentLocation}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, currentLocation: event.target.value })}
                     placeholder="Depot, site, or vehicle"
@@ -15257,6 +15922,185 @@ function App() {
                 >
                   <ShieldCheck size={16} />
                   {submitting ? 'Saving...' : 'Save retained equipment'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {equipmentCheckoutEditor ? (
+        <div className="modal-backdrop equipment-backdrop" role="presentation">
+          <section
+            className="modal equipment-custody-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="equipment-checkout-title"
+            data-testid="equipment-checkout-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeEquipmentCheckout()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Physical custody</p>
+                <h2 id="equipment-checkout-title">Check out reserved equipment</h2>
+                <p>Reservation-linked handoff evidence</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close equipment checkout" onClick={closeEquipmentCheckout}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={saveEquipmentCheckout}>
+              <div className="form-grid equipment-custody-form">
+                <label>
+                  Job
+                  <select autoFocus required disabled={submitting} value={equipmentCheckoutDraft.jobId} onChange={(event) => void selectEquipmentCheckoutJob(event.target.value)}>
+                    <option value="">Select an active job</option>
+                    {jobs.filter((job) => !['archived', 'completed', 'cancelled', 'rejected'].includes(job.status)).map((job) => (
+                      <option key={job.id} value={job.id}>{job.title}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Reservation
+                  <select required disabled={!equipmentCheckoutDraft.jobId || submitting} value={equipmentCheckoutDraft.reservationId} onChange={(event) => selectEquipmentCheckoutPlan(event.target.value)}>
+                    <option value="">Select checkout-ready equipment</option>
+                    {equipmentCheckoutPlans.map((plan) => (
+                      <option key={plan.reservation.id} value={plan.reservation.id} disabled={!plan.checkoutReady}>
+                        {plan.tool.name} / {plan.checkoutReady ? 'ready' : plan.activeCustody ? 'already checked out' : `${formatStatus(plan.tool.status)} - blocked`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {selectedEquipmentCheckoutPlan ? (
+                  <dl className="equipment-custody-preview form-span">
+                    <div><dt>Equipment</dt><dd>{selectedEquipmentCheckoutPlan.tool.name}</dd></div>
+                    <div><dt>Current location</dt><dd>{selectedEquipmentCheckoutPlan.tool.currentLocation || 'Not retained'}</dd></div>
+                    <div><dt>Reservation until</dt><dd>{selectedEquipmentCheckoutPlan.reservation.neededUntil ? formatDateTime(selectedEquipmentCheckoutPlan.reservation.neededUntil) : 'Open'}</dd></div>
+                  </dl>
+                ) : equipmentCheckoutDraft.jobId && !submitting ? (
+                  <p className="workflow-note form-span">No checkout-ready retained equipment reservation is available for this job.</p>
+                ) : null}
+                <label>
+                  Physical custodian
+                  <input required minLength="2" maxLength="160" value={equipmentCheckoutDraft.checkedOutBy} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, checkedOutBy: event.target.value })} />
+                </label>
+                <label>
+                  Checkout condition
+                  <select value={equipmentCheckoutDraft.condition} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, condition: event.target.value })}>
+                    <option value="good">Good</option>
+                    <option value="serviceable">Serviceable</option>
+                  </select>
+                </label>
+                <label>
+                  Checked out at
+                  <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={equipmentCheckoutDraft.checkedOutAt} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, checkedOutAt: event.target.value })} />
+                </label>
+                <label>
+                  Due back
+                  <input type="datetime-local" min={equipmentCheckoutDraft.checkedOutAt} value={equipmentCheckoutDraft.dueBackAt} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, dueBackAt: event.target.value })} />
+                </label>
+                <label>
+                  Handoff location
+                  <input maxLength="240" value={equipmentCheckoutDraft.location} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, location: event.target.value })} placeholder="Depot, yard, or project gate" />
+                </label>
+                <label>
+                  Meter
+                  <input type="number" min="0" step="any" inputMode="decimal" value={equipmentCheckoutDraft.meter} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, meter: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Handoff evidence reference
+                  <input required minLength="3" maxLength="240" value={equipmentCheckoutDraft.evidenceReference} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                </label>
+                <label className="form-span">
+                  Handoff note
+                  <textarea maxLength="2000" value={equipmentCheckoutDraft.notes} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, notes: event.target.value })} placeholder="Keys, accessories, restrictions, or visible condition" />
+                </label>
+                <p className="workflow-note form-span">Checkout changes equipment availability and reservation state atomically. It creates no purchase, hire, or external communication.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeEquipmentCheckout}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !selectedEquipmentCheckoutPlan?.checkoutReady || equipmentCheckoutDraft.checkedOutBy.trim().length < 2 || equipmentCheckoutDraft.evidenceReference.trim().length < 3}>
+                  <ArrowUpRight size={16} />
+                  {submitting ? 'Recording...' : 'Retain checkout'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {equipmentReturnEditor ? (
+        <div className="modal-backdrop equipment-backdrop" role="presentation">
+          <section
+            className="modal equipment-return-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="equipment-return-title"
+            data-testid="equipment-return-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeEquipmentReturn()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Physical custody</p>
+                <h2 id="equipment-return-title">Return {equipmentReturnEditor.toolName}</h2>
+                <p>{equipmentReturnEditor.jobTitle} / {equipmentReturnEditor.workerName || equipmentReturnEditor.checkedOutBy}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close equipment return" onClick={closeEquipmentReturn}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={saveEquipmentReturn}>
+              <div className="form-grid equipment-custody-form">
+                <dl className="equipment-custody-preview form-span">
+                  <div><dt>Checked out</dt><dd>{formatDateTime(equipmentReturnEditor.checkedOutAt)}</dd></div>
+                  <div><dt>Due back</dt><dd>{equipmentReturnEditor.dueBackAt ? formatDateTime(equipmentReturnEditor.dueBackAt) : 'Open'}</dd></div>
+                  <div><dt>Checkout condition</dt><dd>{formatStatus(equipmentReturnEditor.checkoutCondition)}</dd></div>
+                </dl>
+                <label>
+                  Returned at
+                  <input autoFocus required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={equipmentReturnDraft.returnedAt} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, returnedAt: event.target.value })} />
+                </label>
+                <label>
+                  Returned by
+                  <input required minLength="2" maxLength="160" value={equipmentReturnDraft.returnedBy} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, returnedBy: event.target.value })} />
+                </label>
+                <label>
+                  Return condition
+                  <select value={equipmentReturnDraft.condition} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, condition: event.target.value })}>
+                    <option value="serviceable">Serviceable</option>
+                    <option value="good">Good</option>
+                    <option value="damaged">Damaged</option>
+                    <option value="unsafe">Unsafe</option>
+                    <option value="lost">Lost</option>
+                  </select>
+                </label>
+                <label>
+                  Return location
+                  <input maxLength="240" value={equipmentReturnDraft.location} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, location: event.target.value })} placeholder="Depot, yard, or quarantine bay" />
+                </label>
+                <label>
+                  Meter
+                  <input type="number" min={equipmentReturnEditor.checkoutMeter ?? 0} step="any" inputMode="decimal" value={equipmentReturnDraft.meter} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, meter: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Return evidence reference
+                  <input required minLength="3" maxLength="240" value={equipmentReturnDraft.evidenceReference} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                </label>
+                <label className="form-span">
+                  Return findings
+                  <textarea required={['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition)} minLength={['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition) ? 8 : undefined} maxLength="2000" value={equipmentReturnDraft.notes} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, notes: event.target.value })} placeholder="Condition, missing parts, or isolation detail" />
+                </label>
+                <p className="workflow-note form-span">Damaged, unsafe, and lost returns are quarantined automatically and create an internal review action. No supplier or finance action is executed.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeEquipmentReturn}>Cancel</button>
+                <button className="primary-button" disabled={submitting || equipmentReturnDraft.returnedBy.trim().length < 2 || equipmentReturnDraft.evidenceReference.trim().length < 3 || (['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition) && equipmentReturnDraft.notes.trim().length < 8)}>
+                  <PackageCheck size={16} />
+                  {submitting ? 'Recording...' : 'Retain return'}
                 </button>
               </div>
             </form>

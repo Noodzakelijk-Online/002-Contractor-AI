@@ -400,6 +400,39 @@ function createBackupFixture(t, suffix = 'success') {
     });
     attendanceAssignment = source.getJobDetail(job.id).assignments.find(item => item.id === attendanceAssignment.id);
   }
+  const custodyTool = source.upsertTool({
+    name: `Migration custody lift ${suffix}`,
+    category: 'access',
+    status: 'available',
+    currentLocation: 'Migration depot'
+  }, { actor: 'migration_fixture' });
+  const custodyReservation = source.reserveTool(job.id, {
+    toolId: custodyTool.id,
+    toolName: custodyTool.name,
+    status: 'reserved',
+    neededUntil: new Date(Date.now() + 86_400_000).toISOString()
+  }, { actor: 'migration_fixture' });
+  const custodyCheckout = source.checkoutEquipment(job.id, {
+    reservationId: custodyReservation.id,
+    workerId: attendanceWorker.id,
+    checkedOutAt: new Date(Date.now() - 120_000).toISOString(),
+    checkedOutBy: attendanceWorker.name,
+    condition: 'good',
+    location: 'Migration project gate',
+    meter: 88.5,
+    evidenceReference: `migration:equipment-handoff:${suffix}`,
+    entryKey: `migration-equipment-checkout-${suffix}`
+  }, { actor: 'migration_fixture' }).custody;
+  const equipmentCustody = source.returnEquipment(job.id, custodyCheckout.id, {
+    returnedAt: new Date(Date.now() - 60_000).toISOString(),
+    returnedBy: attendanceWorker.name,
+    condition: 'damaged',
+    location: 'Migration quarantine bay',
+    meter: 91.25,
+    evidenceReference: `migration:equipment-return:${suffix}`,
+    entryKey: `migration-equipment-return-${suffix}`,
+    notes: 'Retained guard damage requires hosted maintenance review.'
+  }, { actor: 'migration_fixture' }).custody;
   const qualificationRequirement = source.createQualificationRequirement(job.id, {
     credentialType: 'vca',
     title: 'Migration VCA site qualification',
@@ -507,7 +540,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, equipmentCustody, evidenceBytes, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -597,7 +630,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '037_material_receiving');
+  assert.equal(migration.migrationVersion, '038_equipment_custody');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -651,6 +684,11 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedAttendance.status, 'checked_out');
     assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);
     assert.equal(migratedAttendance.data.payrollDerived, false);
+    const migratedCustody = detail.equipmentCustody.find(item => item.id === fixture.equipmentCustody.id);
+    assert.equal(migratedCustody.status, 'exception');
+    assert.equal(migratedCustody.checkoutFingerprint, fixture.equipmentCustody.checkoutFingerprint);
+    assert.equal(migratedCustody.returnFingerprint, fixture.equipmentCustody.returnFingerprint);
+    assert.equal(migratedCustody.returnCondition, 'damaged');
     const migratedCredential = hosted.getWorkerCredential(fixture.workerCredential.id);
     assert.equal(migratedCredential.status, 'approved');
     assert.equal(migratedCredential.snapshotHash, fixture.workerCredential.snapshotHash);

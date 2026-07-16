@@ -45,7 +45,7 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     ],
     serviceGroups: [
       { name: 'Field capture', services: ['Progress update', 'daily field report', 'photo evidence', 'time log'] },
-      { name: 'Production resources', services: ['Material needs', 'tool/equipment reservation', 'worker availability', 'worker instruction', 'production variance'] }
+      { name: 'Production resources', services: ['Material needs', 'tool/equipment reservation', 'equipment custody and return', 'worker availability', 'worker instruction', 'production variance'] }
     ]
   },
   {
@@ -140,7 +140,8 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'attendance', label: 'Site attendance and labor map', table: 'attendance_sessions', detailKey: 'attendanceSessions', readyStatuses: ['checked_in', 'checked_out'] },
     { key: 'materials', label: 'Material tracking', table: 'material_requirements', detailKey: 'materials' },
     { key: 'material_receipt', label: 'Material delivery receipts', table: 'material_receipts', detailKey: 'materialReceipts', readyStatuses: ['received', 'discrepancy', 'pending_reversal'] },
-    { key: 'equipment', label: 'Tool/equipment tracking', table: 'tool_reservations', detailKey: 'tools' },
+    { key: 'equipment', label: 'Tool/equipment planning', table: 'tool_reservations', detailKey: 'tools' },
+    { key: 'equipment_custody', label: 'Equipment custody and return', table: 'equipment_custody_sessions', detailKey: 'equipmentCustody', readyStatuses: ['checked_out', 'returned', 'exception'] },
     { key: 'availability', label: 'Worker availability', table: 'worker_availability_periods', readyStatuses: ['active', 'pending_cancellation'], ledgerOnly: true },
     { key: 'evidence', label: 'Photo evidence', table: 'documents', detailKey: 'documents' },
     { key: 'instructions', label: 'Worker instructions', table: 'worker_instructions', detailKey: 'workerInstructions' }
@@ -560,6 +561,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     materials: 'material_form',
     tools: 'tool_reservation_form',
     equipment: 'tool_reservation_form',
+    equipment_custody: 'equipment_custody_form',
     assignment: 'assignment_form',
     job: 'job_update_form',
     tasks: 'task_form',
@@ -644,6 +646,7 @@ const CAPABILITY_MANUAL_COMMITMENT_REQUIREMENTS = new Set([
   'site_visit',
   'tools',
   'equipment',
+  'equipment_custody',
   'assignment',
   'qualification',
   'vca',
@@ -2938,6 +2941,58 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON material_receipts(reversal_approval_id) WHERE status = 'pending_reversal';
         CREATE INDEX IF NOT EXISTS idx_material_receipt_lines_requirement
           ON material_receipt_lines(material_requirement_id, receipt_id);
+      `);
+    }
+  },
+  {
+    version: '038_equipment_custody',
+    description: 'Retain replay-safe equipment checkout and return evidence with exclusive custody and condition-based quarantine.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS equipment_custody_sessions (
+          id TEXT PRIMARY KEY,
+          tool_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          reservation_id TEXT NOT NULL,
+          worker_id TEXT,
+          status TEXT NOT NULL DEFAULT 'checked_out',
+          checked_out_at TEXT NOT NULL,
+          due_back_at TEXT,
+          checked_out_by TEXT NOT NULL,
+          checkout_location TEXT,
+          checkout_condition TEXT NOT NULL,
+          checkout_meter DOUBLE PRECISION,
+          checkout_evidence_reference TEXT NOT NULL,
+          checkout_entry_key TEXT NOT NULL,
+          checkout_fingerprint TEXT NOT NULL,
+          returned_at TEXT,
+          returned_by TEXT,
+          return_location TEXT,
+          return_condition TEXT,
+          return_meter DOUBLE PRECISION,
+          return_evidence_reference TEXT,
+          return_entry_key TEXT,
+          return_fingerprint TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(tool_id) REFERENCES tools(id),
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(reservation_id) REFERENCES tool_reservations(id),
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          UNIQUE(tool_id, checkout_entry_key),
+          UNIQUE(tool_id, return_entry_key)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_equipment_custody_active_tool
+          ON equipment_custody_sessions(tool_id) WHERE status = 'checked_out';
+        CREATE INDEX IF NOT EXISTS idx_equipment_custody_job_status
+          ON equipment_custody_sessions(job_id, status, checked_out_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_equipment_custody_worker_status
+          ON equipment_custody_sessions(worker_id, status, checked_out_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_equipment_custody_due
+          ON equipment_custody_sessions(status, due_back_at);
+        CREATE INDEX IF NOT EXISTS idx_equipment_custody_reservation
+          ON equipment_custody_sessions(reservation_id, checked_out_at DESC);
       `);
     }
   }
@@ -8511,6 +8566,34 @@ class ContractorOperatingLedger {
       error.code = 'tool_status_invalid';
       throw error;
     }
+    const activeCustody = before
+      ? this.db.prepare("SELECT id, job_id FROM equipment_custody_sessions WHERE tool_id = ? AND status = 'checked_out'").get(id)
+      : null;
+    if (status === 'in_use' && !activeCustody) {
+      throw ledgerInputError(
+        'equipment_custody_route_required',
+        'Equipment can only enter in-use status through a reservation-linked physical checkout.',
+        { toolId: id },
+        409
+      );
+    }
+    if (activeCustody && status !== 'in_use') {
+      throw ledgerInputError(
+        'equipment_custody_return_required',
+        'Return the equipment through its active custody session before changing operational status.',
+        { toolId: id, custodySessionId: activeCustody.id, jobId: activeCustody.job_id },
+        409
+      );
+    }
+    const requestedCurrentLocation = payload.currentLocation ?? payload.current_location ?? payload.location;
+    if (activeCustody && requestedCurrentLocation !== undefined && requestedCurrentLocation !== before.current_location) {
+      throw ledgerInputError(
+        'equipment_custody_location_controlled',
+        'Equipment location is controlled by the active custody session until return.',
+        { toolId: id, custodySessionId: activeCustody.id, jobId: activeCustody.job_id },
+        409
+      );
+    }
     const timestamp = nowIso();
     const existingData = fromJson(before?.data_json, {});
     const incomingData = payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
@@ -8624,6 +8707,10 @@ class ContractorOperatingLedger {
         error.code = 'tool_retirement_pending';
         error.details = { toolId, approvalId: pendingRetirement.id };
         throw error;
+      }
+      const activeCustody = this.db.prepare("SELECT id, job_id FROM equipment_custody_sessions WHERE tool_id = ? AND status = 'checked_out'").get(toolId);
+      if (activeCustody) {
+        throw ledgerInputError('tool_inspection_active_custody', 'Return the equipment before recording a new office inspection.', { custodySessionId: activeCustody.id, jobId: activeCustody.job_id }, 409);
       }
 
       const result = normalizeStatus(payload.result, '');
@@ -8767,6 +8854,10 @@ class ContractorOperatingLedger {
         error.details = { toolId, approvalId: pendingRetirement.id };
         throw error;
       }
+      const activeCustody = this.db.prepare("SELECT id, job_id FROM equipment_custody_sessions WHERE tool_id = ? AND status = 'checked_out'").get(toolId);
+      if (activeCustody) {
+        throw ledgerInputError('tool_maintenance_active_custody', 'Return the equipment before recording office maintenance evidence.', { custodySessionId: activeCustody.id, jobId: activeCustody.job_id }, 409);
+      }
       const requestedSpend = normalizeNumber(
         payload.amount ?? payload.cost ?? payload.spendAmount ?? payload.spend_amount,
         0
@@ -8909,6 +9000,14 @@ class ContractorOperatingLedger {
       active: Number(row.active_count || 0),
       dormant: Number(row.dormant_count || 0)
     }]));
+    const activeCustody = new Map(this.db.prepare(`
+      SELECT sessions.*, jobs.title AS job_title, workers.name AS worker_name, tools.name AS tool_name
+      FROM equipment_custody_sessions sessions
+      JOIN jobs ON jobs.id = sessions.job_id
+      JOIN tools ON tools.id = sessions.tool_id
+      LEFT JOIN workers ON workers.id = sessions.worker_id
+      WHERE sessions.status = 'checked_out'
+    `).all().map(row => [row.tool_id, this.mapEquipmentCustodySession(row)]));
     return this.db.prepare(`
       SELECT * FROM tools
       WHERE (? = '' OR status = ?)
@@ -8922,6 +9021,7 @@ class ContractorOperatingLedger {
         ...tool,
         inspection: this.assessToolInspection(tool),
         maintenance: this.assessToolMaintenance(tool),
+        activeCustody: activeCustody.get(tool.id) || null,
         retirementApprovalId: pendingRetirements.get(tool.id) || null,
         activeReservationCount: reservations.active,
         dormantReservationCount: reservations.dormant,
@@ -8951,6 +9051,10 @@ class ContractorOperatingLedger {
       if (['not_recorded', 'invalid'].includes(tool.inspection?.status)) summary.inspectionMissing += 1;
       if (tool.inspection?.blocksReservation) summary.inspectionBlocked += 1;
       if (tool.status === 'maintenance' || tool.maintenance?.requiresAttention) summary.maintenanceAttention += 1;
+      if (tool.activeCustody) {
+        summary.checkedOut += 1;
+        if (tool.activeCustody.overdue) summary.custodyOverdue += 1;
+      }
       summary.maintenanceRecords += Number(tool.maintenance?.historyCount || 0);
       return summary;
     }, {
@@ -8967,7 +9071,9 @@ class ContractorOperatingLedger {
       inspectionMissing: 0,
       inspectionBlocked: 0,
       maintenanceAttention: 0,
-      maintenanceRecords: 0
+      maintenanceRecords: 0,
+      checkedOut: 0,
+      custodyOverdue: 0
     });
   }
 
@@ -9029,6 +9135,7 @@ class ContractorOperatingLedger {
       const reservationScope = this.toolReservationScope(toolId);
       const activeReservations = reservationScope.operational;
       const dormantReservations = reservationScope.dormant;
+      const activeCustody = this.db.prepare("SELECT id, job_id, worker_id, checked_out_at, due_back_at FROM equipment_custody_sessions WHERE tool_id = ? AND status = 'checked_out'").get(toolId) || null;
       const approval = this.createApproval({
         targetType: 'tool_retirement',
         targetId: toolId,
@@ -9047,6 +9154,7 @@ class ContractorOperatingLedger {
           activeReservations,
           dormantReservationCount: dormantReservations.length,
           dormantReservations,
+          activeCustody,
           before: tool
         }
       }, { actor });
@@ -9062,6 +9170,7 @@ class ContractorOperatingLedger {
           approvalId: approval.id,
           activeReservationCount: activeReservations.length,
           dormantReservationCount: dormantReservations.length,
+          activeCustodySessionId: activeCustody?.id || null,
           externalCommitments: 0
         }
       });
@@ -15113,6 +15222,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 400;
         throw error;
       }
+      const activeCustody = this.db.prepare("SELECT id FROM equipment_custody_sessions WHERE reservation_id = ? AND status = 'checked_out'").get(reservationId);
+      if (activeCustody) {
+        throw ledgerInputError('equipment_custody_return_required', 'Retain the physical equipment return before closing its reservation.', { custodySessionId: activeCustody.id }, 409);
+      }
       const timestamp = nowIso();
       const before = this.mapToolReservation(row);
       const data = fromJson(row.data_json, {});
@@ -15146,6 +15259,357 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       return after;
     });
+  }
+
+  equipmentCustodyPlanForJob(jobId) {
+    this.requireJob(jobId);
+    const rows = this.db.prepare(`
+      SELECT reservations.*, tools.name AS retained_tool_name, tools.category AS tool_category,
+        tools.status AS tool_status, tools.current_location AS tool_location, tools.data_json AS tool_data_json
+      FROM tool_reservations reservations
+      JOIN tools ON tools.id = reservations.tool_id
+      WHERE reservations.job_id = ?
+        AND reservations.status IN ('reserved', 'scheduled', 'planned', 'approved', 'in_use')
+      ORDER BY reservations.needed_from ASC, reservations.created_at ASC
+    `).all(jobId);
+    return rows.map(row => {
+      const reservation = this.mapToolReservation(row);
+      const tool = this.mapTool({
+        id: row.tool_id,
+        name: row.retained_tool_name,
+        category: row.tool_category,
+        status: row.tool_status,
+        home_location: null,
+        current_location: row.tool_location,
+        data_json: row.tool_data_json,
+        created_at: null,
+        updated_at: null
+      });
+      const inspection = this.assessToolInspection(tool);
+      const activeCustody = this.db.prepare(`
+        SELECT sessions.*, workers.name AS worker_name, jobs.title AS job_title, tools.name AS tool_name
+        FROM equipment_custody_sessions sessions
+        JOIN tools ON tools.id = sessions.tool_id
+        JOIN jobs ON jobs.id = sessions.job_id
+        LEFT JOIN workers ON workers.id = sessions.worker_id
+        WHERE sessions.tool_id = ? AND sessions.status = 'checked_out'
+      `).get(tool.id);
+      return {
+        reservation,
+        tool: {
+          id: tool.id,
+          name: tool.name,
+          category: tool.category,
+          status: tool.status,
+          currentLocation: tool.currentLocation,
+          inspection: {
+            status: inspection.status,
+            dueAt: inspection.dueAt,
+            reservationReady: inspection.reservationReady
+          }
+        },
+        activeCustody: activeCustody ? this.mapEquipmentCustodySession(activeCustody) : null,
+        checkoutReady: !activeCustody
+          && reservation.status !== 'pending_approval'
+          && tool.status === 'available'
+          && inspection.reservationReady
+      };
+    });
+  }
+
+  normalizeEquipmentCustodyMeter(value, label) {
+    if (value === undefined || value === null || value === '') return null;
+    const meter = Number(value);
+    if (!Number.isFinite(meter) || meter < 0 || meter > 1_000_000_000) {
+      throw ledgerInputError('equipment_custody_meter_invalid', `${label} must be a non-negative number no greater than 1,000,000,000.`);
+    }
+    return roundQuantity(meter);
+  }
+
+  checkoutEquipment(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const reservationId = normalizeText(payload.reservationId || payload.reservation_id, '');
+      if (!reservationId) throw ledgerInputError('equipment_custody_reservation_required', 'Equipment checkout requires a retained job reservation.');
+      const reservationRow = this.db.prepare('SELECT * FROM tool_reservations WHERE id = ? AND job_id = ?').get(reservationId, jobId);
+      if (!reservationRow) throw ledgerInputError('equipment_custody_reservation_not_found', 'The selected equipment reservation was not found for this job.', { reservationId }, 404);
+      const reservation = this.mapToolReservation(reservationRow);
+      if (!reservation.toolId) throw ledgerInputError('equipment_custody_tool_required', 'The reservation must be linked to a canonical equipment record.', { reservationId }, 409);
+      if (reservation.status === 'pending_approval') {
+        throw ledgerInputError('equipment_custody_reservation_pending', 'Resolve the equipment reservation approval before physical checkout.', { reservationId, approvalId: reservation.approvalId }, 409);
+      }
+      if (!['reserved', 'scheduled', 'planned', 'approved', 'in_use'].includes(reservation.status)) {
+        throw ledgerInputError('equipment_custody_reservation_closed', `Equipment cannot be checked out from a ${reservation.status} reservation.`, { reservationId }, 409);
+      }
+      const toolRow = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(reservation.toolId);
+      if (!toolRow) throw ledgerInputError('equipment_custody_tool_not_found', 'The reserved equipment record no longer exists.', { toolId: reservation.toolId }, 404);
+      const tool = this.mapTool(toolRow);
+      const checkedOutAt = this.normalizeReservationDate(payload.checkedOutAt || payload.checked_out_at || nowIso(), 'checkedOutAt');
+      if (Date.parse(checkedOutAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('equipment_custody_checkout_time_invalid', 'Equipment checkout time cannot be in the future.');
+      }
+      const dueBackInput = payload.dueBackAt || payload.due_back_at || reservation.neededUntil || null;
+      const dueBackAt = dueBackInput ? this.normalizeReservationDate(dueBackInput, 'dueBackAt') : null;
+      if (dueBackAt && Date.parse(dueBackAt) < Date.parse(checkedOutAt)) {
+        throw ledgerInputError('equipment_custody_due_time_invalid', 'Equipment due-back time cannot be before checkout.');
+      }
+      const checkedOutBy = normalizeText(payload.checkedOutBy || payload.checked_out_by || payload.custodianName || payload.custodian_name, '');
+      if (checkedOutBy.length < 2 || checkedOutBy.length > 160) {
+        throw ledgerInputError('equipment_custody_custodian_invalid', 'The physical custodian name must be between 2 and 160 characters.');
+      }
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '') || null;
+      if (workerId) {
+        const worker = this.db.prepare('SELECT id, status FROM workers WHERE id = ?').get(workerId);
+        if (!worker || ['retired', 'inactive'].includes(normalizeStatus(worker.status, 'active'))) {
+          throw ledgerInputError('equipment_custody_worker_not_found', 'The selected active worker was not found.', { workerId }, 404);
+        }
+        const assignment = this.db.prepare(`
+          SELECT id FROM assignments WHERE job_id = ? AND worker_id = ? AND ${this.activeAssignmentStatusSql('assignments')} LIMIT 1
+        `).get(jobId, workerId);
+        if (!assignment) throw ledgerInputError('equipment_custody_assignment_required', 'Equipment custody can only be assigned to a worker with an active job assignment.', { workerId, jobId }, 409);
+      }
+      const condition = normalizeStatus(payload.condition || payload.checkoutCondition || payload.checkout_condition, '');
+      if (!['good', 'serviceable'].includes(condition)) {
+        throw ledgerInputError('equipment_custody_checkout_condition_invalid', 'Equipment checkout condition must be good or serviceable. Unsafe equipment must remain quarantined.');
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.checkoutEvidenceReference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) {
+        throw ledgerInputError('equipment_custody_evidence_required', 'Checkout requires a retained handoff, photo, or checklist reference between 3 and 240 characters.');
+      }
+      const location = normalizeText(payload.location || payload.checkoutLocation || payload.checkout_location, '');
+      if (location.length > 240) throw ledgerInputError('equipment_custody_location_invalid', 'Equipment custody location cannot exceed 240 characters.');
+      const meter = this.normalizeEquipmentCustodyMeter(payload.meter ?? payload.checkoutMeter ?? payload.checkout_meter, 'Checkout meter');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, `checkout:${reservationId}`);
+      if (entryKey.length < 8 || entryKey.length > 240) {
+        throw ledgerInputError('equipment_custody_entry_key_invalid', 'Equipment checkout entry key must be between 8 and 240 characters.');
+      }
+      const fingerprint = sha256Json({
+        jobId, reservationId, toolId: tool.id, workerId, checkedOutAt, dueBackAt, checkedOutBy,
+        location: location || null, condition, meter, evidenceReference,
+        notes: normalizeText(payload.notes || payload.note, '').slice(0, 2000) || null
+      });
+      const replay = this.db.prepare('SELECT * FROM equipment_custody_sessions WHERE tool_id = ? AND checkout_entry_key = ?').get(tool.id, entryKey);
+      if (replay) {
+        if (replay.checkout_fingerprint !== fingerprint) {
+          throw ledgerInputError('equipment_custody_replay_conflict', 'This equipment checkout key is already retained with different evidence.', { custodySessionId: replay.id }, 409);
+        }
+        return { custody: this.getEquipmentCustodySession(replay.id), replayed: true };
+      }
+      const active = this.db.prepare("SELECT * FROM equipment_custody_sessions WHERE tool_id = ? AND status = 'checked_out'").get(tool.id);
+      if (active) {
+        throw ledgerInputError('equipment_already_checked_out', 'This equipment already has an active physical custodian.', { custodySessionId: active.id, jobId: active.job_id }, 409);
+      }
+      const inspection = this.assessToolInspection(tool);
+      if (!inspection.reservationReady) {
+        throw ledgerInputError('equipment_custody_inspection_blocked', `Equipment inspection is ${inspection.status.replace(/_/g, ' ')} and blocks checkout.`, { inspectionStatus: inspection.status }, 409);
+      }
+      if (tool.status !== 'available') {
+        throw ledgerInputError('equipment_custody_tool_unavailable', `Equipment marked ${tool.status.replace(/_/g, ' ')} cannot be checked out.`, { toolId: tool.id, status: tool.status }, 409);
+      }
+      const id = makeId('equipment_custody');
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'dashboard';
+      const notes = normalizeText(payload.notes || payload.note, '').slice(0, 2000) || null;
+      this.db.prepare(`
+        INSERT INTO equipment_custody_sessions (
+          id, tool_id, job_id, reservation_id, worker_id, status, checked_out_at, due_back_at,
+          checked_out_by, checkout_location, checkout_condition, checkout_meter,
+          checkout_evidence_reference, checkout_entry_key, checkout_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'checked_out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, tool.id, jobId, reservationId, workerId, checkedOutAt, dueBackAt, checkedOutBy,
+        location || null, condition, meter, evidenceReference, entryKey, fingerprint,
+        toJson({ notes, checkedOutByActor: actor, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const toolData = fromJson(toolRow.data_json, {});
+      this.db.prepare("UPDATE tools SET status = 'in_use', current_location = ?, data_json = ?, updated_at = ? WHERE id = ?")
+        .run(location || tool.currentLocation || tool.homeLocation, toJson({
+          ...toolData,
+          assignedJobId: jobId,
+          assignedWorkerId: workerId,
+          activeCustodySessionId: id
+        }), timestamp, tool.id);
+      this.db.prepare("UPDATE tool_reservations SET status = 'in_use', data_json = ?, updated_at = ? WHERE id = ?")
+        .run(toJson({ ...fromJson(reservationRow.data_json, {}), custodySessionId: id, checkedOutAt }), timestamp, reservationId);
+      const custody = this.getEquipmentCustodySession(id);
+      this.audit({
+        entityType: 'equipment_custody', entityId: id, jobId, action: 'checkout_equipment', actor, after: custody,
+        metadata: { toolId: tool.id, reservationId, workerId, entryKey, externalCommitments: 0 }
+      });
+      return { custody, replayed: false };
+    });
+  }
+
+  returnEquipment(jobId, custodySessionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId, { allowInactive: true });
+      const row = this.db.prepare('SELECT * FROM equipment_custody_sessions WHERE id = ? AND job_id = ?').get(custodySessionId, jobId);
+      if (!row) throw ledgerInputError('equipment_custody_not_found', 'Equipment custody session was not found for this job.', { custodySessionId }, 404);
+      const returnedAt = this.normalizeReservationDate(payload.returnedAt || payload.returned_at || nowIso(), 'returnedAt');
+      const returnedBy = normalizeText(payload.returnedBy || payload.returned_by || payload.custodianName || payload.custodian_name, '');
+      if (returnedBy.length < 2 || returnedBy.length > 160) {
+        throw ledgerInputError('equipment_return_custodian_invalid', 'The person returning the equipment must be between 2 and 160 characters.');
+      }
+      const condition = normalizeStatus(payload.condition || payload.returnCondition || payload.return_condition, '');
+      if (!['good', 'serviceable', 'damaged', 'unsafe', 'lost'].includes(condition)) {
+        throw ledgerInputError('equipment_return_condition_invalid', 'Return condition must be good, serviceable, damaged, unsafe, or lost.');
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.returnEvidenceReference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) {
+        throw ledgerInputError('equipment_return_evidence_required', 'Return requires a retained handoff, photo, or checklist reference between 3 and 240 characters.');
+      }
+      const location = normalizeText(payload.location || payload.returnLocation || payload.return_location, '');
+      if (location.length > 240) throw ledgerInputError('equipment_return_location_invalid', 'Equipment return location cannot exceed 240 characters.');
+      const meter = this.normalizeEquipmentCustodyMeter(payload.meter ?? payload.returnMeter ?? payload.return_meter, 'Return meter');
+      if (Date.parse(returnedAt) > Date.now() + 5 * 60 * 1000 || Date.parse(returnedAt) < Date.parse(row.checked_out_at)) {
+        throw ledgerInputError('equipment_return_time_invalid', 'Equipment return time cannot be in the future or before checkout.');
+      }
+      if (meter !== null && row.checkout_meter !== null && meter < normalizeNumber(row.checkout_meter, 0)) {
+        throw ledgerInputError('equipment_return_meter_regression', 'Return meter cannot be lower than the retained checkout meter.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, `return:${custodySessionId}`);
+      if (entryKey.length < 8 || entryKey.length > 240) {
+        throw ledgerInputError('equipment_return_entry_key_invalid', 'Equipment return entry key must be between 8 and 240 characters.');
+      }
+      const notes = normalizeText(payload.notes || payload.note || payload.findings, '').slice(0, 2000) || null;
+      if (['damaged', 'unsafe', 'lost'].includes(condition) && (!notes || notes.length < 8)) {
+        throw ledgerInputError('equipment_return_exception_evidence_required', 'Damaged, unsafe, or lost equipment requires findings of at least eight characters.');
+      }
+      const fingerprint = sha256Json({ custodySessionId, returnedAt, returnedBy, location: location || null, condition, meter, evidenceReference, notes });
+      if (row.status !== 'checked_out') {
+        if (row.return_entry_key === entryKey && row.return_fingerprint === fingerprint) {
+          return { custody: this.getEquipmentCustodySession(custodySessionId), replayed: true };
+        }
+        throw ledgerInputError('equipment_return_replay_conflict', 'This custody session already has different retained return evidence.', { custodySessionId }, 409);
+      }
+      const exceptional = ['damaged', 'unsafe', 'lost'].includes(condition);
+      const status = exceptional ? 'exception' : 'returned';
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'dashboard';
+      const before = this.getEquipmentCustodySession(custodySessionId);
+      this.db.prepare(`
+        UPDATE equipment_custody_sessions
+        SET status = ?, returned_at = ?, returned_by = ?, return_location = ?, return_condition = ?,
+          return_meter = ?, return_evidence_reference = ?, return_entry_key = ?, return_fingerprint = ?,
+          data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'checked_out'
+      `).run(
+        status, returnedAt, returnedBy, location || null, condition, meter, evidenceReference, entryKey, fingerprint,
+        toJson({ ...fromJson(row.data_json, {}), returnNotes: notes, returnedByActor: actor, quarantineRequired: exceptional, externalCommitments: 0 }),
+        timestamp, custodySessionId
+      );
+      const toolRow = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(row.tool_id);
+      const toolData = fromJson(toolRow?.data_json, {});
+      const toolStatus = condition === 'lost' ? 'lost' : exceptional ? 'maintenance' : 'available';
+      this.db.prepare('UPDATE tools SET status = ?, current_location = ?, data_json = ?, updated_at = ? WHERE id = ?')
+        .run(toolStatus, location || toolRow?.home_location || toolRow?.current_location, toJson({
+          ...toolData,
+          assignedJobId: null,
+          assignedWorkerId: null,
+          activeCustodySessionId: null,
+          lastCustodySessionId: custodySessionId,
+          lastReturnCondition: condition,
+          lastReturnedAt: returnedAt
+        }), timestamp, row.tool_id);
+      this.db.prepare("UPDATE tool_reservations SET status = 'returned', data_json = ?, updated_at = ? WHERE id = ?")
+        .run(toJson({ ...fromJson(this.db.prepare('SELECT data_json FROM tool_reservations WHERE id = ?').get(row.reservation_id)?.data_json, {}), returnedAt, returnCondition: condition }), timestamp, row.reservation_id);
+      const custody = this.getEquipmentCustodySession(custodySessionId);
+      this.audit({
+        entityType: 'equipment_custody', entityId: custodySessionId, jobId, action: 'return_equipment', actor, before, after: custody,
+        metadata: { toolId: row.tool_id, reservationId: row.reservation_id, condition, exceptional, entryKey, externalCommitments: 0 }
+      });
+      return { custody, replayed: false };
+    });
+  }
+
+  getEquipmentCustodySession(custodySessionId) {
+    const row = this.db.prepare(`
+      SELECT sessions.*, tools.name AS tool_name, tools.category AS tool_category,
+        jobs.title AS job_title, workers.name AS worker_name, reservations.tool_name AS reservation_tool_name
+      FROM equipment_custody_sessions sessions
+      JOIN tools ON tools.id = sessions.tool_id
+      JOIN jobs ON jobs.id = sessions.job_id
+      JOIN tool_reservations reservations ON reservations.id = sessions.reservation_id
+      LEFT JOIN workers ON workers.id = sessions.worker_id
+      WHERE sessions.id = ?
+    `).get(String(custodySessionId || ''));
+    if (!row) throw ledgerInputError('equipment_custody_not_found', 'Equipment custody session was not found.', { custodySessionId }, 404);
+    return this.mapEquipmentCustodySession(row);
+  }
+
+  listEquipmentCustodySessions(filters = {}) {
+    const clauses = [];
+    const values = [];
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const toolId = normalizeText(filters.toolId || filters.tool_id, '');
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    if (jobId) { clauses.push('sessions.job_id = ?'); values.push(jobId); }
+    if (toolId) { clauses.push('sessions.tool_id = ?'); values.push(toolId); }
+    if (workerId) { clauses.push('sessions.worker_id = ?'); values.push(workerId); }
+    if (status) { clauses.push('sessions.status = ?'); values.push(status); }
+    const limit = safeLimit(filters.limit, 250, 1000);
+    return this.db.prepare(`
+      SELECT sessions.*, tools.name AS tool_name, tools.category AS tool_category,
+        jobs.title AS job_title, workers.name AS worker_name, reservations.tool_name AS reservation_tool_name
+      FROM equipment_custody_sessions sessions
+      JOIN tools ON tools.id = sessions.tool_id
+      JOIN jobs ON jobs.id = sessions.job_id
+      JOIN tool_reservations reservations ON reservations.id = sessions.reservation_id
+      LEFT JOIN workers ON workers.id = sessions.worker_id
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY CASE WHEN sessions.status = 'checked_out' THEN 0 WHEN sessions.status = 'exception' THEN 1 ELSE 2 END,
+        sessions.checked_out_at DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapEquipmentCustodySession(row));
+  }
+
+  listEquipmentCustodyRegister(filters = {}) {
+    const sessions = this.listEquipmentCustodySessions({ ...filters, limit: filters.limit || 500 });
+    const active = sessions.filter(session => session.status === 'checked_out');
+    const exceptions = sessions.filter(session => session.status === 'exception');
+    return {
+      generatedAt: nowIso(),
+      summary: {
+        total: sessions.length,
+        checkedOut: active.length,
+        overdue: active.filter(session => session.overdue).length,
+        exceptions: exceptions.length,
+        returned: sessions.filter(session => session.status === 'returned').length
+      },
+      sessions,
+      active,
+      exceptions,
+      actions: this.detectEquipmentCustodyActions(100),
+      policy: {
+        exclusiveCustody: true,
+        reservationRequired: true,
+        exactReplay: true,
+        damagedReturnsQuarantined: true,
+        externalCommitments: 0
+      }
+    };
+  }
+
+  detectEquipmentCustodyActions(limit = 50) {
+    const actions = [];
+    for (const session of this.listEquipmentCustodySessions({ limit: Math.max(limit * 4, 100) })) {
+      const reason = session.status === 'exception' ? 'return_exception' : session.overdue ? 'overdue_return' : null;
+      if (!reason) continue;
+      const sourceHash = session.status === 'exception' ? session.returnFingerprint : session.checkoutFingerprint;
+      const taskId = `task_${sha256Text(`equipment-custody:${reason}:${session.id}:${sourceHash}`).slice(0, 24)}`;
+      const existing = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (!existing) actions.push({
+        type: 'review_equipment_custody', reason, jobId: session.jobId, jobTitle: session.jobTitle,
+        custodySessionId: session.id, toolId: session.toolId, toolName: session.toolName,
+        taskId, sourceHash, severity: 'high',
+        message: reason === 'return_exception'
+          ? `${session.toolName} returned as ${session.returnCondition}; retain an internal maintenance or loss review.`
+          : `${session.toolName} remains checked out beyond ${session.dueBackAt}; verify custody without changing the reservation automatically.`
+      });
+      if (actions.length >= limit) break;
+    }
+    return actions;
   }
 
   addMaterialRequirement(jobId, payload = {}, options = {}) {
@@ -26713,6 +27177,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ORDER BY created_at DESC
         LIMIT 1
       `).get(tool.id);
+      const activeCustodyRow = this.db.prepare(`
+        SELECT sessions.*, jobs.title AS job_title, workers.name AS worker_name, tools.name AS tool_name
+        FROM equipment_custody_sessions sessions
+        JOIN jobs ON jobs.id = sessions.job_id
+        JOIN tools ON tools.id = sessions.tool_id
+        LEFT JOIN workers ON workers.id = sessions.worker_id
+        WHERE sessions.tool_id = ? AND sessions.status = 'checked_out'
+      `).get(tool.id);
+      const activeCustody = activeCustodyRow ? this.mapEquipmentCustodySession(activeCustodyRow) : null;
       let blocker = null;
       if (pendingRetirement) {
         blocker = {
@@ -26728,6 +27201,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           message: `${tool.name} inspection is ${inspection.status.replace(/_/g, ' ')} and blocks dispatch.`,
           inspectionStatus: inspection.status,
           inspectionDueAt: inspection.dueAt
+        };
+      } else if (activeCustody && activeCustody.jobId !== reservation.jobId) {
+        blocker = {
+          type: 'equipment_custody_conflict',
+          severity: 'high',
+          message: `${tool.name} is physically checked out to ${activeCustody.jobTitle} and cannot support this dispatch.`,
+          custodySessionId: activeCustody.id,
+          custodyJobId: activeCustody.jobId
+        };
+      } else if (normalizeStatus(tool.status, 'available') === 'in_use' && !activeCustody) {
+        blocker = {
+          type: 'equipment_custody_missing',
+          severity: 'high',
+          message: `${tool.name} is marked in use without a retained physical custody session.`,
+          toolStatus: tool.status
         };
       } else if (!['available', 'in_use', 'reserved'].includes(normalizeStatus(tool.status, 'available'))) {
         blocker = {
@@ -26757,12 +27245,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (inspection.status === 'due_soon') {
           warnings.push(`${tool.name} inspection is due ${inspection.dueAt || 'soon'}; confirm it remains current for the field window.`);
         }
+        const collectionWindowStarted = !activeCustody
+          && reservation.neededFrom
+          && Number.isFinite(Date.parse(reservation.neededFrom))
+          && Date.parse(reservation.neededFrom) <= Date.now();
+        if (collectionWindowStarted) warnings.push(`${tool.name} collection window has started without a retained physical checkout.`);
         items.push({
           reservationId: reservation.id,
           toolId: tool.id,
           toolName: tool.name,
-          status: inspection.status === 'due_soon' ? 'due_soon' : 'ready',
+          status: activeCustody ? 'in_custody' : inspection.status === 'due_soon' ? 'due_soon' : 'reserved_not_collected',
           inspectionStatus: inspection.status,
+          custodySessionId: activeCustody?.id || null,
           blocked: false
         });
       }
@@ -27201,7 +27695,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ].includes(blocker.type));
     const recommendedStatus = blockers.some(blocker => ['planned_start_missing', 'worker_assignment_missing'].includes(blocker.type))
       ? 'needs_planning'
-      : blockers.some(blocker => ['worker_record_missing', 'worker_retirement_pending', 'worker_unavailable', 'worker_conflict', 'tool_record_missing', 'tool_retirement_pending', 'tool_inspection_readiness', 'tool_unavailable'].includes(blocker.type))
+      : blockers.some(blocker => ['worker_record_missing', 'worker_retirement_pending', 'worker_unavailable', 'worker_conflict', 'tool_record_missing', 'tool_retirement_pending', 'tool_inspection_readiness', 'tool_unavailable', 'equipment_custody_conflict', 'equipment_custody_missing'].includes(blocker.type))
         ? 'blocked'
       : requiresApproval
         ? 'needs_approval'
@@ -27497,6 +27991,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       error.code = 'job_archive_blocked_by_approvals';
       error.details = { blockerCount: blockers.length, blockers };
       throw error;
+    }
+    const activeCustody = this.db.prepare(`
+      SELECT id, tool_id, worker_id, checked_out_at, due_back_at
+      FROM equipment_custody_sessions WHERE job_id = ? AND status = 'checked_out'
+      ORDER BY checked_out_at ASC
+    `).all(jobId);
+    if (activeCustody.length) {
+      throw ledgerInputError(
+        'job_archive_active_equipment_custody',
+        `Return ${activeCustody.length} checked-out equipment item${activeCustody.length === 1 ? '' : 's'} before approving archive.`,
+        { jobId, custodySessions: activeCustody },
+        409
+      );
     }
 
     const timestamp = nowIso();
@@ -28806,6 +29313,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     } else if (targetType === 'tool_retirement') {
       const before = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(targetId);
       if (before) {
+        const activeCustody = this.db.prepare("SELECT id, job_id, worker_id, checked_out_at, due_back_at FROM equipment_custody_sessions WHERE tool_id = ? AND status = 'checked_out'").get(targetId);
+        if (activeCustody) {
+          const error = new Error('Return the equipment and retain its condition evidence before approving retirement.');
+          error.statusCode = 409;
+          error.code = 'tool_retirement_active_custody';
+          error.details = { toolId: targetId, custodySessionId: activeCustody.id, jobId: activeCustody.job_id };
+          throw error;
+        }
         const reservationScope = this.toolReservationScope(targetId);
         const activeReservations = reservationScope.operational;
         if (activeReservations.length) {
@@ -29962,6 +30477,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'tool_retirement_pending',
       'tool_inspection_readiness',
       'tool_unavailable',
+      'equipment_custody_conflict',
+      'equipment_custody_missing',
       'site_access_blocked',
       'safety_readiness'
     ]);
@@ -30054,14 +30571,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return summary;
   }
 
+  requestedJobIds(filters = {}) {
+    return new Set(
+      []
+        .concat(filters.jobId || filters.job_id || [])
+        .concat(filters.jobIds || filters.job_ids || [])
+        .flatMap(value => String(value || '').split(','))
+        .map(value => value.trim())
+        .filter(Boolean)
+    );
+  }
+
   listDispatchReadiness(filters = {}) {
     const mode = normalizeStatus(filters.mode || filters.status, 'all');
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
     const includeClosed = filters.includeClosed === true || filters.include_closed === true || filters.includeClosed === 'true' || filters.include_closed === 'true';
+    const jobFilter = this.requestedJobIds(filters);
     const closedStatuses = new Set(['completed', 'cancelled', 'canceled', 'rejected', 'closed', 'archived']);
     const rows = this.listJobs({ includeArchived: includeClosed, limit: 500 })
       .filter(job => includeClosed || !closedStatuses.has(normalizeStatus(job.status, 'open')))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
         const recommendation = this.recommendSchedule(job.id, {}, { actor: 'Contractor.AI', audit: false });
@@ -30344,6 +30874,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
     const includeArchived = normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
+    const jobFilter = this.requestedJobIds(filters);
     const excludedStatuses = new Set(includeArchived ? [] : ['cancelled', 'canceled', 'rejected', 'archived']);
     const financeTargetTypes = new Set([
       'invoice',
@@ -30367,6 +30898,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
         const costForecast = this.calculateCostForecast(job.id, { detail });
@@ -30943,6 +31475,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
     const includeArchived = normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
+    const jobFilter = this.requestedJobIds(filters);
     const excludedStatuses = new Set(includeArchived ? [] : ['cancelled', 'canceled', 'rejected', 'archived']);
     const clientTargetTypes = new Set([
       'communication',
@@ -30957,6 +31490,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
@@ -31270,6 +31804,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
     const includeArchived = normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
+    const jobFilter = this.requestedJobIds(filters);
     const excludedStatuses = new Set(includeArchived ? [] : ['cancelled', 'canceled', 'rejected', 'archived']);
     const workforceTargetTypes = new Set([
       'assignment',
@@ -31290,6 +31825,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
@@ -31652,6 +32188,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
     const includeArchived = normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
+    const jobFilter = this.requestedJobIds(filters);
     const excludedStatuses = new Set(includeArchived ? [] : ['cancelled', 'canceled', 'rejected', 'archived']);
     const inventoryTargetTypes = new Set([
       'tool_reservation',
@@ -31669,6 +32206,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
@@ -31976,6 +32514,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const search = normalizeText(filters.search, '').toLowerCase();
     const limit = safeLimit(filters.limit, 100, 500);
     const includeArchived = normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
+    const jobFilter = this.requestedJobIds(filters);
     const excludedStatuses = new Set(includeArchived ? [] : ['cancelled', 'canceled', 'rejected', 'archived']);
     const fieldTargetTypes = new Set([
       'rfi_record',
@@ -32011,6 +32550,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const rows = this.listJobs({ includeArchived, limit: 500 })
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
         const detail = this.getJobDetail(job.id, { includeAudit: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
@@ -32387,6 +32927,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       qualificationRequirements: this.db.prepare("SELECT * FROM job_qualification_requirements WHERE job_id = ? ORDER BY credential_type ASC, role_key ASC").all(jobId).map(row => this.mapQualificationRequirement(row)),
       assignments: this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapAssignment(row)),
       tools: this.db.prepare('SELECT * FROM tool_reservations WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapToolReservation(row)),
+      equipmentCustody: this.listEquipmentCustodySessions({ jobId, limit: 1000 }),
       materials: this.db.prepare('SELECT * FROM material_requirements WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapMaterialRequirement(row)),
       materialReceipts: this.listMaterialReceipts({ jobId, includeReversed: true, limit: 1000 }),
       documents: this.db.prepare('SELECT * FROM documents WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapDocument(row)),
@@ -33531,6 +34072,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       toolReservations: activeCount('tool_reservations'),
       pendingToolReservations: activeCount('tool_reservations', "records.status = 'pending_approval'"),
       toolReservationConflicts: toolReservationConflicts.length,
+      equipmentCustodySessions: activeCount('equipment_custody_sessions'),
+      equipmentCheckedOut: activeCount('equipment_custody_sessions', "records.status = 'checked_out'"),
+      equipmentCustodyOverdue: activeCount('equipment_custody_sessions', "records.status = 'checked_out' AND records.due_back_at IS NOT NULL AND records.due_back_at < ?", [nowIso()]),
+      equipmentCustodyExceptions: activeCount('equipment_custody_sessions', "records.status = 'exception'"),
       weatherAssessments: activeCount('schedule_weather'),
       weatherRisks: activeCount('schedule_weather', "records.precipitation_percent >= 60 OR records.condition IN ('rain_risk', 'wind_risk', 'storm_risk', 'visibility_risk')"),
       openClientHandoverApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('submittal_approval', 'client_selection_approval', 'punch_item_closeout', 'warranty_claim_resolution')"),
@@ -33580,6 +34125,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM assignments records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval'), 0) AS pendingAssignments,
         COALESCE((SELECT COUNT(*) FROM tool_reservations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('reserved', 'in_use')), 0) AS reservedTools,
         COALESCE((SELECT COUNT(*) FROM tool_reservations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval'), 0) AS pendingToolReservations,
+        COALESCE((SELECT COUNT(*) FROM equipment_custody_sessions records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'checked_out' AND records.due_back_at IS NOT NULL AND records.due_back_at < ?), 0) AS overdueEquipmentCustody,
+        COALESCE((SELECT COUNT(*) FROM equipment_custody_sessions records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'exception'), 0) AS equipmentCustodyExceptions,
         COALESCE((SELECT COUNT(*) FROM material_requirements records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('needed', 'ordered', 'low_stock')), 0) AS materialNeeds,
         COALESCE((SELECT COUNT(*) FROM material_receipts records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('discrepancy', 'pending_reversal')), 0) AS materialReceiptQueue,
         COALESCE((SELECT COUNT(*) FROM site_visits records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'scheduled', 'pending_approval')), 0) AS siteVisitDrafts,
@@ -33614,7 +34161,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM worker_instructions records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS instructionDrafts,
         COALESCE((SELECT COUNT(*) FROM punch_items records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')), 0) AS punchQueue,
         COALESCE((SELECT COUNT(*) FROM warranty_claims records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status NOT IN ('closed', 'resolved', 'accepted', 'rejected', 'cancelled')), 0) AS warrantyQueue
-    `).get(nowIso());
+    `).get(nowIso(), nowIso());
     const nextActions = this.nextActions();
     const capabilityMap = this.ledgerCapabilityCoverage();
     return {
@@ -33789,6 +34336,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     for (const action of this.detectMaterialReceivingActions(10)) actions.push(action);
+    for (const action of this.detectEquipmentCustodyActions(10)) actions.push(action);
 
     const qualificationAssignments = this.db.prepare(`
       SELECT assignments.id, assignments.job_id, assignments.worker_id, assignments.role,
@@ -35145,6 +35693,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_missing_timesheet',
       'review_stale_timesheet',
       'review_material_receipt',
+      'review_equipment_custody',
       'review_worker_availability_conflict',
       'review_worker_qualification_gap',
       'review_expiring_worker_credential',
@@ -35188,21 +35737,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   buildTodayCommandPlan(filters = {}) {
     const limit = safeLimit(filters.limit, 24, 100);
+    const sourceJobLimit = safeLimit(filters.jobLimit || filters.job_limit, 12, 50);
     const search = normalizeText(filters.search, '').toLowerCase();
     const mode = normalizeStatus(filters.mode || filters.status, 'all');
-    const jobFilter = new Set(
-      []
-        .concat(filters.jobId || filters.job_id || [])
-        .concat(filters.jobIds || filters.job_ids || [])
-        .flatMap(value => String(value || '').split(','))
-        .map(value => value.trim())
-        .filter(Boolean)
-    );
+    const jobFilter = this.requestedJobIds(filters);
     const safeActionTypes = this.commandPlanSafeActionTypes();
     const actionableJobIds = new Set(this.db.prepare(`
       SELECT id FROM jobs
       WHERE status NOT IN ('cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
     `).all().map(row => row.id));
+    const commandJobs = this.listJobs({ limit: 500 })
+      .filter(job => actionableJobIds.has(job.id))
+      .filter(job => !jobFilter.size || jobFilter.has(job.id))
+      .slice(0, sourceJobLimit);
+    const sourceJobIds = commandJobs.map(job => job.id);
     const commands = [];
     const seen = new Set();
     const add = command => {
@@ -35267,14 +35815,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
-    const readinessSources = [
-      { stream: 'dispatch', result: this.listDispatchReadiness({ limit: 50 }), statusKey: 'readinessStatus', stable: ['ready'] },
-      { stream: 'workforce', result: this.listWorkforceReadiness({ limit: 50 }), statusKey: 'workforceStatus', stable: ['stable'] },
-      { stream: 'inventory', result: this.listInventoryReadiness({ limit: 50 }), statusKey: 'inventoryStatus', stable: ['stable'] },
-      { stream: 'field_assurance', result: this.listFieldAssurance({ limit: 50 }), statusKey: 'fieldStatus', stable: ['stable'] },
-      { stream: 'finance', result: this.listFinanceReadiness({ limit: 50 }), statusKey: 'financeStatus', stable: ['stable'] },
-      { stream: 'client_success', result: this.listClientSuccess({ limit: 50 }), statusKey: 'clientStatus', stable: ['stable'] }
-    ];
+    const readinessFilters = { limit: sourceJobLimit, jobIds: sourceJobIds };
+    const readinessSources = sourceJobIds.length ? [
+      { stream: 'dispatch', result: this.listDispatchReadiness(readinessFilters), statusKey: 'readinessStatus', stable: ['ready'] },
+      { stream: 'workforce', result: this.listWorkforceReadiness(readinessFilters), statusKey: 'workforceStatus', stable: ['stable'] },
+      { stream: 'inventory', result: this.listInventoryReadiness(readinessFilters), statusKey: 'inventoryStatus', stable: ['stable'] },
+      { stream: 'field_assurance', result: this.listFieldAssurance(readinessFilters), statusKey: 'fieldStatus', stable: ['stable'] },
+      { stream: 'finance', result: this.listFinanceReadiness(readinessFilters), statusKey: 'financeStatus', stable: ['stable'] },
+      { stream: 'client_success', result: this.listClientSuccess(readinessFilters), statusKey: 'clientStatus', stable: ['stable'] }
+    ] : [];
     for (const source of readinessSources) {
       for (const row of source.result.jobs || []) {
         const status = normalizeStatus(row[source.statusKey], 'needs_review');
@@ -35298,12 +35847,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     if (filters.includeCapabilities !== false && filters.include_capabilities !== 'false') {
-      const capabilityJobs = this.listJobs({ limit: 25 }).filter(job => {
-        const status = normalizeStatus(job.status, 'open');
-        return !['completed', 'cancelled', 'canceled', 'rejected', 'archived'].includes(status);
-      });
-      for (const job of capabilityJobs) {
-        if (jobFilter.size && !jobFilter.has(job.id)) continue;
+      for (const job of commandJobs) {
         const plan = this.buildJobCapabilityPlan(job.id, { limit: 3, includeOpen: false });
         for (const action of plan.actions || []) {
           add({
@@ -35351,6 +35895,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       mode,
       summary: this.commandPlanSummary(commands, filtered.length),
       actions: filtered.slice(0, limit),
+      scope: {
+        jobLimit: sourceJobLimit,
+        consideredJobs: sourceJobIds.length,
+        jobIds: sourceJobIds
+      },
       safety: {
         externalCommitments: 0,
         policy: 'Draft internal records only. External messages, quotes, invoices, payment actions, orders, deletions, and client commitments remain approval-gated.'
@@ -36539,6 +37088,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const equipmentCustodyReviews = preview.filter(action => action.type === 'review_equipment_custody').slice(0, 10);
+        for (const action of equipmentCustodyReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`equipment-custody-review:${action.custodySessionId}:${action.sourceHash}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: action.reason === 'overdue_return'
+              ? `Verify overdue equipment custody: ${action.toolName}`
+              : `Review equipment return exception: ${action.toolName}`,
+            description: `${action.message} Verify the physical custodian, retained handoff evidence, location, condition, and meter reading. Keep unsafe equipment quarantined; do not rent, replace, contact a supplier, or authorize spend automatically.`,
+            priority: 'high',
+            dueAt: futureIsoDate(1),
+            source: 'equipment_custody_monitor',
+            data: {
+              custodySessionId: action.custodySessionId,
+              toolId: action.toolId,
+              custodyReason: action.reason,
+              sourceHash: action.sourceHash || null,
+              internalOnly: true,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_equipment_custody_review_task', actor, after: task,
+            metadata: { custodySessionId: action.custodySessionId, toolId: action.toolId, sourceHash: action.sourceHash || null, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -37620,6 +38202,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         workerCredentials: this.count('worker_credentials'),
         qualificationRequirements: this.count('job_qualification_requirements'),
         workerAvailabilityPeriods: this.count('worker_availability_periods'),
+        equipmentCustodySessions: this.count('equipment_custody_sessions'),
         materialReceipts: this.count('material_receipts'),
         materialReceiptLines: this.count('material_receipt_lines'),
         purchaseOrders: this.count('purchase_orders'),
@@ -38605,6 +39188,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       approvalId: data.approvalId || null,
       conflicts: Array.isArray(data.conflicts) ? data.conflicts : [],
       requiresApproval: normalizeBoolean(data.requiresApproval, false),
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapEquipmentCustodySession(row) {
+    const data = fromJson(row.data_json, {});
+    const dueBackAt = row.due_back_at || null;
+    const overdue = row.status === 'checked_out' && dueBackAt && Date.parse(dueBackAt) < Date.now();
+    return {
+      id: row.id,
+      toolId: row.tool_id,
+      toolName: row.tool_name || row.reservation_tool_name || row.tool_id,
+      toolCategory: row.tool_category || null,
+      jobId: row.job_id,
+      jobTitle: row.job_title || row.job_id,
+      reservationId: row.reservation_id,
+      workerId: row.worker_id || null,
+      workerName: row.worker_name || null,
+      status: row.status,
+      checkedOutAt: row.checked_out_at,
+      dueBackAt,
+      checkedOutBy: row.checked_out_by,
+      checkoutLocation: row.checkout_location || null,
+      checkoutCondition: row.checkout_condition,
+      checkoutMeter: row.checkout_meter === null || row.checkout_meter === undefined ? null : normalizeNumber(row.checkout_meter, 0),
+      checkoutEvidenceReference: row.checkout_evidence_reference,
+      checkoutEntryKey: row.checkout_entry_key,
+      checkoutFingerprint: row.checkout_fingerprint,
+      returnedAt: row.returned_at || null,
+      returnedBy: row.returned_by || null,
+      returnLocation: row.return_location || null,
+      returnCondition: row.return_condition || null,
+      returnMeter: row.return_meter === null || row.return_meter === undefined ? null : normalizeNumber(row.return_meter, 0),
+      returnEvidenceReference: row.return_evidence_reference || null,
+      returnEntryKey: row.return_entry_key || null,
+      returnFingerprint: row.return_fingerprint || null,
+      overdue: Boolean(overdue),
+      exception: row.status === 'exception',
       data,
       createdAt: row.created_at,
       updatedAt: row.updated_at

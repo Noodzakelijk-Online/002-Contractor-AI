@@ -106,6 +106,7 @@ const evidenceStorageEndpointProtocol = (() => {
   }
 })();
 const evidenceStorageVerificationTtlMs = Math.max(5_000, Number(process.env.CONTRACTOR_AI_STORAGE_VERIFY_TTL_MS || 60_000));
+const ledgerDiagnosticsCacheTtlMs = boundedInteger(process.env.CONTRACTOR_AI_DIAGNOSTICS_CACHE_TTL_MS, 2_000, 250, 30_000);
 let evidenceStorageVerificationCache = evidenceStorageInitError
   ? {
       ready: false,
@@ -116,6 +117,7 @@ let evidenceStorageVerificationCache = evidenceStorageInitError
     }
   : null;
 let evidenceStorageVerificationPromise = null;
+let ledgerDiagnosticsCache = null;
 const maxUploadBytes = Math.max(1024, Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 * 1024));
 const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
@@ -1191,6 +1193,8 @@ function allowsOperatorRequest(role, req) {
          || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
         || pathName === '/api/ledger/attendance'
         || /^\/api\/ledger\/jobs\/[^/]+\/attendance$/.test(pathName)
         || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
@@ -1200,6 +1204,8 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/check-in$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/[^/]+\/check-out$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/check-out$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
 
@@ -1233,9 +1239,9 @@ function scopedLedgerJobs(req, filters = {}) {
 
 const FIELD_RECORD_PRIVATE_KEYS = new Set([
   'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
-  'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
+  'checkoutEntryKey', 'checkoutFingerprint', 'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
   'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
-  'snapshotHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
+  'returnEntryKey', 'returnFingerprint', 'snapshotHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
 ]);
 
 function projectFieldRecord(record) {
@@ -1312,6 +1318,7 @@ function projectFieldJobDetail(req, detail) {
     qualificationRequirements: projectFieldRecords(detail.qualificationRequirements),
     assignments: projectFieldRecords(detail.assignments),
     tools: projectFieldRecords(detail.tools),
+    equipmentCustody: projectFieldRecords(detail.equipmentCustody),
     materials: projectFieldRecords(detail.materials),
     materialReceipts: projectFieldRecords(detail.materialReceipts),
     documents: projectFieldRecords(detail.documents),
@@ -1361,6 +1368,16 @@ function timeLogPayloadForOperator(req, payload = {}) {
     hourlyRate: identity.hourlyRate,
     hourly_rate: identity.hourlyRate
   };
+}
+
+function getLedgerDiagnostics({ force = false } = {}) {
+  const checkedAt = Number(ledgerDiagnosticsCache?.checkedAt || 0);
+  if (!force && ledgerDiagnosticsCache && Date.now() - checkedAt < ledgerDiagnosticsCacheTtlMs) {
+    return ledgerDiagnosticsCache.value;
+  }
+  const value = operatingLedger.diagnose();
+  ledgerDiagnosticsCache = { checkedAt: Date.now(), value };
+  return value;
 }
 
 function attendancePayloadForOperator(req, payload = {}) {
@@ -1991,7 +2008,11 @@ app.post('/api/ledger/command-plan', (req, res) => {
       ...result,
       commandPlan: mode === 'preview'
         ? result
-        : operatingLedger.buildTodayCommandPlan({ mode: payload.refreshMode || 'all', limit: 100 }),
+        : operatingLedger.buildTodayCommandPlan({
+            mode: payload.refreshMode || 'all',
+            limit: 100,
+            jobLimit: payload.jobLimit || payload.job_limit || 12
+          }),
       dashboard: operatingLedger.dashboardSummary()
     };
   }, 201);
@@ -2876,6 +2897,73 @@ app.post('/api/ledger/jobs/:id/tools/:reservationId/release', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }));
+});
+
+app.get('/api/ledger/jobs/:id/equipment-custody-plan', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    plans: operatingLedger.equipmentCustodyPlanForJob(req.params.id).map(plan => ({
+      reservation: recordForOperator(req, plan.reservation),
+      tool: recordForOperator(req, plan.tool),
+      activeCustody: recordForOperator(req, plan.activeCustody),
+      checkoutReady: plan.checkoutReady
+    }))
+  }));
+});
+
+app.get('/api/ledger/jobs/:id/equipment-custody', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const custody = operatingLedger.listEquipmentCustodySessions({
+      jobId: req.params.id,
+      workerId: req.operator?.role === 'field_worker' ? req.operator.scope?.workerId : req.query.workerId,
+      status: req.query.status,
+      limit: req.query.limit
+    });
+    return {
+      success: true,
+      custody: req.operator?.role === 'field_worker' ? projectFieldRecords(custody) : custody
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/equipment-custody/check-out', (req, res) => {
+  const payload = { ...(req.body || {}) };
+  if (req.operator?.role === 'field_worker') {
+    const identity = fieldWorkerIdentity(req);
+    payload.workerId = identity.workerId;
+    payload.checkedOutBy = identity.workerName;
+  }
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.checkoutEquipment(req.params.id, payload, {
+      actor: actorFromRequest(req, payload.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      custody: recordForOperator(req, result.custody),
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      equipmentCustody: req.operator?.role === 'field_worker' ? null : operatingLedger.listEquipmentCustodyRegister(),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/equipment-custody/:custodySessionId/return', (req, res) => {
+  const payload = { ...(req.body || {}) };
+  if (req.operator?.role === 'field_worker') payload.returnedBy = fieldWorkerIdentity(req).workerName;
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.returnEquipment(req.params.id, req.params.custodySessionId, payload, {
+      actor: actorFromRequest(req, payload.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      custody: recordForOperator(req, result.custody),
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      equipmentCustody: req.operator?.role === 'field_worker' ? null : operatingLedger.listEquipmentCustodyRegister(),
+      dashboard: dashboardForOperator(req)
+    };
+  });
 });
 
 app.post('/api/ledger/jobs/:id/materials', (req, res) => {
@@ -4026,6 +4114,13 @@ app.get('/api/ledger/tools', (req, res) => {
       dashboard: operatingLedger.dashboardSummary()
     };
   });
+});
+
+app.get('/api/ledger/equipment-custody', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    equipmentCustody: operatingLedger.listEquipmentCustodyRegister(req.query || {})
+  }));
 });
 
 app.post('/api/ledger/tools', (req, res) => {
@@ -5314,7 +5409,7 @@ app.get('/api/operations/audit-integrity', (req, res) => {
 async function operationalReadiness() {
   const storageVerification = await verifyEvidenceStorage();
   const runtime = runtimeConfiguration({ storageVerification });
-  const ledgerDiagnostics = operatingLedger.diagnose();
+  const ledgerDiagnostics = getLedgerDiagnostics();
   const status = runtime.ready && ledgerDiagnostics.valid ? 'ready' : 'attention';
   return { status, runtime, ledgerDiagnostics, storageVerification };
 }
@@ -5544,6 +5639,17 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         autonomousExceptionReview: 'internal_task_only',
         externalCommitments: 0
       },
+      equipmentCustody: {
+        canonicalEquipmentRequired: true,
+        retainedReservationRequired: true,
+        replaySafeCheckoutAndReturn: true,
+        exclusiveActiveCustody: true,
+        workerAssignmentValidation: true,
+        conditionAndMeterEvidence: true,
+        damagedUnsafeLostQuarantine: true,
+        autonomousOverdueAndExceptionReview: 'internal_task_only',
+        externalCommitments: 0
+      },
       automation: {
         ledgerOnly: true,
         schedulerEnabled: runtime.autonomousScheduler.enabled,
@@ -5664,7 +5770,7 @@ app.get('/api/health/ready', asyncHandler(async (req, res) => {
 
 // Health check
 app.get('/api/health', (req, res) => {
-  const ledgerDiagnostics = operatingLedger.diagnose();
+  const ledgerDiagnostics = getLedgerDiagnostics();
   const runtime = runtimeConfiguration();
   res.json({
     status: ledgerDiagnostics.valid && runtime.ready ? 'healthy' : 'degraded',

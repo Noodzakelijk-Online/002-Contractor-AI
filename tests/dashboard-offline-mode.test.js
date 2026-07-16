@@ -96,7 +96,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt', 'equipment_check_out', 'equipment_return'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -117,6 +117,8 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(dashboardSource, /Save incident offline/);
   assert.match(dashboardSource, /Save punch item offline/);
   assert.match(dashboardSource, /Save receipt offline/);
+  assert.match(dashboardSource, /Save handoff offline/);
+  assert.match(dashboardSource, /Save return offline/);
   assert.doesNotMatch(outboxSource, /localStorage|sessionStorage/);
 });
 
@@ -130,6 +132,20 @@ test('material receiving connects purchasing, field readiness, approvals, and su
   assert.match(dashboardSource, /materialReceiptId: financeActionDraft\.materialReceiptId \|\| null/);
   assert.match(dashboardSource, /Retained goods receipt/);
   assert.match(dashboardSource, /verified three-way match/);
+});
+
+test('equipment custody connects reservations, field handoff, exact offline retry, return quarantine, and office review', () => {
+  assert.match(dashboardSource, /api\('\/api\/ledger\/equipment-custody\?limit=500'\)/);
+  assert.match(dashboardSource, /data-testid="equipment-custody-register"/);
+  assert.match(dashboardSource, /data-testid="equipment-checkout-modal"/);
+  assert.match(dashboardSource, /data-testid="equipment-return-modal"/);
+  assert.match(dashboardSource, /data-testid="field-equipment-checkout-form"/);
+  assert.match(dashboardSource, /data-testid="field-equipment-return-form"/);
+  assert.match(dashboardSource, /type: 'equipment_check_out'/);
+  assert.match(dashboardSource, /type: 'equipment_return'/);
+  assert.match(dashboardSource, /equipment-custody\/check-out/);
+  assert.match(dashboardSource, /equipment-custody\/\$\{encodeURIComponent\(custodySessionId\)\}\/return/);
+  assert.match(dashboardSource, /Damaged, unsafe, and lost returns are quarantined automatically/);
 });
 
 test('job workspace schedules and completes immutable approval-backed inspection checklists', () => {
@@ -183,6 +199,9 @@ test('operations view lists, verifies, and exports portable checksummed local ba
   assert.match(dashboardSource, /operationCapabilities\?\.hostedMigration\?\.available/);
   assert.match(dashboardSource, />EU migration</);
   assert.match(dashboardSource, /operations\/backups\/\$\{encodeURIComponent\(backup\.backupId\)\}\/download/);
+  assert.match(dashboardSource, /command-plan\?limit=100&jobLimit=12/);
+  assert.match(dashboardSource, /if \(next === 'operations'\) void refreshOperationsCommandPlan\(sequence\)/);
+  assert.match(dashboardSource, /Preparing the bounded command plan/);
   assert.match(dashboardSource, /<FileDown size=\{15\} \/>\s*Download\s*<\/a>/);
   assert.match(dashboardSource, /Validate export/);
   assert.match(dashboardSource, /Check restore/);

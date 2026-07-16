@@ -1238,6 +1238,57 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(hostedReceipt.receipt.status, 'discrepancy');
     assert.equal(ledger.getJobDetail(hostedForecastJob.id).materials.find(item => item.id === hostedMaterial.id).status, 'available');
     assert.equal(ledger.listMaterialReceivingRegister().receipts.some(item => item.id === hostedReceipt.receipt.id), true);
+    const custodyWorker = ledger.upsertWorker({
+      name: `PostgreSQL equipment custodian ${Date.now()}`,
+      role: 'Equipment operator',
+      status: 'available'
+    }, { actor: 'postgres_contract_test' });
+    let custodyAssignment = ledger.addAssignment(hostedForecastJob.id, {
+      workerId: custodyWorker.id,
+      workerName: custodyWorker.name,
+      role: custodyWorker.role,
+      status: 'assigned'
+    }, { actor: 'postgres_contract_test' });
+    if (custodyAssignment.approval?.id) {
+      ledger.resolveApproval(custodyAssignment.approval.id, {
+        status: 'approved', resolvedBy: 'postgres_contract_test', reason: 'Hosted equipment custodian assignment verified.'
+      });
+      custodyAssignment = ledger.getJobDetail(hostedForecastJob.id).assignments.find(item => item.id === custodyAssignment.id);
+    }
+    const custodyTool = ledger.upsertTool({
+      name: `PostgreSQL custody lift ${Date.now()}`,
+      category: 'access',
+      status: 'available',
+      currentLocation: 'EU hosted depot'
+    }, { actor: 'postgres_contract_test' });
+    const custodyReservation = ledger.reserveTool(hostedForecastJob.id, {
+      toolId: custodyTool.id,
+      toolName: custodyTool.name,
+      status: 'reserved',
+      neededUntil: new Date(Date.now() + 86_400_000).toISOString()
+    }, { actor: 'postgres_contract_test' });
+    const custodyCheckout = ledger.checkoutEquipment(hostedForecastJob.id, {
+      reservationId: custodyReservation.id,
+      workerId: custodyWorker.id,
+      checkedOutAt: new Date(Date.now() - 60_000).toISOString(),
+      checkedOutBy: custodyWorker.name,
+      condition: 'good',
+      location: 'Hosted project gate',
+      evidenceReference: 'postgres:equipment-handoff',
+      entryKey: `postgres-equipment-checkout-${Date.now()}`
+    }, { actor: 'postgres_contract_test' });
+    const custodyReturn = ledger.returnEquipment(hostedForecastJob.id, custodyCheckout.custody.id, {
+      returnedAt: new Date().toISOString(),
+      returnedBy: custodyWorker.name,
+      condition: 'unsafe',
+      location: 'Hosted quarantine bay',
+      evidenceReference: 'postgres:equipment-return-photo',
+      entryKey: `postgres-equipment-return-${Date.now()}`,
+      notes: 'Guard damage retained and equipment isolated for hosted review.'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(custodyReturn.custody.status, 'exception');
+    assert.equal(ledger.listEquipmentCustodyRegister().exceptions.some(item => item.id === custodyReturn.custody.id), true);
+    assert.equal(ledger.listTools({ limit: 500 }).find(item => item.id === custodyTool.id).status, 'maintenance');
 
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
@@ -1248,7 +1299,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '037_material_receiving');
+    assert.equal(migrations.currentVersion, '038_equipment_custody');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1329,12 +1380,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('037_material_receiving'));
+  assert.deepEqual(versions, Array(4).fill('038_equipment_custody'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 37);
+    assert.equal(Number(migrationCount.count), 38);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1347,6 +1398,25 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
       WHERE table_schema = 'public' AND table_name IN ('material_receipts', 'material_receipt_lines')
     `).rows[0];
     assert.equal(Number(materialReceivingTableCount.count), 2);
+    const equipmentCustodyTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'equipment_custody_sessions'
+    `).rows[0];
+    assert.equal(Number(equipmentCustodyTableCount.count), 1);
+    const equipmentCustodyIndexCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN (
+          'idx_equipment_custody_active_tool',
+          'idx_equipment_custody_job_status',
+          'idx_equipment_custody_worker_status',
+          'idx_equipment_custody_due',
+          'idx_equipment_custody_reservation'
+        )
+    `).rows[0];
+    assert.equal(Number(equipmentCustodyIndexCount.count), 5);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1847,7 +1917,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '037_material_receiving');
+    assert.equal(ledger.migrationStatus().currentVersion, '038_equipment_custody');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
