@@ -349,7 +349,7 @@ test('project-control API retains approval-gated document revisions and enforces
   const diagnostics = await request(baseUrl, '/api/readiness', tokens.owner);
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.ledger.valid, true);
-  assert.equal(diagnostics.body.ledger.migrations.currentVersion, '038_equipment_custody');
+  assert.equal(diagnostics.body.ledger.migrations.currentVersion, '039_governed_expense_receipts');
 });
 
 test('controlled document migration upgrades a 021 ledger without losing existing documents', t => {
@@ -379,7 +379,7 @@ test('controlled document migration upgrades a 021 ledger without losing existin
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '038_equipment_custody');
+    assert.equal(upgraded.migrationStatus().currentVersion, '039_governed_expense_receipts');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
     const columns = new Set(upgraded.db.prepare('PRAGMA table_info(documents)').all().map(column => column.name));
     for (const column of ['document_number', 'revision', 'discipline', 'effective_at', 'supersedes_document_id']) {

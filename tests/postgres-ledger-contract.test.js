@@ -540,6 +540,34 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       });
       attendanceAssignment = ledger.getJobDetail(job.id).assignments.find(record => record.id === attendanceAssignment.id);
     }
+    const hostedExpenseKey = `postgres-expense-${Date.now()}`;
+    const hostedExpensePayload = {
+      entryKey: hostedExpenseKey,
+      workerId: attendanceWorker.id,
+      expenseDate: new Date().toISOString().slice(0, 10),
+      category: 'materials',
+      vendor: 'PostgreSQL hosted merchant',
+      receiptReference: `PG-EXPENSE-${Date.now()}`,
+      totalAmount: 121,
+      taxAmount: 21,
+      taxTreatment: 'recoverable',
+      paymentMethod: 'personal_card',
+      costCode: 'PG-EXP-100',
+      notes: 'Hosted expense receipt contract evidence.'
+    };
+    const hostedExpenseRequest = ledger.createExpenseReceipt(job.id, hostedExpensePayload, { actor: 'postgres_contract_test' });
+    assert.equal(hostedExpenseRequest.expense.status, 'pending_approval');
+    assert.equal(hostedExpenseRequest.expense.integrityValid, true);
+    assert.equal(ledger.createExpenseReceipt(job.id, hostedExpensePayload, { actor: 'postgres_contract_replay' }).replayed, true);
+    ledger.resolveApproval(hostedExpenseRequest.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_approver',
+      reason: 'Hosted receipt identity, worker, VAT, and project allocation verified.'
+    });
+    const hostedExpense = ledger.getExpense(hostedExpenseRequest.expense.id);
+    assert.equal(hostedExpense.status, 'approved');
+    assert.equal(hostedExpense.costAmount, 100);
+    assert.equal(hostedExpense.integrityValid, true);
     const hostedQualificationRequirement = ledger.createQualificationRequirement(job.id, {
       credentialType: 'vca',
       title: 'Hosted VCA site qualification',
@@ -1299,7 +1327,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '038_equipment_custody');
+    assert.equal(migrations.currentVersion, '039_governed_expense_receipts');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1380,12 +1408,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('038_equipment_custody'));
+  assert.deepEqual(versions, Array(4).fill('039_governed_expense_receipts'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 38);
+    assert.equal(Number(migrationCount.count), 39);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1917,7 +1945,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '038_equipment_custody');
+    assert.equal(ledger.migrationStatus().currentVersion, '039_governed_expense_receipts');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

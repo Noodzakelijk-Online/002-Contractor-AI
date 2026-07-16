@@ -400,6 +400,26 @@ function createBackupFixture(t, suffix = 'success') {
     });
     attendanceAssignment = source.getJobDetail(job.id).assignments.find(item => item.id === attendanceAssignment.id);
   }
+  const expenseReceiptRequest = source.createExpenseReceipt(job.id, {
+    entryKey: `migration-expense-${suffix}`,
+    workerId: attendanceWorker.id,
+    expenseDate: new Date().toISOString().slice(0, 10),
+    category: 'materials',
+    vendor: `Migration merchant ${suffix}`,
+    receiptReference: `MIGRATION-EXPENSE-${suffix}`,
+    totalAmount: 242,
+    taxAmount: 42,
+    taxTreatment: 'recoverable',
+    paymentMethod: 'personal_card',
+    costCode: 'MIG-EXP-100',
+    notes: 'Retained governed expense receipt migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(expenseReceiptRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration receipt identity, assignment, VAT, and project allocation verified.'
+  });
+  const expenseReceipt = source.getExpense(expenseReceiptRequest.expense.id);
   const custodyTool = source.upsertTool({
     name: `Migration custody lift ${suffix}`,
     category: 'access',
@@ -540,7 +560,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, equipmentCustody, evidenceBytes, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -630,7 +650,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '038_equipment_custody');
+  assert.equal(migration.migrationVersion, '039_governed_expense_receipts');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -689,6 +709,13 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedCustody.checkoutFingerprint, fixture.equipmentCustody.checkoutFingerprint);
     assert.equal(migratedCustody.returnFingerprint, fixture.equipmentCustody.returnFingerprint);
     assert.equal(migratedCustody.returnCondition, 'damaged');
+    const migratedExpense = detail.expenses.find(item => item.id === fixture.expenseReceipt.id);
+    assert.equal(migratedExpense.status, 'approved');
+    assert.equal(migratedExpense.entryFingerprint, fixture.expenseReceipt.entryFingerprint);
+    assert.equal(migratedExpense.sourceFingerprint, fixture.expenseReceipt.sourceFingerprint);
+    assert.equal(migratedExpense.totalAmount, 242);
+    assert.equal(migratedExpense.costAmount, 200);
+    assert.equal(migratedExpense.integrityValid, true);
     const migratedCredential = hosted.getWorkerCredential(fixture.workerCredential.id);
     assert.equal(migratedCredential.status, 'approved');
     assert.equal(migratedCredential.snapshotHash, fixture.workerCredential.snapshotHash);

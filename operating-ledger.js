@@ -2995,6 +2995,30 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON equipment_custody_sessions(reservation_id, checked_out_at DESC);
       `);
     }
+  },
+  {
+    version: '039_governed_expense_receipts',
+    description: 'Retain replay-safe job expense receipts with worker attribution, VAT-aware cost basis, approval review, and compensating reversals.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE expenses ADD COLUMN worker_id TEXT REFERENCES workers(id) ON DELETE SET NULL;
+        ALTER TABLE expenses ADD COLUMN expense_date TEXT;
+        ALTER TABLE expenses ADD COLUMN entry_key TEXT;
+        ALTER TABLE expenses ADD COLUMN entry_fingerprint TEXT;
+        ALTER TABLE expenses ADD COLUMN source_fingerprint TEXT;
+        ALTER TABLE expenses ADD COLUMN reversal_approval_id TEXT REFERENCES approvals(id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_job_entry_key
+          ON expenses(job_id, entry_key) WHERE entry_key IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_source_fingerprint
+          ON expenses(source_fingerprint) WHERE source_fingerprint IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_expenses_job_status_date
+          ON expenses(job_id, status, expense_date DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_expenses_worker_status_date
+          ON expenses(worker_id, status, expense_date DESC, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_pending_reversal
+          ON expenses(reversal_approval_id) WHERE status = 'pending_reversal';
+      `);
+    }
   }
 ];
 
@@ -19797,7 +19821,263 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  expenseReceiptFingerprint(payload = {}) {
+    return sha256Json({
+      jobId: normalizeText(payload.jobId, ''),
+      workerId: normalizeText(payload.workerId, '') || null,
+      expenseDate: normalizeText(payload.expenseDate, ''),
+      category: normalizeStatus(payload.category, 'general'),
+      vendor: normalizeText(payload.vendor, '').toLowerCase(),
+      receiptReference: normalizeText(payload.receiptReference, '').toLowerCase(),
+      currency: normalizeText(payload.currency, 'EUR').toUpperCase(),
+      totalAmount: roundMoney(normalizeNumber(payload.totalAmount, 0)),
+      taxAmount: roundMoney(normalizeNumber(payload.taxAmount, 0)),
+      taxTreatment: normalizeStatus(payload.taxTreatment, 'recoverable'),
+      paymentMethod: normalizeStatus(payload.paymentMethod, 'company_card'),
+      costCode: normalizeText(payload.costCode, '').toUpperCase(),
+      evidenceDocumentId: normalizeText(payload.evidenceDocumentId, '') || null,
+      notes: normalizeText(payload.notes, '') || null
+    });
+  }
+
+  expenseReceiptSourceFingerprint(payload = {}) {
+    return sha256Json({
+      vendor: normalizeText(payload.vendor, '').toLowerCase(),
+      receiptReference: normalizeText(payload.receiptReference, '').toLowerCase(),
+      expenseDate: normalizeText(payload.expenseDate, ''),
+      currency: normalizeText(payload.currency, 'EUR').toUpperCase(),
+      totalAmount: roundMoney(normalizeNumber(payload.totalAmount, 0))
+    });
+  }
+
+  getExpense(expenseId) {
+    const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(expenseId);
+    if (!row) throw ledgerInputError('expense_not_found', 'Expense receipt not found.', { expenseId }, 404);
+    return this.mapExpense(row);
+  }
+
+  listExpenseReceipts(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const limit = Math.max(1, Math.min(500, Math.round(normalizeNumber(filters.limit, 100))));
+    return this.db.prepare(`
+      SELECT * FROM expenses
+      WHERE (? = '' OR job_id = ?)
+        AND (? = '' OR worker_id = ?)
+        AND (? = '' OR status = ?)
+      ORDER BY COALESCE(expense_date, created_at) DESC, created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, workerId, workerId, status, status, limit).map(row => this.mapExpense(row));
+  }
+
+  createExpenseReceipt(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey.length < 8 || entryKey.length > 240) {
+        throw ledgerInputError('expense_entry_key_required', 'Expense receipt capture requires a stable entry key between 8 and 240 characters.');
+      }
+      const retainedExpenseDate = normalizeRetainedDate(payload.expenseDate || payload.expense_date, {
+        required: true,
+        label: 'Expense date',
+        code: 'expense_date_required'
+      });
+      const expenseDate = retainedExpenseDate.slice(0, 10);
+      const expenseTimestamp = Date.parse(`${expenseDate}T23:59:59.999Z`);
+      if (expenseTimestamp > Date.now() + 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('expense_date_future', 'Expense date cannot be in the future.');
+      }
+      if (expenseTimestamp < Date.now() - 366 * 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('expense_date_too_old', 'Expense receipts older than one year require a controlled bookkeeping import instead of field capture.');
+      }
+      const vendor = normalizeText(payload.vendor, '');
+      if (vendor.length < 2 || vendor.length > 160) {
+        throw ledgerInputError('expense_vendor_required', 'Expense vendor must contain between 2 and 160 characters.');
+      }
+      const receiptReference = normalizeText(
+        payload.receiptReference || payload.receipt_reference || payload.receiptRef || payload.receipt_ref || payload.evidenceReference,
+        ''
+      );
+      if (receiptReference.length < 3 || receiptReference.length > 240) {
+        throw ledgerInputError('expense_receipt_reference_required', 'Expense receipt evidence reference must contain between 3 and 240 characters.');
+      }
+      const category = normalizeStatus(payload.category, 'general');
+      if (!['materials', 'equipment', 'travel', 'parking', 'fuel', 'accommodation', 'meals', 'subcontractor', 'general', 'other'].includes(category)) {
+        throw ledgerInputError('expense_category_invalid', 'Expense category is not supported.');
+      }
+      const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) throw ledgerInputError('expense_currency_invalid', 'Expense currency must be a three-letter ISO code.');
+      const totalAmount = roundMoney(normalizeNumber(payload.totalAmount ?? payload.total_amount ?? payload.amount, 0));
+      const taxAmount = roundMoney(normalizeNumber(payload.taxAmount ?? payload.tax_amount, 0));
+      if (!(totalAmount > 0) || totalAmount > 10_000_000) {
+        throw ledgerInputError('expense_total_invalid', 'Expense total must be greater than zero and no more than 10,000,000.');
+      }
+      if (taxAmount < 0 || taxAmount > totalAmount) {
+        throw ledgerInputError('expense_tax_invalid', 'Expense tax must be between zero and the gross total.');
+      }
+      const taxTreatment = normalizeStatus(payload.taxTreatment || payload.tax_treatment, taxAmount > 0 ? 'recoverable' : 'exempt');
+      if (!['recoverable', 'non_recoverable', 'exempt', 'reverse_charge'].includes(taxTreatment)) {
+        throw ledgerInputError('expense_tax_treatment_invalid', 'Expense tax treatment must be recoverable, non-recoverable, exempt, or reverse charge.');
+      }
+      if (['exempt', 'reverse_charge'].includes(taxTreatment) && taxAmount !== 0) {
+        throw ledgerInputError('expense_tax_treatment_conflict', 'Exempt and reverse-charge expense receipts must retain zero charged tax.');
+      }
+      const netAmount = roundMoney(totalAmount - taxAmount);
+      if (netAmount < 0) throw ledgerInputError('expense_net_invalid', 'Expense net amount cannot be negative.');
+      const costAmount = ['recoverable', 'reverse_charge'].includes(taxTreatment) ? netAmount : totalAmount;
+      const paymentMethod = normalizeStatus(payload.paymentMethod || payload.payment_method, 'company_card');
+      if (!['company_card', 'personal_card', 'cash', 'bank_transfer', 'direct_debit', 'other'].includes(paymentMethod)) {
+        throw ledgerInputError('expense_payment_method_invalid', 'Expense payment method is not supported.');
+      }
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '') || null;
+      let worker = null;
+      if (workerId) {
+        worker = this.getWorker(workerId);
+        const assignment = this.resolveCrewAssignment(jobId, { workerId });
+        if (!assignment) {
+          throw ledgerInputError('expense_worker_job_scope_required', 'Expense worker must have an active retained assignment to this job.', { jobId, workerId }, 409);
+        }
+      }
+      const evidenceDocumentId = normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null;
+      if (evidenceDocumentId) {
+        const document = this.db.prepare('SELECT id, job_id, status FROM documents WHERE id = ?').get(evidenceDocumentId);
+        if (!document || document.job_id !== jobId || !['stored', 'approved', 'current'].includes(normalizeStatus(document.status, ''))) {
+          throw ledgerInputError('expense_evidence_document_invalid', 'Expense evidence document must be a current retained document on the same job.', { evidenceDocumentId }, 409);
+        }
+      }
+      const notes = normalizeText(payload.notes || payload.note, '');
+      if (notes.length > 2000) throw ledgerInputError('expense_notes_invalid', 'Expense notes must be 2,000 characters or fewer.');
+      const costCode = normalizeText(payload.costCode || payload.cost_code, category.toUpperCase());
+      if (costCode.length < 2 || costCode.length > 80) throw ledgerInputError('expense_cost_code_invalid', 'Expense cost code must contain between 2 and 80 characters.');
+      const normalized = {
+        jobId,
+        workerId,
+        expenseDate,
+        category,
+        vendor,
+        receiptReference,
+        currency,
+        totalAmount,
+        taxAmount,
+        taxTreatment,
+        paymentMethod,
+        costCode,
+        evidenceDocumentId,
+        notes: notes || null
+      };
+      const entryFingerprint = this.expenseReceiptFingerprint(normalized);
+      const sourceFingerprint = this.expenseReceiptSourceFingerprint(normalized);
+      const replay = this.db.prepare('SELECT * FROM expenses WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('expense_entry_key_reused', 'This expense retry key is already bound to different retained receipt content.', { expenseId: replay.id }, 409);
+        }
+        const expense = this.mapExpense(replay);
+        const approval = replay.approval_id
+          ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id))
+          : null;
+        return { expense, approval, replayed: true, externalCommitments: 0, fundsMoved: false };
+      }
+      const duplicate = this.db.prepare('SELECT * FROM expenses WHERE source_fingerprint = ?').get(sourceFingerprint);
+      if (duplicate) {
+        throw ledgerInputError('expense_receipt_duplicate', 'This vendor receipt, date, amount, and currency are already retained.', {
+          expenseId: duplicate.id,
+          jobId: duplicate.job_id
+        }, 409);
+      }
+      const id = makeId('expense');
+      const timestamp = nowIso();
+      const taxRate = netAmount > 0 ? Math.round((taxAmount / netAmount) * 1_000_000) / 10_000 : 0;
+      this.db.prepare(`
+        INSERT INTO expenses (
+          id, job_id, worker_id, expense_date, category, amount, currency, vendor, receipt_ref, status,
+          approval_id, reversal_approval_id, entry_key, entry_fingerprint, source_fingerprint, notes, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        workerId,
+        expenseDate,
+        category,
+        costAmount,
+        currency,
+        vendor,
+        receiptReference,
+        entryKey,
+        entryFingerprint,
+        sourceFingerprint,
+        notes || null,
+        toJson({
+          governedReceipt: true,
+          costCode,
+          totalAmount,
+          netAmount,
+          taxAmount,
+          taxRate,
+          taxTreatment,
+          paymentMethod,
+          evidenceDocumentId,
+          workerName: worker?.name || normalizeText(payload.workerName || payload.worker_name, '') || null,
+          submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+          source: normalizeText(payload.source, 'expense_receipt'),
+          externalCommitments: 0,
+          fundsMoved: false
+        }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'expense',
+        targetId: id,
+        jobId,
+        approvalType: 'expense_receipt_review',
+        summary: `Review expense receipt ${receiptReference} from ${vendor} for ${totalAmount.toFixed(2)} ${currency}`,
+        reason: 'Receipt identity, job allocation, VAT treatment, cost code, and payment evidence require review before this amount enters actual job cost.',
+        data: {
+          expenseId: id,
+          receiptReference,
+          vendor,
+          expenseDate,
+          workerId,
+          workerName: worker?.name || null,
+          netAmount,
+          taxAmount,
+          totalAmount,
+          costAmount,
+          currency,
+          taxTreatment,
+          paymentMethod,
+          costCode,
+          entryFingerprint,
+          sourceFingerprint,
+          externalCommitments: 0,
+          fundsMoved: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE expenses SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const expense = this.getExpense(id);
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'expense',
+          entityId: id,
+          jobId,
+          action: 'submit_expense_receipt',
+          actor,
+          after: expense,
+          metadata: { approvalId: approval.id, entryKey, entryFingerprint, sourceFingerprint, externalCommitments: 0, fundsMoved: false }
+        });
+      }
+      return { expense, approval, replayed: false, externalCommitments: 0, fundsMoved: false };
+    });
+  }
+
   addExpense(jobId, payload = {}, options = {}) {
+    if (payload.entryKey || payload.entry_key || options.governed === true) {
+      return this.createExpenseReceipt(jobId, payload, options).expense;
+    }
     this.requireJob(jobId);
     const amount = normalizeNumber(payload.amount, 0);
     const status = normalizeStatus(payload.status, 'submitted');
@@ -19821,15 +20101,201 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       payload.receiptRef || payload.receipt_ref || null,
       status,
       payload.notes || null,
-      toJson({ costCode: payload.costCode || payload.cost_code || null }),
+      toJson({ costCode: payload.costCode || payload.cost_code || null, legacyExpense: true }),
       timestamp,
       timestamp
     );
-    const expense = this.mapExpense(this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(id));
+    const expense = this.getExpense(id);
     if (options.audit !== false) {
       this.audit({ entityType: 'expense', entityId: id, jobId, action: 'record_expense', actor: options.actor || 'Contractor.AI', after: expense });
     }
     return expense;
+  }
+
+  requestExpenseReversal(jobId, expenseId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM expenses WHERE id = ? AND job_id = ?').get(expenseId, jobId);
+      if (!row) throw ledgerInputError('expense_not_found', 'Expense receipt not found for this job.', { expenseId }, 404);
+      const status = normalizeStatus(row.status, '');
+      if (status === 'pending_reversal' && row.reversal_approval_id) {
+        return {
+          expense: this.mapExpense(row),
+          approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.reversal_approval_id)),
+          replayed: true,
+          externalCommitments: 0,
+          fundsMoved: false
+        };
+      }
+      if (!['approved', 'submitted'].includes(status)) {
+        throw ledgerInputError('expense_reversal_state_conflict', `Expense receipt cannot be reversed from ${status}.`, { expenseId }, 409);
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 1000) {
+        throw ledgerInputError('expense_reversal_reason_required', 'Expense reversal requires a reason between 8 and 1,000 characters.');
+      }
+      const actor = options.actor || 'Contractor.AI';
+      const approval = this.createApproval({
+        targetType: 'expense_reversal',
+        targetId: expenseId,
+        jobId,
+        approvalType: 'expense_receipt_reversal',
+        summary: `Reverse expense receipt ${row.receipt_ref || expenseId}`,
+        reason: 'Approved job costs are corrected through a compensating approval so the original receipt and audit evidence remain retained.',
+        data: {
+          expenseId,
+          previousStatus: status,
+          receiptReference: row.receipt_ref || null,
+          amount: normalizeNumber(row.amount, 0),
+          currency: row.currency,
+          reason,
+          entryFingerprint: row.entry_fingerprint || null,
+          externalCommitments: 0,
+          fundsMoved: false
+        }
+      }, { actor, audit: false });
+      const data = fromJson(row.data_json, {});
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE expenses
+        SET status = 'pending_reversal', reversal_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(approval.id, toJson({
+        ...data,
+        pendingReversal: { approvalId: approval.id, requestedAt: timestamp, requestedBy: actor, reason, previousStatus: status }
+      }), timestamp, expenseId, jobId);
+      const expense = this.getExpense(expenseId);
+      this.audit({
+        entityType: 'expense',
+        entityId: expenseId,
+        jobId,
+        action: 'request_expense_reversal',
+        actor,
+        before: this.mapExpense(row),
+        after: expense,
+        metadata: { approvalId: approval.id, externalCommitments: 0, fundsMoved: false }
+      });
+      return { expense, approval, replayed: false, externalCommitments: 0, fundsMoved: false };
+    });
+  }
+
+  applyExpenseReceiptApproval(expenseId) {
+    const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(expenseId);
+    if (!row) throw ledgerInputError('expense_not_found', 'Expense receipt not found.', { expenseId }, 404);
+    if (row.status === 'approved') return this.mapExpense(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('expense_approval_state_conflict', `Expense receipt cannot be approved from ${row.status}.`, { expenseId }, 409);
+    }
+    const expense = this.mapExpense(row);
+    if (!expense.governedReceipt || !expense.integrityValid) {
+      throw ledgerInputError('expense_receipt_integrity_failed', 'Expense receipt approval requires an intact governed receipt snapshot.', { expenseId }, 409);
+    }
+    const approval = row.approval_id
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'expense' AND target_id = ? AND status = 'approved'").get(row.approval_id, expenseId)
+      : null;
+    if (!approval) {
+      throw ledgerInputError('expense_approval_missing', 'Expense receipt requires its matching approved decision.', { expenseId }, 409);
+    }
+    const timestamp = nowIso();
+    const data = fromJson(row.data_json, {});
+    this.db.prepare(`
+      UPDATE expenses
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...data,
+      approvalDecision: {
+        status: 'approved',
+        approvalId: approval.id,
+        resolvedAt: approval.resolved_at || timestamp,
+        resolvedBy: approval.resolved_by || null,
+        reason: approval.reason || null
+      }
+    }), timestamp, expenseId);
+    const after = this.getExpense(expenseId);
+    this.audit({
+      entityType: 'expense',
+      entityId: expenseId,
+      jobId: row.job_id,
+      action: 'approve_expense_receipt',
+      actor: approval.resolved_by || approval.requested_by || 'approval',
+      before: expense,
+      after,
+      metadata: { approvalId: approval.id, costAmount: after.costAmount, taxAmount: after.taxAmount, externalCommitments: 0, fundsMoved: false }
+    });
+    return after;
+  }
+
+  applyExpenseReversal(expenseId) {
+    const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(expenseId);
+    if (!row) throw ledgerInputError('expense_not_found', 'Expense receipt not found.', { expenseId }, 404);
+    if (row.status === 'reversed') return this.mapExpense(row);
+    if (row.status !== 'pending_reversal' || !row.reversal_approval_id) {
+      throw ledgerInputError('expense_reversal_state_conflict', `Expense receipt cannot complete reversal from ${row.status}.`, { expenseId }, 409);
+    }
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE id = ? AND target_type = 'expense_reversal' AND target_id = ? AND status = 'approved'
+    `).get(row.reversal_approval_id, expenseId);
+    if (!approval) {
+      throw ledgerInputError('expense_reversal_approval_missing', 'Expense reversal requires its matching approved decision.', { expenseId }, 409);
+    }
+    const before = this.mapExpense(row);
+    if (before.governedReceipt && !before.integrityValid) {
+      throw ledgerInputError('expense_receipt_integrity_failed', 'Expense reversal requires the original governed receipt snapshot to remain intact.', { expenseId }, 409);
+    }
+    const timestamp = nowIso();
+    const data = fromJson(row.data_json, {});
+    this.db.prepare(`
+      UPDATE expenses
+      SET status = 'reversed', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_reversal'
+    `).run(toJson({
+      ...data,
+      reversalDecision: {
+        status: 'approved',
+        approvalId: approval.id,
+        resolvedAt: approval.resolved_at || timestamp,
+        resolvedBy: approval.resolved_by || null,
+        reason: approval.reason || data.pendingReversal?.reason || null
+      }
+    }), timestamp, expenseId);
+    const after = this.getExpense(expenseId);
+    this.audit({
+      entityType: 'expense',
+      entityId: expenseId,
+      jobId: row.job_id,
+      action: 'reverse_expense_receipt',
+      actor: approval.resolved_by || approval.requested_by || 'approval',
+      before,
+      after,
+      metadata: { approvalId: approval.id, retainedOriginal: true, externalCommitments: 0, fundsMoved: false }
+    });
+    return after;
+  }
+
+  restoreRejectedExpenseReversal(approval, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(approval.target_id);
+    if (!row || row.status !== 'pending_reversal' || row.reversal_approval_id !== approval.id) return row ? this.mapExpense(row) : null;
+    const data = fromJson(row.data_json, {});
+    const previousStatus = normalizeStatus(data.pendingReversal?.previousStatus, 'approved');
+    const restoredStatus = ['approved', 'submitted'].includes(previousStatus) ? previousStatus : 'approved';
+    const timestamp = options.timestamp || nowIso();
+    this.db.prepare(`
+      UPDATE expenses
+      SET status = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_reversal'
+    `).run(restoredStatus, toJson({
+      ...data,
+      reversalDecision: {
+        status,
+        approvalId: approval.id,
+        resolvedAt: timestamp,
+        resolvedBy: options.actor || null,
+        reason: options.reason || null
+      }
+    }), timestamp, row.id);
+    return this.getExpense(row.id);
   }
 
   recordJobCosts(jobId, payload = {}, options = {}) {
@@ -19847,7 +20313,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     return this.transaction(() => {
       const timeLog = hasTime ? this.addTimeLog(jobId, timePayload, { actor, audit: false }) : null;
-      const expense = hasExpense ? this.addExpense(jobId, expensePayload, { actor, audit: false }) : null;
+      const expense = hasExpense
+        ? (expensePayload.entryKey || expensePayload.entry_key
+            ? this.createExpenseReceipt(jobId, expensePayload, { actor, audit: false }).expense
+            : this.addExpense(jobId, expensePayload, { actor, audit: false }))
+        : null;
       const result = { timeLog, expense };
       if (options.audit !== false) {
         this.audit({
@@ -19954,7 +20424,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   calculateCostForecast(jobId, options = {}) {
     const detail = options.detail || this.getJobDetail(jobId, { includeAudit: false });
     const approvedBudgetStatuses = new Set(['approved', 'locked', 'baseline']);
-    const inactiveStatuses = new Set(['cancelled', 'canceled', 'rejected', 'void', 'closed']);
+    const inactiveStatuses = new Set(['cancelled', 'canceled', 'rejected', 'reversed', 'void', 'closed']);
     const supplierActualStatuses = new Set(['approved', 'partially_paid', 'paid', 'confirmed', 'settled', 'received']);
     const acceptedQuote = (detail.quotes || []).find(quote => normalizeStatus(quote.status, '') === 'accepted')
       || (detail.quotes || []).find(quote => !inactiveStatuses.has(normalizeStatus(quote.status, '')))
@@ -28319,6 +28789,31 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'expense_reversal') {
+        this.restoreRejectedExpenseReversal(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
+      } else if (before.target_type === 'expense') {
+        const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          const data = fromJson(row.data_json, {});
+          this.db.prepare(`
+            UPDATE expenses
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...data,
+            approvalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'document_transmittal') {
         const transmittalData = fromJson(
           this.db.prepare('SELECT data_json FROM document_transmittals WHERE id = ?').get(before.target_id)?.data_json,
@@ -29414,6 +29909,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           metadata: { approvalId: approval?.id || null, externalCommitments: 0 }
         });
       }
+    } else if (targetType === 'expense') {
+      this.applyExpenseReceiptApproval(targetId);
+    } else if (targetType === 'expense_reversal') {
+      this.applyExpenseReversal(targetId);
     } else if (targetType === 'invoice') {
       this.db.prepare("UPDATE invoices SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'billing_milestone') {
@@ -30753,6 +31252,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       pendingSupplierInvoices: 0,
       dueSupplierInvoices: 0,
       pendingSupplierPayments: 0,
+      pendingExpenses: 0,
       openDrawRequests: 0,
       openLienWaivers: 0,
       costForecastReady: 0,
@@ -30823,6 +31323,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.pendingSupplierInvoices += normalizeNumber(row.counts?.pendingSupplierInvoices, 0);
       summary.dueSupplierInvoices += normalizeNumber(row.counts?.dueSupplierInvoices, 0);
       summary.pendingSupplierPayments += normalizeNumber(row.counts?.pendingSupplierPayments, 0);
+      summary.pendingExpenses += normalizeNumber(row.counts?.pendingExpenses, 0);
       summary.openDrawRequests += normalizeNumber(row.counts?.openDrawRequests, 0);
       summary.openLienWaivers += normalizeNumber(row.counts?.openLienWaivers, 0);
       summary.costForecastReady += row.costForecast?.ready ? 1 : 0;
@@ -30883,6 +31384,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'budget_line',
       'cost_forecast',
       'billing_milestone',
+      'expense',
+      'expense_reversal',
       'purchase_order',
       'supplier_invoice',
       'supplier_invoice_payment',
@@ -30980,10 +31483,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const openLienWaivers = (detail.lienWaivers || []).filter(waiver => this.financeRecordOpen(waiver.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'released', 'waived']));
         const activeHandoffs = (detail.financeHandoffs || []).filter(handoff => this.financeRecordOpen(handoff.status, activeHandoffClosedStatuses));
         const timeLogs = (detail.timeLogs || []).filter(log => this.financeRecordOpen(log.status, ['cancelled', 'canceled', 'rejected', 'void']));
-        const expenses = (detail.expenses || []).filter(expense => this.financeRecordOpen(expense.status, ['cancelled', 'canceled', 'rejected', 'void']));
+        const expenses = (detail.expenses || []).filter(expense => this.financeRecordOpen(expense.status, ['cancelled', 'canceled', 'rejected', 'reversed', 'void']));
+        const pendingExpenses = expenses.filter(expense => normalizeStatus(expense.status, '') === 'pending_approval');
+        const recognizedExpenses = expenses.filter(expense => ['approved', 'submitted', 'pending_reversal'].includes(normalizeStatus(expense.status, '')));
+        const reversibleExpenses = recognizedExpenses.filter(expense => ['approved', 'submitted'].includes(normalizeStatus(expense.status, '')));
         const billableHours = timeLogs.reduce((sum, log) => sum + (log.billable === false ? 0 : normalizeNumber(log.hours, 0)), 0);
         const billableLaborValue = timeLogs.reduce((sum, log) => sum + (log.billable === false ? 0 : normalizeNumber(log.hours, 0) * normalizeNumber(log.rate, 0)), 0);
-        const expenseValue = expenses.reduce((sum, expense) => sum + normalizeNumber(expense.amount, 0), 0);
+        const expenseValue = recognizedExpenses.reduce((sum, expense) => sum + normalizeNumber(expense.costAmount ?? expense.amount, 0), 0);
         const validQuotes = (detail.quotes || [])
           .filter(quote => this.financeRecordOpen(quote.status, ['cancelled', 'canceled', 'rejected', 'expired', 'void']));
         const latestQuote = validQuotes[0] || null;
@@ -31039,7 +31545,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || paidSupplierPayments.length
           || openDrawRequests.length
           || openLienWaivers.length;
-        const missingCosts = startedForCosting && !expenses.length && !timeLogs.length && budgetActualValue <= 0;
+        const missingCosts = startedForCosting && !recognizedExpenses.length && !timeLogs.length && budgetActualValue <= 0;
         const missingBudget = activeJobStatuses.has(jobStatus) && netRevenueBasis >= 1000 && !activeBudgetLines.length;
         const invoiceReady = Boolean(nextBillingMilestone) || (progressedForFinance && invoiceDraftAmount > 1 && activeBillingMilestones.length === 0);
         const invoicePackageReady = packageReadyInvoices.length > 0;
@@ -31058,6 +31564,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || activeInvoices.some(invoice => invoice.approvalId && ['draft', 'submitted', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')))
           || openPayments.some(payment => payment.approvalId && ['pending_confirmation', 'pending_approval'].includes(normalizeStatus(payment.status, '')))
           || openPurchaseOrders.some(order => order.approvalId && normalizeStatus(order.status, '') === 'pending_approval')
+          || pendingExpenses.length > 0
+          || expenses.some(expense => normalizeStatus(expense.status, '') === 'pending_reversal')
           || pendingSupplierInvoices.length > 0
           || pendingSupplierPayments.length > 0
           || openDrawRequests.some(draw => draw.approvalId && ['pending_approval', 'submitted', 'approved_for_funding'].includes(normalizeStatus(draw.status, '')))
@@ -31224,6 +31732,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             requiresApproval: true
           });
         }
+        if (reversibleExpenses.length) {
+          const expense = reversibleExpenses[0];
+          nextActions.push({
+            type: 'request_expense_reversal',
+            label: 'Reverse retained expense',
+            expenseId: expense.id,
+            receiptReference: expense.receiptReference || expense.receiptRef || null,
+            vendor: expense.vendor,
+            amount: expense.costAmount ?? expense.amount,
+            totalAmount: expense.totalAmount ?? expense.amount,
+            currency: expense.currency,
+            requiresApproval: true
+          });
+        }
         if (missingCosts) nextActions.push({ type: 'record_time_expense', label: 'Record time logs and job expenses', requiresApproval: false });
         if (missingBudget) nextActions.push({ type: 'create_budget_line', label: 'Create budget and forecast control', requiresApproval: true });
         if (receivableInvoices.length && !openDrawRequests.length && invoiceValue >= 1000) nextActions.push({ type: 'create_draw_request', label: 'Prepare progress draw request', invoiceId: receivableInvoices[0].id, requiresApproval: true });
@@ -31255,6 +31777,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             timeLogs: timeLogs.length,
             billableHours,
             expenses: expenses.length,
+            recognizedExpenses: recognizedExpenses.length,
+            pendingExpenses: pendingExpenses.length,
             invoices: validInvoices.length,
             draftInvoices: draftInvoices.length,
             issueableInvoices: packageReadyInvoices.length,
@@ -31348,7 +31872,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             lienWaiver: openLienWaivers[0] || null,
             financeHandoff: activeHandoffs[0] || null,
             timeLog: timeLogs[0] || null,
-            expense: expenses[0] || null
+            expense: (detail.expenses || [])[0] || null
           }
         };
       });
@@ -35475,6 +35999,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'payment_follow_up', paymentId: payment.id, jobId: payment.job_id, severity: payment.due_at && payment.due_at < nowIso() ? 'high' : 'medium', message: `Payment follow-up ${payment.id} is ${payment.status} for ${Number(payment.amount || 0).toFixed(2)} EUR.` });
     }
 
+    const expenseReceiptReviews = this.db.prepare(`
+      SELECT expenses.id, expenses.job_id, expenses.vendor, expenses.receipt_ref, expenses.amount,
+        expenses.currency, expenses.data_json, jobs.title
+      FROM expenses
+      JOIN jobs ON jobs.id = expenses.job_id
+      WHERE expenses.status = 'pending_approval'
+        AND expenses.data_json LIKE '%"governedReceipt":true%'
+        AND jobs.status NOT IN ('archived', 'cancelled', 'canceled', 'rejected', 'deleted', 'void')
+        AND (
+          expenses.amount >= 500
+          OR expenses.data_json LIKE '%"paymentMethod":"personal_card"%'
+          OR expenses.data_json LIKE '%"taxTreatment":"non_recoverable"%'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM job_tasks
+          WHERE job_tasks.job_id = expenses.job_id
+            AND job_tasks.status NOT IN ('completed', 'cancelled', 'canceled')
+            AND job_tasks.data_json LIKE '%' || expenses.id || '%'
+        )
+      ORDER BY expenses.amount DESC, expenses.created_at ASC
+      LIMIT 5
+    `).all();
+    for (const expense of expenseReceiptReviews) {
+      const data = fromJson(expense.data_json, {});
+      const totalAmount = normalizeNumber(data.totalAmount, expense.amount);
+      actions.push({
+        type: 'review_expense_receipt',
+        expenseId: expense.id,
+        jobId: expense.job_id,
+        severity: totalAmount >= 1000 ? 'high' : 'medium',
+        requiresApproval: true,
+        suggestedAmount: totalAmount,
+        message: `${expense.title} has pending expense receipt ${expense.receipt_ref || expense.id} from ${expense.vendor || 'a vendor'} for ${totalAmount.toFixed(2)} ${expense.currency || 'EUR'}. Review the retained receipt, worker allocation, VAT treatment, and payment evidence; Contractor.AI cannot approve or reimburse it.`
+      });
+    }
+
     const supplierPayables = this.db.prepare(`
       SELECT supplier_invoices.id, supplier_invoices.job_id, supplier_invoices.invoice_number,
         supplier_invoices.supplier, supplier_invoices.total, supplier_invoices.due_at, jobs.title,
@@ -35694,6 +36254,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_stale_timesheet',
       'review_material_receipt',
       'review_equipment_custody',
+      'review_expense_receipt',
       'review_worker_availability_conflict',
       'review_worker_qualification_gap',
       'review_expiring_worker_credential',
@@ -36608,6 +37169,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             actor,
             after: task,
             metadata: { supplierInvoiceId: action.supplierInvoiceId, externalCommitments: 0, fundsMoved: false }
+          });
+        }
+
+        const expenseReceiptReviews = preview.filter(action => action.type === 'review_expense_receipt').slice(0, 3);
+        for (const action of expenseReceiptReviews) {
+          const expense = this.db.prepare('SELECT * FROM expenses WHERE id = ? AND job_id = ?').get(action.expenseId, action.jobId);
+          if (!expense || expense.status !== 'pending_approval') {
+            blocked.push({ ...action, status: 'blocked', reason: 'The expense receipt is no longer pending review.' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review expense receipt ${expense.receipt_ref || expense.id}`,
+            description: `${action.message} Verify the original receipt source before resolving its existing approval. Do not infer VAT, alter the cost, reimburse the worker, or contact the vendor.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'autonomous_cycle',
+            data: {
+              expenseId: expense.id,
+              approvalId: expense.approval_id || null,
+              internalOnly: true,
+              externalCommitments: 0,
+              fundsMoved: false
+            }
+          }, { actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, fundsMoved: false });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_expense_receipt_review_task',
+            actor,
+            after: task,
+            metadata: { expenseId: expense.id, approvalId: expense.approval_id || null, externalCommitments: 0, fundsMoved: false }
           });
         }
 
@@ -38051,6 +38645,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ) overplanned
     `).get().count || 0);
     if (overplannedBillingJobs) issues.push({ severity: 'error', message: `${overplannedBillingJobs} job billing plan(s) exceed retained contract value.` });
+    const governedExpenseRows = this.db.prepare("SELECT * FROM expenses WHERE data_json LIKE '%\"governedReceipt\":true%'").all();
+    for (const expenseRow of governedExpenseRows) {
+      const expense = this.mapExpense(expenseRow);
+      if (!expense.integrityValid) {
+        issues.push({ severity: 'error', message: `Expense receipt ${expense.id} failed retained entry or source fingerprint verification.` });
+      }
+      if (['approved', 'pending_reversal', 'reversed'].includes(expense.status)) {
+        const approval = expense.approvalId
+          ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'expense' AND target_id = ? AND status = 'approved'").get(expense.approvalId, expense.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Recognized expense receipt ${expense.id} lacks its matching approved review.` });
+      }
+      if (expense.status === 'pending_reversal') {
+        const approval = expense.reversalApprovalId
+          ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'expense_reversal' AND target_id = ? AND status = 'pending'").get(expense.reversalApprovalId, expense.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Pending expense reversal ${expense.id} lacks its matching pending approval.` });
+      }
+    }
     const purchaseOrdersWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM purchase_orders WHERE status IN ('approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued') AND approval_id IS NULL").get().count || 0);
     if (purchaseOrdersWithoutApproval) issues.push({ severity: 'warning', message: `${purchaseOrdersWithoutApproval} purchase order commitment(s) have no approval gate.` });
     const supplierInvoicesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM supplier_invoices WHERE status IN ('approved', 'partially_paid', 'paid') AND approval_id IS NULL").get().count || 0);
@@ -38205,6 +38818,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         equipmentCustodySessions: this.count('equipment_custody_sessions'),
         materialReceipts: this.count('material_receipts'),
         materialReceiptLines: this.count('material_receipt_lines'),
+        expenses: this.count('expenses'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -39542,18 +40156,67 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   mapExpense(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const governedReceipt = data.governedReceipt === true;
+    const integrityValid = !governedReceipt || Boolean(
+      row.entry_fingerprint
+      && row.source_fingerprint
+      && row.entry_fingerprint === this.expenseReceiptFingerprint({
+        jobId: row.job_id,
+        workerId: row.worker_id,
+        expenseDate: row.expense_date,
+        category: row.category,
+        vendor: row.vendor,
+        receiptReference: row.receipt_ref,
+        currency: row.currency,
+        totalAmount: data.totalAmount,
+        taxAmount: data.taxAmount,
+        taxTreatment: data.taxTreatment,
+        paymentMethod: data.paymentMethod,
+        costCode: data.costCode,
+        evidenceDocumentId: data.evidenceDocumentId,
+        notes: row.notes
+      })
+      && row.source_fingerprint === this.expenseReceiptSourceFingerprint({
+        vendor: row.vendor,
+        receiptReference: row.receipt_ref,
+        expenseDate: row.expense_date,
+        currency: row.currency,
+        totalAmount: data.totalAmount
+      })
+    );
     return {
       id: row.id,
       jobId: row.job_id,
+      workerId: row.worker_id || null,
+      workerName: data.workerName || null,
+      expenseDate: row.expense_date || null,
       category: row.category,
       amount: normalizeNumber(row.amount, 0),
+      costAmount: normalizeNumber(row.amount, 0),
+      netAmount: normalizeNumber(data.netAmount, normalizeNumber(row.amount, 0)),
+      taxAmount: normalizeNumber(data.taxAmount, 0),
+      taxRate: normalizeNumber(data.taxRate, 0),
+      totalAmount: normalizeNumber(data.totalAmount, normalizeNumber(row.amount, 0)),
+      taxTreatment: data.taxTreatment || null,
+      paymentMethod: data.paymentMethod || null,
+      costCode: data.costCode || null,
       currency: row.currency,
       vendor: row.vendor,
       receiptRef: row.receipt_ref,
+      receiptReference: row.receipt_ref,
       status: row.status,
       approvalId: row.approval_id,
+      reversalApprovalId: row.reversal_approval_id || null,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      sourceFingerprint: row.source_fingerprint || null,
+      governedReceipt,
+      integrityValid,
+      evidenceDocumentId: data.evidenceDocumentId || null,
       notes: row.notes,
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -40274,6 +40937,41 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.total = mapped?.total ?? data.total ?? null;
       preview.currency = mapped?.currency || data.currency || 'EUR';
       preview.reason = mapped?.data?.reason || null;
+    } else if (targetType === 'expense') {
+      const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapExpense(row) : null;
+      primaryEffect = `Approve expense receipt ${mapped?.receiptReference || data.receiptReference || ''} for ${(mapped?.totalAmount ?? data.totalAmount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'}.`;
+      addEffect(`Recognize ${(mapped?.costAmount ?? data.costAmount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} as actual job cost after retained VAT treatment.`);
+      addSafeguard('The receipt identity, job, worker, VAT split, cost code, and replay fingerprint are rechecked before approval.');
+      addSafeguard('Approval records an existing expense only. Contractor.AI does not reimburse the worker, charge a card, contact the vendor, or move funds.');
+      riskLevel = (mapped?.totalAmount ?? data.totalAmount ?? 0) >= 500 || mapped?.paymentMethod === 'personal_card' ? 'high' : 'medium';
+      preview.vendor = mapped?.vendor || data.vendor || null;
+      preview.receiptReference = mapped?.receiptReference || data.receiptReference || null;
+      preview.expenseDate = mapped?.expenseDate || data.expenseDate || null;
+      preview.workerName = mapped?.workerName || data.workerName || null;
+      preview.netAmount = mapped?.netAmount ?? data.netAmount ?? null;
+      preview.taxAmount = mapped?.taxAmount ?? data.taxAmount ?? null;
+      preview.total = mapped?.totalAmount ?? data.totalAmount ?? null;
+      preview.costAmount = mapped?.costAmount ?? data.costAmount ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.taxTreatment = mapped?.taxTreatment || data.taxTreatment || null;
+      preview.paymentMethod = mapped?.paymentMethod || data.paymentMethod || null;
+      preview.costCode = mapped?.costCode || data.costCode || null;
+      preview.integrityValid = mapped?.integrityValid ?? null;
+    } else if (targetType === 'expense_reversal') {
+      const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapExpense(row) : null;
+      primaryEffect = `Reverse expense receipt ${mapped?.receiptReference || data.receiptReference || ''}.`;
+      addEffect(`Remove ${(mapped?.costAmount ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} from recognized actual job cost while retaining the original receipt.`);
+      addSafeguard('This is a compensating ledger decision: the original receipt, fingerprint, approval, and audit history are not deleted or overwritten.');
+      addSafeguard('Rejection or cancellation restores the prior recognized state. No reimbursement, refund, vendor contact, or funds movement occurs.');
+      riskLevel = 'high';
+      preview.vendor = mapped?.vendor || null;
+      preview.receiptReference = mapped?.receiptReference || data.receiptReference || null;
+      preview.amount = mapped?.costAmount ?? data.amount ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.reason = data.reason || null;
+      preview.integrityValid = mapped?.integrityValid ?? null;
     } else if (targetType === 'supplier_invoice') {
       const row = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapSupplierInvoice(row) : null;

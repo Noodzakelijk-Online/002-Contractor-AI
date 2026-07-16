@@ -2267,9 +2267,25 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   await control.getByLabel('Expense amount (EUR)').fill('120');
   await control.getByLabel('Vendor').fill('Bouwmaat');
   await control.getByLabel('Receipt reference').fill('BROWSER-COST-120');
+  await control.getByLabel('VAT amount (EUR)').fill('20.83');
   await control.getByLabel('Internal evidence and notes').fill('Four verified labor hours and retained materials receipt were reviewed together.');
   await control.getByRole('button', { name: 'Record ledger costs' }).click();
-  await expect(page.getByText('Time and expense evidence retained atomically in the job ledger.')).toBeVisible();
+  await expect(page.getByText('Time was retained and the expense receipt is pending source review. No reimbursement, payment, or export was initiated.')).toBeVisible();
+
+  costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
+  await expect(costRow.getByRole('button', { name: `Budget baseline for ${costJob.job.title}` })).toBeDisabled();
+  let costDetailResponse = await request.get(`/api/ledger/jobs/${costJob.job.id}`);
+  expect(costDetailResponse.ok()).toBeTruthy();
+  let costDetail = await costDetailResponse.json();
+  expect(costDetail.job.timeLogs).toHaveLength(1);
+  expect(costDetail.job.expenses).toHaveLength(1);
+  expect(costDetail.job.expenses[0].status).toBe('pending_approval');
+  expect(costDetail.job.expenses[0].approvalId).toBeTruthy();
+  const expenseApproval = await request.post(`/api/ledger/approvals/${costDetail.job.expenses[0].approvalId}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Receipt identity, VAT treatment, and job allocation checked.' }
+  });
+  expect(expenseApproval.ok()).toBeTruthy();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
 
   costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
   await costRow.getByRole('button', { name: `Budget baseline for ${costJob.job.title}` }).click();
@@ -2280,11 +2296,9 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   await control.getByRole('button', { name: 'Request approver review' }).click();
   await expect(page.getByText('Budget baseline retained for approver review. No export, funding request, or external commitment was made.')).toBeVisible();
 
-  let costDetailResponse = await request.get(`/api/ledger/jobs/${costJob.job.id}`);
+  costDetailResponse = await request.get(`/api/ledger/jobs/${costJob.job.id}`);
   expect(costDetailResponse.ok()).toBeTruthy();
-  let costDetail = await costDetailResponse.json();
-  expect(costDetail.job.timeLogs).toHaveLength(1);
-  expect(costDetail.job.expenses).toHaveLength(1);
+  costDetail = await costDetailResponse.json();
   expect(costDetail.job.budgetLines).toHaveLength(1);
   expect(costDetail.job.budgetLines[0].status).toBe('pending_approval');
   const budgetApproval = await request.post(`/api/ledger/approvals/${costDetail.job.budgetLines[0].approvalId}/resolve`, {
@@ -2541,9 +2555,11 @@ test('owner investigates cursor-paged audit history with retained chain proof', 
 
   await panel.getByLabel('Action').selectOption('create_intake_job');
   await panel.getByRole('button', { name: 'Apply', exact: true }).click();
-  await expect.poll(() => rows.count()).toBeGreaterThan(0);
-  const actions = await panel.locator('.audit-event-copy > div > strong').allTextContents();
-  expect(actions.every(action => action === 'create intake job')).toBeTruthy();
+  const visibleActions = panel.locator('.audit-event-copy > div > strong');
+  await expect.poll(async () => {
+    const actions = await visibleActions.allTextContents();
+    return actions.length > 0 && actions.every(action => action === 'create intake job');
+  }).toBe(true);
 
   let inspectButton = rows.first().getByRole('button', { name: /Inspect audit event/ });
   await inspectButton.click();

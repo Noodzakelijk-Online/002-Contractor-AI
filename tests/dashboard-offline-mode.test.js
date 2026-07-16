@@ -96,7 +96,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt', 'equipment_check_out', 'equipment_return'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt', 'expense_receipt', 'equipment_check_out', 'equipment_return'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -132,6 +132,19 @@ test('material receiving connects purchasing, field readiness, approvals, and su
   assert.match(dashboardSource, /materialReceiptId: financeActionDraft\.materialReceiptId \|\| null/);
   assert.match(dashboardSource, /Retained goods receipt/);
   assert.match(dashboardSource, /verified three-way match/);
+});
+
+test('governed expense receipts connect field capture, offline replay, approval, finance cost, and reversal', () => {
+  assert.match(dashboardSource, /data-testid="field-expense-receipt-form"/);
+  assert.match(dashboardSource, /type: 'expense_receipt'/);
+  assert.match(dashboardSource, /type === 'expense_receipt'\s*\?\s*'expense-receipts'/);
+  assert.match(dashboardSource, /expense-receipts\?limit=8/);
+  assert.match(dashboardSource, /entryKey: financeActionDraft\.entryKey/);
+  assert.match(dashboardSource, /taxTreatment: financeActionDraft\.taxTreatment/);
+  assert.match(dashboardSource, /paymentMethod: financeActionDraft\.paymentMethod/);
+  assert.match(dashboardSource, /request_expense_reversal/);
+  assert.match(dashboardSource, /expense-receipts\/\$\{encodeURIComponent\(financeAction\.action\.expenseId\)\}\/reversal/);
+  assert.match(dashboardSource, /No reimbursement or payment was initiated/);
 });
 
 test('equipment custody connects reservations, field handoff, exact offline retry, return quarantine, and office review', () => {

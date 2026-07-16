@@ -110,6 +110,7 @@ const FINANCE_ACTION_LABELS = {
   record_payment_follow_up: 'Payment follow-up',
   prepare_finance_handoff: 'Finance handoff',
   record_time_expense: 'Record costs',
+  request_expense_reversal: 'Reverse expense',
   create_budget_line: 'Budget baseline',
   prepare_cost_forecast: 'Freeze forecast',
   create_billing_milestone: 'Billing milestone',
@@ -201,6 +202,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? 'production-entries'
       : type === 'material_receipt'
         ? 'material-receipts'
+      : type === 'expense_receipt'
+        ? 'expense-receipts'
       : type === 'equipment_check_out'
         ? 'equipment-custody/check-out'
       : type === 'equipment_return' && custodySessionId
@@ -357,6 +360,23 @@ function emptyMaterialReceiptDraft(plan = null) {
   }
 }
 
+function emptyFieldExpenseReceiptDraft() {
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    jobId: '',
+    expenseDate: futureDateInput(0),
+    category: 'materials',
+    vendor: '',
+    receiptReference: '',
+    totalAmount: '',
+    taxAmount: '',
+    taxTreatment: 'recoverable',
+    paymentMethod: 'company_card',
+    costCode: 'MAT-100',
+    notes: '',
+  }
+}
+
 function emptyAttendanceDraft() {
   return {
     jobId: '',
@@ -479,6 +499,7 @@ function emptyCommercialAcceptanceDraft() {
 
 function emptyFinanceActionDraft() {
   return {
+    entryKey: createFieldEvidenceDraftId(),
     outcome: 'follow_up_recorded',
     amount: '',
     taxRate: '21',
@@ -503,6 +524,8 @@ function emptyFinanceActionDraft() {
     invoiceNumber: '',
     invoiceDate: futureDateInput(0),
     taxAmount: '',
+    taxTreatment: 'recoverable',
+    paymentMethod: 'company_card',
     materialReceiptId: '',
     deliveryReference: '',
     notes: '',
@@ -3843,7 +3866,6 @@ function FinanceWorkspace({
                     !['prepare_invoice_package', 'prepare_credit_note_package', 'prepare_purchase_order_package'].includes(action.type) &&
                     FINANCE_ACTION_LABELS[action.type],
                 )
-                .slice(0, 3)
             : EMPTY_LIST
           return (
             <article className="finance-item" key={item.jobId}>
@@ -3958,6 +3980,16 @@ function FinanceWorkspace({
                   {item.counts?.expenses ? (
                     <span className="tag">
                       {item.counts.expenses} expense{item.counts.expenses === 1 ? '' : 's'}
+                    </span>
+                  ) : null}
+                  {item.counts?.pendingExpenses ? (
+                    <span className="tag tag-amber">
+                      {item.counts.pendingExpenses} expense receipt{item.counts.pendingExpenses === 1 ? '' : 's'} pending
+                    </span>
+                  ) : null}
+                  {item.latest?.expense ? (
+                    <span className={`tag ${item.latest.expense.status === 'approved' ? 'tag-green' : 'tag-amber'}`}>
+                      {item.latest.expense.receiptReference || 'Expense'} / {formatStatus(item.latest.expense.status)}
                     </span>
                   ) : null}
                   {item.latest?.invoice?.data?.structuredExportRequested ? (
@@ -4108,7 +4140,7 @@ function FinanceWorkspace({
                 {financeActions.map((action) => (
                   <button
                     className="secondary-button"
-                    key={`${action.type}-${action.creditNoteId || action.supplierInvoiceId || action.purchaseOrderId || action.invoiceId || action.paymentId || item.jobId}`}
+                    key={`${action.type}-${action.creditNoteId || action.supplierInvoiceId || action.purchaseOrderId || action.invoiceId || action.paymentId || action.expenseId || item.jobId}`}
                     aria-label={`${FINANCE_ACTION_LABELS[action.type]} for ${job.title}`}
                     disabled={submitting}
                     onClick={() => onAction(item, action)}
@@ -7811,6 +7843,8 @@ function App() {
   const [fieldDailyLog, setFieldDailyLog] = useState(emptyFieldDailyLog)
   const [fieldMaterialReceipt, setFieldMaterialReceipt] = useState(() => emptyMaterialReceiptDraft())
   const [fieldMaterialReceiptPlans, setFieldMaterialReceiptPlans] = useState([])
+  const [fieldExpenseReceipt, setFieldExpenseReceipt] = useState(() => emptyFieldExpenseReceiptDraft())
+  const [fieldExpenseReceipts, setFieldExpenseReceipts] = useState([])
   const [fieldEquipmentCheckout, setFieldEquipmentCheckout] = useState(() => emptyEquipmentCheckoutDraft())
   const [fieldEquipmentReturn, setFieldEquipmentReturn] = useState(() => emptyEquipmentReturnDraft())
   const [fieldEquipmentPlans, setFieldEquipmentPlans] = useState([])
@@ -9276,6 +9310,96 @@ function App() {
           setFieldMaterialReceipt(emptyMaterialReceiptDraft())
           setFieldMaterialReceiptPlans([])
           notify('Connection interrupted. The complete delivery ticket was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function selectFieldExpenseJob(jobId) {
+    setFieldExpenseReceipt({ ...emptyFieldExpenseReceiptDraft(), jobId })
+    setFieldExpenseReceipts([])
+    if (!jobId || navigator.onLine === false) return
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/expense-receipts?limit=8`)
+      setFieldExpenseReceipts(result.expenses || [])
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  async function recordFieldExpenseReceipt(event) {
+    event.preventDefault()
+    const totalAmount = Number(fieldExpenseReceipt.totalAmount)
+    const taxAmount = fieldExpenseReceipt.taxAmount === '' ? 0 : Number(fieldExpenseReceipt.taxAmount)
+    const zeroTaxTreatment = ['exempt', 'reverse_charge'].includes(fieldExpenseReceipt.taxTreatment)
+    if (
+      !fieldExpenseReceipt.jobId ||
+      !fieldExpenseReceipt.expenseDate ||
+      fieldExpenseReceipt.vendor.trim().length < 2 ||
+      fieldExpenseReceipt.receiptReference.trim().length < 3 ||
+      !(totalAmount > 0) ||
+      !Number.isFinite(taxAmount) ||
+      taxAmount < 0 ||
+      taxAmount > totalAmount ||
+      (zeroTaxTreatment && taxAmount !== 0) ||
+      fieldExpenseReceipt.costCode.trim().length < 2
+    ) {
+      setError('Choose a job and retain the date, vendor, receipt reference, positive gross total, valid VAT amount, treatment, and cost code.')
+      return
+    }
+    const jobId = fieldExpenseReceipt.jobId
+    const payload = {
+      expenseDate: fieldExpenseReceipt.expenseDate,
+      category: fieldExpenseReceipt.category,
+      vendor: fieldExpenseReceipt.vendor.trim(),
+      receiptReference: fieldExpenseReceipt.receiptReference.trim(),
+      totalAmount: roundMoney(totalAmount),
+      taxAmount: roundMoney(taxAmount),
+      taxTreatment: fieldExpenseReceipt.taxTreatment,
+      paymentMethod: fieldExpenseReceipt.paymentMethod,
+      costCode: fieldExpenseReceipt.costCode.trim(),
+      currency: 'EUR',
+      notes: fieldExpenseReceipt.notes.trim() || null,
+      source: 'field_dashboard',
+    }
+    const draft = {
+      id: fieldExpenseReceipt.entryKey,
+      type: 'expense_receipt',
+      jobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setFieldExpenseReceipt({ ...emptyFieldExpenseReceiptDraft(), jobId })
+        notify('Expense receipt was saved locally with its VAT basis and will sync after reconnection.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      notify(result.replayed
+        ? 'This expense receipt was already retained; no duplicate cost record was created.'
+        : `Receipt ${result.expense?.receiptReference || ''} was retained for approver review. No reimbursement or payment was initiated.`)
+      await selectFieldExpenseJob(jobId)
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setFieldExpenseReceipt({ ...emptyFieldExpenseReceiptDraft(), jobId })
+          notify('Connection interrupted. The complete expense receipt was saved locally for an exact retry.')
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -12608,7 +12732,9 @@ function App() {
       ? (action.materialReceipts || []).find((receipt) => receipt.status === 'received') || null
       : null
     const amount =
-      action.type === 'create_credit_note'
+      action.type === 'request_expense_reversal'
+        ? Number(action.totalAmount || action.amount || 0)
+        : action.type === 'create_credit_note'
         ? creditNoteAmount
         : action.type === 'record_supplier_invoice'
           ? supplierInvoiceAmount
@@ -12626,8 +12752,13 @@ function App() {
       taxAmount: action.type === 'record_supplier_invoice' && amount > 0 ? roundMoney(amount * 0.21).toFixed(2) : '',
       forecastAmount: contractAmount > 0 ? contractAmount.toFixed(2) : '',
       plannedIssueAt: action.plannedIssueAt ? String(action.plannedIssueAt).slice(0, 10) : futureDateInput(7),
-      dueAt: action.dueAt ? String(action.dueAt).slice(0, 10) : futureDateInput(action.type === 'create_billing_milestone' ? 37 : 7),
-      vendor: action.supplier || item.latest?.purchaseOrder?.supplier || '',
+      dueAt: action.dueAt
+        ? String(action.dueAt).slice(0, 10)
+        : futureDateInput(action.type === 'record_time_expense' ? 0 : action.type === 'create_billing_milestone' ? 37 : 7),
+      reference: action.type === 'request_expense_reversal' ? action.receiptReference || '' : '',
+      vendor: action.type === 'request_expense_reversal'
+        ? action.vendor || item.latest?.expense?.vendor || ''
+        : action.supplier || item.latest?.purchaseOrder?.supplier || '',
       materialReceiptId: suggestedMaterialReceipt?.id || '',
       deliveryReference: suggestedMaterialReceipt?.receiptReference || '',
       description:
@@ -12696,7 +12827,14 @@ function App() {
 
     let route = ''
     let body = {}
-    if (type === 'create_credit_note') {
+    if (type === 'request_expense_reversal') {
+      if (!financeAction.action.expenseId || notes.length < 8) {
+        setError('Record at least eight characters explaining the corrected bookkeeping evidence for this reversal.')
+        return
+      }
+      route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/expense-receipts/${encodeURIComponent(financeAction.action.expenseId)}/reversal`
+      body = { reason: notes }
+    } else if (type === 'create_credit_note') {
       if (!(financeControlAmount > 0) || !financeAction.action.invoiceId) {
         setError('Record a positive net correction amount against the retained invoice.')
         return
@@ -12835,6 +12973,19 @@ function App() {
         setError('Record the vendor for retained expense evidence.')
         return
       }
+      const expenseTax = Number(financeActionDraft.taxAmount || 0)
+      if (
+        financeControlExpense > 0 && (
+          !reference ||
+          !Number.isFinite(expenseTax) ||
+          expenseTax < 0 ||
+          expenseTax > financeControlExpense ||
+          (['exempt', 'reverse_charge'].includes(financeActionDraft.taxTreatment) && expenseTax !== 0)
+        )
+      ) {
+        setError('Expense evidence requires a receipt reference and a VAT amount and treatment that reconcile to the gross total.')
+        return
+      }
       route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/finance-costs`
       body = {
         timeLog:
@@ -12854,9 +13005,14 @@ function App() {
             ? {
                 category: financeActionDraft.category,
                 amount: roundMoney(financeControlExpense),
+                totalAmount: roundMoney(financeControlExpense),
+                taxAmount: roundMoney(expenseTax),
+                taxTreatment: financeActionDraft.taxTreatment,
+                paymentMethod: financeActionDraft.paymentMethod,
+                expenseDate: financeActionDraft.dueAt,
+                entryKey: financeActionDraft.entryKey,
                 vendor,
-                receiptRef: reference || null,
-                status: 'submitted',
+                receiptReference: reference,
                 costCode: financeActionDraft.costCode.trim() || null,
                 notes,
               }
@@ -12960,7 +13116,9 @@ function App() {
     setSubmitting(true)
     try {
       const result = await api(route, { method: 'POST', body: JSON.stringify({ ...body, actor: 'office_operator' }) })
-      if (type === 'create_credit_note') {
+      if (type === 'request_expense_reversal') {
+        notify(`Expense ${result.expense?.receiptReference || reference || ''} is pending reversal approval. The original evidence remains retained and no funds moved.`)
+      } else if (type === 'create_credit_note') {
         notify(
           `Credit-note draft retained for ${currency.format(financeCreditTotal)} against ${financeAction.action.invoiceReference || 'the issued invoice'}. Approval and immutable package preparation are required before the receivable changes.`,
         )
@@ -12981,7 +13139,11 @@ function App() {
             : 'Internal payment follow-up retained. No reminder or external message was sent.',
         )
       } else if (type === 'record_time_expense') {
-        notify('Time and expense evidence retained atomically in the job ledger.')
+        notify(
+          result.costs?.expense
+            ? 'Time was retained and the expense receipt is pending source review. No reimbursement, payment, or export was initiated.'
+            : 'Time evidence was retained in the job ledger.',
+        )
       } else if (type === 'create_billing_milestone') {
         notify(
           `Billing milestone retained for ${currency.format(result.billingMilestone?.total || financeControlAmount)}. Approval is required before an invoice can be derived.`,
@@ -14328,6 +14490,110 @@ function App() {
                   ) : null}
                   <p className="attendance-policy">Custody records are internal operational evidence. External hire, spend, and statutory inspection remain separately governed.</p>
                 </section>
+                <form className="evidence-form field-expense-receipt-form" data-testid="field-expense-receipt-form" onSubmit={recordFieldExpenseReceipt}>
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Expense receipt</h2>
+                      <p>Retain the original receipt identity, VAT basis, payment method, and job allocation for approval.</p>
+                    </div>
+                    <ReceiptEuro size={20} />
+                  </div>
+                  <div className="form-grid">
+                    <label>
+                      Job
+                      <select required value={fieldExpenseReceipt.jobId} onChange={(event) => void selectFieldExpenseJob(event.target.value)}>
+                        <option value="">Select an active job</option>
+                        {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      Expense date
+                      <input required type="date" max={futureDateInput(0)} value={fieldExpenseReceipt.expenseDate} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, expenseDate: event.target.value })} />
+                    </label>
+                    <label>
+                      Category
+                      <select value={fieldExpenseReceipt.category} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, category: event.target.value })}>
+                        <option value="materials">Materials</option>
+                        <option value="equipment">Equipment</option>
+                        <option value="travel">Travel</option>
+                        <option value="parking">Parking</option>
+                        <option value="fuel">Fuel</option>
+                        <option value="accommodation">Accommodation</option>
+                        <option value="meals">Meals</option>
+                        <option value="subcontractor">Subcontractor</option>
+                        <option value="general">General</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                    <label>
+                      Vendor
+                      <input required minLength="2" maxLength="160" value={fieldExpenseReceipt.vendor} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, vendor: event.target.value })} placeholder="Supplier or merchant" />
+                    </label>
+                    <label>
+                      Receipt reference
+                      <input required minLength="3" maxLength="240" value={fieldExpenseReceipt.receiptReference} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, receiptReference: event.target.value })} placeholder="Receipt number or retained evidence reference" />
+                    </label>
+                    <label>
+                      Gross total (EUR)
+                      <input required type="number" min="0.01" step="0.01" inputMode="decimal" value={fieldExpenseReceipt.totalAmount} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, totalAmount: event.target.value })} />
+                    </label>
+                    <label>
+                      VAT amount (EUR)
+                      <input required type="number" min="0" max={fieldExpenseReceipt.totalAmount || undefined} step="0.01" inputMode="decimal" value={fieldExpenseReceipt.taxAmount} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, taxAmount: event.target.value })} />
+                    </label>
+                    <label>
+                      VAT treatment
+                      <select value={fieldExpenseReceipt.taxTreatment} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, taxTreatment: event.target.value, taxAmount: ['exempt', 'reverse_charge'].includes(event.target.value) ? '0' : fieldExpenseReceipt.taxAmount })}>
+                        <option value="recoverable">Recoverable VAT</option>
+                        <option value="non_recoverable">Non-recoverable VAT</option>
+                        <option value="exempt">VAT exempt</option>
+                        <option value="reverse_charge">Reverse charge</option>
+                      </select>
+                    </label>
+                    <label>
+                      Payment method
+                      <select value={fieldExpenseReceipt.paymentMethod} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, paymentMethod: event.target.value })}>
+                        <option value="company_card">Company card</option>
+                        <option value="personal_card">Personal card</option>
+                        <option value="cash">Cash</option>
+                        <option value="bank_transfer">Bank transfer</option>
+                        <option value="direct_debit">Direct debit</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                    <label>
+                      Cost code
+                      <input required minLength="2" maxLength="80" value={fieldExpenseReceipt.costCode} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, costCode: event.target.value })} />
+                    </label>
+                    <label className="form-span">
+                      Receipt note
+                      <textarea maxLength="2000" value={fieldExpenseReceipt.notes} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, notes: event.target.value })} placeholder="Purpose, allocation, or review context" />
+                    </label>
+                  </div>
+                  {fieldExpenseReceipts.length ? (
+                    <div className="field-expense-receipt-list" aria-label="Recent expense receipts">
+                      {fieldExpenseReceipts.map((expense) => (
+                        <div className="field-expense-receipt-row" key={expense.id}>
+                          <div>
+                            <strong>{expense.vendor}</strong>
+                            <small>{expense.receiptReference} / {formatDate(expense.expenseDate)} / {formatStatus(expense.taxTreatment)}</small>
+                          </div>
+                          <div>
+                            <strong>{currency.format(expense.totalAmount || 0)}</strong>
+                            <span className={`status status-${expense.status}`}>{formatStatus(expense.status)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="modal-actions">
+                    <button className="primary-button" disabled={submitting}>
+                      <ReceiptEuro size={16} />
+                      {submitting ? 'Recording...' : navigator.onLine === false ? 'Save receipt offline' : 'Request expense approval'}
+                    </button>
+                  </div>
+                  <p className="attendance-policy">Approval recognizes the job cost only. Reimbursement, card settlement, bookkeeping export, and supplier contact remain separate.</p>
+                </form>
                 <form className="evidence-form material-receipt-form" data-testid="field-material-receipt-form" onSubmit={recordFieldMaterialReceipt}>
                   <div className="panel-heading">
                     <div>
@@ -19692,6 +19958,23 @@ function App() {
                   </p>
                 </div>
 
+                {financeAction.action.type === 'request_expense_reversal' ? (
+                  <div className="invoice-preview form-span" aria-label="Expense reversal context">
+                    <span>
+                      Receipt <strong>{financeAction.action.receiptReference || financeAction.action.expenseId}</strong>
+                    </span>
+                    <span>
+                      Vendor <strong>{financeAction.action.vendor || 'Retained vendor'}</strong>
+                    </span>
+                    <span>
+                      Gross total <strong>{currency.format(financeAction.action.totalAmount || 0)}</strong>
+                    </span>
+                    <span>
+                      Recognized cost <strong>{currency.format(financeAction.action.amount || 0)}</strong>
+                    </span>
+                  </div>
+                ) : null}
+
                 {financeAction.action.type === 'create_credit_note' ? (
                   <>
                     <label>
@@ -20076,6 +20359,7 @@ function App() {
                       <input
                         required
                         type="date"
+                        max={futureDateInput(0)}
                         value={financeActionDraft.dueAt}
                         onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, dueAt: event.target.value })}
                       />
@@ -20144,9 +20428,51 @@ function App() {
                         <label>
                           Receipt reference
                           <input
+                            required
+                            minLength="3"
+                            maxLength="240"
                             value={financeActionDraft.reference}
                             onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, reference: event.target.value })}
                           />
+                        </label>
+                        <label>
+                          VAT amount (EUR)
+                          <input
+                            required
+                            type="number"
+                            min="0"
+                            max={financeActionDraft.expenseAmount || undefined}
+                            step="0.01"
+                            value={financeActionDraft.taxAmount}
+                            onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, taxAmount: event.target.value })}
+                          />
+                        </label>
+                        <label>
+                          VAT treatment
+                          <select
+                            value={financeActionDraft.taxTreatment}
+                            onChange={(event) => setFinanceActionDraft({
+                              ...financeActionDraft,
+                              taxTreatment: event.target.value,
+                              taxAmount: ['exempt', 'reverse_charge'].includes(event.target.value) ? '0' : financeActionDraft.taxAmount,
+                            })}
+                          >
+                            <option value="recoverable">Recoverable VAT</option>
+                            <option value="non_recoverable">Non-recoverable VAT</option>
+                            <option value="exempt">VAT exempt</option>
+                            <option value="reverse_charge">Reverse charge</option>
+                          </select>
+                        </label>
+                        <label>
+                          Payment method
+                          <select value={financeActionDraft.paymentMethod} onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, paymentMethod: event.target.value })}>
+                            <option value="company_card">Company card</option>
+                            <option value="personal_card">Personal card</option>
+                            <option value="cash">Cash</option>
+                            <option value="bank_transfer">Bank transfer</option>
+                            <option value="direct_debit">Direct debit</option>
+                            <option value="other">Other</option>
+                          </select>
                         </label>
                       </>
                     ) : null}
@@ -20367,6 +20693,7 @@ function App() {
                     value={financeActionDraft.notes}
                     onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, notes: event.target.value })}
                     placeholder="Record the source evidence, calculation, collection history, receipt, or review basis."
+                    minLength={financeAction.action.type === 'request_expense_reversal' ? 8 : undefined}
                   />
                 </label>
                 <p className="workflow-note form-span">
@@ -20384,6 +20711,8 @@ function App() {
                     ? 'Recording...'
                     : financeAction.action.type === 'create_credit_note'
                       ? 'Request credit-note approval'
+                      : financeAction.action.type === 'request_expense_reversal'
+                        ? 'Request expense reversal'
                       : financeAction.action.type === 'record_supplier_invoice'
                         ? 'Request payable approval'
                         : financeAction.action.type === 'record_supplier_payment'

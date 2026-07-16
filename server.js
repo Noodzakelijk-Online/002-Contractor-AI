@@ -1193,6 +1193,7 @@ function allowsOperatorRequest(role, req) {
          || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
         || pathName === '/api/ledger/attendance'
@@ -1206,6 +1207,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/[^/]+\/check-out$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/check-out$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
 
@@ -1256,6 +1258,31 @@ function projectFieldRecord(record) {
 
 function projectFieldRecords(records) {
   return Array.isArray(records) ? records.map(projectFieldRecord) : [];
+}
+
+function projectFieldExpenseReceipt(expense) {
+  if (!expense) return null;
+  return {
+    id: expense.id,
+    jobId: expense.jobId,
+    workerId: expense.workerId,
+    workerName: expense.workerName,
+    expenseDate: expense.expenseDate,
+    category: expense.category,
+    vendor: expense.vendor,
+    receiptReference: expense.receiptReference,
+    currency: expense.currency,
+    netAmount: expense.netAmount,
+    taxAmount: expense.taxAmount,
+    totalAmount: expense.totalAmount,
+    taxTreatment: expense.taxTreatment,
+    paymentMethod: expense.paymentMethod,
+    costCode: expense.costCode,
+    status: expense.status,
+    notes: expense.notes,
+    createdAt: expense.createdAt,
+    updatedAt: expense.updatedAt
+  };
 }
 
 function projectFieldJobSummary(job = {}) {
@@ -1367,6 +1394,27 @@ function timeLogPayloadForOperator(req, payload = {}) {
     rate: identity.hourlyRate,
     hourlyRate: identity.hourlyRate,
     hourly_rate: identity.hourlyRate
+  };
+}
+
+function expenseReceiptPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field expense capture requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    submittedBy: identity.workerName,
+    submitted_by: identity.workerName,
+    source: 'field_expense_receipt'
   };
 }
 
@@ -3496,10 +3544,66 @@ app.post('/api/ledger/jobs/:id/daily-logs', (req, res) => {
   }, 201);
 });
 
+app.get('/api/ledger/jobs/:id/expense-receipts', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = {
+      jobId: req.params.id,
+      workerId: req.operator?.role === 'field_worker' ? fieldWorkerIdentity(req).workerId : req.query.workerId,
+      status: req.query.status,
+      limit: req.query.limit
+    };
+    const expenses = operatingLedger.listExpenseReceipts(filters);
+    return {
+      success: true,
+      expenses: req.operator?.role === 'field_worker' ? expenses.map(projectFieldExpenseReceipt) : expenses,
+      policy: {
+        approvalRequired: true,
+        exactReplay: true,
+        duplicateReceiptProtection: true,
+        compensatingReversal: true,
+        fundsMoved: false,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/expense-receipts', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = expenseReceiptPayloadForOperator(req, req.body || {});
+    const result = operatingLedger.createExpenseReceipt(req.params.id, payload, {
+      actor: actorFromRequest(req, 'dashboard')
+    });
+    return {
+      success: true,
+      expense: req.operator?.role === 'field_worker' ? projectFieldExpenseReceipt(result.expense) : result.expense,
+      approval: req.operator?.role === 'field_worker' ? null : result.approval,
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0,
+      fundsMoved: false
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/expense-receipts/:expenseId/reversal', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestExpenseReversal(req.params.id, req.params.expenseId, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0,
+    fundsMoved: false
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    expense: operatingLedger.addExpense(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    expense: operatingLedger.addExpense(req.params.id, req.body || {}, { actor: actorFromRequest(req, 'dashboard') }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -3508,7 +3612,7 @@ app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
 app.post('/api/ledger/jobs/:id/finance-costs', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    costs: operatingLedger.recordJobCosts(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    costs: operatingLedger.recordJobCosts(req.params.id, req.body || {}, { actor: actorFromRequest(req, 'dashboard') }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5502,6 +5606,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         timesheetExportIntegrity: 'sha256',
         dailyLogEntryKey: 'durable',
         materialReceiptEntryKey: 'durable',
+        expenseReceiptEntryKey: 'durable',
+        expenseReceiptDuplicateControl: 'vendor_reference_date_amount_currency',
+        expenseReceiptApproval: 'source_current_approval_gated',
+        expenseReceiptReversal: 'approval_gated_compensating_record',
+        expenseReceiptVatBasis: 'retained_net_tax_total',
         taskLifecycle: 'retained',
         taskCompletionEvidenceRequired: true,
         fieldTaskScopeEnforced: true,

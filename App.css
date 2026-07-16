@@ -486,11 +486,20 @@
 .equipment-field-form .form-grid { padding-bottom: 12px; }
 .equipment-field-form .modal-actions { padding: 0 22px 18px; }
 .equipment-return-form { border-left: 3px solid #b75c32; }
+.field-expense-receipt-form { border-top: 1px solid #dfe8e4; border-bottom: 1px solid #dfe8e4; background: #fbfcfc; }
+.field-expense-receipt-list { display: grid; margin: 0 22px 16px; overflow: hidden; border: 1px solid #dfe8e4; border-radius: 6px; background: #fff; }
+.field-expense-receipt-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 58px; padding: 10px 12px; border-bottom: 1px solid #edf1ef; }
+.field-expense-receipt-row:last-child { border-bottom: 0; }
+.field-expense-receipt-row > div { display: grid; min-width: 0; gap: 3px; }
+.field-expense-receipt-row > div:last-child { justify-items: end; }
+.field-expense-receipt-row strong { min-width: 0; overflow: hidden; color: #2d4239; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.field-expense-receipt-row small { min-width: 0; overflow: hidden; color: #74817c; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .status-in_use, .status-reserved { color: #275e80; background: #e5f0f6; }
 .status-maintenance, .status-inspection_due { color: #94620a; background: #fff1d4; }
 .status-lost { color: #aa342a; background: #fbe9e7; }
 @media (max-width: 920px) { .equipment-row { grid-template-columns: minmax(0, 1fr) auto; }.equipment-details { grid-column: 1 / -1; grid-row: 2; }.equipment-custody-row { grid-template-columns: 8px minmax(0, 1fr) auto; }.equipment-custody-values { grid-column: 2; grid-row: 2; } }
 @media (max-width: 760px) { .equipment-row { grid-template-columns: minmax(0, 1fr); }.equipment-details { grid-column: 1; grid-row: auto; }.equipment-custody-heading-actions { justify-content: flex-start; }.equipment-custody-heading-actions .primary-button { width: 100%; }.equipment-custody-row { grid-template-columns: 7px minmax(0, 1fr); gap: 10px; padding: 13px 14px; }.equipment-custody-values { grid-column: 2; grid-template-columns: repeat(2, minmax(0, 1fr)); }.equipment-custody-row > .secondary-button { width: 100%; grid-column: 1 / -1; }.equipment-custody-preview { grid-template-columns: 1fr; }.equipment-custody-preview > div { border-top: 1px solid #d8e5df; border-left: 0; }.equipment-custody-preview > div:first-child { border-top: 0; }.equipment-field-selector { grid-template-columns: 1fr; padding: 14px; }.equipment-field-custody-row { grid-template-columns: 7px minmax(0, 1fr); padding: 12px 14px; }.equipment-field-custody-row small { white-space: normal; }.equipment-field-custody-row .secondary-button { width: 100%; grid-column: 1 / -1; }.equipment-field-form-heading { padding: 9px 14px; }.equipment-field-form .modal-actions { padding: 0 16px 16px; }.equipment-field-form .primary-button { width: 100%; min-height: 42px; }.equipment-modal .modal-actions, .equipment-custody-modal .modal-actions, .equipment-return-modal .modal-actions, .equipment-inspection-modal .modal-actions, .equipment-maintenance-modal .modal-actions, .equipment-retirement-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }.equipment-modal .modal-actions button, .equipment-custody-modal .modal-actions button, .equipment-return-modal .modal-actions button, .equipment-inspection-modal .modal-actions button, .equipment-maintenance-modal .modal-actions button, .equipment-retirement-modal .modal-actions button { width: 100%; } }
+@media (max-width: 760px) { .field-expense-receipt-list { margin: 0 14px 14px; }.field-expense-receipt-row { align-items: start; gap: 10px; padding: 11px; }.field-expense-receipt-row small { overflow-wrap: anywhere; white-space: normal; }.field-expense-receipt-form .primary-button { width: 100%; min-height: 42px; } }
 .task-create-form { grid-template-columns: minmax(0, 1.5fr) minmax(120px, .5fr); }
 .task-create-form .form-span { grid-column: 1 / -1; }
 .task-list { margin-top: 16px; }

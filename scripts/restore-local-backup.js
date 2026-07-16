@@ -499,6 +499,36 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('039_governed_expense_receipts')) {
+        if (!retainedTables.has('expenses')) {
+          throw new Error('Backup governed expense-receipt schema is incomplete: expenses.');
+        }
+        const expenseColumns = new Set(database.prepare('PRAGMA table_info(expenses)').all().map(row => row.name));
+        for (const column of [
+          'worker_id',
+          'expense_date',
+          'entry_key',
+          'entry_fingerprint',
+          'source_fingerprint',
+          'reversal_approval_id'
+        ]) {
+          if (!expenseColumns.has(column)) {
+            throw new Error(`Backup governed expense-receipt schema is incomplete: expenses.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_expenses_job_entry_key',
+          'idx_expenses_source_fingerprint',
+          'idx_expenses_job_status_date',
+          'idx_expenses_worker_status_date',
+          'idx_expenses_pending_reversal'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed expense-receipt constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {
