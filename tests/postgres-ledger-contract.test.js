@@ -420,6 +420,23 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     }, { actor: 'postgres_contract_test' });
     assert.equal(progress.progressPercent, 25);
 
+    const hostedClient = ledger.updateClient(job.clientId, {
+      company: 'PostgreSQL Integration Client BV',
+      email: 'postgres-client@example.test',
+      address: 'Hosted Contract Street 1',
+      postalCode: '1011 AA',
+      city: 'Amsterdam',
+      country: 'NL',
+      registrationNumber: '87654321'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedClient.readiness.structuredInvoiceReady, true);
+    const hostedClientDirectory = ledger.listClients({ search: 'PostgreSQL Integration Client', limit: 10 });
+    assert.ok(hostedClientDirectory.some(client => (
+      client.id === hostedClient.id
+      && client.metrics.activeJobs >= 1
+      && client.readiness.endpoint.scheme === '0106'
+    )));
+
     const hostedTask = ledger.addTask(job.id, {
       title: 'Verify hosted task lifecycle',
       priority: 'high',

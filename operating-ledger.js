@@ -4095,63 +4095,299 @@ class ContractorOperatingLedger {
     });
   }
 
+  normalizeClientProfile(payload = {}, existing = null) {
+    const current = existing || {};
+    const currentData = current.data || {};
+    const name = normalizeText(payload.name ?? payload.client ?? payload.clientName ?? current.name, '');
+    if (name.length < 2 || name.length > 160) {
+      throw ledgerInputError('client_name_invalid', 'Client contact name must contain 2 to 160 characters.');
+    }
+    const company = normalizeText(payload.company ?? current.company, '');
+    if (company.length > 200) {
+      throw ledgerInputError('client_company_invalid', 'Client legal or company name cannot exceed 200 characters.');
+    }
+    const email = normalizeText(payload.email ?? payload.client_email ?? current.email, '').toLowerCase();
+    if (email.length > 254 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+      throw ledgerInputError('client_email_invalid', 'Client email address is invalid.');
+    }
+    const billingEmail = normalizeText(
+      payload.billingEmail ?? payload.billing_email ?? payload.data?.billingEmail ?? currentData.billingEmail,
+      ''
+    ).toLowerCase();
+    if (billingEmail.length > 254 || (billingEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(billingEmail))) {
+      throw ledgerInputError('client_billing_email_invalid', 'Client billing email address is invalid.');
+    }
+    const phone = normalizeText(payload.phone ?? payload.client_phone ?? current.phone, '');
+    if (phone.length > 80) {
+      throw ledgerInputError('client_phone_invalid', 'Client phone number cannot exceed 80 characters.');
+    }
+    const address = normalizeText(payload.address ?? payload.location ?? current.address, '');
+    const city = normalizeText(payload.city ?? current.city, '');
+    const country = normalizeText(payload.country ?? current.country, 'NL').toUpperCase();
+    if (!/^[A-Z]{2}$/.test(country)) {
+      throw ledgerInputError('client_country_invalid', 'Client country must be a two-letter country code.');
+    }
+    const preferredLanguage = normalizeText(
+      payload.preferredLanguage ?? payload.language ?? current.preferredLanguage,
+      'nl'
+    ).toLowerCase();
+    if (!/^[a-z]{2}(?:-[a-z]{2})?$/.test(preferredLanguage)) {
+      throw ledgerInputError('client_language_invalid', 'Client language must be a two-letter language code with an optional region.');
+    }
+    const vatNumber = normalizeText(payload.vatNumber ?? payload.vat_number ?? current.vatNumber, '').toUpperCase();
+    const registrationNumber = normalizeText(
+      payload.registrationNumber ?? payload.registration_number ?? payload.data?.registrationNumber ?? currentData.registrationNumber,
+      ''
+    ).toUpperCase();
+    const postalCode = normalizeText(
+      payload.postalCode ?? payload.postal_code ?? payload.data?.postalCode ?? currentData.postalCode,
+      ''
+    ).toUpperCase();
+    const electronicAddressScheme = normalizeText(
+      payload.electronicAddressScheme
+        ?? payload.electronic_address_scheme
+        ?? payload.data?.electronicAddressScheme
+        ?? currentData.electronicAddressScheme,
+      ''
+    );
+    const electronicAddress = normalizeText(
+      payload.electronicAddress
+        ?? payload.electronic_address
+        ?? payload.data?.electronicAddress
+        ?? currentData.electronicAddress,
+      ''
+    );
+    if (Boolean(electronicAddressScheme) !== Boolean(electronicAddress)) {
+      throw ledgerInputError(
+        'client_electronic_address_incomplete',
+        'Client electronic address scheme and address must be retained together.'
+      );
+    }
+    if (electronicAddressScheme && !/^[0-9A-Za-z:._-]{2,20}$/.test(electronicAddressScheme)) {
+      throw ledgerInputError('client_electronic_scheme_invalid', 'Client electronic address scheme contains unsupported characters.');
+    }
+    if (electronicAddress.length > 120) {
+      throw ledgerInputError('client_electronic_address_invalid', 'Client electronic address cannot exceed 120 characters.');
+    }
+    const clientType = normalizeStatus(
+      payload.clientType ?? payload.client_type ?? payload.data?.clientType ?? currentData.clientType,
+      company ? 'business' : 'consumer'
+    );
+    if (!['business', 'consumer', 'public', 'property_manager', 'other'].includes(clientType)) {
+      throw ledgerInputError('client_type_invalid', 'Client type must be business, consumer, public, property manager, or other.');
+    }
+    const notes = normalizeText(payload.notes ?? payload.note ?? payload.data?.notes ?? currentData.notes, '');
+    if (notes.length > 4000) {
+      throw ledgerInputError('client_notes_invalid', 'Client notes cannot exceed 4,000 characters.');
+    }
+    if (address.length > 300 || city.length > 120 || postalCode.length > 30
+      || vatNumber.length > 80 || registrationNumber.length > 80) {
+      throw ledgerInputError('client_profile_invalid', 'One or more client identity or address fields exceed their supported length.');
+    }
+    return {
+      name,
+      company: company || null,
+      email: email || null,
+      phone: phone || null,
+      address: address || null,
+      city: city || null,
+      country,
+      vatNumber: vatNumber || null,
+      preferredLanguage,
+      data: {
+        ...currentData,
+        ...(payload.data || {}),
+        source: normalizeText(payload.source ?? payload.data?.source ?? currentData.source, 'manual'),
+        clientType,
+        billingEmail: billingEmail || null,
+        registrationNumber: registrationNumber || null,
+        postalCode: postalCode || null,
+        electronicAddressScheme: electronicAddressScheme || null,
+        electronicAddress: electronicAddress || null,
+        notes: notes || null
+      }
+    };
+  }
+
+  clientElectronicAddress(client = {}) {
+    const scheme = normalizeText(client.data?.electronicAddressScheme, '');
+    const id = normalizeText(client.data?.electronicAddress, '');
+    if (scheme && id) return { scheme, id, derived: false };
+    const registrationNumber = normalizeText(client.data?.registrationNumber, '');
+    if (normalizeText(client.country, 'NL').toUpperCase() === 'NL' && registrationNumber) {
+      return { scheme: '0106', id: registrationNumber, derived: true };
+    }
+    return { scheme: '', id: '', derived: false };
+  }
+
+  assessClientReadiness(client = {}) {
+    const contactMissing = [];
+    const invoiceMissing = [];
+    const structuredMissing = [];
+    const add = (target, code, field, label) => target.push({ code, field, label });
+    const country = normalizeText(client.country, '').toUpperCase();
+    const endpoint = this.clientElectronicAddress(client);
+    if (!normalizeText(client.email) && !normalizeText(client.phone)) {
+      add(contactMissing, 'client_contact_missing', 'email', 'Client email or phone');
+    }
+    if (!normalizeText(client.company || client.name)) add(invoiceMissing, 'buyer_name_missing', 'company', 'Buyer legal name');
+    if (!normalizeText(client.address)) add(invoiceMissing, 'buyer_address_missing', 'address', 'Buyer street address');
+    if (!normalizeText(client.city)) add(invoiceMissing, 'buyer_city_missing', 'city', 'Buyer city');
+    if (!/^[A-Z]{2}$/.test(country)) add(invoiceMissing, 'buyer_country_missing', 'country', 'Buyer country code');
+    structuredMissing.push(...invoiceMissing);
+    if (!normalizeText(client.data?.postalCode)) {
+      add(structuredMissing, 'buyer_postal_code_missing', 'postalCode', 'Buyer postal code');
+    }
+    if (!endpoint.scheme || !endpoint.id) {
+      add(structuredMissing, 'buyer_endpoint_missing', 'electronicAddress', 'Buyer electronic address');
+    }
+    if (country === 'NL' && endpoint.scheme && !['0106', '0190'].includes(endpoint.scheme)) {
+      add(structuredMissing, 'buyer_legal_scheme_invalid', 'electronicAddressScheme', 'Buyer KVK or OIN electronic address');
+    }
+    const contactReady = contactMissing.length === 0;
+    const invoiceReady = invoiceMissing.length === 0;
+    const structuredInvoiceReady = structuredMissing.length === 0;
+    return {
+      status: contactReady && invoiceReady ? 'ready' : 'incomplete',
+      contactReady,
+      invoiceReady,
+      structuredInvoiceReady,
+      endpoint,
+      missing: {
+        contact: contactMissing,
+        invoice: invoiceMissing,
+        structuredInvoice: structuredMissing
+      }
+    };
+  }
+
+  upsertClient(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const id = normalizeText(options.id || payload.id, makeId('client'));
+      const beforeRow = this.db.prepare('SELECT * FROM clients WHERE id = ?').get(id);
+      const before = beforeRow ? this.mapClient(beforeRow) : null;
+      const profile = this.normalizeClientProfile(payload, before);
+      const duplicateRows = this.db.prepare(`
+        SELECT * FROM clients
+        WHERE id <> ?
+          AND (
+            (? <> '' AND lower(COALESCE(email, '')) = lower(?))
+            OR (? <> '' AND lower(COALESCE(company, '')) = lower(?))
+            OR (? = '' AND ? = '' AND lower(name) = lower(?) AND COALESCE(phone, '') = ?)
+          )
+        ORDER BY created_at ASC
+      `).all(
+        id,
+        profile.email || '', profile.email || '',
+        profile.company || '', profile.company || '',
+        profile.email || '', profile.company || '', profile.name, profile.phone || ''
+      );
+      const identifierDuplicate = (profile.data.registrationNumber || profile.data.electronicAddress)
+        ? this.db.prepare('SELECT id, data_json FROM clients WHERE id <> ?').all(id).find(row => {
+            const data = fromJson(row.data_json, {});
+            return (profile.data.registrationNumber
+              && normalizeText(data.registrationNumber, '').toUpperCase() === profile.data.registrationNumber)
+              || (profile.data.electronicAddress
+                && normalizeText(data.electronicAddress, '').toUpperCase() === profile.data.electronicAddress.toUpperCase()
+                && normalizeText(data.electronicAddressScheme, '') === profile.data.electronicAddressScheme);
+          })
+        : null;
+      const duplicate = duplicateRows[0] || identifierDuplicate;
+      if (duplicate) {
+        const error = ledgerInputError('client_duplicate', 'A client with this email, company, registration, electronic address, or matching contact identity already exists.', {
+          existingClientId: duplicate.id
+        });
+        error.statusCode = 409;
+        throw error;
+      }
+      const timestamp = nowIso();
+      if (beforeRow) {
+        this.db.prepare(`
+          UPDATE clients
+          SET name = ?, company = ?, email = ?, phone = ?, address = ?, city = ?, country = ?, vat_number = ?,
+            preferred_language = ?, data_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          profile.name,
+          profile.company,
+          profile.email,
+          profile.phone,
+          profile.address,
+          profile.city,
+          profile.country,
+          profile.vatNumber,
+          profile.preferredLanguage,
+          toJson(profile.data),
+          timestamp,
+          id
+        );
+      } else {
+        this.db.prepare(`
+          INSERT INTO clients (id, name, company, email, phone, address, city, country, vat_number, preferred_language, data_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          profile.name,
+          profile.company,
+          profile.email,
+          profile.phone,
+          profile.address,
+          profile.city,
+          profile.country,
+          profile.vatNumber,
+          profile.preferredLanguage,
+          toJson(profile.data),
+          timestamp,
+          timestamp
+        );
+      }
+      const after = this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(id));
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'client',
+          entityId: id,
+          action: before ? 'update_client' : 'create_client',
+          actor: options.actor || 'Contractor.AI',
+          before,
+          after,
+          metadata: { externalCommitments: 0 }
+        });
+      }
+      return { ...after, readiness: this.assessClientReadiness(after) };
+    });
+  }
+
+  createClient(payload = {}, options = {}) {
+    return this.upsertClient(payload, options);
+  }
+
   findOrCreateClient(payload = {}, options = {}) {
     const name = normalizeText(payload.name || payload.client || payload.clientName || payload.company, 'Unknown client');
-    const email = normalizeText(payload.email || payload.client_email, '');
+    const email = normalizeText(payload.email || payload.client_email, '').toLowerCase();
     const phone = normalizeText(payload.phone || payload.client_phone, '');
-    const existing = this.db.prepare(`
+    const company = normalizeText(payload.company, '');
+    const registrationNumber = normalizeText(
+      payload.registrationNumber || payload.registration_number || payload.data?.registrationNumber,
+      ''
+    ).toUpperCase();
+    let existing = this.db.prepare(`
       SELECT * FROM clients
-      WHERE lower(name) = lower(?)
-        AND (COALESCE(email, '') = ? OR ? = '')
-        AND (COALESCE(phone, '') = ? OR ? = '')
+      WHERE (? <> '' AND lower(COALESCE(email, '')) = lower(?))
+        OR (? <> '' AND lower(COALESCE(company, '')) = lower(?))
+        OR (? <> '' AND COALESCE(phone, '') = ?)
+        OR (? = '' AND ? = '' AND ? = '' AND lower(name) = lower(?))
       ORDER BY created_at ASC
       LIMIT 1
-    `).get(name, email, email, phone, phone);
+    `).get(email, email, company, company, phone, phone, email, company, phone, name);
+    if (!existing && registrationNumber) {
+      existing = this.db.prepare('SELECT * FROM clients ORDER BY created_at ASC').all().find(row => (
+        normalizeText(fromJson(row.data_json, {}).registrationNumber, '').toUpperCase() === registrationNumber
+      ));
+    }
     if (existing) {
       return this.mapClient(existing);
     }
-
-    const id = makeId('client');
-    const timestamp = nowIso();
-    const record = {
-      id,
-      name,
-      company: payload.company || null,
-      email: email || null,
-      phone: phone || null,
-      address: payload.address || payload.location || null,
-      city: payload.city || null,
-      country: normalizeText(payload.country, 'NL'),
-      vatNumber: payload.vatNumber || payload.vat_number || null,
-      preferredLanguage: normalizeText(payload.preferredLanguage || payload.language, 'nl'),
-      data: { source: payload.source || 'manual', notes: payload.notes || null },
-      createdAt: timestamp,
-      updatedAt: timestamp
-    };
-
-    this.db.prepare(`
-      INSERT INTO clients (id, name, company, email, phone, address, city, country, vat_number, preferred_language, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      record.id,
-      record.name,
-      record.company,
-      record.email,
-      record.phone,
-      record.address,
-      record.city,
-      record.country,
-      record.vatNumber,
-      record.preferredLanguage,
-      toJson(record.data),
-      record.createdAt,
-      record.updatedAt
-    );
-
-    if (options.audit !== false) {
-      this.audit({ entityType: 'client', entityId: id, action: 'create_client', actor: options.actor || 'Contractor.AI', after: record });
-    }
-    return record;
+    return this.upsertClient({ ...payload, name }, options);
   }
 
   listClients(filters = {}) {
@@ -4163,7 +4399,116 @@ class ContractorOperatingLedger {
       ORDER BY updated_at DESC
       LIMIT ?
     `).all(search, `%${search}%`, limit);
-    return rows.map(row => this.mapClient(row));
+    const clients = rows.map(row => this.mapClient(row));
+    if (!clients.length) return [];
+    const clientIds = clients.map(client => client.id);
+    const clientIdSet = new Set(clientIds);
+    const placeholders = clientIds.map(() => '?').join(', ');
+    const jobs = this.db.prepare(`
+      SELECT id, client_id, title, status, contract_value, updated_at
+      FROM jobs
+      WHERE client_id IN (${placeholders})
+      ORDER BY updated_at DESC
+    `).all(...clientIds);
+    const opportunities = this.db.prepare(`
+      SELECT id, client_id, stage, estimated_value, updated_at
+      FROM opportunities
+      WHERE client_id IN (${placeholders})
+    `).all(...clientIds);
+    const invoices = this.db.prepare(`
+      SELECT invoices.*, jobs.client_id
+      FROM invoices
+      JOIN jobs ON jobs.id = invoices.job_id
+      WHERE jobs.client_id IN (${placeholders})
+    `).all(...clientIds);
+    const invoiceIds = invoices.map(invoice => invoice.id);
+    const invoiceIdSet = new Set(invoiceIds);
+    const invoicePlaceholders = invoiceIds.map(() => '?').join(', ');
+    const payments = invoiceIds.length
+      ? this.db.prepare(`SELECT * FROM payments WHERE invoice_id IN (${invoicePlaceholders})`).all(...invoiceIds)
+      : [];
+    const creditNotes = invoiceIds.length
+      ? this.db.prepare(`SELECT * FROM credit_notes WHERE invoice_id IN (${invoicePlaceholders})`).all(...invoiceIds)
+      : [];
+    const jobsByClient = new Map(clientIds.map(id => [id, []]));
+    const opportunitiesByClient = new Map(clientIds.map(id => [id, []]));
+    const invoicesByClient = new Map(clientIds.map(id => [id, []]));
+    const paymentsByInvoice = new Map(invoiceIds.map(id => [id, []]));
+    const creditsByInvoice = new Map(invoiceIds.map(id => [id, []]));
+    for (const job of jobs) if (clientIdSet.has(job.client_id)) jobsByClient.get(job.client_id).push(job);
+    for (const opportunity of opportunities) if (clientIdSet.has(opportunity.client_id)) opportunitiesByClient.get(opportunity.client_id).push(opportunity);
+    for (const invoice of invoices) if (clientIdSet.has(invoice.client_id)) invoicesByClient.get(invoice.client_id).push(invoice);
+    for (const payment of payments) if (invoiceIdSet.has(payment.invoice_id)) paymentsByInvoice.get(payment.invoice_id).push(payment);
+    for (const credit of creditNotes) if (invoiceIdSet.has(credit.invoice_id)) creditsByInvoice.get(credit.invoice_id).push(credit);
+    const receivableStatuses = new Set(['sent', 'submitted', 'partially_paid', 'partially_settled']);
+    const openOpportunityStatuses = new Set(['new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating']);
+    return clients.map(client => {
+      const clientJobs = jobsByClient.get(client.id) || [];
+      const clientOpportunities = opportunitiesByClient.get(client.id) || [];
+      const clientInvoices = invoicesByClient.get(client.id) || [];
+      let outstandingReceivable = 0;
+      for (const invoice of clientInvoices) {
+        if (!receivableStatuses.has(normalizeStatus(invoice.status, 'draft'))) continue;
+        const received = (paymentsByInvoice.get(invoice.id) || []).reduce((sum, payment) => {
+          const status = normalizeStatus(payment.status, '');
+          return ['paid', 'received', 'settled', 'written_off'].includes(status)
+            ? roundMoney(sum + normalizeNumber(payment.amount, 0))
+            : sum;
+        }, 0);
+        const credited = (creditsByInvoice.get(invoice.id) || []).reduce((sum, credit) => {
+          const status = normalizeStatus(credit.status, 'draft');
+          return ['prepared', 'sent', 'delivered', 'issued'].includes(status)
+            ? roundMoney(sum + normalizeNumber(credit.total, 0))
+            : sum;
+        }, 0);
+        outstandingReceivable = roundMoney(
+          outstandingReceivable + Math.max(0, normalizeNumber(invoice.total, 0) - received - credited)
+        );
+      }
+      const activeJobs = clientJobs.filter(job => !INACTIVE_JOB_STATUSES.has(normalizeStatus(job.status, 'intake')));
+      const readiness = this.assessClientReadiness(client);
+      return {
+        ...client,
+        readiness,
+        metrics: {
+          totalJobs: clientJobs.length,
+          activeJobs: activeJobs.length,
+          completedJobs: clientJobs.filter(job => normalizeStatus(job.status) === 'completed').length,
+          openOpportunities: clientOpportunities.filter(opportunity => openOpportunityStatuses.has(normalizeOpportunityStage(opportunity.stage))).length,
+          acceptedContractValue: roundMoney(clientJobs.reduce((sum, job) => sum + normalizeNumber(job.contract_value, 0), 0)),
+          outstandingReceivable
+        },
+        latestJobs: clientJobs.slice(0, 3).map(job => ({
+          id: job.id,
+          title: job.title,
+          status: job.status,
+          updatedAt: job.updated_at
+        }))
+      };
+    });
+  }
+
+  summarizeClients(clients = []) {
+    return clients.reduce((summary, client) => {
+      summary.total += 1;
+      if (client.readiness?.contactReady) summary.contactReady += 1;
+      if (client.readiness?.invoiceReady) summary.invoiceReady += 1;
+      if (client.readiness?.structuredInvoiceReady) summary.structuredInvoiceReady += 1;
+      summary.activeJobs += normalizeNumber(client.metrics?.activeJobs, 0);
+      summary.openOpportunities += normalizeNumber(client.metrics?.openOpportunities, 0);
+      summary.outstandingReceivable = roundMoney(
+        summary.outstandingReceivable + normalizeNumber(client.metrics?.outstandingReceivable, 0)
+      );
+      return summary;
+    }, {
+      total: 0,
+      contactReady: 0,
+      invoiceReady: 0,
+      structuredInvoiceReady: 0,
+      activeJobs: 0,
+      openOpportunities: 0,
+      outstandingReceivable: 0
+    });
   }
 
   requireOpportunity(opportunityId) {
@@ -4667,37 +5012,14 @@ class ContractorOperatingLedger {
   }
 
   updateClient(clientId, payload = {}, options = {}) {
-    const before = this.db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId);
+    const before = this.db.prepare('SELECT id FROM clients WHERE id = ?').get(clientId);
     if (!before) {
       const error = new Error('Client not found');
       error.statusCode = 404;
+      error.code = 'client_not_found';
       throw error;
     }
-    const timestamp = nowIso();
-    const data = { ...fromJson(before.data_json), ...(payload.data || {}) };
-    this.db.prepare(`
-      UPDATE clients
-      SET name = ?, company = ?, email = ?, phone = ?, address = ?, city = ?, country = ?, vat_number = ?, preferred_language = ?, data_json = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      normalizeText(payload.name ?? before.name, before.name),
-      payload.company ?? before.company,
-      payload.email ?? payload.client_email ?? before.email,
-      payload.phone ?? payload.client_phone ?? before.phone,
-      payload.address ?? payload.location ?? before.address,
-      payload.city ?? before.city,
-      normalizeText(payload.country ?? before.country, 'NL'),
-      payload.vatNumber ?? payload.vat_number ?? before.vat_number,
-      normalizeText(payload.preferredLanguage ?? payload.language ?? before.preferred_language, 'nl'),
-      toJson(data),
-      timestamp,
-      clientId
-    );
-    const after = this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId));
-    if (options.audit !== false) {
-      this.audit({ entityType: 'client', entityId: clientId, action: 'update_client', actor: options.actor || 'Contractor.AI', before: this.mapClient(before), after });
-    }
-    return after;
+    return this.upsertClient(payload, { ...options, id: clientId });
   }
 
   assessTradePartnerCompliance(partner, options = {}) {
@@ -14391,6 +14713,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (normalized.length > maxLength) throw ledgerInputError('invoice_buyer_invalid', `${label} cannot exceed ${maxLength} characters.`);
         return normalized;
       };
+      const clientEndpoint = this.clientElectronicAddress(client || {});
       const buyer = {
         id: client?.id || null,
         legalName: field(payload.buyerLegalName ?? payload.buyer_legal_name ?? client?.company ?? client?.name, 'Buyer legal name'),
@@ -14398,8 +14721,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         email: field(payload.buyerEmail ?? payload.buyer_email ?? client?.email, 'Buyer email', 254).toLowerCase(),
         vatNumber: field(payload.buyerVatNumber ?? payload.buyer_vat_number ?? client?.vatNumber, 'Buyer VAT number', 80).toUpperCase(),
         registrationNumber: field(payload.buyerRegistrationNumber ?? payload.buyer_registration_number ?? clientData.registrationNumber, 'Buyer registration number', 80).toUpperCase(),
-        endpointScheme: field(payload.buyerEndpointScheme ?? payload.buyer_endpoint_scheme ?? clientData.electronicAddressScheme, 'Buyer electronic address scheme', 20),
-        endpointId: field(payload.buyerEndpointId ?? payload.buyer_endpoint_id ?? clientData.electronicAddress, 'Buyer electronic address', 120),
+        endpointScheme: field(payload.buyerEndpointScheme ?? payload.buyer_endpoint_scheme ?? clientEndpoint.scheme, 'Buyer electronic address scheme', 20),
+        endpointId: field(payload.buyerEndpointId ?? payload.buyer_endpoint_id ?? clientEndpoint.id, 'Buyer electronic address', 120),
         address: field(payload.buyerAddress ?? payload.buyer_address ?? client?.address ?? job.address, 'Buyer street address', 300),
         postalCode: field(payload.buyerPostalCode ?? payload.buyer_postal_code ?? clientData.postalCode, 'Buyer postal code', 30).toUpperCase(),
         city: field(payload.buyerCity ?? payload.buyer_city ?? client?.city ?? job.city, 'Buyer city', 120),

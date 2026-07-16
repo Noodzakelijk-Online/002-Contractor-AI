@@ -3467,23 +3467,31 @@ app.post('/api/ledger/tools/:id/retirement', requestToolRetirement);
 app.delete('/api/ledger/tools/:id', requestToolRetirement);
 
 app.get('/api/ledger/clients', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    clients: operatingLedger.listClients(req.query || {})
-  }));
+  return handleLedgerRequest(req, res, () => {
+    const clients = operatingLedger.listClients(req.query || {});
+    return {
+      success: true,
+      clients,
+      summary: operatingLedger.summarizeClients(clients)
+    };
+  });
 });
 
 app.post('/api/ledger/clients', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    client: operatingLedger.findOrCreateClient(req.body || {}, { actor: req.body?.actor || 'dashboard' })
+    client: operatingLedger.createClient(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
   }), 201);
 });
 
 app.put('/api/ledger/clients/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    client: operatingLedger.updateClient(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
+    client: operatingLedger.updateClient(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
   }));
 });
 

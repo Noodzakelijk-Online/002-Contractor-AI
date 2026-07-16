@@ -403,6 +403,40 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     const officeClients = await request(baseUrl, '/api/ledger/client-success?limit=10', { headers: officeHeaders });
     assert.equal(officeClients.response.status, 200);
 
+    const officeClientRecord = await request(baseUrl, '/api/ledger/clients', {
+      method: 'POST',
+      headers: officeHeaders,
+      body: JSON.stringify({
+        name: 'Role governed client',
+        company: 'Role Governed Client BV',
+        email: 'role-client@example.test',
+        address: 'Role Street 10',
+        postalCode: '3511 AA',
+        city: 'Utrecht',
+        registrationNumber: '12345678',
+        actor: 'spoofed-owner'
+      })
+    });
+    assert.equal(officeClientRecord.response.status, 201);
+    assert.equal(officeClientRecord.body.client.readiness.structuredInvoiceReady, true);
+
+    const officeClientDirectory = await request(baseUrl, '/api/ledger/clients?search=Role%20Governed&limit=10', { headers: officeHeaders });
+    assert.equal(officeClientDirectory.response.status, 200);
+    assert.equal(officeClientDirectory.body.clients[0].id, officeClientRecord.body.client.id);
+    const approverClientDirectory = await request(baseUrl, '/api/ledger/clients?search=Role%20Governed&limit=10', { headers: approverHeaders });
+    assert.equal(approverClientDirectory.response.status, 200);
+    const deniedFieldClientDirectory = await request(baseUrl, '/api/ledger/clients?limit=10', { headers: fieldHeaders });
+    assert.equal(deniedFieldClientDirectory.response.status, 403);
+    assert.equal(deniedFieldClientDirectory.body.error.code, 'insufficient_role');
+    const governedClientAudit = await request(
+      baseUrl,
+      `/api/ledger/audit?entityId=${encodeURIComponent(officeClientRecord.body.client.id)}&limit=10`,
+      { headers: ownerHeaders }
+    );
+    assert.ok(governedClientAudit.body.events.some(event => (
+      event.action === 'create_client' && event.actor === 'role:office_operator'
+    )));
+
     const officeAssurance = await request(baseUrl, '/api/ledger/field-assurance?limit=10', { headers: officeHeaders });
     assert.equal(officeAssurance.response.status, 200);
 

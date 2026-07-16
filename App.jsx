@@ -535,6 +535,29 @@ function emptyEquipmentMaintenanceDraft() {
   }
 }
 
+function emptyClientDraft(client = null) {
+  const data = client?.data || {}
+  return {
+    id: client?.id || '',
+    name: client?.name || '',
+    company: client?.company || '',
+    clientType: data.clientType || (client?.company ? 'business' : 'consumer'),
+    email: client?.email || '',
+    billingEmail: data.billingEmail || '',
+    phone: client?.phone || '',
+    address: client?.address || '',
+    postalCode: data.postalCode || '',
+    city: client?.city || '',
+    country: client?.country || 'NL',
+    registrationNumber: data.registrationNumber || '',
+    vatNumber: client?.vatNumber || '',
+    electronicAddressScheme: data.electronicAddressScheme || '',
+    electronicAddress: data.electronicAddress || '',
+    preferredLanguage: client?.preferredLanguage || 'nl',
+    notes: data.notes || '',
+  }
+}
+
 function organizationDraft(profile = {}) {
   return {
     legalName: profile.legalName || '',
@@ -823,7 +846,16 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'finance') return { finance: await api('/api/ledger/finance?limit=100') }
-  if (section === 'clients') return { clients: await api('/api/ledger/client-success?limit=100') }
+  if (section === 'clients') {
+    const [clientSuccess, directory] = await Promise.all([
+      api('/api/ledger/client-success?limit=100'),
+      api('/api/ledger/clients?limit=500'),
+    ])
+    return {
+      clients: clientSuccess,
+      clientDirectory: directory,
+    }
+  }
   if (section === 'field') {
     const [field, workers] = await Promise.all([
       api('/api/ledger/field-assurance?limit=100'),
@@ -2731,6 +2763,148 @@ function CommercialControl({
         </section>
       </div>
     </section>
+  )
+}
+
+function ClientDirectoryWorkspace({ directory, canCoordinate, submitting, onCreate, onEdit, onOpen }) {
+  const [query, setQuery] = useState('')
+  const clients = directory?.clients || EMPTY_LIST
+  const summary = directory?.summary || {}
+  const normalizedQuery = query.trim().toLowerCase()
+  const rows = normalizedQuery
+    ? clients.filter((client) => [
+        client.name,
+        client.company,
+        client.email,
+        client.phone,
+        client.address,
+        client.city,
+        client.data?.billingEmail,
+        client.data?.registrationNumber,
+      ].some((value) => String(value || '').toLowerCase().includes(normalizedQuery)))
+    : clients
+
+  return (
+    <section className="panel page-panel client-directory" data-testid="client-directory">
+      <div className="panel-heading client-directory-heading">
+        <div>
+          <h2>Client directory</h2>
+          <p>Maintain one retained identity for project communication, commercial packages, invoicing, and aftercare.</p>
+        </div>
+        {canCoordinate ? (
+          <button type="button" className="primary-button" disabled={submitting} onClick={onCreate}>
+            <Plus size={16} />
+            New client
+          </button>
+        ) : <span className="count-badge">{clients.length}</span>}
+      </div>
+      <div className="client-directory-summary" aria-label="Client directory summary">
+        <div><span>Clients</span><strong>{summary.total || 0}</strong></div>
+        <div><span>Contact ready</span><strong>{summary.contactReady || 0}</strong></div>
+        <div><span>Invoice ready</span><strong>{summary.invoiceReady || 0}</strong></div>
+        <div><span>Peppol profile</span><strong>{summary.structuredInvoiceReady || 0}</strong></div>
+        <div><span>Active jobs</span><strong>{summary.activeJobs || 0}</strong></div>
+        <div><span>Receivable</span><strong>{currency.format(summary.outstandingReceivable || 0)}</strong></div>
+      </div>
+      <div className="client-directory-filter">
+        <Search size={16} aria-hidden="true" />
+        <label htmlFor="client-directory-search">Search clients</label>
+        <input
+          id="client-directory-search"
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Name, company, email, city, or registration"
+        />
+        <span>{rows.length} shown</span>
+      </div>
+      <div className="client-directory-list">
+        {rows.map((client) => {
+          const missing = client.readiness?.missing?.structuredInvoice || EMPTY_LIST
+          const latestJob = client.latestJobs?.[0]
+          return (
+            <article className="client-directory-row" key={client.id} data-testid={`client-directory-${client.id}`}>
+              <div className="client-directory-identity">
+                <div className="client-directory-title">
+                  <span className="client-directory-icon"><Building2 size={17} /></span>
+                  <div>
+                    <h3>{client.company || client.name}</h3>
+                    <p>{client.company ? client.name : formatStatus(client.data?.clientType || 'consumer')}</p>
+                  </div>
+                </div>
+                <div className="client-directory-contact">
+                  <span>{client.email || client.data?.billingEmail || 'No email retained'}</span>
+                  <span>{client.phone || 'No phone retained'}</span>
+                  <span>{[client.address, client.data?.postalCode, client.city, client.country].filter(Boolean).join(', ') || 'No address retained'}</span>
+                </div>
+                <div className="client-flags">
+                  <span className={client.readiness?.contactReady ? 'tag tag-green' : 'tag tag-amber'}>Contact {client.readiness?.contactReady ? 'ready' : 'incomplete'}</span>
+                  <span className={client.readiness?.invoiceReady ? 'tag tag-green' : 'tag tag-amber'}>Invoice {client.readiness?.invoiceReady ? 'ready' : 'incomplete'}</span>
+                  <span className={client.readiness?.structuredInvoiceReady ? 'tag tag-green' : 'tag tag-amber'}>Peppol {client.readiness?.structuredInvoiceReady ? 'ready' : 'incomplete'}</span>
+                </div>
+                {!client.readiness?.structuredInvoiceReady && missing.length ? (
+                  <small className="client-directory-missing">Missing: {missing.slice(0, 3).map((item) => item.label).join(', ')}{missing.length > 3 ? ` +${missing.length - 3}` : ''}</small>
+                ) : null}
+              </div>
+              <div className="client-directory-metrics" aria-label={`Operating context for ${client.company || client.name}`}>
+                <div><span>Active jobs</span><strong>{client.metrics?.activeJobs || 0}</strong></div>
+                <div><span>Pipeline</span><strong>{client.metrics?.openOpportunities || 0}</strong></div>
+                <div><span>Contract value</span><strong>{currency.format(client.metrics?.acceptedContractValue || 0)}</strong></div>
+                <div><span>Receivable</span><strong>{currency.format(client.metrics?.outstandingReceivable || 0)}</strong></div>
+              </div>
+              <div className="client-directory-actions">
+                {latestJob ? (
+                  <button type="button" className="secondary-button" onClick={() => onOpen(latestJob)}>
+                    <ArrowUpRight size={15} />
+                    Open latest job
+                  </button>
+                ) : null}
+                {canCoordinate ? (
+                  <button type="button" className="secondary-button" disabled={submitting} onClick={() => onEdit(client)}>
+                    <Pencil size={15} />
+                    Edit client
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          )
+        })}
+        {!rows.length ? (
+          <Empty
+            title={clients.length ? 'No matching clients' : 'No retained clients'}
+            detail={clients.length ? 'Change the directory search to review another retained client.' : 'Create a client identity before preparing commercial or invoicing records.'}
+          />
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
+function ClientsWorkspace({ directory, onCreateClient, onEditClient, ...props }) {
+  const [view, setView] = useState('work')
+  const workCount = props.clients?.jobs?.length || 0
+  const directoryCount = directory?.clients?.length || 0
+  return (
+    <>
+      <div className="client-view-switch" role="tablist" aria-label="Client workspace view">
+        <button type="button" role="tab" aria-selected={view === 'work'} className={view === 'work' ? 'active' : ''} onClick={() => setView('work')}>
+          Client work <span>{workCount}</span>
+        </button>
+        <button type="button" role="tab" aria-selected={view === 'directory'} className={view === 'directory' ? 'active' : ''} onClick={() => setView('directory')}>
+          Directory <span>{directoryCount}</span>
+        </button>
+      </div>
+      {view === 'directory' ? (
+        <ClientDirectoryWorkspace
+          directory={directory}
+          canCoordinate={props.canCoordinate}
+          submitting={props.submitting}
+          onCreate={onCreateClient}
+          onEdit={onEditClient}
+          onOpen={props.onOpen}
+        />
+      ) : <ClientSuccessWorkspace {...props} />}
+    </>
   )
 }
 
@@ -5495,6 +5669,8 @@ function App() {
   const [invoiceDraft, setInvoiceDraft] = useState(() => emptyInvoiceDraft())
   const [financeAction, setFinanceAction] = useState(null)
   const [financeActionDraft, setFinanceActionDraft] = useState(emptyFinanceActionDraft)
+  const [clientEditor, setClientEditor] = useState(null)
+  const [clientDraft, setClientDraft] = useState(() => emptyClientDraft())
   const [clientAction, setClientAction] = useState(null)
   const [clientActionNotes, setClientActionNotes] = useState('')
   const [clientActionOption, setClientActionOption] = useState('')
@@ -8934,6 +9110,53 @@ function App() {
     }
   }
 
+  function openClientEditor(client = null) {
+    if (!canCoordinate) return
+    setClientEditor({ mode: client ? 'edit' : 'create', client })
+    setClientDraft(emptyClientDraft(client))
+  }
+
+  function closeClientEditor() {
+    setClientEditor(null)
+    setClientDraft(emptyClientDraft())
+  }
+
+  async function submitClientEditor(event) {
+    event.preventDefault()
+    if (!canCoordinate || !clientEditor) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const { id, ...payload } = clientDraft
+      const route = id ? `/api/ledger/clients/${encodeURIComponent(id)}` : '/api/ledger/clients'
+      const result = await api(route, {
+        method: id ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      })
+      const patch = await loadSectionPatch('clients', resourceViewRef.current, fieldScoped)
+      setData((current) => current ? {
+        ...current,
+        ...patch,
+        jobs: (current.jobs || EMPTY_LIST).map((job) => job.clientId === result.client.id
+          ? {
+              ...job,
+              clientName: result.client.name,
+              clientEmail: result.client.email,
+              clientPhone: result.client.phone,
+            }
+          : job),
+      } : current)
+      notify(id
+        ? 'Client identity updated in the ledger. Existing commercial snapshots remain immutable.'
+        : 'Client identity retained. No message, project, quote, or invoice was created.')
+      closeClientEditor()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function prepareClientCloseout(item) {
     if (!item?.jobId || !item.flags?.closeoutReady || item.flags?.approvalRequired) return
     setSubmitting(true)
@@ -9803,8 +10026,9 @@ function App() {
             ) : null}
 
             {section === 'clients' && capabilities.clientSuccess ? (
-              <ClientSuccessWorkspace
+              <ClientsWorkspace
                 clients={data.clients}
+                directory={data.clientDirectory}
                 jobs={jobs}
                 canCoordinate={canCoordinate}
                 canApprove={capabilities.approvals === true}
@@ -9816,6 +10040,8 @@ function App() {
                 onLifecycle={openClientLifecycle}
                 onOpenApprovals={openApprovals}
                 onOpen={openJobWorkspace}
+                onCreateClient={() => openClientEditor()}
+                onEditClient={openClientEditor}
               />
             ) : null}
 
@@ -11774,6 +12000,126 @@ function App() {
                 >
                   <ShieldCheck size={16} />
                   {submitting ? 'Resolving...' : approvalReview.status === 'approved' ? 'Confirm approval' : 'Confirm rejection'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {clientEditor ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="modal client-editor-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="client-editor-title"
+            data-testid="client-editor-modal"
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Retained client identity</p>
+                <h2 id="client-editor-title">{clientEditor.mode === 'edit' ? 'Edit client' : 'New client'}</h2>
+                <p>Contact, billing, and electronic invoicing data used by future controlled records.</p>
+              </div>
+              <button className="icon-button" type="button" aria-label="Close client editor" onClick={closeClientEditor}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitClientEditor}>
+              <div className="form-grid client-editor-form">
+                <label>
+                  Contact name
+                  <input autoFocus required minLength="2" maxLength="160" value={clientDraft.name} onChange={(event) => setClientDraft({ ...clientDraft, name: event.target.value })} />
+                </label>
+                <label>
+                  Client type
+                  <select value={clientDraft.clientType} onChange={(event) => setClientDraft({ ...clientDraft, clientType: event.target.value })}>
+                    <option value="business">Business</option>
+                    <option value="consumer">Consumer</option>
+                    <option value="public">Public body</option>
+                    <option value="property_manager">Property manager</option>
+                    <option value="other">Other</option>
+                  </select>
+                </label>
+                <label className="form-span">
+                  Legal or company name
+                  <input maxLength="200" value={clientDraft.company} onChange={(event) => setClientDraft({ ...clientDraft, company: event.target.value })} />
+                </label>
+                <label>
+                  Contact email
+                  <input type="email" maxLength="254" value={clientDraft.email} onChange={(event) => setClientDraft({ ...clientDraft, email: event.target.value })} />
+                </label>
+                <label>
+                  Billing email
+                  <input type="email" maxLength="254" value={clientDraft.billingEmail} onChange={(event) => setClientDraft({ ...clientDraft, billingEmail: event.target.value })} />
+                </label>
+                <label>
+                  Phone
+                  <input type="tel" maxLength="80" value={clientDraft.phone} onChange={(event) => setClientDraft({ ...clientDraft, phone: event.target.value })} />
+                </label>
+                <label>
+                  Preferred language
+                  <select value={clientDraft.preferredLanguage} onChange={(event) => setClientDraft({ ...clientDraft, preferredLanguage: event.target.value })}>
+                    <option value="nl">Dutch</option>
+                    <option value="en">English</option>
+                    <option value="de">German</option>
+                    <option value="fr">French</option>
+                  </select>
+                </label>
+                <label className="form-span">
+                  Street address
+                  <input maxLength="300" value={clientDraft.address} onChange={(event) => setClientDraft({ ...clientDraft, address: event.target.value })} />
+                </label>
+                <label>
+                  Postal code
+                  <input maxLength="30" value={clientDraft.postalCode} onChange={(event) => setClientDraft({ ...clientDraft, postalCode: event.target.value })} />
+                </label>
+                <label>
+                  City
+                  <input maxLength="120" value={clientDraft.city} onChange={(event) => setClientDraft({ ...clientDraft, city: event.target.value })} />
+                </label>
+                <label>
+                  Country code
+                  <input required minLength="2" maxLength="2" value={clientDraft.country} onChange={(event) => setClientDraft({ ...clientDraft, country: event.target.value.toUpperCase() })} />
+                </label>
+                <label>
+                  KVK / registration number
+                  <input maxLength="80" value={clientDraft.registrationNumber} onChange={(event) => setClientDraft({ ...clientDraft, registrationNumber: event.target.value })} />
+                </label>
+                <label>
+                  VAT number
+                  <input maxLength="80" value={clientDraft.vatNumber} onChange={(event) => setClientDraft({ ...clientDraft, vatNumber: event.target.value })} />
+                </label>
+                <label>
+                  Electronic address scheme
+                  <input maxLength="20" placeholder="0106 for KVK or 0190 for OIN" value={clientDraft.electronicAddressScheme} onChange={(event) => setClientDraft({ ...clientDraft, electronicAddressScheme: event.target.value })} />
+                </label>
+                <label>
+                  Electronic address
+                  <input maxLength="120" value={clientDraft.electronicAddress} onChange={(event) => setClientDraft({ ...clientDraft, electronicAddress: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Internal notes
+                  <textarea maxLength="4000" value={clientDraft.notes} onChange={(event) => setClientDraft({ ...clientDraft, notes: event.target.value })} />
+                </label>
+                <p className="workflow-note form-span">
+                  Saving changes the client master only. Existing quote, invoice, handover, and communication snapshots remain unchanged, and no external action is performed.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeClientEditor}>Cancel</button>
+                <button
+                  className="primary-button"
+                  disabled={
+                    submitting
+                    || clientDraft.name.trim().length < 2
+                    || clientDraft.country.trim().length !== 2
+                    || Boolean(clientDraft.electronicAddressScheme.trim()) !== Boolean(clientDraft.electronicAddress.trim())
+                  }
+                >
+                  <BadgeCheck size={16} />
+                  {submitting ? 'Retaining...' : clientEditor.mode === 'edit' ? 'Update client' : 'Retain client'}
                 </button>
               </div>
             </form>
