@@ -32572,15 +32572,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     const qualificationAssignments = this.db.prepare(`
-      SELECT DISTINCT assignments.id, assignments.job_id, assignments.worker_id, assignments.role,
+      SELECT assignments.id, assignments.job_id, assignments.worker_id, assignments.role,
         assignments.scheduled_start, assignments.scheduled_end, workers.name AS worker_name, jobs.title AS job_title
       FROM assignments
       JOIN workers ON workers.id = assignments.worker_id
       JOIN jobs ON jobs.id = assignments.job_id
-      JOIN job_qualification_requirements requirements ON requirements.job_id = assignments.job_id
-        AND requirements.status IN ('active', 'pending_retirement')
       WHERE ${this.activeAssignmentStatusSql('assignments')}
         AND ${this.operationalJobStatusSql('jobs')}
+        AND EXISTS (
+          SELECT 1 FROM job_qualification_requirements requirements
+          WHERE requirements.job_id = assignments.job_id
+            AND requirements.status IN ('active', 'pending_retirement')
+        )
       ORDER BY assignments.updated_at DESC
       LIMIT 100
     `).all();
