@@ -1540,6 +1540,7 @@ app.get('/api/session', (req, res) => {
         dashboard: !fieldWorker,
         intake: role === 'owner' || role === 'office_operator',
         pipeline: !fieldWorker,
+        schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
         resources: !fieldWorker,
@@ -3630,6 +3631,13 @@ app.post('/api/ledger/weather/assess', (req, res) => {
       dashboard: operatingLedger.dashboardSummary()
     };
   }, 201);
+});
+
+app.get('/api/ledger/schedule', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listPortfolioSchedule(req.query || {})
+  }));
 });
 
 app.post('/api/ledger/schedule/recommend', (req, res) => {

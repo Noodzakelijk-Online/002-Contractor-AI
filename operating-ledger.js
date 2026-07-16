@@ -9989,6 +9989,307 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     `).all(limit).map(row => this.mapScheduleBaseline(row));
   }
 
+  summarizePortfolioSchedule(rows = [], matching = rows.length) {
+    const summary = {
+      total: rows.length,
+      matching,
+      inWindow: 0,
+      conflicts: 0,
+      overdueJobs: 0,
+      overdueTasks: 0,
+      unscheduled: 0,
+      invalidPlans: 0,
+      baselinePending: 0,
+      baselineStale: 0,
+      approvedBaselines: 0,
+      openTasks: 0,
+      criticalTasks: 0,
+      workerConflicts: 0,
+      toolConflicts: 0
+    };
+    for (const row of rows) {
+      if (row.flags?.inWindow) summary.inWindow += 1;
+      if (row.flags?.conflict) summary.conflicts += 1;
+      if (row.flags?.overdue) summary.overdueJobs += 1;
+      if (row.flags?.unscheduled) summary.unscheduled += 1;
+      if (row.flags?.invalidPlan) summary.invalidPlans += 1;
+      if (row.flags?.baselinePending) summary.baselinePending += 1;
+      if (row.flags?.baselineStale) summary.baselineStale += 1;
+      if (row.baseline?.status === 'approved') summary.approvedBaselines += 1;
+      summary.overdueTasks += normalizeNumber(row.counts?.overdueTasks, 0);
+      summary.openTasks += normalizeNumber(row.counts?.openTasks, 0);
+      summary.criticalTasks += normalizeNumber(row.counts?.criticalTasks, 0);
+      summary.workerConflicts += normalizeNumber(row.counts?.workerConflicts, 0);
+      summary.toolConflicts += normalizeNumber(row.counts?.toolConflicts, 0);
+    }
+    return summary;
+  }
+
+  listPortfolioSchedule(filters = {}) {
+    const mode = normalizeStatus(filters.mode || filters.status, 'all');
+    const search = normalizeText(filters.search || filters.q, '').toLowerCase();
+    const limit = safeLimit(filters.limit, 100, 500);
+    const includeArchived = normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
+    const horizonDays = Math.max(1, Math.min(180, Math.round(normalizeNumber(
+      filters.horizonDays || filters.horizon_days,
+      30
+    ))));
+    const referenceAt = normalizeScheduleTimestamp(filters.referenceAt || filters.reference_at || nowIso(), {
+      label: 'Portfolio schedule reference',
+      code: 'portfolio_schedule_reference_invalid'
+    });
+    const referenceMs = Date.parse(referenceAt);
+    const horizonEnd = new Date(referenceMs + horizonDays * 24 * SCHEDULE_HOUR_MS).toISOString();
+    const horizonEndMs = Date.parse(horizonEnd);
+    const closedStatuses = new Set(['completed', 'closed', 'cancelled', 'canceled', 'rejected', 'archived']);
+    const sourceJobs = this.listJobs({ includeArchived, limit: 500 })
+      .filter(job => includeArchived || !closedStatuses.has(normalizeStatus(job.status, 'open')));
+
+    const rows = sourceJobs.map(job => {
+      const basic = {
+        jobId: job.id,
+        jobTitle: job.title,
+        jobStatus: job.status,
+        phase: job.phase,
+        priority: job.priority,
+        riskLevel: job.riskLevel,
+        clientName: job.clientName,
+        address: job.address || job.city || job.region,
+        scheduledStart: job.scheduledStart,
+        scheduledEnd: job.scheduledEnd,
+        targetCompletion: job.targetCompletion,
+        progressPercent: job.progressPercent
+      };
+      try {
+        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const control = detail.scheduleControl || {};
+        const activeBaseline = control.activeBaseline || null;
+        const pendingBaseline = control.pendingBaseline || null;
+        const plannedStart = pendingBaseline?.plannedStart || activeBaseline?.plannedStart
+          || control.plannedStart || detail.scheduledStart || null;
+        const plannedEnd = pendingBaseline?.plannedEnd || activeBaseline?.plannedEnd
+          || control.plannedEnd || detail.scheduledEnd || detail.targetCompletion || null;
+        const recommendation = this.recommendSchedule(job.id, {
+          plannedStart,
+          plannedEnd,
+          referenceAt,
+          horizonDays
+        }, { actor: 'portfolio_schedule', audit: false, detail });
+        const activeTasks = (control.tasks || detail.tasks || [])
+          .filter(task => SCHEDULE_TASK_STATUSES.has(normalizeStatus(task.status, 'open')));
+        const criticalTaskIds = new Set(control.criticalPathTaskIds || []);
+        const taskTimestamp = task => Date.parse(task.plannedEnd || task.dueAt || '');
+        const overdueTasks = activeTasks.filter(task => {
+          const timestamp = taskTimestamp(task);
+          return Number.isFinite(timestamp) && timestamp < referenceMs;
+        });
+        const lookAheadTasks = activeTasks.filter(task => {
+          const start = Date.parse(task.plannedStart || task.dueAt || '');
+          const end = Date.parse(task.plannedEnd || task.dueAt || '');
+          return Number.isFinite(start) && Number.isFinite(end) && end >= referenceMs && start <= horizonEndMs;
+        });
+        const plannedStartMs = Date.parse(plannedStart || '');
+        const plannedEndMs = Date.parse(plannedEnd || '');
+        const inWindow = Number.isFinite(plannedStartMs) && Number.isFinite(plannedEndMs)
+          && plannedEndMs >= referenceMs && plannedStartMs <= horizonEndMs;
+        const jobOverdue = overdueTasks.length > 0
+          || (Number.isFinite(plannedEndMs) && plannedEndMs < referenceMs && normalizeNumber(detail.progressPercent, 0) < 100);
+        const blockers = Array.isArray(recommendation.blockers) ? recommendation.blockers : [];
+        const workerConflictBlockers = blockers.filter(blocker => blocker.type === 'worker_conflict');
+        const toolConflictBlockers = blockers.filter(blocker => blocker.type === 'tool_conflict');
+        const workerConflicts = Math.max(
+          workerConflictBlockers.length,
+          normalizeNumber(recommendation.readiness?.workforce?.conflicts, 0)
+        );
+        const toolConflicts = Math.max(
+          toolConflictBlockers.length,
+          Array.isArray(recommendation.toolConflicts) ? recommendation.toolConflicts.length : 0
+        );
+        const conflict = workerConflicts > 0 || toolConflicts > 0;
+        const baselinePending = Boolean(pendingBaseline);
+        const baselineStale = Boolean(control.baselineStale);
+        const unscheduled = !control.ready || !plannedStart || !plannedEnd;
+        const scheduleStatus = conflict
+          ? 'conflict'
+          : jobOverdue
+            ? 'overdue'
+            : baselineStale
+              ? 'baseline_stale'
+              : baselinePending
+                ? 'baseline_pending'
+                : unscheduled
+                  ? 'unscheduled'
+                  : inWindow
+                    ? 'in_window'
+                    : 'upcoming';
+        const nextAction = conflict
+          ? 'Resolve overlapping crew or equipment commitments before relying on this window.'
+          : jobOverdue
+            ? 'Review overdue work and retain a revised internal plan before making a new commitment.'
+            : baselineStale
+              ? 'Recalculate this work plan and request a revised baseline.'
+              : baselinePending
+                ? 'Review the pending schedule baseline decision.'
+                : unscheduled
+                  ? 'Add task durations and a planned start to build the work plan.'
+                  : inWindow
+                    ? 'Monitor the active look-ahead tasks and current critical path.'
+                    : 'This job sits outside the current look-ahead window.';
+        const baseline = pendingBaseline
+          ? {
+              id: pendingBaseline.id,
+              versionNumber: pendingBaseline.versionNumber,
+              status: 'pending_approval',
+              approvalId: pendingBaseline.approvalId,
+              plannedStart: pendingBaseline.plannedStart,
+              plannedEnd: pendingBaseline.plannedEnd,
+              current: false
+            }
+          : activeBaseline
+            ? {
+                id: activeBaseline.id,
+                versionNumber: activeBaseline.versionNumber,
+                status: 'approved',
+                approvalId: activeBaseline.approvalId,
+                plannedStart: activeBaseline.plannedStart,
+                plannedEnd: activeBaseline.plannedEnd,
+                current: control.baselineCurrent === true
+              }
+            : null;
+        return {
+          ...basic,
+          plannedStart,
+          plannedEnd,
+          scheduleStatus,
+          nextAction,
+          baseline,
+          flags: {
+            inWindow,
+            conflict,
+            overdue: jobOverdue,
+            unscheduled,
+            invalidPlan: false,
+            baselinePending,
+            baselineStale
+          },
+          counts: {
+            openTasks: activeTasks.length,
+            overdueTasks: overdueTasks.length,
+            lookAheadTasks: lookAheadTasks.length,
+            criticalTasks: activeTasks.filter(task => criticalTaskIds.has(task.id)).length,
+            workerConflicts,
+            toolConflicts,
+            pendingApprovals: (detail.approvals || []).filter(approval => (
+              approval.status === 'pending' && approval.targetType === 'schedule_baseline'
+            )).length
+          },
+          tasks: activeTasks.map(task => ({
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            priority: task.priority,
+            assigneeId: task.assigneeId,
+            plannedStart: task.plannedStart,
+            plannedEnd: task.plannedEnd,
+            dueAt: task.dueAt,
+            durationHours: task.durationHours,
+            critical: criticalTaskIds.has(task.id),
+            overdue: overdueTasks.some(candidate => candidate.id === task.id),
+            inWindow: lookAheadTasks.some(candidate => candidate.id === task.id)
+          })),
+          conflicts: blockers
+            .filter(blocker => ['worker_conflict', 'tool_conflict'].includes(blocker.type))
+            .slice(0, 8)
+        };
+      } catch (error) {
+        return {
+          ...basic,
+          plannedStart: job.scheduledStart || null,
+          plannedEnd: job.scheduledEnd || job.targetCompletion || null,
+          scheduleStatus: 'invalid_plan',
+          nextAction: 'Repair the retained task sequence before this job can participate in portfolio planning.',
+          baseline: null,
+          flags: {
+            inWindow: false,
+            conflict: false,
+            overdue: false,
+            unscheduled: false,
+            invalidPlan: true,
+            baselinePending: false,
+            baselineStale: false
+          },
+          counts: {
+            openTasks: 0,
+            overdueTasks: 0,
+            lookAheadTasks: 0,
+            criticalTasks: 0,
+            workerConflicts: 0,
+            toolConflicts: 0,
+            pendingApprovals: 0
+          },
+          tasks: [],
+          conflicts: [],
+          planError: {
+            code: error.code || 'portfolio_schedule_job_invalid',
+            message: error.message || 'The retained work plan is invalid.'
+          }
+        };
+      }
+    });
+
+    const matchesMode = row => {
+      if (mode === 'all') return true;
+      if (mode === 'risk' || mode === 'at_risk') {
+        return row.flags?.conflict || row.flags?.overdue || row.flags?.baselineStale || row.flags?.invalidPlan;
+      }
+      if (mode === 'conflict') return row.flags?.conflict === true;
+      if (mode === 'overdue') return row.flags?.overdue === true;
+      if (mode === 'unscheduled') return row.flags?.unscheduled === true || row.flags?.invalidPlan === true;
+      if (mode === 'baseline') return row.flags?.baselinePending === true || row.flags?.baselineStale === true;
+      if (mode === 'in_window' || mode === 'look_ahead') return row.flags?.inWindow === true;
+      if (mode === 'upcoming') return row.scheduleStatus === 'upcoming';
+      return row.scheduleStatus === mode;
+    };
+    const matchesSearch = row => !search || JSON.stringify({
+      jobTitle: row.jobTitle,
+      clientName: row.clientName,
+      address: row.address,
+      phase: row.phase,
+      tasks: row.tasks?.map(task => task.title)
+    }).toLowerCase().includes(search);
+    const filtered = rows.filter(row => matchesMode(row) && matchesSearch(row));
+    const statusRank = {
+      invalid_plan: 0,
+      conflict: 1,
+      overdue: 2,
+      baseline_stale: 3,
+      baseline_pending: 4,
+      unscheduled: 5,
+      in_window: 6,
+      upcoming: 7
+    };
+    const priorityRank = { low: 1, medium: 2, high: 3, critical: 4 };
+    filtered.sort((left, right) => {
+      const statusDelta = (statusRank[left.scheduleStatus] ?? 8) - (statusRank[right.scheduleStatus] ?? 8);
+      if (statusDelta) return statusDelta;
+      const overdueDelta = normalizeNumber(right.counts?.overdueTasks, 0) - normalizeNumber(left.counts?.overdueTasks, 0);
+      if (overdueDelta) return overdueDelta;
+      const priorityDelta = (priorityRank[normalizePriority(right.priority)] || 0)
+        - (priorityRank[normalizePriority(left.priority)] || 0);
+      if (priorityDelta) return priorityDelta;
+      return String(left.plannedStart || left.targetCompletion || left.jobTitle)
+        .localeCompare(String(right.plannedStart || right.targetCompletion || right.jobTitle));
+    });
+
+    return {
+      generatedAt: nowIso(),
+      mode,
+      window: { referenceAt, horizonEnd, horizonDays },
+      summary: this.summarizePortfolioSchedule(rows, filtered.length),
+      jobs: filtered.slice(0, limit)
+    };
+  }
+
   requestScheduleBaseline(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       const job = this.mapJob(this.requireJob(jobId));
@@ -20161,7 +20462,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   recommendSchedule(jobId, payload = {}, options = {}) {
-    const detail = this.getJobDetail(jobId, { includeAudit: false });
+    const detail = options.detail || this.getJobDetail(jobId, { includeAudit: false });
     const job = detail;
     const { plannedStart, plannedEnd, estimatedHours } = this.scheduleRecommendationWindow(job, payload);
     const activeAssignments = (detail.assignments || []).filter(assignment => this.activeAssignmentStatus(assignment.status));

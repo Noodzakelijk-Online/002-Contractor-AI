@@ -856,3 +856,101 @@
   .closeout-row-actions { justify-content: flex-start; }
   .closeout-row-actions .secondary-button { flex: 1 1 120px; }
 }
+
+.portfolio-schedule { overflow: hidden; }
+.portfolio-schedule-heading { align-items: center; }
+.portfolio-schedule-heading > div { min-width: 0; }
+.portfolio-schedule-heading p { max-width: 760px; }
+.portfolio-schedule-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-bottom: 1px solid #dfe7e3; }
+.portfolio-schedule-summary > div { display: grid; gap: 4px; min-width: 0; padding: 13px 16px; border-right: 1px solid #dfe7e3; }
+.portfolio-schedule-summary > div:last-child { border-right: 0; }
+.portfolio-schedule-summary span { overflow-wrap: anywhere; color: #6a7973; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.portfolio-schedule-summary strong { color: #263b32; font-size: 18px; }
+.portfolio-schedule-toolbar { display: grid; grid-template-columns: minmax(480px, 1fr) minmax(250px, .55fr) minmax(120px, .2fr); align-items: end; gap: 10px; padding: 12px 16px; background: #f7f9f8; border-bottom: 1px solid #dfe7e3; }
+.portfolio-schedule-filters { display: grid; grid-template-columns: repeat(6, minmax(76px, 1fr)); min-width: 0; overflow: hidden; border: 1px solid #cedbd5; border-radius: 6px; }
+.portfolio-schedule-filters button { min-width: 0; min-height: 38px; padding: 0 8px; overflow: hidden; color: #53675e; font: inherit; font-size: 10px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; background: #fff; border: 0; border-right: 1px solid #d7e1dc; cursor: pointer; }
+.portfolio-schedule-filters button:last-child { border-right: 0; }
+.portfolio-schedule-filters button:hover { background: #eef5f2; }
+.portfolio-schedule-filters button:focus-visible { position: relative; z-index: 1; outline: 3px solid #96c9bc; outline-offset: -3px; }
+.portfolio-schedule-filters button.tab-active { color: #fff; background: #315f53; }
+.portfolio-schedule-search { width: 100%; }
+.portfolio-schedule-search > span { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; white-space: nowrap; clip-path: inset(50%); }
+.portfolio-horizon-control { display: grid; gap: 5px; min-width: 0; color: #60736b; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.portfolio-horizon-control select { width: 100%; min-width: 0; min-height: 38px; padding: 0 9px; color: #263a32; background: #fff; border: 1px solid #cfded8; border-radius: 5px; }
+.portfolio-horizon-control select:focus { border-color: #0a7b65; outline: 3px solid #dff2eb; outline-offset: 0; }
+.portfolio-timeline-heading { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.1fr); color: #708079; background: #fbfcfb; border-bottom: 1px solid #dfe7e3; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.portfolio-timeline-heading > span { padding: 9px 16px; }
+.portfolio-timeline-heading > div { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 9px 16px; border-left: 1px solid #e2e9e6; }
+.portfolio-timeline-heading > div span { text-align: center; }
+.portfolio-timeline-heading > div span:first-child { text-align: left; }
+.portfolio-timeline-heading > div span:last-child { text-align: right; }
+.portfolio-schedule-list { display: grid; }
+.portfolio-schedule-row { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.1fr); min-width: 0; border-bottom: 1px solid #e2e9e6; border-left: 3px solid #8ca198; }
+.portfolio-schedule-row:last-child { border-bottom: 0; }
+.portfolio-schedule-row.schedule-conflict, .portfolio-schedule-row.schedule-invalid_plan { background: #fff9f8; border-left-color: #b64036; }
+.portfolio-schedule-row.schedule-overdue { background: #fffbf4; border-left-color: #bc7619; }
+.portfolio-schedule-row.schedule-baseline_stale, .portfolio-schedule-row.schedule-baseline_pending { border-left-color: #a27624; }
+.portfolio-schedule-row.schedule-in_window { border-left-color: #367d68; }
+.portfolio-schedule-copy, .portfolio-timeline-cell { min-width: 0; padding: 15px 16px; }
+.portfolio-schedule-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
+.portfolio-schedule-title > div { min-width: 0; }
+.portfolio-schedule-title h3 { margin: 0; overflow-wrap: anywhere; color: #243a31; font-size: 13px; }
+.portfolio-schedule-title p { margin: 4px 0 0; overflow-wrap: anywhere; color: #6a7a74; font-size: 10px; line-height: 1.4; }
+.portfolio-schedule-title .status { flex: 0 0 auto; }
+.portfolio-schedule-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.portfolio-schedule-action { margin: 9px 0 0; overflow-wrap: anywhere; color: #50675e; font-size: 11px; line-height: 1.45; }
+.portfolio-task-list { display: grid; margin-top: 9px; border-top: 1px solid #e4ebe8; }
+.portfolio-task-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; min-width: 0; padding: 7px 0; border-bottom: 1px solid #edf1ef; }
+.portfolio-task-list span { min-width: 0; overflow-wrap: anywhere; color: #334b41; font-size: 10px; font-weight: 700; }
+.portfolio-task-list small { color: #73827d; font-size: 9px; white-space: nowrap; }
+.portfolio-task-list .portfolio-task-critical { color: #a43730; }
+.portfolio-timeline-cell { display: grid; align-content: start; gap: 9px; border-left: 1px solid #e2e9e6; }
+.portfolio-timeline-track { position: relative; width: 100%; height: 30px; overflow: hidden; background: #edf2ef; border: 1px solid #d8e2dd; border-radius: 5px; }
+.portfolio-timeline-span { position: absolute; top: 4px; bottom: 4px; min-width: 3px; background: #367d68; border-radius: 3px; }
+.portfolio-timeline-span.timeline-conflict, .portfolio-timeline-span.timeline-invalid_plan { background: #b64036; }
+.portfolio-timeline-span.timeline-overdue { background: #bc7619; }
+.portfolio-timeline-span.timeline-baseline_stale, .portfolio-timeline-span.timeline-baseline_pending { background: #9c7428; }
+.portfolio-timeline-span.timeline-unscheduled { background: #76837e; }
+.portfolio-timeline-span.timeline-upcoming { background: #446f86; }
+.portfolio-timeline-empty { display: grid; height: 100%; place-items: center; color: #72817b; font-size: 9px; font-weight: 700; }
+.portfolio-timeline-dates { display: flex; justify-content: space-between; gap: 12px; color: #6d7c76; font-size: 9px; }
+.portfolio-schedule-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; margin-top: 2px; }
+.portfolio-schedule-actions .secondary-button { min-height: 32px; padding: 0 9px; font-size: 10px; }
+.status-conflict, .status-invalid_plan { color: #a5342c; background: #fae7e4; }
+.status-overdue { color: #955d0d; background: #fff0d3; }
+.status-baseline_stale, .status-baseline_pending { color: #805d18; background: #f8edcf; }
+.status-unscheduled { color: #596a63; background: #e8eeeb; }
+.status-in_window { color: #146e4d; background: #e1f2e7; }
+.status-upcoming { color: #315f76; background: #e3eef3; }
+
+@media (max-width: 1180px) {
+  .portfolio-schedule-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .portfolio-schedule-summary > div:nth-child(3n) { border-right: 0; }
+  .portfolio-schedule-summary > div:nth-child(-n + 3) { border-bottom: 1px solid #dfe7e3; }
+  .portfolio-schedule-toolbar { grid-template-columns: minmax(0, 1fr) 140px; }
+  .portfolio-schedule-filters { grid-column: 1 / -1; }
+  .portfolio-timeline-heading { display: none; }
+  .portfolio-schedule-row { grid-template-columns: minmax(0, 1fr); }
+  .portfolio-timeline-cell { border-top: 1px solid #e6ece9; border-left: 0; }
+}
+
+@media (max-width: 760px) {
+  .portfolio-schedule-heading { align-items: flex-start; flex-wrap: wrap; }
+  .portfolio-schedule-heading > .secondary-button { width: 100%; }
+  .portfolio-schedule-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .portfolio-schedule-summary > div { padding: 11px 12px; }
+  .portfolio-schedule-summary > div:nth-child(3n) { border-right: 1px solid #dfe7e3; }
+  .portfolio-schedule-summary > div:nth-child(2n) { border-right: 0; }
+  .portfolio-schedule-summary > div:nth-child(-n + 4) { border-bottom: 1px solid #dfe7e3; }
+  .portfolio-schedule-toolbar { grid-template-columns: minmax(0, 1fr); padding: 12px 14px; }
+  .portfolio-schedule-filters { grid-column: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .portfolio-schedule-filters button { border-right: 1px solid #d7e1dc; border-bottom: 1px solid #d7e1dc; }
+  .portfolio-schedule-filters button:nth-child(2n) { border-right: 0; }
+  .portfolio-schedule-filters button:nth-last-child(-n + 2) { border-bottom: 0; }
+  .portfolio-schedule-copy, .portfolio-timeline-cell { padding: 13px 14px; }
+  .portfolio-schedule-title { align-items: flex-start; flex-direction: column; }
+  .portfolio-task-list > div { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .portfolio-task-list small { white-space: normal; }
+  .portfolio-schedule-actions { justify-content: stretch; }
+  .portfolio-schedule-actions .secondary-button { flex: 1 1 130px; }
+}

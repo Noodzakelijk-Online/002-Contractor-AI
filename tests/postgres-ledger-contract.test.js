@@ -864,6 +864,17 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(detail.taskDependencies.some(entry => entry.id === scheduleDependency.id && entry.status === 'active'));
     assert.equal(detail.scheduleControl.activeBaseline.id, scheduleBaseline.baseline.id);
     assert.equal(detail.scheduleControl.baselineCurrent, true);
+    const portfolioSchedule = ledger.listPortfolioSchedule({
+      search: job.title,
+      referenceAt: '2026-10-05T07:00:00.000Z',
+      horizonDays: 14,
+      limit: 10
+    });
+    assert.equal(portfolioSchedule.jobs.length, 1);
+    assert.equal(portfolioSchedule.jobs[0].jobId, job.id);
+    assert.equal(portfolioSchedule.jobs[0].baseline.id, scheduleBaseline.baseline.id);
+    assert.equal(portfolioSchedule.jobs[0].flags.inWindow, true);
+    assert.ok(portfolioSchedule.jobs[0].counts.criticalTasks >= 2);
     assert.ok(detail.audit.some(entry => entry.action === 'transition_task'));
     assert.ok(detail.audit.some(entry => entry.actor === 'postgres_contract_test'));
     assert.ok(detail.audit.some(entry => entry.action === 'apply_job_archive'));

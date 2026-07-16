@@ -15,6 +15,17 @@ test('React dashboard uses ledger endpoints instead of cached or simulated contr
   assert.doesNotMatch(dashboardSource, /localStorage|sampleJobs|simulateClientRequest|innerHTML|onclick=/);
 });
 
+test('portfolio schedule is role-gated, ledger-backed, rendered, and connected to operating workflows', () => {
+  assert.match(dashboardSource, /\['schedule', 'Schedule', CalendarDays\]/);
+  assert.match(dashboardSource, /api\('\/api\/ledger\/schedule\?horizonDays=180&limit=500'\)/);
+  assert.match(dashboardSource, /if \(key === 'schedule'\) return capabilities\.schedule/);
+  assert.match(dashboardSource, /section === 'schedule' && capabilities\.schedule/);
+  assert.match(dashboardSource, /data-testid="portfolio-schedule"/);
+  assert.match(dashboardSource, /onOpenDispatch=\{reviewPortfolioDispatch\}/);
+  assert.match(dashboardSource, /onOpenApprovals=\{openApprovals\}/);
+  assert.match(dashboardSource, /onOpen=\{openJobWorkspace\}/);
+});
+
 test('dashboard mutations remain API-backed and confirmation-gated where they affect retained operations', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/intake'/);
   assert.match(dashboardSource, /api\(`\/api\/ledger\/approvals\/\$\{item\.id\}\/resolve`/);

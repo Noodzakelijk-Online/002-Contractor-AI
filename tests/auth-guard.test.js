@@ -403,6 +403,14 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     const officeClients = await request(baseUrl, '/api/ledger/client-success?limit=10', { headers: officeHeaders });
     assert.equal(officeClients.response.status, 200);
 
+    const officeSchedule = await request(baseUrl, '/api/ledger/schedule?limit=10', { headers: officeHeaders });
+    assert.equal(officeSchedule.response.status, 200);
+    const approverSchedule = await request(baseUrl, '/api/ledger/schedule?limit=10', { headers: approverHeaders });
+    assert.equal(approverSchedule.response.status, 200);
+    const deniedFieldSchedule = await request(baseUrl, '/api/ledger/schedule?limit=10', { headers: fieldHeaders });
+    assert.equal(deniedFieldSchedule.response.status, 403);
+    assert.equal(deniedFieldSchedule.body.error.code, 'insufficient_role');
+
     const officeClientRecord = await request(baseUrl, '/api/ledger/clients', {
       method: 'POST',
       headers: officeHeaders,

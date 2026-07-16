@@ -107,6 +107,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   for (const canonicalRoute of [
     "app.get('/api/ledger/dashboard'",
+    "app.get('/api/ledger/schedule'",
     "app.post('/api/ledger/upload'",
     "app.post('/api/ledger/jobs/:id/daily-logs'",
     "app.post('/api/ledger/jobs/:id/controlled-document-revisions'",
