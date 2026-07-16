@@ -560,6 +560,31 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(hostedCredential.status, 'approved');
     assert.equal(ledger.assessWorkerQualifications(attendanceWorker.id, { jobId: job.id, role: 'Site installer' }).status, 'ready');
     assert.ok(ledger.getJobDetail(job.id).qualificationRequirements.some(item => item.id === hostedQualificationRequirement.id));
+    const hostedAvailabilityStart = new Date(Date.now() + 120 * 86_400_000).toISOString();
+    const hostedAvailabilityEnd = new Date(Date.parse(hostedAvailabilityStart) + 8 * 3_600_000).toISOString();
+    const hostedAvailability = ledger.createWorkerAvailabilityPeriod(attendanceWorker.id, {
+      periodType: 'training',
+      title: 'Hosted equipment training',
+      startsAt: hostedAvailabilityStart,
+      endsAt: hostedAvailabilityEnd,
+      notes: 'Operational availability contract fixture.'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedAvailability.period.status, 'active');
+    assert.equal(ledger.findWorkerAvailabilityConflicts({
+      workerId: attendanceWorker.id,
+      scheduledStart: hostedAvailabilityStart,
+      scheduledEnd: hostedAvailabilityEnd
+    }).length, 1);
+    const hostedAvailabilityCancellation = ledger.requestWorkerAvailabilityCancellation(
+      attendanceWorker.id,
+      hostedAvailability.period.id,
+      { reason: 'Hosted availability cancellation contract verification.' },
+      { actor: 'postgres_contract_test' }
+    );
+    ledger.resolveApproval(hostedAvailabilityCancellation.approval.id, {
+      status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted availability change verified.'
+    });
+    assert.equal(ledger.getWorkerAvailabilityPeriod(hostedAvailability.period.id).status, 'cancelled');
     const attendanceOrientation = ledger.createWorkerOrientation(job.id, {
       assignmentId: attendanceAssignment.id,
       workerId: attendanceWorker.id,
@@ -1200,7 +1225,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '035_workforce_qualifications');
+    assert.equal(migrations.currentVersion, '036_worker_availability');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1281,12 +1306,18 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('035_workforce_qualifications'));
+  assert.deepEqual(versions, Array(4).fill('036_worker_availability'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 35);
+    assert.equal(Number(migrationCount.count), 36);
+    const availabilityTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'worker_availability_periods'
+    `).rows[0];
+    assert.equal(Number(availabilityTableCount.count), 1);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1787,7 +1818,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '035_workforce_qualifications');
+    assert.equal(ledger.migrationStatus().currentVersion, '036_worker_availability');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

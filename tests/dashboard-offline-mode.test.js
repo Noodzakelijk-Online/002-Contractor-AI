@@ -79,6 +79,16 @@ test('workforce qualifications use retained approval-backed evidence and job rea
   assert.match(dashboardSource, /Contractor\.AI does not issue, renew, or contact a certificate authority/);
 });
 
+test('worker availability is ledger-backed, privacy-minimized, and cancellation-gated', () => {
+  assert.match(dashboardSource, /api\('\/api\/ledger\/availability'\)/);
+  assert.match(dashboardSource, /data-testid="availability-workspace"/);
+  assert.match(dashboardSource, /data-testid="availability-editor"/);
+  assert.match(dashboardSource, /data-testid="availability-cancellation-modal"/);
+  assert.match(dashboardSource, /\/availability\/\$\{encodeURIComponent\(availabilityCancellation\.id\)\}\/cancellation/);
+  assert.match(dashboardSource, /The scheduling block remains active until approval/);
+  assert.match(dashboardSource, /Do not enter diagnosis, illness, medical details, payroll entitlement, HR case information, or location tracking data/);
+});
+
 test('field updates use a bounded operator-scoped IndexedDB outbox only for interrupted requests', () => {
   assert.match(outboxSource, /const DATABASE_VERSION = 2/);
   assert.match(outboxSource, /indexedDB\.open\(DATABASE_NAME, DATABASE_VERSION\)/);

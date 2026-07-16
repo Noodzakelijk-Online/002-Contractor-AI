@@ -3803,6 +3803,13 @@ app.get('/api/ledger/qualifications', (req, res) => {
   }));
 });
 
+app.get('/api/ledger/availability', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    availabilityRegister: operatingLedger.listWorkerAvailabilityRegister(req.query || {})
+  }));
+});
+
 app.get('/api/ledger/workers/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3852,6 +3859,43 @@ app.post('/api/ledger/workers/:id/credentials', (req, res) => {
     qualificationRegister: operatingLedger.listQualificationRegister(),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.get('/api/ledger/workers/:id/availability', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    worker: operatingLedger.getWorker(req.params.id),
+    periods: operatingLedger.listWorkerAvailability({
+      workerId: req.params.id,
+      includeCancelled: req.query.includeCancelled || req.query.include_cancelled,
+      limit: req.query.limit
+    }),
+    catalog: operatingLedger.workforceAvailabilityCatalog()
+  }));
+});
+
+app.post('/api/ledger/workers/:id/availability', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createWorkerAvailabilityPeriod(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    worker: operatingLedger.getWorker(req.params.id),
+    availabilityRegister: operatingLedger.listWorkerAvailabilityRegister(),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/workers/:id/availability/:periodId/cancellation', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestWorkerAvailabilityCancellation(req.params.id, req.params.periodId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    worker: operatingLedger.getWorker(req.params.id),
+    availabilityRegister: operatingLedger.listWorkerAvailabilityRegister(),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
 });
 
 function requestWorkerRetirement(req, res) {

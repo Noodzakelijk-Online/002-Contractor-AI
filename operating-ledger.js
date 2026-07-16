@@ -38,14 +38,14 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'field-production',
     label: 'Field production and resources',
     vendors: ['Raken', 'Procore', 'Contractor Foreman'],
-    capabilities: ['daily field reports', 'RFIs', 'time tracking', 'production tracking', 'material tracking', 'equipment tracking', 'kiosk attendance', 'labor map'],
+    capabilities: ['daily field reports', 'RFIs', 'time tracking', 'production tracking', 'material tracking', 'equipment tracking', 'workforce availability', 'kiosk attendance', 'labor map'],
     sourceEvidence: [
       'Raken focuses on field-first daily reports, photo documentation, time tracking, production tracking, resource scheduling, material tracking and equipment management.',
       'Procore adds daywork sheets, resource tracking, timecards and equipment visibility.'
     ],
     serviceGroups: [
       { name: 'Field capture', services: ['Progress update', 'daily field report', 'photo evidence', 'time log'] },
-      { name: 'Production resources', services: ['Material needs', 'tool/equipment reservation', 'worker instruction', 'production variance'] }
+      { name: 'Production resources', services: ['Material needs', 'tool/equipment reservation', 'worker availability', 'worker instruction', 'production variance'] }
     ]
   },
   {
@@ -140,6 +140,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'attendance', label: 'Site attendance and labor map', table: 'attendance_sessions', detailKey: 'attendanceSessions', readyStatuses: ['checked_in', 'checked_out'] },
     { key: 'materials', label: 'Material tracking', table: 'material_requirements', detailKey: 'materials' },
     { key: 'equipment', label: 'Tool/equipment tracking', table: 'tool_reservations', detailKey: 'tools' },
+    { key: 'availability', label: 'Worker availability', table: 'worker_availability_periods', readyStatuses: ['active', 'pending_cancellation'], ledgerOnly: true },
     { key: 'evidence', label: 'Photo evidence', table: 'documents', detailKey: 'documents' },
     { key: 'instructions', label: 'Worker instructions', table: 'worker_instructions', detailKey: 'workerInstructions' }
   ],
@@ -333,6 +334,15 @@ const WORKFORCE_REQUIREMENT_CATALOG = Object.freeze([
 
 const WORKFORCE_CREDENTIAL_BY_KEY = new Map(WORKFORCE_CREDENTIAL_CATALOG.map(item => [item.key, item]));
 const WORKFORCE_REQUIREMENT_BY_KEY = new Map(WORKFORCE_REQUIREMENT_CATALOG.map(item => [item.key, item]));
+
+const WORKFORCE_AVAILABILITY_CATALOG = Object.freeze([
+  { key: 'leave', label: 'Leave' },
+  { key: 'training', label: 'Training' },
+  { key: 'external_commitment', label: 'External commitment' },
+  { key: 'unavailable', label: 'Unavailable' },
+  { key: 'other', label: 'Other operational absence' }
+]);
+const WORKFORCE_AVAILABILITY_BY_KEY = new Map(WORKFORCE_AVAILABILITY_CATALOG.map(item => [item.key, item]));
 
 const TOOL_RESERVATION_CLOSED_STATUSES = new Set([
   'released',
@@ -2836,6 +2846,37 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON job_qualification_requirements(status, updated_at DESC);
       `);
     }
+  },
+  {
+    version: '036_worker_availability',
+    description: 'Retain privacy-minimized worker availability periods with approval-backed cancellation and dispatch conflict indexes.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS worker_availability_periods (
+          id TEXT PRIMARY KEY,
+          worker_id TEXT NOT NULL,
+          period_type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          starts_at TEXT NOT NULL,
+          ends_at TEXT NOT NULL,
+          cancellation_approval_id TEXT,
+          source_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(worker_id) REFERENCES workers(id),
+          FOREIGN KEY(cancellation_approval_id) REFERENCES approvals(id),
+          UNIQUE(worker_id, source_fingerprint)
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_availability_worker_window
+          ON worker_availability_periods(worker_id, status, starts_at, ends_at);
+        CREATE INDEX IF NOT EXISTS idx_worker_availability_current
+          ON worker_availability_periods(status, starts_at, ends_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_availability_pending_cancellation
+          ON worker_availability_periods(cancellation_approval_id) WHERE status = 'pending_cancellation';
+      `);
+    }
   }
 ];
 
@@ -4487,7 +4528,7 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
-    if (table === 'weekly_timesheets' || table === 'timesheet_exports') {
+    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods'].includes(table)) {
       return { from: `${table} AS records`, condition: '1 = 1' };
     }
     if (table === 'jobs') {
@@ -7098,6 +7139,12 @@ class ContractorOperatingLedger {
       credentials.push(this.mapWorkerCredential(row));
       credentialsByWorker.set(row.worker_id, credentials);
     }
+    const availabilityByWorker = new Map();
+    for (const row of this.db.prepare("SELECT * FROM worker_availability_periods WHERE status IN ('active', 'pending_cancellation') ORDER BY worker_id, starts_at ASC").all()) {
+      const periods = availabilityByWorker.get(row.worker_id) || [];
+      periods.push(this.mapWorkerAvailabilityPeriod(row));
+      availabilityByWorker.set(row.worker_id, periods);
+    }
     return this.db.prepare(`
       SELECT * FROM workers
       WHERE (? = '' OR lower(name || ' ' || COALESCE(role, '') || ' ' || COALESCE(home_region, '') || ' ' || COALESCE(email, '') || ' ' || skills_json) LIKE ?)
@@ -7111,7 +7158,8 @@ class ContractorOperatingLedger {
         activeAssignmentCount: workerAssignments.active,
         dormantAssignmentCount: workerAssignments.dormant,
         retainedAssignmentCount: workerAssignments.active + workerAssignments.dormant,
-        qualification: this.workerCredentialSummaryFromCredentials(credentialsByWorker.get(worker.id) || [])
+        qualification: this.workerCredentialSummaryFromCredentials(credentialsByWorker.get(worker.id) || []),
+        availability: this.workerAvailabilitySummaryFromPeriods(availabilityByWorker.get(worker.id) || [])
       };
     }).filter(worker => !status || worker.status === status).slice(0, limit);
   }
@@ -7137,7 +7185,8 @@ class ContractorOperatingLedger {
       activeAssignmentCount: assignmentScope.operational.length,
       dormantAssignmentCount: assignmentScope.dormant.length,
       retainedAssignmentCount: assignmentScope.retained.length,
-      qualification: this.workerCredentialSummary(workerId)
+      qualification: this.workerCredentialSummary(workerId),
+      availability: this.workerAvailabilitySummary(workerId)
     };
   }
 
@@ -7149,7 +7198,7 @@ class ContractorOperatingLedger {
       if (worker.status === 'retired') summary.retired += 1;
       else {
         summary.active += 1;
-        if (worker.status === 'available') summary.available += 1;
+        if (worker.status === 'available' && !worker.availability?.current) summary.available += 1;
         else summary.unavailable += 1;
       }
       if (worker.retirementApprovalId) summary.pendingRetirement += 1;
@@ -7157,8 +7206,10 @@ class ContractorOperatingLedger {
       summary.pendingCredentials += Number(worker.qualification?.pending || 0);
       summary.expiringCredentials += Number(worker.qualification?.expiring || 0);
       summary.expiredCredentials += Number(worker.qualification?.expired || 0);
+      summary.currentAvailabilityBlocks += Number(worker.availability?.current || 0);
+      summary.upcomingAvailabilityBlocks += Number(worker.availability?.upcoming || 0);
       return summary;
-    }, { total: 0, active: 0, available: 0, unavailable: 0, pendingRetirement: 0, retired: 0, activeAssignments: 0, dormantAssignments: 0, credentialed: 0, pendingCredentials: 0, expiringCredentials: 0, expiredCredentials: 0 });
+    }, { total: 0, active: 0, available: 0, unavailable: 0, pendingRetirement: 0, retired: 0, activeAssignments: 0, dormantAssignments: 0, credentialed: 0, pendingCredentials: 0, expiringCredentials: 0, expiredCredentials: 0, currentAvailabilityBlocks: 0, upcomingAvailabilityBlocks: 0 });
   }
 
   workforceQualificationCatalog() {
@@ -7807,6 +7858,384 @@ class ContractorOperatingLedger {
       blockedAssignments: jobs.reduce((sum, job) => sum + job.blockedAssignments, 0)
     });
     return { catalog: this.workforceQualificationCatalog(), summary, workers: workerRows, requirements, jobs };
+  }
+
+  workforceAvailabilityCatalog() {
+    return WORKFORCE_AVAILABILITY_CATALOG.map(item => ({ key: item.key, label: item.label }));
+  }
+
+  normalizeWorkerAvailabilityType(value) {
+    const periodType = normalizeStatus(value, '');
+    if (!WORKFORCE_AVAILABILITY_BY_KEY.has(periodType)) {
+      throw ledgerInputError(
+        'worker_availability_type_invalid',
+        `Availability type must be one of: ${WORKFORCE_AVAILABILITY_CATALOG.map(item => item.key).join(', ')}.`
+      );
+    }
+    return periodType;
+  }
+
+  normalizeWorkerAvailabilityWindow(payload = {}) {
+    const startsAt = this.normalizeReservationDate(
+      payload.startsAt || payload.starts_at || payload.startAt || payload.start_at,
+      'startsAt'
+    );
+    const endsAt = this.normalizeReservationDate(
+      payload.endsAt || payload.ends_at || payload.endAt || payload.end_at,
+      'endsAt'
+    );
+    if (!startsAt || !endsAt) {
+      throw ledgerInputError('worker_availability_window_required', 'Availability requires both a start and an end date/time.');
+    }
+    if (Date.parse(endsAt) <= Date.parse(startsAt)) {
+      throw ledgerInputError('worker_availability_window_invalid', 'Availability end must be after its start.');
+    }
+    if (Date.parse(endsAt) - Date.parse(startsAt) > 366 * 24 * 60 * 60 * 1000) {
+      throw ledgerInputError('worker_availability_window_too_long', 'One availability period cannot exceed 366 days.');
+    }
+    return { startsAt, endsAt };
+  }
+
+  listWorkerAvailability(filters = {}) {
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const periodType = normalizeStatus(filters.periodType || filters.period_type, '');
+    const includeCancelled = normalizeBoolean(filters.includeCancelled ?? filters.include_cancelled, false);
+    const limit = safeLimit(filters.limit, 250, 1000);
+    const clauses = [];
+    const values = [];
+    if (workerId) { clauses.push('periods.worker_id = ?'); values.push(workerId); }
+    if (status) { clauses.push('periods.status = ?'); values.push(status); }
+    if (periodType) { clauses.push('periods.period_type = ?'); values.push(periodType); }
+    if (!includeCancelled && !status) clauses.push("periods.status IN ('active', 'pending_cancellation')");
+    return this.db.prepare(`
+      SELECT periods.*, workers.name AS worker_name, workers.role AS worker_role
+      FROM worker_availability_periods periods
+      JOIN workers ON workers.id = periods.worker_id
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY periods.starts_at ASC, workers.name ASC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapWorkerAvailabilityPeriod(row));
+  }
+
+  getWorkerAvailabilityPeriod(periodId) {
+    const row = this.db.prepare(`
+      SELECT periods.*, workers.name AS worker_name, workers.role AS worker_role
+      FROM worker_availability_periods periods
+      JOIN workers ON workers.id = periods.worker_id
+      WHERE periods.id = ?
+    `).get(String(periodId || ''));
+    if (!row) throw ledgerInputError('worker_availability_not_found', 'Worker availability period not found.', null, 404);
+    return this.mapWorkerAvailabilityPeriod(row);
+  }
+
+  workerAvailabilitySummaryFromPeriods(periods = [], referenceAt = nowIso()) {
+    const reference = Date.parse(referenceAt);
+    const retained = periods.filter(period => ['active', 'pending_cancellation'].includes(period.status));
+    const active = retained.filter(period => Date.parse(period.endsAt) >= reference);
+    const current = active.filter(period => Date.parse(period.startsAt) <= reference);
+    const upcoming = active.filter(period => Date.parse(period.startsAt) > reference);
+    return {
+      active: active.length,
+      current: current.length,
+      upcoming: upcoming.length,
+      past: retained.filter(period => Date.parse(period.endsAt) < reference).length,
+      pendingCancellation: retained.filter(period => period.status === 'pending_cancellation').length,
+      nextPeriod: [...current, ...upcoming].sort((left, right) => Date.parse(left.startsAt) - Date.parse(right.startsAt))[0] || null,
+      status: current.length ? 'unavailable' : upcoming.length ? 'scheduled' : 'available'
+    };
+  }
+
+  workerAvailabilitySummary(workerId, referenceAt = nowIso()) {
+    return this.workerAvailabilitySummaryFromPeriods(
+      this.listWorkerAvailability({ workerId, includeCancelled: false, limit: 250 }),
+      referenceAt
+    );
+  }
+
+  createWorkerAvailabilityPeriod(workerId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const worker = this.getWorker(workerId);
+      if (worker.status === 'retired' || worker.retirementApprovalId) {
+        throw ledgerInputError(
+          'worker_availability_worker_inactive',
+          'Availability cannot be added while the worker is retired or awaiting retirement.',
+          { workerId, approvalId: worker.retirementApprovalId || null },
+          409
+        );
+      }
+      const periodType = this.normalizeWorkerAvailabilityType(payload.periodType || payload.period_type || payload.type);
+      const catalogEntry = WORKFORCE_AVAILABILITY_BY_KEY.get(periodType);
+      const title = normalizeText(payload.title, catalogEntry.label);
+      if (title.length < 2 || title.length > 160) {
+        throw ledgerInputError('worker_availability_title_invalid', 'Availability title must be between 2 and 160 characters.');
+      }
+      if ([payload.medicalDetails, payload.medical_details, payload.healthDetails, payload.health_details, payload.diagnosis, payload.illness]
+        .some(value => normalizeText(value, ''))) {
+        throw ledgerInputError(
+          'worker_availability_sensitive_data_forbidden',
+          'Do not retain diagnosis, illness, or medical details in operational availability records.'
+        );
+      }
+      const { startsAt, endsAt } = this.normalizeWorkerAvailabilityWindow(payload);
+      const notes = normalizeText(payload.notes || payload.operationalNotes || payload.operational_notes, '');
+      if (notes.length > 1000) {
+        throw ledgerInputError('worker_availability_notes_invalid', 'Operational availability notes must be 1000 characters or fewer.');
+      }
+      if (/\b(diagnos(?:e|is|tic)?|illness|medical|medisch|ziek(?:te)?|symptom|medication|medicatie|doctor|arts)\b/i.test(notes)) {
+        throw ledgerInputError(
+          'worker_availability_sensitive_data_forbidden',
+          'Operational availability notes cannot contain medical or illness details.'
+        );
+      }
+      const sourceFingerprint = sha256Json({ workerId, periodType, title, startsAt, endsAt });
+      const existing = this.db.prepare(`
+        SELECT * FROM worker_availability_periods
+        WHERE worker_id = ? AND source_fingerprint = ?
+      `).get(workerId, sourceFingerprint);
+      if (existing) {
+        if (existing.status === 'cancelled') {
+          const before = this.mapWorkerAvailabilityPeriod({ ...existing, worker_name: worker.name, worker_role: worker.role });
+          const data = fromJson(existing.data_json, {});
+          const timestamp = nowIso();
+          this.db.prepare(`
+            UPDATE worker_availability_periods
+            SET status = 'active', cancellation_approval_id = NULL, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'cancelled'
+          `).run(toJson({ ...data, restoredAt: timestamp, restoredBy: options.actor || payload.actor || 'dashboard' }), timestamp, existing.id);
+          const period = this.getWorkerAvailabilityPeriod(existing.id);
+          this.audit({
+            entityType: 'worker_availability_period', entityId: existing.id, action: 'restore_worker_availability_period',
+            actor: options.actor || payload.actor || 'dashboard', before, after: period,
+            metadata: { workerId, periodType, externalCommitments: 0 }
+          });
+          return { period, conflicts: this.findAssignmentConflicts({ workerId, scheduledStart: startsAt, scheduledEnd: endsAt }), replayed: false, restored: true };
+        }
+        return {
+          period: this.mapWorkerAvailabilityPeriod({ ...existing, worker_name: worker.name, worker_role: worker.role }),
+          conflicts: this.findAssignmentConflicts({ workerId, scheduledStart: startsAt, scheduledEnd: endsAt }),
+          replayed: true,
+          restored: false
+        };
+      }
+      const id = makeId('availability');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO worker_availability_periods (
+          id, worker_id, period_type, title, status, starts_at, ends_at,
+          cancellation_approval_id, source_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?, ?)
+      `).run(
+        id, workerId, periodType, title, startsAt, endsAt, sourceFingerprint,
+        toJson({ operationalNotes: notes || null, source: payload.source || 'availability_control' }), timestamp, timestamp
+      );
+      const period = this.getWorkerAvailabilityPeriod(id);
+      const conflicts = this.findAssignmentConflicts({ workerId, scheduledStart: startsAt, scheduledEnd: endsAt });
+      this.audit({
+        entityType: 'worker_availability_period', entityId: id, action: 'create_worker_availability_period',
+        actor: options.actor || payload.actor || 'dashboard', after: period,
+        metadata: { workerId, periodType, assignmentConflicts: conflicts.length, externalCommitments: 0 }
+      });
+      return { period, conflicts, replayed: false, restored: false };
+    });
+  }
+
+  requestWorkerAvailabilityCancellation(workerId, periodId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT periods.*, workers.name AS worker_name, workers.role AS worker_role
+        FROM worker_availability_periods periods
+        JOIN workers ON workers.id = periods.worker_id
+        WHERE periods.id = ? AND periods.worker_id = ?
+      `).get(periodId, workerId);
+      if (!row) throw ledgerInputError('worker_availability_not_found', 'Worker availability period not found.', null, 404);
+      if (row.status === 'cancelled') return { period: this.mapWorkerAvailabilityPeriod(row), approval: null, replayed: true };
+      if (row.status === 'pending_cancellation') {
+        const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.cancellation_approval_id);
+        return { period: this.mapWorkerAvailabilityPeriod(row), approval: approval ? this.mapApproval(approval) : null, replayed: true };
+      }
+      if (row.status !== 'active') {
+        throw ledgerInputError('worker_availability_state_conflict', `Availability cannot be cancelled from ${row.status}.`, { periodId }, 409);
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 1000) {
+        throw ledgerInputError('worker_availability_cancellation_reason_required', 'Cancellation reason must be between 8 and 1000 characters.');
+      }
+      const actor = options.actor || payload.actor || 'dashboard';
+      const before = this.mapWorkerAvailabilityPeriod(row);
+      const approval = this.createApproval({
+        targetType: 'worker_availability_cancellation',
+        targetId: periodId,
+        approvalType: 'worker_availability_cancellation',
+        requestedBy: actor,
+        summary: `Cancel ${row.title} for ${row.worker_name}`,
+        reason,
+        data: {
+          periodId, workerId, workerName: row.worker_name, title: row.title,
+          periodType: row.period_type, startsAt: row.starts_at, endsAt: row.ends_at
+        }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE worker_availability_periods
+        SET status = 'pending_cancellation', cancellation_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'active'
+      `).run(
+        approval.id,
+        toJson({ ...fromJson(row.data_json, {}), cancellationRequestedAt: timestamp, cancellationRequestedBy: actor, cancellationReason: reason }),
+        timestamp,
+        periodId
+      );
+      const period = this.getWorkerAvailabilityPeriod(periodId);
+      this.audit({
+        entityType: 'worker_availability_period', entityId: periodId, action: 'request_worker_availability_cancellation',
+        actor, before, after: period,
+        metadata: { workerId, approvalId: approval.id, externalCommitments: 0 }
+      });
+      return { period, approval, replayed: false };
+    });
+  }
+
+  applyWorkerAvailabilityCancellation(periodId, timestamp = nowIso()) {
+    const row = this.db.prepare('SELECT * FROM worker_availability_periods WHERE id = ?').get(periodId);
+    if (!row || row.status === 'cancelled') return row ? this.mapWorkerAvailabilityPeriod(row) : null;
+    if (row.status !== 'pending_cancellation') {
+      throw ledgerInputError('worker_availability_state_conflict', `Availability cannot complete cancellation from ${row.status}.`, { periodId }, 409);
+    }
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE id = ? AND target_type = 'worker_availability_cancellation' AND target_id = ? AND status = 'approved'
+    `).get(row.cancellation_approval_id, periodId);
+    if (!approval) {
+      throw ledgerInputError('worker_availability_approval_missing', 'Availability cancellation requires a matching approved decision.', { periodId }, 409);
+    }
+    const before = this.mapWorkerAvailabilityPeriod(row);
+    this.db.prepare(`
+      UPDATE worker_availability_periods SET status = 'cancelled', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_cancellation'
+    `).run(
+      toJson({ ...fromJson(row.data_json, {}), cancelledAt: timestamp, cancelledBy: approval.resolved_by || 'approval' }),
+      timestamp,
+      periodId
+    );
+    const after = this.mapWorkerAvailabilityPeriod(this.db.prepare('SELECT * FROM worker_availability_periods WHERE id = ?').get(periodId));
+    this.audit({
+      entityType: 'worker_availability_period', entityId: periodId, action: 'cancel_worker_availability_period',
+      actor: approval.resolved_by || 'approval', before, after,
+      metadata: { workerId: row.worker_id, approvalId: approval.id, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  restoreRejectedWorkerAvailabilityCancellation(approval, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM worker_availability_periods WHERE id = ?').get(approval.target_id);
+    if (!row || row.status !== 'pending_cancellation') return row ? this.mapWorkerAvailabilityPeriod(row) : null;
+    const timestamp = options.timestamp || nowIso();
+    const before = this.mapWorkerAvailabilityPeriod(row);
+    this.db.prepare(`
+      UPDATE worker_availability_periods
+      SET status = 'active', cancellation_approval_id = NULL, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_cancellation'
+    `).run(
+      toJson({ ...fromJson(row.data_json, {}), cancellationDecision: status, cancellationResolvedAt: timestamp, cancellationResolvedBy: options.actor || 'approval' }),
+      timestamp,
+      row.id
+    );
+    const after = this.mapWorkerAvailabilityPeriod(this.db.prepare('SELECT * FROM worker_availability_periods WHERE id = ?').get(row.id));
+    this.audit({
+      entityType: 'worker_availability_period', entityId: row.id, action: 'restore_worker_availability_after_rejected_cancellation',
+      actor: options.actor || 'approval', before, after,
+      metadata: { workerId: row.worker_id, approvalId: approval.id, decision: status, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  findWorkerAvailabilityConflicts({ workerId = null, scheduledStart = null, scheduledEnd = null, excludePeriodId = null } = {}) {
+    if (!workerId || !scheduledStart || !scheduledEnd) return [];
+    return this.db.prepare(`
+      SELECT periods.*, workers.name AS worker_name, workers.role AS worker_role
+      FROM worker_availability_periods periods
+      JOIN workers ON workers.id = periods.worker_id
+      WHERE periods.worker_id = ? AND periods.status IN ('active', 'pending_cancellation')
+      ORDER BY periods.starts_at ASC
+    `).all(workerId)
+      .filter(row => !excludePeriodId || String(row.id) !== String(excludePeriodId))
+      .filter(row => this.assignmentWindowsOverlap(scheduledStart, scheduledEnd, row.starts_at, row.ends_at))
+      .map(row => this.mapWorkerAvailabilityPeriod(row));
+  }
+
+  detectWorkerAvailabilityConflicts(limit = 25) {
+    const assignments = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, jobs.title AS job_title
+      FROM assignments
+      JOIN workers ON workers.id = assignments.worker_id
+      JOIN jobs ON jobs.id = assignments.job_id
+      WHERE ${this.activeAssignmentStatusSql('assignments')}
+        AND ${this.operationalJobStatusSql('jobs')}
+        AND assignments.scheduled_start IS NOT NULL
+        AND assignments.scheduled_end IS NOT NULL
+      ORDER BY assignments.updated_at DESC
+    `).all();
+    const conflicts = [];
+    for (const assignment of assignments) {
+      const periods = this.findWorkerAvailabilityConflicts({
+        workerId: assignment.worker_id,
+        scheduledStart: assignment.scheduled_start,
+        scheduledEnd: assignment.scheduled_end
+      });
+      for (const period of periods) {
+        conflicts.push({
+          assignmentId: assignment.id,
+          jobId: assignment.job_id,
+          jobTitle: assignment.job_title || assignment.job_id,
+          workerId: assignment.worker_id,
+          workerName: assignment.worker_name || assignment.worker_id,
+          scheduledStart: assignment.scheduled_start,
+          scheduledEnd: assignment.scheduled_end,
+          period
+        });
+        if (conflicts.length >= limit) return conflicts;
+      }
+    }
+    return conflicts;
+  }
+
+  listWorkerAvailabilityRegister(filters = {}) {
+    const referenceAt = this.normalizeReservationDate(filters.referenceAt || filters.reference_at || nowIso(), 'referenceAt');
+    const periods = this.listWorkerAvailability({ ...filters, includeCancelled: normalizeBoolean(filters.includeCancelled ?? filters.include_cancelled, false), limit: safeLimit(filters.limit, 500, 1000) });
+    const conflicts = this.detectWorkerAvailabilityConflicts(250);
+    const periodsByWorker = new Map();
+    for (const period of periods) {
+      const rows = periodsByWorker.get(period.workerId) || [];
+      rows.push(period);
+      periodsByWorker.set(period.workerId, rows);
+    }
+    const workers = this.listWorkers({ includeInactive: true, limit: 1000 }).map(worker => ({
+      worker,
+      availability: this.workerAvailabilitySummaryFromPeriods(periodsByWorker.get(worker.id) || [], referenceAt)
+    }));
+    const reference = Date.parse(referenceAt);
+    return {
+      generatedAt: nowIso(),
+      referenceAt,
+      policy: {
+        purpose: 'Operational capacity planning only',
+        excludedData: ['medical diagnosis', 'payroll entitlement', 'HR case details', 'geolocation'],
+        pendingCancellationBlocksScheduling: true
+      },
+      catalog: this.workforceAvailabilityCatalog(),
+      summary: {
+        activePeriods: periods.filter(period => ['active', 'pending_cancellation'].includes(period.status) && Date.parse(period.endsAt) >= reference).length,
+        currentUnavailable: periods.filter(period => ['active', 'pending_cancellation'].includes(period.status) && Date.parse(period.startsAt) <= reference && Date.parse(period.endsAt) >= reference).length,
+        upcoming: periods.filter(period => ['active', 'pending_cancellation'].includes(period.status) && Date.parse(period.startsAt) > reference).length,
+        past: periods.filter(period => ['active', 'pending_cancellation'].includes(period.status) && Date.parse(period.endsAt) < reference).length,
+        pendingCancellation: periods.filter(period => period.status === 'pending_cancellation').length,
+        assignmentConflicts: conflicts.length
+      },
+      workers,
+      periods,
+      conflicts
+    };
   }
 
   retireWorker(workerId, options = {}) {
@@ -13856,7 +14285,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         scheduledStart: window.scheduledStart,
         scheduledEnd: window.scheduledEnd
       });
-      const approvalReasons = this.assignmentApprovalReasons(worker, payload, conflicts);
+      const availabilityConflictPeriods = this.findWorkerAvailabilityConflicts({
+        workerId: worker.id,
+        scheduledStart: window.scheduledStart,
+        scheduledEnd: window.scheduledEnd
+      });
+      const availabilityConflicts = availabilityConflictPeriods.map(period => ({
+        id: period.id,
+        startsAt: period.startsAt,
+        endsAt: period.endsAt,
+        status: period.status
+      }));
+      const approvalReasons = this.assignmentApprovalReasons(worker, payload, conflicts, availabilityConflicts);
       const requiresApproval = approvalReasons.length > 0;
       const id = makeId('assign');
       const timestamp = nowIso();
@@ -13867,6 +14307,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         notes: payload.notes || payload.reason || null,
         conflicts,
         conflictCount: conflicts.length,
+        availabilityConflicts,
+        availabilityConflictCount: availabilityConflicts.length,
         requiresApproval,
         approvalReasons
       };
@@ -13904,6 +14346,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             scheduledStart: window.scheduledStart,
             scheduledEnd: window.scheduledEnd,
             conflicts,
+            availabilityConflicts,
             approvalReasons
           }
         }, { actor, audit: false });
@@ -13922,13 +14365,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           action: requiresApproval ? 'propose_assignment' : 'create_assignment',
           actor,
           after: assignment,
-          metadata: { approvalId: approval?.id || null, conflicts: conflicts.length }
+          metadata: { approvalId: approval?.id || null, conflicts: conflicts.length, availabilityConflicts: availabilityConflicts.length }
         });
       }
       return {
         ...assignment,
         approval,
         conflicts,
+        availabilityConflicts,
         requiresApproval
       };
     });
@@ -14177,7 +14621,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return conflicts;
   }
 
-  assignmentApprovalReasons(worker, payload = {}, conflicts = []) {
+  assignmentApprovalReasons(worker, payload = {}, conflicts = [], availabilityConflicts = []) {
     const requestedApproval = normalizeBoolean(payload.requiresApproval, false);
     const clientCommitment = normalizeBoolean(payload.clientCommitment ?? payload.client_commitment ?? payload.committedToClient, false);
     const status = normalizeStatus(payload.status, 'planned');
@@ -14186,6 +14630,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       reasons.push({
         type: 'worker_conflict',
         detail: `${conflicts.length} active assignment conflict(s) need review before this worker is committed.`
+      });
+    }
+    if (availabilityConflicts.length) {
+      reasons.push({
+        type: 'worker_availability_conflict',
+        detail: `${availabilityConflicts.length} retained worker unavailability period(s) overlap this assignment and must be resolved before approval.`
       });
     }
     if (clientCommitment) {
@@ -25284,6 +25734,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           scheduledStart: plannedStart,
           scheduledEnd: plannedEnd
         }).filter(conflict => String(conflict.jobId) !== String(jobId));
+        const availabilityConflicts = this.findWorkerAvailabilityConflicts({
+          workerId: worker.id,
+          scheduledStart: plannedStart,
+          scheduledEnd: plannedEnd
+        });
         const region = normalizeText(worker.homeRegion, '').toLowerCase();
         const regionMatch = region && [job.city, job.region, job.address].some(value => normalizeText(value, '').toLowerCase().includes(region));
         const data = worker.data || {};
@@ -25296,6 +25751,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (regionMatch) score += 8;
         if (rating) score += Math.min(10, rating * 2);
         if (conflicts.length) score -= 70;
+        if (availabilityConflicts.length) score -= 90;
         return {
           worker: {
             id: worker.id,
@@ -25309,7 +25765,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           score: Math.max(0, Math.round(score)),
           matchedSkills,
           conflicts,
-          available: !conflicts.length && !unavailableStatuses.has(status)
+          availabilityConflicts: availabilityConflicts.map(period => ({
+            id: period.id,
+            startsAt: period.startsAt,
+            endsAt: period.endsAt,
+            status: period.status
+          })),
+          available: !conflicts.length && !availabilityConflicts.length && !unavailableStatuses.has(status)
         };
       })
       .sort((left, right) => right.score - left.score || left.worker.name.localeCompare(right.worker.name));
@@ -25395,6 +25857,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         scheduledEnd: plannedEnd || assignment.scheduledEnd,
         excludeAssignmentId: assignment.id
       }).filter(conflict => String(conflict.jobId) !== String(jobId || assignment.jobId));
+      const availabilityConflicts = this.findWorkerAvailabilityConflicts({
+        workerId: worker.id,
+        scheduledStart: plannedStart || assignment.scheduledStart,
+        scheduledEnd: plannedEnd || assignment.scheduledEnd
+      });
       const qualification = this.assessWorkerQualifications(worker.id, {
         jobId: jobId || assignment.jobId,
         role: assignment.role || worker.role,
@@ -25415,6 +25882,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           severity: 'high',
           message: `${worker.name} is marked ${workerStatus.replace(/_/g, ' ')} and blocks dispatch.`,
           workerStatus
+        };
+      } else if (availabilityConflicts.length) {
+        blocker = {
+          type: 'worker_availability_conflict',
+          severity: 'high',
+          message: `${worker.name} has ${availabilityConflicts.length} retained unavailability period(s) in the dispatch window.`
         };
       } else if (conflicts.length) {
         blocker = {
@@ -25446,6 +25919,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           workerStatus,
           status: blocker?.type || qualification.status,
           conflicts: conflicts.length,
+          availabilityConflicts: availabilityConflicts.length,
           qualification,
           blocked: true
         });
@@ -25461,6 +25935,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           workerStatus,
           status: warningStatuses.has(workerStatus) || qualification.warnings.length ? 'review' : 'ready',
           conflicts: 0,
+          availabilityConflicts: 0,
           qualification,
           blocked: false
         });
@@ -25483,7 +25958,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       assignments: activeAssignments.length,
       blocked: blockers.length,
       warnings: warnings.length,
-      conflicts: blockers.filter(blocker => blocker.type === 'worker_conflict').length,
+      conflicts: blockers.filter(blocker => ['worker_conflict', 'worker_availability_conflict'].includes(blocker.type)).length,
+      availabilityConflicts: blockers.filter(blocker => blocker.type === 'worker_availability_conflict').length,
       qualificationBlockers: blockers.filter(blocker => blocker.type.startsWith('worker_qualification_')).length,
       items,
       blockers,
@@ -26730,6 +27206,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'worker_availability_cancellation') {
+        this.restoreRejectedWorkerAvailabilityCancellation(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'document_transmittal') {
         const transmittalData = fromJson(
           this.db.prepare('SELECT data_json FROM document_transmittals WHERE id = ?').get(before.target_id)?.data_json,
@@ -27254,6 +27736,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyWorkerCredentialApproval(targetId, timestamp);
     } else if (targetType === 'job_qualification_requirement_retirement') {
       this.applyQualificationRequirementRetirement(targetId, timestamp);
+    } else if (targetType === 'worker_availability_cancellation') {
+      this.applyWorkerAvailabilityCancellation(targetId, timestamp);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -27603,6 +28087,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const approvedStatus = ['planned', 'scheduled', 'active', 'in_progress', 'approved'].includes(requestedStatus)
         ? requestedStatus
         : 'planned';
+      const availabilityConflicts = assignment ? this.findWorkerAvailabilityConflicts({
+        workerId: assignment.worker_id,
+        scheduledStart: assignment.scheduled_start,
+        scheduledEnd: assignment.scheduled_end
+      }) : [];
+      if (assignment && availabilityConflicts.length) {
+        throw ledgerInputError(
+          'assignment_worker_availability_required',
+          'Assignment approval is blocked while retained worker unavailability overlaps the work window.',
+          {
+            assignmentId: targetId,
+            workerId: assignment.worker_id,
+            periodIds: availabilityConflicts.map(period => period.id)
+          },
+          409
+        );
+      }
       if (assignment && ['active', 'in_progress'].includes(approvedStatus)) {
         const worker = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(assignment.worker_id);
         const qualification = worker ? this.assessWorkerQualifications(worker.id, {
@@ -27620,7 +28121,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
       }
       this.db.prepare('UPDATE assignments SET status = ?, data_json = ?, updated_at = ? WHERE id = ?')
-        .run(approvedStatus, toJson({ ...data, approvedAt: timestamp }), timestamp, targetId);
+        .run(approvedStatus, toJson({ ...data, availabilityConflicts: [], availabilityConflictCount: 0, approvedAt: timestamp }), timestamp, targetId);
       this.db.prepare("UPDATE jobs SET phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM assignments WHERE id = ?)")
         .run(timestamp, targetId);
     } else if (targetType === 'tool_reservation') {
@@ -30194,6 +30695,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             excludeAssignmentId: assignment.id
           });
         });
+        const workerAvailabilityConflicts = activeAssignments.flatMap(assignment => (
+          this.findWorkerAvailabilityConflicts({
+            workerId: assignment.workerId,
+            scheduledStart: assignment.scheduledStart,
+            scheduledEnd: assignment.scheduledEnd
+          }).map(period => ({
+            type: 'worker_availability_conflict',
+            assignmentId: assignment.id,
+            workerId: assignment.workerId,
+            workerName: assignment.workerName,
+            periodId: period.id,
+            startsAt: period.startsAt,
+            endsAt: period.endsAt,
+            status: period.status
+          }))
+        ));
+        const allWorkerConflicts = [...workerConflicts, ...workerAvailabilityConflicts];
         const offlineAssignments = activeAssignments.filter(assignment => {
           const worker = assignment.workerId ? workersById.get(assignment.workerId) : null;
           return !worker || offlineWorkerStatuses.has(normalizeStatus(worker.status, 'available'));
@@ -30232,7 +30750,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || blockedSiteAccess.some(access => access.approvalId && normalizeStatus(access.status, '') === 'pending_approval');
         const flags = {
           approvalRequired,
-          workerConflict: workerConflicts.length > 0,
+          workerConflict: allWorkerConflicts.length > 0,
           needsAssignment,
           needsInstruction,
           siteAccess,
@@ -30246,6 +30764,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const siteAccessGap = crewEvidence.items.find(item => !item.siteAccessReady) || null;
         const nextActions = [];
         if (approvalRequired) nextActions.push({ type: 'review_worker_approval', label: 'Review crew approval gates', approvalId: pendingApprovals[0]?.id || null, requiresApproval: false });
+        if (workerAvailabilityConflicts.length) nextActions.push({ type: 'review_worker_availability_conflict', label: 'Resolve worker availability conflict', assignmentId: workerAvailabilityConflicts[0].assignmentId, workerId: workerAvailabilityConflicts[0].workerId, periodId: workerAvailabilityConflicts[0].periodId, requiresApproval: false });
         if (workerConflicts.length) nextActions.push({ type: 'resolve_worker_conflict', label: 'Resolve double-booked worker assignment', assignmentId: activeAssignments[0]?.id || null, workerId: activeAssignments[0]?.workerId || null, requiresApproval: false });
         if (offlineAssignments.length) nextActions.push({ type: 'resolve_worker_conflict', label: 'Replace unavailable worker assignment', assignmentId: offlineAssignments[0]?.id || null, workerId: offlineAssignments[0]?.workerId || null, requiresApproval: false });
         if (needsAssignment) nextActions.push({ type: 'assign_worker', label: 'Assign an available worker or subcontractor', requiresApproval: false });
@@ -30328,7 +30847,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             pendingApprovals: pendingApprovals.length,
             activeAssignments: activeAssignments.length,
             pendingAssignments: pendingAssignments.length,
-            workerConflicts: workerConflicts.length,
+            workerConflicts: allWorkerConflicts.length,
+            workerAvailabilityConflicts: workerAvailabilityConflicts.length,
             offlineAssignments: offlineAssignments.length,
             assignmentHours,
             workerInstructions: activeInstructions.length,
@@ -30359,7 +30879,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             siteAccess: crewEvidence.currentSiteAccessLogs[0] || null,
             timeLog: timeLogs[0] || null
           },
-          conflicts: workerConflicts.slice(0, 8),
+          conflicts: allWorkerConflicts.slice(0, 8),
           workers: activeAssignments.map(assignment => ({
             id: assignment.workerId,
             name: assignment.workerName || workersById.get(assignment.workerId)?.name || assignment.workerId,
@@ -31318,6 +31838,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       progress_updates: 'status',
       time_logs: 'status',
       weekly_timesheets: 'status',
+      worker_availability_periods: 'status',
       job_qualification_requirements: 'status',
       worker_instructions: 'status',
       worker_orientations: 'status',
@@ -32242,6 +32763,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   dashboardSummary() {
     const toolReservationConflicts = this.detectToolReservationConflicts(100);
     const assignmentConflicts = this.detectAssignmentConflicts(100);
+    const workerAvailabilityConflicts = this.detectWorkerAvailabilityConflicts(100);
     const tradePartnerSummary = this.summarizeTradePartners();
     const opportunityPipeline = this.opportunityForecast();
     const activeCount = (table, condition = '1 = 1', params = []) => this.countActiveRecords(table, condition, params);
@@ -32257,6 +32779,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       expiringTradePartners: tradePartnerSummary.expiring,
       tradePartnerComplianceActions: tradePartnerSummary.actionRequired,
       jobs: this.count('jobs'),
+      workerAvailabilityPeriods: Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_availability_periods WHERE status IN ('active', 'pending_cancellation')").get().count || 0),
       openJobs: activeCount('jobs', "records.status <> 'completed'"),
       completedJobs: activeCount('jobs', "records.status = 'completed'"),
       archivedJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'archived'").get().count || 0),
@@ -32455,6 +32978,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         activeAssignments: normalizeNumber(workload.activeAssignments, 0),
         pendingAssignments: normalizeNumber(workload.pendingAssignments, 0),
         assignmentConflicts: assignmentConflicts.length,
+        workerAvailabilityConflicts: workerAvailabilityConflicts.length,
         reservedTools: normalizeNumber(workload.reservedTools, 0),
         pendingToolReservations: normalizeNumber(workload.pendingToolReservations, 0),
         toolReservationConflicts: toolReservationConflicts.length,
@@ -32569,6 +33093,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         severity: 'high',
         message: `${conflict.workerName} is assigned across ${conflict.jobTitle} and ${conflict.conflictingJobTitle}; approve, release, or reschedule before dispatch.`
       });
+    }
+
+    const availabilityConflicts = this.detectWorkerAvailabilityConflicts(10);
+    for (const conflict of availabilityConflicts) {
+      const sourceHash = sha256Json({
+        assignmentId: conflict.assignmentId,
+        periodId: conflict.period.id,
+        startsAt: conflict.period.startsAt,
+        endsAt: conflict.period.endsAt,
+        status: conflict.period.status
+      });
+      const taskId = `task_${sha256Text(`availability-conflict:${conflict.assignmentId}:${conflict.period.id}:${sourceHash}`).slice(0, 24)}`;
+      const existingTask = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (!existingTask) {
+        actions.push({
+          type: 'review_worker_availability_conflict',
+          jobId: conflict.jobId,
+          assignmentId: conflict.assignmentId,
+          workerId: conflict.workerId,
+          workerName: conflict.workerName,
+          jobTitle: conflict.jobTitle,
+          periodId: conflict.period.id,
+          taskId,
+          sourceHash,
+          severity: 'high',
+          message: `${conflict.workerName} has retained unavailability overlapping the ${conflict.jobTitle} assignment window.`
+        });
+      }
     }
 
     const qualificationAssignments = this.db.prepare(`
@@ -33925,6 +34477,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_stale_attendance',
       'review_missing_timesheet',
       'review_stale_timesheet',
+      'review_worker_availability_conflict',
       'review_worker_qualification_gap',
       'review_expiring_worker_credential',
       'aftercare_follow_up',
@@ -35254,6 +35807,37 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const availabilityReviews = preview.filter(action => action.type === 'review_worker_availability_conflict').slice(0, 10);
+        for (const action of availabilityReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`availability-review:${action.assignmentId}:${action.periodId}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Resolve worker availability conflict: ${action.workerName || 'crew member'}`,
+            description: `${action.message} Review the retained assignment window and availability period. Reschedule or request approval-backed cancellation before dispatch; do not contact the worker automatically.`,
+            priority: 'high',
+            dueAt: futureIsoDate(1),
+            source: 'availability_monitor',
+            data: {
+              assignmentId: action.assignmentId,
+              workerId: action.workerId,
+              availabilityPeriodId: action.periodId,
+              sourceHash: action.sourceHash || null,
+              internalOnly: true,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_worker_availability_review_task', actor, after: task,
+            metadata: { assignmentId: action.assignmentId, workerId: action.workerId, availabilityPeriodId: action.periodId, sourceHash: action.sourceHash || null, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -35671,6 +36255,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         `).get(requirement.retirement_approval_id, requirement.id);
         if (!approval) issues.push({ severity: 'error', message: `Qualification requirement ${requirement.id} lacks its pending retirement decision.` });
       }
+    }
+    const availabilityRows = this.db.prepare(`
+      SELECT periods.*, workers.id AS retained_worker_id
+      FROM worker_availability_periods periods
+      LEFT JOIN workers ON workers.id = periods.worker_id
+    `).all();
+    for (const period of availabilityRows) {
+      if (!period.retained_worker_id) {
+        issues.push({ severity: 'error', message: `Worker availability period ${period.id} references a missing worker.` });
+        continue;
+      }
+      if (!WORKFORCE_AVAILABILITY_BY_KEY.has(period.period_type)) {
+        issues.push({ severity: 'error', message: `Worker availability period ${period.id} uses an unsupported operational type.` });
+      }
+      if (!['active', 'pending_cancellation', 'cancelled'].includes(period.status)
+        || !Number.isFinite(Date.parse(period.starts_at))
+        || !Number.isFinite(Date.parse(period.ends_at))
+        || Date.parse(period.ends_at) <= Date.parse(period.starts_at)
+        || !normalizeText(period.source_fingerprint, '')) {
+        issues.push({ severity: 'error', message: `Worker availability period ${period.id} violates status, time-window, or fingerprint invariants.` });
+      }
+      if (period.status === 'pending_cancellation' || period.status === 'cancelled') {
+        const expectedApprovalStatus = period.status === 'cancelled' ? 'approved' : 'pending';
+        const approval = this.db.prepare(`
+          SELECT id FROM approvals
+          WHERE id = ? AND target_type = 'worker_availability_cancellation' AND target_id = ? AND status = ?
+        `).get(period.cancellation_approval_id, period.id, expectedApprovalStatus);
+        if (!approval) issues.push({ severity: 'error', message: `Worker availability period ${period.id} lacks its matching ${expectedApprovalStatus} cancellation decision.` });
+      }
+    }
+    const availabilityConflicts = this.detectWorkerAvailabilityConflicts(250);
+    if (availabilityConflicts.length) {
+      issues.push({ severity: 'warning', message: `${availabilityConflicts.length} active assignment(s) overlap retained worker unavailability.` });
     }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
     if (jobsWithoutClient) issues.push({ severity: 'error', message: `${jobsWithoutClient} job(s) are missing clients.` });
@@ -36242,6 +36859,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         timesheetExports: this.count('timesheet_exports'),
         workerCredentials: this.count('worker_credentials'),
         qualificationRequirements: this.count('job_qualification_requirements'),
+        workerAvailabilityPeriods: this.count('worker_availability_periods'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -36467,6 +37085,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       hourlyRate: normalizeNumber(row.hourly_rate, 0),
       skills: fromJson(row.skills_json, []),
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapWorkerAvailabilityPeriod(row) {
+    if (!row) return null;
+    const periodType = normalizeStatus(row.period_type, 'other');
+    const status = normalizeStatus(row.status, 'active');
+    const reference = Date.now();
+    const startsAt = row.starts_at;
+    const endsAt = row.ends_at;
+    let phase = status;
+    if (status === 'active' || status === 'pending_cancellation') {
+      if (Date.parse(endsAt) < reference) phase = 'past';
+      else if (Date.parse(startsAt) > reference) phase = 'upcoming';
+      else phase = 'current';
+    }
+    return {
+      id: row.id,
+      workerId: row.worker_id,
+      workerName: row.worker_name || null,
+      workerRole: row.worker_role || null,
+      periodType,
+      periodLabel: WORKFORCE_AVAILABILITY_BY_KEY.get(periodType)?.label || row.title,
+      title: row.title,
+      status,
+      phase,
+      startsAt,
+      endsAt,
+      cancellationApprovalId: row.cancellation_approval_id || null,
+      sourceFingerprint: row.source_fingerprint,
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -37171,6 +37822,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       allocationHours: normalizeNumber(row.allocation_hours, 0),
       approvalId: data.approvalId || null,
       conflicts: Array.isArray(data.conflicts) ? data.conflicts : [],
+      availabilityConflicts: Array.isArray(data.availabilityConflicts) ? data.availabilityConflicts : [],
       requiresApproval: normalizeBoolean(data.requiresApproval, false),
       data,
       createdAt: row.created_at,
@@ -38244,12 +38896,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.credentialType = data.credentialType || null;
       preview.roleKey = data.roleKey || '*';
       preview.mandatory = data.mandatory !== false;
+    } else if (targetType === 'worker_availability_cancellation') {
+      primaryEffect = `Cancel ${data.title || 'the retained unavailability period'} for ${data.workerName || 'the retained worker'}.`;
+      addEffect(`Remove the scheduling block for ${data.startsAt || 'the retained start'} through ${data.endsAt || 'the retained end'}.`);
+      addSafeguard('The period continues to block assignment and dispatch while this decision is pending.');
+      addSafeguard('Rejection or cancellation restores the active block; no HR, payroll, or medical record is changed.');
+      riskLevel = 'high';
+      preview.workerId = data.workerId || null;
+      preview.periodType = data.periodType || null;
+      preview.startsAt = data.startsAt || null;
+      preview.endsAt = data.endsAt || null;
     } else if (targetType === 'assignment') {
       primaryEffect = `Approve worker assignment for ${data.workerName || data.workerId || 'worker'}.`;
       addEffect(`Set assignment to ${data.requestedStatus || 'planned'} for ${data.scheduledStart || 'the proposed start'} through ${data.scheduledEnd || 'the proposed end'}.`);
       if (Array.isArray(data.conflicts) && data.conflicts.length) {
         riskLevel = 'high';
         preview.conflicts = data.conflicts.slice(0, 6);
+      }
+      if (Array.isArray(data.availabilityConflicts) && data.availabilityConflicts.length) {
+        riskLevel = 'high';
+        preview.availabilityConflicts = data.availabilityConflicts.slice(0, 6).map(period => ({
+          id: period.id,
+          startsAt: period.startsAt,
+          endsAt: period.endsAt,
+          status: period.status
+        }));
+        addSafeguard('Approval remains blocked until every overlapping retained worker availability period is cancelled through its own approval decision.');
       }
       addSafeguard('Does not notify the worker or client automatically.');
     } else if (targetType === 'tool_reservation') {

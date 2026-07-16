@@ -448,6 +448,21 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('036_worker_availability')) {
+        if (!retainedTables.has('worker_availability_periods')) {
+          throw new Error('Backup worker-availability schema is incomplete: worker_availability_periods.');
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_worker_availability_worker_window',
+          'idx_worker_availability_current',
+          'idx_worker_availability_pending_cancellation'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup worker-availability constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

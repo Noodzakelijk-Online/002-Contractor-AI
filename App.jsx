@@ -9,6 +9,7 @@ import {
   BriefcaseBusiness,
   Building2,
   CalendarDays,
+  CalendarOff,
   Check,
   ChevronRight,
   ClipboardCheck,
@@ -690,6 +691,21 @@ function emptyQualificationRequirementDraft(job = null) {
   }
 }
 
+function emptyWorkerAvailabilityDraft(worker = null) {
+  const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
+  startsAt.setHours(8, 0, 0, 0)
+  const endsAt = new Date(startsAt)
+  endsAt.setHours(17, 0, 0, 0)
+  return {
+    workerId: worker?.id || '',
+    periodType: 'leave',
+    title: '',
+    startsAt: toLocalDateTimeInput(startsAt.toISOString()),
+    endsAt: toLocalDateTimeInput(endsAt.toISOString()),
+    notes: '',
+  }
+}
+
 function emptyProductionBaselineLine(index = 0) {
   return {
     lineKey: `production-line-${index + 1}`,
@@ -1030,16 +1046,18 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       const result = await api('/api/ledger/trade-partners?includeRetired=true&limit=200')
       return { tradePartners: result.partners || [], tradePartnerSummary: result.summary || {} }
     }
-    const [workforce, workers, qualifications] = await Promise.all([
+    const [workforce, workers, qualifications, availability] = await Promise.all([
       api('/api/ledger/workforce?limit=100'),
       api('/api/ledger/workers?limit=500'),
       api('/api/ledger/qualifications'),
+      api('/api/ledger/availability'),
     ])
     return {
       workforce,
       workers: workers.workers || [],
       workerSummary: workers.summary || {},
       qualificationRegister: qualifications.qualificationRegister || { catalog: { credentials: [], requirements: [] }, summary: {}, workers: [], requirements: [], jobs: [] },
+      availabilityRegister: availability.availabilityRegister || { catalog: [], summary: {}, workers: [], periods: [], conflicts: [] },
     }
   }
   if (section === 'finance') return { finance: await api('/api/ledger/finance?limit=100') }
@@ -2397,6 +2415,129 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
   )
 }
 
+function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, submitting, onCreate, onCancel, onOpenApprovals }) {
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState('all')
+  const periods = register?.periods || EMPTY_LIST
+  const conflictsByPeriod = useMemo(() => {
+    const grouped = new Map()
+    for (const conflict of register?.conflicts || EMPTY_LIST) {
+      const periodId = conflict.period?.id
+      if (!periodId) continue
+      const rows = grouped.get(periodId) || []
+      rows.push(conflict)
+      grouped.set(periodId, rows)
+    }
+    return grouped
+  }, [register?.conflicts])
+  const visiblePeriods = useMemo(() => {
+    const search = query.trim().toLowerCase()
+    return periods.filter((period) => {
+      if (filter === 'current' && period.phase !== 'current') return false
+      if (filter === 'upcoming' && period.phase !== 'upcoming') return false
+      if (filter === 'pending' && period.status !== 'pending_cancellation') return false
+      if (filter === 'conflict' && !conflictsByPeriod.has(period.id)) return false
+      if (!search) return true
+      return JSON.stringify({
+        workerName: period.workerName,
+        workerRole: period.workerRole,
+        title: period.title,
+        periodType: period.periodLabel,
+        notes: period.data?.operationalNotes,
+      }).toLowerCase().includes(search)
+    })
+  }, [conflictsByPeriod, filter, periods, query])
+  const summary = register?.summary || {}
+
+  return (
+    <div className="availability-workspace" role="tabpanel" data-testid="availability-workspace">
+      <div className="resource-summary availability-summary" aria-label="Worker availability summary">
+        <div><span>Active periods</span><strong>{summary.activePeriods || 0}</strong></div>
+        <div><span>Unavailable now</span><strong>{summary.currentUnavailable || 0}</strong></div>
+        <div><span>Upcoming</span><strong>{summary.upcoming || 0}</strong></div>
+        <div><span>Cancellation review</span><strong>{summary.pendingCancellation || 0}</strong></div>
+        <div><span>Assignment conflicts</span><strong>{summary.assignmentConflicts || 0}</strong></div>
+      </div>
+      <div className="availability-toolbar">
+        <label className="search-control">
+          <Search size={16} />
+          <span className="visually-hidden">Search worker availability</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search worker or period" />
+        </label>
+        <div className="resource-tabs" role="tablist" aria-label="Availability state">
+          {[
+            ['all', 'All'],
+            ['current', 'Current'],
+            ['upcoming', 'Upcoming'],
+            ['pending', 'Pending'],
+            ['conflict', 'Conflicts'],
+          ].map(([key, label]) => (
+            <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'resource-tab-active' : ''} onClick={() => setFilter(key)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {canCoordinate ? (
+          <button type="button" className="primary-button" disabled={submitting || !workers?.length} onClick={() => onCreate()}>
+            <Plus size={16} />
+            Add unavailability
+          </button>
+        ) : null}
+      </div>
+      <div className="availability-policy">
+        <LockKeyhole size={16} />
+        <p>Operational capacity only. Do not retain diagnosis, illness, HR case, payroll entitlement, or location tracking data.</p>
+      </div>
+      <div className="availability-list">
+        {visiblePeriods.map((period) => {
+          const conflicts = conflictsByPeriod.get(period.id) || EMPTY_LIST
+          const displayState = period.status === 'pending_cancellation' ? period.status : period.phase
+          return (
+            <article className="availability-row" key={period.id}>
+              <div className="availability-identity">
+                <span className="availability-icon"><CalendarOff size={17} /></span>
+                <div>
+                  <div className="availability-title-line">
+                    <h3>{period.workerName}</h3>
+                    <span className={`status status-${displayState}`}>{formatStatus(displayState)}</span>
+                    {conflicts.length ? <span className="tag tag-red">{conflicts.length} conflict{conflicts.length === 1 ? '' : 's'}</span> : null}
+                  </div>
+                  <p>{period.workerRole || 'Role not retained'} / {period.periodLabel}</p>
+                </div>
+              </div>
+              <div className="availability-window">
+                <strong>{period.title}</strong>
+                <span>{formatDateTime(period.startsAt)} to {formatDateTime(period.endsAt)}</span>
+                {period.data?.operationalNotes ? <small>{period.data.operationalNotes}</small> : null}
+              </div>
+              <div className="availability-actions">
+                {period.status === 'pending_cancellation' && canApprove && period.cancellationApprovalId ? (
+                  <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: period.cancellationApprovalId })}>
+                    <ClipboardCheck size={15} />
+                    Review cancellation
+                  </button>
+                ) : null}
+                {period.status === 'active' && canCoordinate ? (
+                  <button type="button" className="secondary-button" disabled={submitting} onClick={() => onCancel(period)}>
+                    <Ban size={15} />
+                    Request cancellation
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          )
+        })}
+        {!visiblePeriods.length ? (
+          <Empty
+            title="No matching availability periods"
+            detail="Time-bounded operational unavailability will appear here and participate in scheduling immediately."
+          />
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function EquipmentDirectory({
   tools,
   summary,
@@ -2881,6 +3022,7 @@ function ResourcesWorkspace({
   workers,
   workerSummary,
   qualificationRegister,
+  availabilityRegister,
   tools,
   toolSummary,
   tradePartners,
@@ -2904,6 +3046,8 @@ function ResourcesWorkspace({
   onAddCredential,
   onCreateQualificationRequirement,
   onRetireQualificationRequirement,
+  onCreateAvailability,
+  onCancelAvailability,
   onCreateEquipment,
   onEditEquipment,
   onInspectEquipment,
@@ -2926,6 +3070,7 @@ function ResourcesWorkspace({
   const isTimesheets = view === 'timesheets'
   const isCrewDirectory = isWorkforce && workforceMode === 'crew'
   const isQualifications = isWorkforce && workforceMode === 'qualifications'
+  const isAvailability = isWorkforce && workforceMode === 'availability'
   const stream = isWorkforce ? workforce : inventory
   const rows = stream?.jobs || EMPTY_LIST
   const summary = stream?.summary || {}
@@ -2944,6 +3089,8 @@ function ResourcesWorkspace({
                 ? 'Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.'
                 : isQualifications
                   ? 'Verify retained worker credentials, enforce role-specific job requirements, and resolve expiry or evidence gaps before site work.'
+                : isAvailability
+                  ? 'Retain time-bounded operational availability and resolve assignment conflicts before scheduling or dispatch.'
                 : isCrewDirectory
                   ? 'Maintain retained crew identity, availability, skills, cost, and assignment safeguards.'
                   : 'Coordinate retained crew, equipment, material, procurement, and loading records before work is committed.'}
@@ -3027,6 +3174,15 @@ function ResourcesWorkspace({
               <ShieldCheck size={15} />
               Qualifications
             </button>
+            <button
+              role="tab"
+              aria-selected={workforceMode === 'availability'}
+              className={workforceMode === 'availability' ? 'resource-tab-active' : ''}
+              onClick={() => setWorkforceMode('availability')}
+            >
+              <CalendarOff size={15} />
+              Availability
+            </button>
           </div>
         </div>
       ) : null}
@@ -3065,6 +3221,17 @@ function ResourcesWorkspace({
           onInspect={onInspectEquipment}
           onMaintain={onMaintainEquipment}
           onRetire={onRetireEquipment}
+          onOpenApprovals={onOpenApprovals}
+        />
+      ) : isAvailability ? (
+        <AvailabilityWorkspace
+          register={availabilityRegister}
+          workers={workers}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          submitting={submitting}
+          onCreate={onCreateAvailability}
+          onCancel={onCancelAvailability}
           onOpenApprovals={onOpenApprovals}
         />
       ) : isQualifications ? (
@@ -7314,6 +7481,10 @@ function App() {
   const [qualificationRequirementDraft, setQualificationRequirementDraft] = useState(() => emptyQualificationRequirementDraft())
   const [qualificationRequirementRetirement, setQualificationRequirementRetirement] = useState(null)
   const [qualificationRequirementRetirementReason, setQualificationRequirementRetirementReason] = useState('')
+  const [availabilityEditor, setAvailabilityEditor] = useState(false)
+  const [availabilityDraft, setAvailabilityDraft] = useState(() => emptyWorkerAvailabilityDraft())
+  const [availabilityCancellation, setAvailabilityCancellation] = useState(null)
+  const [availabilityCancellationReason, setAvailabilityCancellationReason] = useState('')
   const [equipmentEditor, setEquipmentEditor] = useState(null)
   const [equipmentDraft, setEquipmentDraft] = useState(emptyEquipmentDraft)
   const [equipmentInspection, setEquipmentInspection] = useState(null)
@@ -7365,6 +7536,7 @@ function App() {
   const fieldCaptureRef = useRef(null)
   const workerDialogOpenerRef = useRef(null)
   const qualificationDialogOpenerRef = useRef(null)
+  const availabilityDialogOpenerRef = useRef(null)
   const equipmentDialogOpenerRef = useRef(null)
   const equipmentInspectionOpenerRef = useRef(null)
   const equipmentMaintenanceOpenerRef = useRef(null)
@@ -7409,6 +7581,7 @@ function App() {
           workers: [],
           workerSummary: {},
           qualificationRegister: { catalog: { credentials: [], requirements: [] }, summary: {}, workers: [], requirements: [], jobs: [] },
+          availabilityRegister: { catalog: [], summary: {}, workers: [], periods: [], conflicts: [] },
           timesheets: { rows: [], exports: [], summary: {} },
           tools: [],
           toolSummary: {},
@@ -7448,6 +7621,7 @@ function App() {
           workers: [],
           workerSummary: {},
           qualificationRegister: { catalog: { credentials: [], requirements: [] }, summary: {}, workers: [], requirements: [], jobs: [] },
+          availabilityRegister: { catalog: [], summary: {}, workers: [], periods: [], conflicts: [] },
           timesheets: { rows: [], exports: [], summary: {} },
           tools: [],
           toolSummary: {},
@@ -10693,6 +10867,105 @@ function App() {
     }
   }
 
+  function openAvailabilityEditor(worker = null) {
+    availabilityDialogOpenerRef.current = document.activeElement
+    const firstWorker = worker || (data?.workers || EMPTY_LIST).find((item) => item.status !== 'retired') || null
+    setAvailabilityDraft(emptyWorkerAvailabilityDraft(firstWorker))
+    setAvailabilityEditor(true)
+  }
+
+  function closeAvailabilityEditor() {
+    if (submitting) return
+    const opener = availabilityDialogOpenerRef.current
+    availabilityDialogOpenerRef.current = null
+    setAvailabilityEditor(false)
+    setAvailabilityDraft(emptyWorkerAvailabilityDraft())
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function submitWorkerAvailability(event) {
+    event.preventDefault()
+    if (!availabilityDraft.workerId || !availabilityDraft.startsAt || !availabilityDraft.endsAt) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/workers/${encodeURIComponent(availabilityDraft.workerId)}/availability`, {
+        method: 'POST',
+        body: JSON.stringify({
+          periodType: availabilityDraft.periodType,
+          title: availabilityDraft.title.trim() || null,
+          startsAt: availabilityDraft.startsAt,
+          endsAt: availabilityDraft.endsAt,
+          notes: availabilityDraft.notes.trim() || null,
+          actor: 'office_operator',
+        }),
+      })
+      setAvailabilityEditor(false)
+      setAvailabilityDraft(emptyWorkerAvailabilityDraft())
+      setData((current) => current ? {
+        ...current,
+        workers: result.worker ? upsertById(current.workers, result.worker) : current.workers,
+        availabilityRegister: result.availabilityRegister || current.availabilityRegister,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      const conflictCount = result.conflicts?.length || 0
+      notify(
+        result.replayed
+          ? `${result.period.title} already exists with the same retained window.`
+          : `${result.period.title} now blocks overlapping scheduling${conflictCount ? ` and exposes ${conflictCount} assignment conflict${conflictCount === 1 ? '' : 's'}` : ''}.`,
+      )
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openAvailabilityCancellation(period) {
+    availabilityDialogOpenerRef.current = document.activeElement
+    setAvailabilityCancellation(period)
+    setAvailabilityCancellationReason('')
+  }
+
+  function closeAvailabilityCancellation() {
+    if (submitting) return
+    const opener = availabilityDialogOpenerRef.current
+    availabilityDialogOpenerRef.current = null
+    setAvailabilityCancellation(null)
+    setAvailabilityCancellationReason('')
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function requestAvailabilityCancellation(event) {
+    event.preventDefault()
+    if (!availabilityCancellation || availabilityCancellationReason.trim().length < 8) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/workers/${encodeURIComponent(availabilityCancellation.workerId)}/availability/${encodeURIComponent(availabilityCancellation.id)}/cancellation`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: availabilityCancellationReason.trim(), actor: 'office_operator' }),
+      })
+      setAvailabilityCancellation(null)
+      setAvailabilityCancellationReason('')
+      setData((current) => current ? {
+        ...current,
+        workers: result.worker ? upsertById(current.workers, result.worker) : current.workers,
+        availabilityRegister: result.availabilityRegister || current.availabilityRegister,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(`Cancellation approval requested for ${result.period.title}. The scheduling block remains active until approval.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function openEquipmentEditor(tool = null) {
     equipmentDialogOpenerRef.current = document.activeElement
     setEquipmentEditor(tool || { id: null })
@@ -12775,6 +13048,7 @@ function App() {
                 workers={workers}
                 workerSummary={data.workerSummary}
                 qualificationRegister={data.qualificationRegister}
+                availabilityRegister={data.availabilityRegister}
                 tools={tools}
                 toolSummary={data.toolSummary}
                 tradePartners={tradePartners}
@@ -12798,6 +13072,8 @@ function App() {
                 onAddCredential={openCredentialEditor}
                 onCreateQualificationRequirement={openQualificationRequirementEditor}
                 onRetireQualificationRequirement={openQualificationRequirementRetirement}
+                onCreateAvailability={openAvailabilityEditor}
+                onCancelAvailability={openAvailabilityCancellation}
                 onCreateEquipment={() => openEquipmentEditor()}
                 onEditEquipment={openEquipmentEditor}
                 onInspectEquipment={openEquipmentInspection}
@@ -14255,6 +14531,123 @@ function App() {
                 <button className="danger-button" disabled={submitting || qualificationRequirementRetirementReason.trim().length < 8}>
                   <Archive size={16} />
                   {submitting ? 'Submitting...' : 'Request removal approval'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {availabilityEditor ? (
+        <div className="modal-backdrop worker-backdrop" role="presentation">
+          <section
+            className="modal availability-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="availability-editor-title"
+            data-testid="availability-editor"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeAvailabilityEditor()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Operational capacity ledger</p>
+                <h2 id="availability-editor-title">Add worker unavailability</h2>
+                <p>The retained time window blocks overlapping scheduling immediately without creating a message, payroll record, or HR case.</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close availability editor" onClick={closeAvailabilityEditor}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitWorkerAvailability}>
+              <div className="form-grid availability-form">
+                <label className="form-span">
+                  Worker
+                  <select autoFocus required value={availabilityDraft.workerId} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, workerId: event.target.value })}>
+                    <option value="">Select retained worker</option>
+                    {(data.workers || EMPTY_LIST).filter((worker) => worker.status !== 'retired' && !worker.retirementApprovalId).map((worker) => (
+                      <option key={worker.id} value={worker.id}>{worker.name} / {worker.role || 'Role not retained'}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Operational type
+                  <select value={availabilityDraft.periodType} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, periodType: event.target.value })}>
+                    {(data.availabilityRegister?.catalog || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Display title
+                  <input maxLength="160" value={availabilityDraft.title} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, title: event.target.value })} placeholder="Uses the operational type when blank" />
+                </label>
+                <label>
+                  Starts
+                  <input required type="datetime-local" value={availabilityDraft.startsAt} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, startsAt: event.target.value })} />
+                </label>
+                <label>
+                  Ends
+                  <input required type="datetime-local" min={availabilityDraft.startsAt || undefined} value={availabilityDraft.endsAt} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, endsAt: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Operational note
+                  <textarea maxLength="1000" value={availabilityDraft.notes} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, notes: event.target.value })} placeholder="Capacity or planning context only" />
+                </label>
+                <p className="workflow-note form-span">Do not enter diagnosis, illness, medical details, payroll entitlement, HR case information, or location tracking data.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeAvailabilityEditor}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !availabilityDraft.workerId || !availabilityDraft.startsAt || !availabilityDraft.endsAt}>
+                  <CalendarOff size={16} />
+                  {submitting ? 'Saving...' : 'Block availability window'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {availabilityCancellation ? (
+        <div className="modal-backdrop worker-backdrop" role="presentation">
+          <section
+            className="modal availability-cancellation-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="availability-cancellation-title"
+            data-testid="availability-cancellation-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeAvailabilityCancellation()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Approval-backed capacity change</p>
+                <h2 id="availability-cancellation-title">Request availability cancellation</h2>
+                <p>{availabilityCancellation.workerName} / {availabilityCancellation.title}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close availability cancellation" onClick={closeAvailabilityCancellation}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={requestAvailabilityCancellation}>
+              <div className="job-lifecycle-body">
+                <div className="job-lifecycle-effect">
+                  <TriangleAlert size={20} />
+                  <div>
+                    <strong>Remove this scheduling block only after approval</strong>
+                    <p>{formatDateTime(availabilityCancellation.startsAt)} to {formatDateTime(availabilityCancellation.endsAt)} remains unavailable while review is pending.</p>
+                  </div>
+                </div>
+                <label>
+                  Operational reason
+                  <textarea autoFocus required minLength="8" maxLength="1000" value={availabilityCancellationReason} onChange={(event) => setAvailabilityCancellationReason(event.target.value)} placeholder="Explain the verified planning change." />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeAvailabilityCancellation}>Cancel</button>
+                <button className="danger-button" disabled={submitting || availabilityCancellationReason.trim().length < 8}>
+                  <Ban size={16} />
+                  {submitting ? 'Submitting...' : 'Request cancellation approval'}
                 </button>
               </div>
             </form>

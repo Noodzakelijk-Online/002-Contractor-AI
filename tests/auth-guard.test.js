@@ -482,6 +482,29 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     });
     assert.equal(deniedApproverCredentialMutation.response.status, 403);
     assert.equal(deniedApproverCredentialMutation.body.error.code, 'insufficient_role');
+    const officeAvailability = await request(baseUrl, '/api/ledger/availability', { headers: officeHeaders });
+    assert.equal(officeAvailability.response.status, 200);
+    const approverAvailability = await request(baseUrl, '/api/ledger/availability', { headers: approverHeaders });
+    assert.equal(approverAvailability.response.status, 200);
+    const deniedFieldAvailability = await request(baseUrl, '/api/ledger/availability', { headers: fieldHeaders });
+    assert.equal(deniedFieldAvailability.response.status, 403);
+    assert.equal(deniedFieldAvailability.body.error.code, 'insufficient_role');
+    const availabilityStartsAt = new Date(Date.now() + 45 * 86_400_000).toISOString();
+    const availabilityEndsAt = new Date(Date.parse(availabilityStartsAt) + 8 * 3_600_000).toISOString();
+    const deniedApproverAvailabilityMutation = await request(baseUrl, '/api/ledger/workers/field-worker-role-scope/availability', {
+      method: 'POST',
+      headers: approverHeaders,
+      body: JSON.stringify({ periodType: 'training', startsAt: availabilityStartsAt, endsAt: availabilityEndsAt })
+    });
+    assert.equal(deniedApproverAvailabilityMutation.response.status, 403);
+    assert.equal(deniedApproverAvailabilityMutation.body.error.code, 'insufficient_role');
+    const authorizedOfficeAvailability = await request(baseUrl, '/api/ledger/workers/field-worker-role-scope/availability', {
+      method: 'POST',
+      headers: officeHeaders,
+      body: JSON.stringify({ periodType: 'training', startsAt: availabilityStartsAt, endsAt: availabilityEndsAt, notes: 'Role-governed capacity record.' })
+    });
+    assert.equal(authorizedOfficeAvailability.response.status, 201);
+    assert.equal(authorizedOfficeAvailability.body.period.status, 'active');
 
     const officeRetirementWorker = await request(baseUrl, '/api/ledger/workers', {
       method: 'POST',

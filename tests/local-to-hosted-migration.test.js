@@ -402,6 +402,14 @@ function createBackupFixture(t, suffix = 'success') {
     status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration worker credential source verified.'
   });
   const workerCredential = source.getWorkerCredential(credentialRequest.credential.id);
+  const availabilityStart = new Date(Date.now() + 150 * 86_400_000).toISOString();
+  const availabilityPeriod = source.createWorkerAvailabilityPeriod(attendanceWorker.id, {
+    periodType: 'training',
+    title: 'Migration equipment training',
+    startsAt: availabilityStart,
+    endsAt: new Date(Date.parse(availabilityStart) + 8 * 3_600_000).toISOString(),
+    notes: 'Migration operational availability fixture.'
+  }, { actor: 'migration_fixture' }).period;
   const attendanceOrientation = source.createWorkerOrientation(job.id, {
     assignmentId: attendanceAssignment.id,
     workerId: attendanceWorker.id,
@@ -484,7 +492,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -574,7 +582,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '035_workforce_qualifications');
+  assert.equal(migration.migrationVersion, '036_worker_availability');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -632,6 +640,9 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedCredential.status, 'approved');
     assert.equal(migratedCredential.snapshotHash, fixture.workerCredential.snapshotHash);
     assert.equal(migratedCredential.credentialType, 'vca_vol');
+    const migratedAvailability = hosted.getWorkerAvailabilityPeriod(fixture.availabilityPeriod.id);
+    assert.equal(migratedAvailability.status, 'active');
+    assert.equal(migratedAvailability.sourceFingerprint, fixture.availabilityPeriod.sourceFingerprint);
     assert.ok(detail.qualificationRequirements.some(item => item.id === fixture.qualificationRequirement.id && item.status === 'active'));
     assert.equal(hosted.assessWorkerQualifications(migratedCredential.workerId, {
       jobId: fixture.job.id,
