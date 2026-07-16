@@ -19,7 +19,7 @@ test('operator sessions remain revocable across ledger restarts', t => {
   };
 
   const initial = new ContractorOperatingLedger({ dbFile });
-  assert.equal(initial.migrationStatus().currentVersion, '039_governed_expense_receipts');
+  assert.equal(initial.migrationStatus().currentVersion, '040_governed_environmental_reporting');
   assert.equal(initial.createOperatorSession(session).operatorId, session.operatorId);
   initial.close();
 

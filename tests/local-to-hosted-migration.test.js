@@ -420,6 +420,34 @@ function createBackupFixture(t, suffix = 'success') {
     reason: 'Migration receipt identity, assignment, VAT, and project allocation verified.'
   });
   const expenseReceipt = source.getExpense(expenseReceiptRequest.expense.id);
+  const environmentalActivityRequest = source.createEnvironmentalActivity(job.id, {
+    entryKey: `migration-environmental-${suffix}`,
+    workerId: attendanceWorker.id,
+    activityDate: new Date().toISOString().slice(0, 10),
+    category: 'fuel',
+    ghgScope: 'scope_1',
+    description: `Migration generator diesel ${suffix}`,
+    quantity: 75,
+    unit: 'litre',
+    emissionFactor: 2.68,
+    factorSource: 'Migration retained factor library',
+    factorReference: `migration-factor:diesel:${suffix}`,
+    evidenceReference: `migration-fuel-ticket:${suffix}`,
+    notes: 'Retained environmental migration fixture.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(environmentalActivityRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration activity quantity, evidence, scope, and factor provenance verified.'
+  });
+  const environmentalActivity = source.getEnvironmentalActivity(environmentalActivityRequest.activity.id);
+  const environmentalReportRequest = source.requestEnvironmentalReport(job.id, {}, { actor: 'migration_fixture' });
+  source.resolveApproval(environmentalReportRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration environmental source set and report checksums verified.'
+  });
+  const environmentalReport = source.getEnvironmentalReport(environmentalReportRequest.report.id);
   const refreshedCostForecastRequest = source.requestCostForecastSnapshot(job.id, {}, { actor: 'migration_fixture' });
   source.resolveApproval(refreshedCostForecastRequest.approval.id, {
     status: 'approved',
@@ -567,7 +595,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -657,7 +685,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '039_governed_expense_receipts');
+  assert.equal(migration.migrationVersion, '040_governed_environmental_reporting');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -723,6 +751,17 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedExpense.totalAmount, 242);
     assert.equal(migratedExpense.costAmount, 200);
     assert.equal(migratedExpense.integrityValid, true);
+    const migratedEnvironmentalActivity = detail.environmentalActivities.find(item => item.id === fixture.environmentalActivity.id);
+    assert.equal(migratedEnvironmentalActivity.status, 'approved');
+    assert.equal(migratedEnvironmentalActivity.entryFingerprint, fixture.environmentalActivity.entryFingerprint);
+    assert.equal(migratedEnvironmentalActivity.sourceFingerprint, fixture.environmentalActivity.sourceFingerprint);
+    assert.equal(migratedEnvironmentalActivity.emissionsKgCo2e, 201);
+    assert.equal(migratedEnvironmentalActivity.integrityValid, true);
+    const migratedEnvironmentalReport = hosted.getEnvironmentalReportContent(fixture.environmentalReport.id);
+    assert.equal(migratedEnvironmentalReport.report.status, 'approved');
+    assert.equal(migratedEnvironmentalReport.report.integrityValid, true);
+    assert.equal(migratedEnvironmentalReport.report.sourceCurrent, true);
+    assert.match(migratedEnvironmentalReport.content, /Migration generator diesel/);
     const migratedCredential = hosted.getWorkerCredential(fixture.workerCredential.id);
     assert.equal(migratedCredential.status, 'approved');
     assert.equal(migratedCredential.snapshotHash, fixture.workerCredential.snapshotHash);

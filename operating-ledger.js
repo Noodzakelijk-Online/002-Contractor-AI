@@ -186,6 +186,8 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'wkb', label: 'Wkb-style handover dossier', table: 'documents', detailKey: 'documents', recordType: 'handover_issue_package', readyStatuses: ['prepared'] },
     { key: 'invoice', label: 'VAT/UBL invoice signal', table: 'invoices', detailKey: 'invoices' },
     { key: 'credit_note', label: 'Invoice correction signal', table: 'credit_notes', detailKey: 'creditNotes' },
+    { key: 'environmental_activity', label: 'Approved CO2 activity evidence', table: 'environmental_activities', detailKey: 'environmentalActivities', readyStatuses: ['approved', 'pending_reversal'] },
+    { key: 'environmental_report', label: 'Approved CO2 report package', table: 'environmental_reports', detailKey: 'environmentalReports', readyStatuses: ['approved'] },
     { key: 'vca', label: 'Worker VCA requirement', table: 'job_qualification_requirements', detailKey: 'qualificationRequirements', credentialType: 'vca', readyStatuses: ['active', 'pending_retirement'] },
     { key: 'site_access', label: 'Site access proof', table: 'site_access_logs', detailKey: 'siteAccessLogs' },
     { key: 'approval_audit', label: 'Approval audit', table: 'approvals', detailKey: 'approvals' },
@@ -610,6 +612,8 @@ function capabilityRequirementActionTarget(requirementKey) {
     warranty: 'warranty_claim_form',
     aftercare: 'aftercare_form',
     recurring: 'recurring_plan_form',
+    environmental_activity: 'environmental_activity_form',
+    environmental_report: 'environmental_report_control',
     wkb: 'client_handover_package',
     handover: 'client_handover_package',
     audit: 'audit_log'
@@ -939,6 +943,7 @@ const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
 const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
 const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
 const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
+const ENVIRONMENTAL_REPORT_FORMAT = 'contractor-ai-environmental-report/v1';
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -1250,6 +1255,11 @@ function normalizeNumber(value, fallback = 0) {
 
 function roundMoney(value) {
   return Math.round((normalizeNumber(value, 0) + Number.EPSILON) * 100) / 100;
+}
+
+function roundMeasurement(value, precision = 6) {
+  const scale = 10 ** Math.max(0, Math.min(9, Math.round(precision)));
+  return Math.round((normalizeNumber(value, 0) + Number.EPSILON) * scale) / scale;
 }
 
 function ledgerInputError(code, message, details = null, statusCode = 400) {
@@ -3017,6 +3027,77 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON expenses(worker_id, status, expense_date DESC, created_at DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_pending_reversal
           ON expenses(reversal_approval_id) WHERE status = 'pending_reversal';
+      `);
+    }
+  },
+  {
+    version: '040_governed_environmental_reporting',
+    description: 'Retain replay-safe environmental activities with sourced emission factors, approval-backed recognition, compensating reversals, and immutable report packages.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environmental_activities (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          worker_id TEXT,
+          activity_date TEXT NOT NULL,
+          category TEXT NOT NULL,
+          ghg_scope TEXT NOT NULL,
+          description TEXT NOT NULL,
+          quantity DOUBLE PRECISION NOT NULL,
+          unit TEXT NOT NULL,
+          emission_factor DOUBLE PRECISION NOT NULL,
+          emissions_kg_co2e DOUBLE PRECISION NOT NULL,
+          factor_source TEXT NOT NULL,
+          factor_reference TEXT NOT NULL,
+          evidence_reference TEXT NOT NULL,
+          evidence_document_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          approval_id TEXT,
+          reversal_approval_id TEXT,
+          entry_key TEXT NOT NULL,
+          entry_fingerprint TEXT NOT NULL,
+          source_fingerprint TEXT NOT NULL,
+          notes TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          FOREIGN KEY(evidence_document_id) REFERENCES documents(id) ON DELETE SET NULL,
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          FOREIGN KEY(reversal_approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, entry_key),
+          UNIQUE(source_fingerprint)
+        );
+        CREATE TABLE IF NOT EXISTS environmental_reports (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          csv_checksum TEXT NOT NULL,
+          csv_content TEXT NOT NULL,
+          approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, period_start, period_end, source_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_environmental_activity_job_status_date
+          ON environmental_activities(job_id, status, activity_date DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_environmental_activity_worker_date
+          ON environmental_activities(worker_id, activity_date DESC, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_environmental_activity_pending_reversal
+          ON environmental_activities(reversal_approval_id) WHERE status = 'pending_reversal';
+        CREATE INDEX IF NOT EXISTS idx_environmental_report_job_period
+          ON environmental_reports(job_id, period_start DESC, period_end DESC, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_environmental_report_pending_source
+          ON environmental_reports(job_id, period_start, period_end, source_hash) WHERE status = 'pending_approval';
       `);
     }
   }
@@ -20298,6 +20379,700 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.getExpense(row.id);
   }
 
+  environmentalActivityFingerprint(payload = {}) {
+    return sha256Json({
+      jobId: normalizeText(payload.jobId, ''),
+      workerId: normalizeText(payload.workerId, '') || null,
+      activityDate: normalizeText(payload.activityDate, ''),
+      category: normalizeStatus(payload.category, 'other'),
+      ghgScope: normalizeStatus(payload.ghgScope, 'unclassified'),
+      description: normalizeText(payload.description, ''),
+      quantity: roundMeasurement(payload.quantity),
+      unit: normalizeText(payload.unit, '').toLowerCase(),
+      emissionFactor: roundMeasurement(payload.emissionFactor, 9),
+      factorSource: normalizeText(payload.factorSource, ''),
+      factorReference: normalizeText(payload.factorReference, ''),
+      evidenceReference: normalizeText(payload.evidenceReference, ''),
+      evidenceDocumentId: normalizeText(payload.evidenceDocumentId, '') || null,
+      notes: normalizeText(payload.notes, '') || null
+    });
+  }
+
+  environmentalActivitySourceFingerprint(payload = {}) {
+    return sha256Json({
+      jobId: normalizeText(payload.jobId, ''),
+      activityDate: normalizeText(payload.activityDate, ''),
+      category: normalizeStatus(payload.category, 'other'),
+      description: normalizeText(payload.description, '').toLowerCase(),
+      quantity: roundMeasurement(payload.quantity),
+      unit: normalizeText(payload.unit, '').toLowerCase(),
+      evidenceReference: normalizeText(payload.evidenceReference, '').toLowerCase()
+    });
+  }
+
+  getEnvironmentalActivity(activityId) {
+    const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(String(activityId || ''));
+    if (!row) throw ledgerInputError('environmental_activity_not_found', 'Environmental activity not found.', { activityId }, 404);
+    return this.mapEnvironmentalActivity(row);
+  }
+
+  listEnvironmentalActivities(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const periodStart = normalizeText(filters.periodStart || filters.period_start, '');
+    const periodEnd = normalizeText(filters.periodEnd || filters.period_end, '');
+    const limit = Math.max(1, Math.min(1000, Math.round(normalizeNumber(filters.limit, 200))));
+    return this.db.prepare(`
+      SELECT * FROM environmental_activities
+      WHERE (? = '' OR job_id = ?)
+        AND (? = '' OR worker_id = ?)
+        AND (? = '' OR status = ?)
+        AND (? = '' OR activity_date >= ?)
+        AND (? = '' OR activity_date <= ?)
+      ORDER BY activity_date DESC, created_at DESC
+      LIMIT ?
+    `).all(
+      jobId, jobId,
+      workerId, workerId,
+      status, status,
+      periodStart, periodStart,
+      periodEnd, periodEnd,
+      limit
+    ).map(row => this.mapEnvironmentalActivity(row));
+  }
+
+  createEnvironmentalActivity(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey.length < 8 || entryKey.length > 240) {
+        throw ledgerInputError('environmental_entry_key_required', 'Environmental capture requires a stable entry key between 8 and 240 characters.');
+      }
+      const retainedDate = normalizeRetainedDate(payload.activityDate || payload.activity_date, {
+        required: true,
+        label: 'Activity date',
+        code: 'environmental_activity_date_required'
+      });
+      const activityDate = retainedDate.slice(0, 10);
+      const activityTimestamp = Date.parse(`${activityDate}T23:59:59.999Z`);
+      if (activityTimestamp > Date.now() + 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('environmental_activity_date_future', 'Environmental activity date cannot be in the future.');
+      }
+      if (activityTimestamp < Date.now() - 2 * 366 * 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('environmental_activity_date_too_old', 'Environmental activities older than two years require a controlled import.');
+      }
+      const category = normalizeStatus(payload.category, 'other');
+      const categories = ['fuel', 'electricity', 'district_heat', 'refrigerant', 'transport', 'material', 'waste', 'water', 'accommodation', 'other'];
+      if (!categories.includes(category)) throw ledgerInputError('environmental_category_invalid', 'Environmental activity category is not supported.');
+      const ghgScope = normalizeStatus(payload.ghgScope || payload.ghg_scope || payload.scope, 'unclassified');
+      if (!['scope_1', 'scope_2', 'scope_3', 'unclassified'].includes(ghgScope)) {
+        throw ledgerInputError('environmental_scope_invalid', 'GHG scope must be scope 1, scope 2, scope 3, or unclassified.');
+      }
+      const description = normalizeText(payload.description || payload.title, '');
+      if (description.length < 3 || description.length > 240) {
+        throw ledgerInputError('environmental_description_required', 'Environmental activity description must contain between 3 and 240 characters.');
+      }
+      const quantity = roundMeasurement(payload.quantity);
+      if (!(quantity > 0) || quantity > 1_000_000_000) {
+        throw ledgerInputError('environmental_quantity_invalid', 'Environmental activity quantity must be greater than zero and no more than 1,000,000,000.');
+      }
+      const unit = normalizeText(payload.unit, '').toLowerCase();
+      if (!/^[a-z0-9][a-z0-9 ._/-]{0,23}$/.test(unit)) {
+        throw ledgerInputError('environmental_unit_invalid', 'Environmental activity unit must contain between 1 and 24 supported characters.');
+      }
+      const emissionFactor = roundMeasurement(payload.emissionFactor ?? payload.emission_factor, 9);
+      if (!(emissionFactor >= 0) || emissionFactor > 1_000_000) {
+        throw ledgerInputError('environmental_factor_invalid', 'Emission factor must be zero or greater and no more than 1,000,000 kg CO2e per unit.');
+      }
+      const emissionsKgCo2e = roundMeasurement(quantity * emissionFactor);
+      if (!Number.isFinite(emissionsKgCo2e) || emissionsKgCo2e > 1_000_000_000_000) {
+        throw ledgerInputError('environmental_emissions_invalid', 'Calculated emissions exceed the supported reporting range.');
+      }
+      const factorSource = normalizeText(payload.factorSource || payload.factor_source, '');
+      const factorReference = normalizeText(payload.factorReference || payload.factor_reference, '');
+      if (factorSource.length < 3 || factorSource.length > 240 || factorReference.length < 3 || factorReference.length > 500) {
+        throw ledgerInputError('environmental_factor_source_required', 'Emission factor source and retained reference are required.');
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('environmental_evidence_required', 'Environmental activity requires a retained source evidence reference.');
+      }
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '') || null;
+      let worker = null;
+      if (workerId) {
+        worker = this.getWorker(workerId);
+        if (!this.resolveCrewAssignment(jobId, { workerId })) {
+          throw ledgerInputError('environmental_worker_job_scope_required', 'Environmental activity worker must have an active retained assignment to this job.', { jobId, workerId }, 409);
+        }
+      }
+      const evidenceDocumentId = normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null;
+      if (evidenceDocumentId) {
+        const document = this.db.prepare('SELECT id, job_id, status FROM documents WHERE id = ?').get(evidenceDocumentId);
+        if (!document || document.job_id !== jobId || !['stored', 'approved', 'current'].includes(normalizeStatus(document.status, ''))) {
+          throw ledgerInputError('environmental_evidence_document_invalid', 'Environmental evidence document must be current and retained on the same job.', { evidenceDocumentId }, 409);
+        }
+      }
+      const notes = normalizeText(payload.notes || payload.note, '');
+      if (notes.length > 2000) throw ledgerInputError('environmental_notes_invalid', 'Environmental notes must be 2,000 characters or fewer.');
+      const normalized = {
+        jobId,
+        workerId,
+        activityDate,
+        category,
+        ghgScope,
+        description,
+        quantity,
+        unit,
+        emissionFactor,
+        factorSource,
+        factorReference,
+        evidenceReference,
+        evidenceDocumentId,
+        notes: notes || null
+      };
+      const entryFingerprint = this.environmentalActivityFingerprint(normalized);
+      const sourceFingerprint = this.environmentalActivitySourceFingerprint(normalized);
+      const replay = this.db.prepare('SELECT * FROM environmental_activities WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('environmental_entry_key_reused', 'This environmental retry key is already bound to different retained content.', { activityId: replay.id }, 409);
+        }
+        const activity = this.mapEnvironmentalActivity(replay);
+        const approval = replay.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id)) : null;
+        return { activity, approval, replayed: true, externalCommitments: 0, certificationClaimed: false };
+      }
+      const duplicate = this.db.prepare('SELECT * FROM environmental_activities WHERE source_fingerprint = ?').get(sourceFingerprint);
+      if (duplicate) {
+        throw ledgerInputError('environmental_activity_duplicate', 'This activity source, date, quantity, and evidence reference are already retained.', { activityId: duplicate.id, jobId: duplicate.job_id }, 409);
+      }
+      const id = makeId('environmental_activity');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO environmental_activities (
+          id, job_id, worker_id, activity_date, category, ghg_scope, description, quantity, unit,
+          emission_factor, emissions_kg_co2e, factor_source, factor_reference, evidence_reference,
+          evidence_document_id, status, approval_id, reversal_approval_id, entry_key, entry_fingerprint,
+          source_fingerprint, notes, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, workerId, activityDate, category, ghgScope, description, quantity, unit,
+        emissionFactor, emissionsKgCo2e, factorSource, factorReference, evidenceReference,
+        evidenceDocumentId, entryKey, entryFingerprint, sourceFingerprint, notes || null,
+        toJson({
+          governedEnvironmentalActivity: true,
+          workerName: worker?.name || normalizeText(payload.workerName || payload.worker_name, '') || null,
+          submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+          source: normalizeText(payload.source, 'environmental_activity'),
+          factorPolicy: 'operator_supplied_with_retained_provenance',
+          reportUnit: 'kg_co2e',
+          externalCommitments: 0,
+          certificationClaimed: false
+        }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'environmental_activity',
+        targetId: id,
+        jobId,
+        approvalType: 'environmental_activity_review',
+        summary: `Review ${description} environmental activity for ${emissionsKgCo2e.toFixed(3)} kg CO2e`,
+        reason: 'Quantity, unit, activity allocation, evidence, emission factor, and factor provenance require review before inclusion in job reporting.',
+        data: {
+          activityId: id,
+          activityDate,
+          category,
+          ghgScope,
+          description,
+          quantity,
+          unit,
+          emissionFactor,
+          emissionsKgCo2e,
+          factorSource,
+          factorReference,
+          evidenceReference,
+          workerId,
+          workerName: worker?.name || null,
+          entryFingerprint,
+          sourceFingerprint,
+          externalCommitments: 0,
+          certificationClaimed: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE environmental_activities SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const activity = this.getEnvironmentalActivity(id);
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'environmental_activity',
+          entityId: id,
+          jobId,
+          action: 'submit_environmental_activity',
+          actor,
+          after: activity,
+          metadata: { approvalId: approval.id, entryKey, entryFingerprint, sourceFingerprint, externalCommitments: 0, certificationClaimed: false }
+        });
+      }
+      return { activity, approval, replayed: false, externalCommitments: 0, certificationClaimed: false };
+    });
+  }
+
+  requestEnvironmentalActivityReversal(jobId, activityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ? AND job_id = ?').get(activityId, jobId);
+      if (!row) throw ledgerInputError('environmental_activity_not_found', 'Environmental activity not found for this job.', { activityId }, 404);
+      if (row.status === 'pending_reversal' && row.reversal_approval_id) {
+        return {
+          activity: this.mapEnvironmentalActivity(row),
+          approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.reversal_approval_id)),
+          replayed: true,
+          externalCommitments: 0,
+          certificationClaimed: false
+        };
+      }
+      if (row.status !== 'approved') {
+        throw ledgerInputError('environmental_reversal_state_conflict', `Environmental activity cannot be reversed from ${row.status}.`, { activityId }, 409);
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 1000) {
+        throw ledgerInputError('environmental_reversal_reason_required', 'Environmental activity reversal requires a reason between 8 and 1,000 characters.');
+      }
+      const actor = options.actor || 'Contractor.AI';
+      const approval = this.createApproval({
+        targetType: 'environmental_activity_reversal',
+        targetId: activityId,
+        jobId,
+        approvalType: 'environmental_activity_reversal',
+        summary: `Reverse environmental activity ${row.description}`,
+        reason: 'Recognized environmental evidence is corrected through a compensating approval so the original source and report history remain retained.',
+        data: {
+          activityId,
+          previousStatus: row.status,
+          description: row.description,
+          emissionsKgCo2e: normalizeNumber(row.emissions_kg_co2e, 0),
+          reason,
+          sourceFingerprint: row.source_fingerprint,
+          externalCommitments: 0,
+          certificationClaimed: false
+        }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE environmental_activities
+        SET status = 'pending_reversal', reversal_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ? AND status = 'approved'
+      `).run(approval.id, toJson({
+        ...fromJson(row.data_json, {}),
+        pendingReversal: { approvalId: approval.id, requestedAt: timestamp, requestedBy: actor, reason, previousStatus: row.status }
+      }), timestamp, activityId, jobId);
+      const activity = this.getEnvironmentalActivity(activityId);
+      this.audit({
+        entityType: 'environmental_activity',
+        entityId: activityId,
+        jobId,
+        action: 'request_environmental_activity_reversal',
+        actor,
+        before: this.mapEnvironmentalActivity(row),
+        after: activity,
+        metadata: { approvalId: approval.id, externalCommitments: 0, certificationClaimed: false }
+      });
+      return { activity, approval, replayed: false, externalCommitments: 0, certificationClaimed: false };
+    });
+  }
+
+  applyEnvironmentalActivityApproval(activityId) {
+    const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(activityId);
+    if (!row) throw ledgerInputError('environmental_activity_not_found', 'Environmental activity not found.', { activityId }, 404);
+    if (row.status === 'approved') return this.mapEnvironmentalActivity(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('environmental_approval_state_conflict', `Environmental activity cannot be approved from ${row.status}.`, { activityId }, 409);
+    }
+    const activity = this.mapEnvironmentalActivity(row);
+    if (!activity.integrityValid) {
+      throw ledgerInputError('environmental_activity_integrity_failed', 'Environmental activity approval requires an intact retained source snapshot.', { activityId }, 409);
+    }
+    const approval = row.approval_id
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'environmental_activity' AND target_id = ? AND status = 'approved'").get(row.approval_id, activityId)
+      : null;
+    if (!approval) throw ledgerInputError('environmental_approval_missing', 'Environmental activity requires its matching approved decision.', { activityId }, 409);
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE environmental_activities
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approvalDecision: {
+        status: 'approved',
+        approvalId: approval.id,
+        resolvedAt: approval.resolved_at || timestamp,
+        resolvedBy: approval.resolved_by || null,
+        reason: approval.reason || null
+      }
+    }), timestamp, activityId);
+    const after = this.getEnvironmentalActivity(activityId);
+    this.audit({
+      entityType: 'environmental_activity',
+      entityId: activityId,
+      jobId: row.job_id,
+      action: 'approve_environmental_activity',
+      actor: approval.resolved_by || approval.requested_by || 'approval',
+      before: activity,
+      after,
+      metadata: { approvalId: approval.id, recognizedKgCo2e: after.emissionsKgCo2e, externalCommitments: 0, certificationClaimed: false }
+    });
+    return after;
+  }
+
+  applyEnvironmentalActivityReversal(activityId) {
+    const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(activityId);
+    if (!row) throw ledgerInputError('environmental_activity_not_found', 'Environmental activity not found.', { activityId }, 404);
+    if (row.status === 'reversed') return this.mapEnvironmentalActivity(row);
+    if (row.status !== 'pending_reversal' || !row.reversal_approval_id) {
+      throw ledgerInputError('environmental_reversal_state_conflict', `Environmental activity cannot complete reversal from ${row.status}.`, { activityId }, 409);
+    }
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE id = ? AND target_type = 'environmental_activity_reversal' AND target_id = ? AND status = 'approved'
+    `).get(row.reversal_approval_id, activityId);
+    if (!approval) throw ledgerInputError('environmental_reversal_approval_missing', 'Environmental reversal requires its matching approved decision.', { activityId }, 409);
+    const before = this.mapEnvironmentalActivity(row);
+    if (!before.integrityValid) {
+      throw ledgerInputError('environmental_activity_integrity_failed', 'Environmental reversal requires the original source snapshot to remain intact.', { activityId }, 409);
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE environmental_activities
+      SET status = 'reversed', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_reversal'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      reversalDecision: {
+        status: 'approved',
+        approvalId: approval.id,
+        resolvedAt: approval.resolved_at || timestamp,
+        resolvedBy: approval.resolved_by || null,
+        reason: approval.reason || fromJson(row.data_json, {}).pendingReversal?.reason || null
+      }
+    }), timestamp, activityId);
+    const after = this.getEnvironmentalActivity(activityId);
+    this.audit({
+      entityType: 'environmental_activity',
+      entityId: activityId,
+      jobId: row.job_id,
+      action: 'reverse_environmental_activity',
+      actor: approval.resolved_by || approval.requested_by || 'approval',
+      before,
+      after,
+      metadata: { approvalId: approval.id, retainedOriginal: true, externalCommitments: 0, certificationClaimed: false }
+    });
+    return after;
+  }
+
+  restoreRejectedEnvironmentalActivityReversal(approval, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(approval.target_id);
+    if (!row || row.status !== 'pending_reversal' || row.reversal_approval_id !== approval.id) return row ? this.mapEnvironmentalActivity(row) : null;
+    const timestamp = options.timestamp || nowIso();
+    this.db.prepare(`
+      UPDATE environmental_activities
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_reversal'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      reversalDecision: {
+        status,
+        approvalId: approval.id,
+        resolvedAt: timestamp,
+        resolvedBy: options.actor || null,
+        reason: options.reason || null
+      }
+    }), timestamp, row.id);
+    return this.getEnvironmentalActivity(row.id);
+  }
+
+  environmentalReportPeriod(payload = {}) {
+    const today = nowIso().slice(0, 10);
+    const defaultStart = `${today.slice(0, 4)}-01-01`;
+    const periodStart = normalizeRetainedDate(payload.periodStart || payload.period_start || defaultStart, {
+      required: true,
+      label: 'Environmental report period start',
+      code: 'environmental_report_period_start_required'
+    }).slice(0, 10);
+    const periodEnd = normalizeRetainedDate(payload.periodEnd || payload.period_end || today, {
+      required: true,
+      label: 'Environmental report period end',
+      code: 'environmental_report_period_end_required'
+    }).slice(0, 10);
+    const startTime = Date.parse(`${periodStart}T00:00:00.000Z`);
+    const endTime = Date.parse(`${periodEnd}T23:59:59.999Z`);
+    if (endTime < startTime) throw ledgerInputError('environmental_report_period_invalid', 'Environmental report period end must be on or after its start.');
+    if (endTime - startTime > 366 * 24 * 60 * 60 * 1000) {
+      throw ledgerInputError('environmental_report_period_too_long', 'Environmental report period cannot exceed 366 days.');
+    }
+    if (endTime > Date.now() + 24 * 60 * 60 * 1000) {
+      throw ledgerInputError('environmental_report_period_future', 'Environmental report period cannot end in the future.');
+    }
+    return { periodStart, periodEnd };
+  }
+
+  calculateEnvironmentalRegister(jobId, filters = {}) {
+    this.requireJob(jobId, { allowInactive: true });
+    const { periodStart, periodEnd } = this.environmentalReportPeriod(filters);
+    const activities = this.listEnvironmentalActivities({ jobId, periodStart, periodEnd, limit: 1000 });
+    const recognized = activities.filter(activity => activity.status === 'approved');
+    const pending = activities.filter(activity => activity.status === 'pending_approval');
+    const pendingReversal = activities.filter(activity => activity.status === 'pending_reversal');
+    const reversed = activities.filter(activity => activity.status === 'reversed');
+    const summarize = (rows, key) => Object.values(rows.reduce((result, activity) => {
+      const value = activity[key] || 'unclassified';
+      const current = result[value] || { key: value, count: 0, emissionsKgCo2e: 0 };
+      current.count += 1;
+      current.emissionsKgCo2e = roundMeasurement(current.emissionsKgCo2e + activity.emissionsKgCo2e);
+      result[value] = current;
+      return result;
+    }, {})).sort((left, right) => right.emissionsKgCo2e - left.emissionsKgCo2e || left.key.localeCompare(right.key));
+    const sourceBasis = recognized
+      .map(activity => ({
+        id: activity.id,
+        sourceFingerprint: activity.sourceFingerprint,
+        entryFingerprint: activity.entryFingerprint,
+        activityDate: activity.activityDate,
+        category: activity.category,
+        ghgScope: activity.ghgScope,
+        description: activity.description,
+        quantity: activity.quantity,
+        unit: activity.unit,
+        emissionFactor: activity.emissionFactor,
+        emissionsKgCo2e: activity.emissionsKgCo2e,
+        factorSource: activity.factorSource,
+        factorReference: activity.factorReference,
+        evidenceReference: activity.evidenceReference,
+        approvalId: activity.approvalId
+      }))
+      .sort((left, right) => left.activityDate.localeCompare(right.activityDate) || left.id.localeCompare(right.id));
+    const sourceHash = sha256Json({ format: ENVIRONMENTAL_REPORT_FORMAT, jobId, periodStart, periodEnd, activities: sourceBasis });
+    const totalKgCo2e = roundMeasurement(recognized.reduce((sum, activity) => sum + activity.emissionsKgCo2e, 0));
+    const blockers = [
+      ...(pending.length ? [{ type: 'pending_activity_approval', count: pending.length, message: `${pending.length} environmental activity record(s) still require source review.` }] : []),
+      ...(pendingReversal.length ? [{ type: 'pending_activity_reversal', count: pendingReversal.length, message: `${pendingReversal.length} environmental activity reversal(s) remain undecided.` }] : []),
+      ...(recognized.some(activity => !activity.integrityValid) ? [{ type: 'source_integrity', message: 'One or more approved environmental activity fingerprints are invalid.' }] : [])
+    ];
+    return {
+      jobId,
+      periodStart,
+      periodEnd,
+      sourceHash,
+      activities,
+      sourceBasis,
+      summary: {
+        totalRecords: activities.length,
+        recognizedRecords: recognized.length,
+        pendingRecords: pending.length,
+        pendingReversals: pendingReversal.length,
+        reversedRecords: reversed.length,
+        totalKgCo2e,
+        totalTonnesCo2e: roundMeasurement(totalKgCo2e / 1000),
+        byScope: summarize(recognized, 'ghgScope'),
+        byCategory: summarize(recognized, 'category')
+      },
+      blockers,
+      readyForReport: recognized.length > 0 && blockers.length === 0,
+      policy: {
+        factorPolicy: 'operator_supplied_with_retained_provenance',
+        certificationClaimed: false,
+        externalSubmission: false,
+        reportUnit: 'kg_co2e'
+      }
+    };
+  }
+
+  getEnvironmentalReport(reportId, { includeSourceCurrent = true } = {}) {
+    const row = this.db.prepare('SELECT * FROM environmental_reports WHERE id = ?').get(String(reportId || ''));
+    if (!row) throw ledgerInputError('environmental_report_not_found', 'Environmental report not found.', { reportId }, 404);
+    const report = this.mapEnvironmentalReport(row);
+    if (!includeSourceCurrent) return report;
+    const register = this.calculateEnvironmentalRegister(row.job_id, { periodStart: row.period_start, periodEnd: row.period_end });
+    return { ...report, sourceCurrent: register.sourceHash === report.sourceHash };
+  }
+
+  listEnvironmentalReports(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const limit = Math.max(1, Math.min(200, Math.round(normalizeNumber(filters.limit, 50))));
+    const reports = this.db.prepare(`
+      SELECT * FROM environmental_reports
+      WHERE (? = '' OR job_id = ?)
+        AND (? = '' OR status = ?)
+      ORDER BY period_end DESC, created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, status, status, limit).map(row => this.mapEnvironmentalReport(row));
+    if (filters.includeSourceCurrent === false || !jobId) return reports;
+    return reports.map(report => {
+      const register = this.calculateEnvironmentalRegister(report.jobId, { periodStart: report.periodStart, periodEnd: report.periodEnd });
+      return { ...report, sourceCurrent: register.sourceHash === report.sourceHash };
+    });
+  }
+
+  requestEnvironmentalReport(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const register = this.calculateEnvironmentalRegister(jobId, payload);
+      if (!register.readyForReport) {
+        throw ledgerInputError(
+          'environmental_report_not_ready',
+          register.summary.recognizedRecords ? 'Environmental report is blocked until pending decisions and source integrity issues are resolved.' : 'Environmental report requires at least one approved activity.',
+          { blockers: register.blockers },
+          409
+        );
+      }
+      const existing = this.db.prepare(`
+        SELECT * FROM environmental_reports
+        WHERE job_id = ? AND period_start = ? AND period_end = ? AND source_hash = ?
+        ORDER BY created_at DESC LIMIT 1
+      `).get(jobId, register.periodStart, register.periodEnd, register.sourceHash);
+      if (existing) {
+        const report = this.getEnvironmentalReport(existing.id);
+        const approval = existing.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existing.approval_id)) : null;
+        return { report, approval, replayed: true, externalCommitments: 0, certificationClaimed: false };
+      }
+      const csvCell = value => {
+        const text = String(value ?? '');
+        return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+      };
+      const columns = ['activity_id', 'activity_date', 'category', 'ghg_scope', 'description', 'quantity', 'unit', 'factor_kg_co2e_per_unit', 'emissions_kg_co2e', 'factor_source', 'factor_reference', 'evidence_reference', 'approval_id'];
+      const csvRows = [columns, ...register.sourceBasis.map(activity => [
+        activity.id, activity.activityDate, activity.category, activity.ghgScope, activity.description || '',
+        activity.quantity, activity.unit, activity.emissionFactor, activity.emissionsKgCo2e,
+        activity.factorSource, activity.factorReference, activity.evidenceReference, activity.approvalId
+      ])];
+      const csvContent = `\uFEFF${csvRows.map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
+      const csvChecksum = sha256Text(csvContent);
+      const snapshot = {
+        format: ENVIRONMENTAL_REPORT_FORMAT,
+        job: { id: job.id, title: job.title, clientName: job.clientName || job.client?.name || null },
+        periodStart: register.periodStart,
+        periodEnd: register.periodEnd,
+        sourceHash: register.sourceHash,
+        csvChecksum,
+        summary: register.summary,
+        activities: register.sourceBasis,
+        policy: register.policy,
+        generatedAt: nowIso()
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('environmental_report');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO environmental_reports (
+          id, job_id, period_start, period_end, status, source_hash, snapshot_hash, snapshot_json,
+          csv_checksum, csv_content, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id, jobId, register.periodStart, register.periodEnd, register.sourceHash, snapshotHash, snapshotJson,
+        csvChecksum, csvContent,
+        toJson({ preparedBy: actor, factorPolicy: register.policy.factorPolicy, externalSubmission: false, certificationClaimed: false }),
+        timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'environmental_report',
+        targetId: id,
+        jobId,
+        approvalType: 'environmental_report_review',
+        summary: `Approve environmental report for ${job.title}, ${register.periodStart} to ${register.periodEnd}`,
+        reason: 'The report freezes approved activity evidence and operator-supplied factor provenance; source currency and checksums must be verified before release.',
+        data: {
+          reportId: id,
+          periodStart: register.periodStart,
+          periodEnd: register.periodEnd,
+          sourceHash: register.sourceHash,
+          snapshotHash,
+          csvChecksum,
+          activityCount: register.summary.recognizedRecords,
+          totalKgCo2e: register.summary.totalKgCo2e,
+          externalCommitments: 0,
+          externalSubmission: false,
+          certificationClaimed: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE environmental_reports SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const report = this.getEnvironmentalReport(id);
+      this.audit({
+        entityType: 'environmental_report',
+        entityId: id,
+        jobId,
+        action: 'prepare_environmental_report',
+        actor,
+        after: report,
+        metadata: { approvalId: approval.id, sourceHash: register.sourceHash, snapshotHash, csvChecksum, externalCommitments: 0, certificationClaimed: false }
+      });
+      return { report, approval, replayed: false, externalCommitments: 0, certificationClaimed: false };
+    });
+  }
+
+  applyEnvironmentalReportApproval(reportId) {
+    const row = this.db.prepare('SELECT * FROM environmental_reports WHERE id = ?').get(reportId);
+    if (!row) throw ledgerInputError('environmental_report_not_found', 'Environmental report not found.', { reportId }, 404);
+    if (row.status === 'approved') return this.getEnvironmentalReport(reportId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('environmental_report_approval_state_conflict', `Environmental report cannot be approved from ${row.status}.`, { reportId }, 409);
+    }
+    const report = this.mapEnvironmentalReport(row);
+    if (!report.integrityValid) throw ledgerInputError('environmental_report_integrity_failed', 'Environmental report failed retained checksum verification.', { reportId }, 409);
+    const register = this.calculateEnvironmentalRegister(row.job_id, { periodStart: row.period_start, periodEnd: row.period_end });
+    if (register.blockers.length || register.sourceHash !== row.source_hash) {
+      throw ledgerInputError('environmental_report_source_stale', 'Environmental report source changed after preparation. Prepare a new report from the current approved activities.', { reportId, blockers: register.blockers }, 409);
+    }
+    const approval = row.approval_id
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'environmental_report' AND target_id = ? AND status = 'approved'").get(row.approval_id, reportId)
+      : null;
+    if (!approval) throw ledgerInputError('environmental_report_approval_missing', 'Environmental report requires its matching approved decision.', { reportId }, 409);
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE environmental_reports
+      SET status = 'superseded', updated_at = ?
+      WHERE job_id = ? AND period_start = ? AND period_end = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.job_id, row.period_start, row.period_end, reportId);
+    this.db.prepare(`
+      UPDATE environmental_reports
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approvalDecision: {
+        status: 'approved',
+        approvalId: approval.id,
+        resolvedAt: approval.resolved_at || timestamp,
+        resolvedBy: approval.resolved_by || null,
+        reason: approval.reason || null
+      }
+    }), timestamp, reportId);
+    const after = this.getEnvironmentalReport(reportId);
+    this.audit({
+      entityType: 'environmental_report',
+      entityId: reportId,
+      jobId: row.job_id,
+      action: 'approve_environmental_report',
+      actor: approval.resolved_by || approval.requested_by || 'approval',
+      before: report,
+      after,
+      metadata: { approvalId: approval.id, sourceHash: row.source_hash, csvChecksum: row.csv_checksum, externalCommitments: 0, certificationClaimed: false }
+    });
+    return after;
+  }
+
+  getEnvironmentalReportContent(reportId) {
+    const row = this.db.prepare('SELECT * FROM environmental_reports WHERE id = ?').get(String(reportId || ''));
+    if (!row) throw ledgerInputError('environmental_report_not_found', 'Environmental report not found.', { reportId }, 404);
+    const report = this.getEnvironmentalReport(reportId);
+    if (report.status !== 'approved') throw ledgerInputError('environmental_report_not_approved', 'Environmental report download requires approval.', { reportId }, 409);
+    if (!report.integrityValid) throw ledgerInputError('environmental_report_integrity_failed', 'Environmental report failed checksum verification.', { reportId }, 409);
+    return { report, content: row.csv_content };
+  }
+
   recordJobCosts(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
     const actor = options.actor || payload.actor || 'Contractor.AI';
@@ -28795,6 +29570,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'environmental_activity_reversal') {
+        this.restoreRejectedEnvironmentalActivityReversal(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'expense') {
         const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -28805,6 +29586,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             WHERE id = ? AND status = 'pending_approval'
           `).run(status, toJson({
             ...data,
+            approvalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
+      } else if (before.target_type === 'environmental_activity') {
+        const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE environmental_activities
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            approvalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
+      } else if (before.target_type === 'environmental_report') {
+        const row = this.db.prepare('SELECT * FROM environmental_reports WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE environmental_reports
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
             approvalDecision: {
               status,
               approvalId,
@@ -29913,6 +30730,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyExpenseReceiptApproval(targetId);
     } else if (targetType === 'expense_reversal') {
       this.applyExpenseReversal(targetId);
+    } else if (targetType === 'environmental_activity') {
+      this.applyEnvironmentalActivityApproval(targetId);
+    } else if (targetType === 'environmental_activity_reversal') {
+      this.applyEnvironmentalActivityReversal(targetId);
+    } else if (targetType === 'environmental_report') {
+      this.applyEnvironmentalReportApproval(targetId);
     } else if (targetType === 'invoice') {
       this.db.prepare("UPDATE invoices SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'billing_milestone') {
@@ -33057,6 +33880,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'punch_item',
       'production_baseline',
       'production_entry_reversal',
+      'environmental_activity',
+      'environmental_activity_reversal',
+      'environmental_report',
       'document'
     ]);
     const closedStatuses = ['approved', 'accepted', 'closed', 'complete', 'completed', 'current', 'valid', 'passed', 'resolved', 'verified', 'cancelled', 'canceled', 'rejected', 'void'];
@@ -33462,6 +34288,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       communications: this.db.prepare('SELECT * FROM communication_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCommunication(row)),
       timeLogs: this.db.prepare('SELECT * FROM time_logs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapTimeLog(row)),
       expenses: this.db.prepare('SELECT * FROM expenses WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapExpense(row)),
+      environmentalActivities: this.listEnvironmentalActivities({ jobId, limit: 1000 }),
+      environmentalReports: this.listEnvironmentalReports({ jobId, limit: 100, includeSourceCurrent: false }),
       billingMilestones: this.db.prepare('SELECT * FROM billing_milestones WHERE job_id = ? ORDER BY sequence_number ASC, created_at ASC').all(jobId).map(row => this.mapBillingMilestone(row)),
       invoices: this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapInvoice(row)),
       creditNotes: this.db.prepare('SELECT * FROM credit_notes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCreditNote(row)),
@@ -33515,6 +34343,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     detail.productionControl = this.calculateProductionPerformance(jobId, {
       baselines: detail.productionBaselines,
       entries: detail.productionEntries
+    });
+    detail.environmentalRegister = this.calculateEnvironmentalRegister(jobId);
+    detail.environmentalReports = detail.environmentalReports.map(report => {
+      const reportRegister = this.calculateEnvironmentalRegister(jobId, {
+        periodStart: report.periodStart,
+        periodEnd: report.periodEnd
+      });
+      return {
+        ...report,
+        sourceCurrent: report.sourceHash === reportRegister.sourceHash
+      };
     });
     if (options.includeAudit) {
       detail.audit = this.listAudit({ jobId, limit: 50 });
@@ -34547,6 +35386,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       orientations: activeCount('worker_orientations'),
       jhas: activeCount('jha_records'),
       sdsSheets: activeCount('sds_sheets'),
+      environmentalActivities: activeCount('environmental_activities'),
+      approvedEnvironmentalActivities: activeCount('environmental_activities', "records.status IN ('approved', 'pending_reversal')"),
+      pendingEnvironmentalActivities: activeCount('environmental_activities', "records.status IN ('pending_approval', 'pending_reversal')"),
+      environmentalReports: activeCount('environmental_reports'),
+      approvedEnvironmentalReports: activeCount('environmental_reports', "records.status = 'approved'"),
+      environmentalKgCo2e: activeSum('environmental_activities', 'emissions_kg_co2e', "records.status IN ('approved', 'pending_reversal')"),
       siteAccessLogs: activeCount('site_access_logs'),
       blockedSiteAccess: activeCount('site_access_logs', "records.status = 'blocked' OR records.orientation_valid = 0"),
       openMobilizationApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('worker_orientation_completion', 'jha_approval', 'sds_current_review', 'site_access_clearance')"),
@@ -36035,6 +36880,66 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const environmentalActivityReviews = this.db.prepare(`
+      SELECT activities.id, activities.job_id, activities.description, activities.category,
+        activities.ghg_scope, activities.emissions_kg_co2e, activities.approval_id, jobs.title
+      FROM environmental_activities activities
+      JOIN jobs ON jobs.id = activities.job_id
+      WHERE activities.status = 'pending_approval'
+        AND jobs.status NOT IN ('archived', 'cancelled', 'canceled', 'rejected', 'deleted', 'void')
+        AND NOT EXISTS (
+          SELECT 1 FROM job_tasks
+          WHERE job_tasks.job_id = activities.job_id
+            AND job_tasks.status NOT IN ('completed', 'cancelled', 'canceled')
+            AND job_tasks.data_json LIKE '%' || activities.id || '%'
+        )
+      ORDER BY activities.emissions_kg_co2e DESC, activities.created_at ASC
+      LIMIT 5
+    `).all();
+    for (const activity of environmentalActivityReviews) {
+      const emissionsKgCo2e = roundMeasurement(activity.emissions_kg_co2e, 3);
+      actions.push({
+        type: 'review_environmental_activity',
+        activityId: activity.id,
+        jobId: activity.job_id,
+        severity: emissionsKgCo2e >= 1000 || activity.ghg_scope === 'unclassified' ? 'high' : 'medium',
+        requiresApproval: true,
+        emissionsKgCo2e,
+        message: `${activity.title} has pending environmental activity ${activity.description} for ${emissionsKgCo2e} kg CO2e. Verify the source quantity, scope, evidence, and operator-supplied factor provenance; Contractor.AI cannot approve or certify it.`
+      });
+    }
+
+    const environmentalJobs = this.db.prepare(`
+      SELECT DISTINCT jobs.id, jobs.title, jobs.updated_at
+      FROM jobs
+      JOIN environmental_activities activities ON activities.job_id = jobs.id
+      WHERE jobs.status NOT IN ('archived', 'cancelled', 'canceled', 'rejected', 'deleted', 'void')
+        AND activities.status = 'approved'
+      ORDER BY jobs.updated_at DESC
+      LIMIT 25
+    `).all();
+    for (const job of environmentalJobs) {
+      const register = this.calculateEnvironmentalRegister(job.id);
+      if (!register.readyForReport) continue;
+      const existingReport = this.db.prepare(`
+        SELECT id FROM environmental_reports
+        WHERE job_id = ? AND period_start = ? AND period_end = ? AND source_hash = ?
+        LIMIT 1
+      `).get(job.id, register.periodStart, register.periodEnd, register.sourceHash);
+      if (existingReport) continue;
+      actions.push({
+        type: 'prepare_environmental_report',
+        jobId: job.id,
+        severity: register.summary.totalKgCo2e >= 1000 ? 'high' : 'medium',
+        requiresApproval: true,
+        periodStart: register.periodStart,
+        periodEnd: register.periodEnd,
+        activityCount: register.summary.recognizedRecords,
+        emissionsKgCo2e: register.summary.totalKgCo2e,
+        message: `${job.title} has ${register.summary.recognizedRecords} approved environmental activity record(s) and no current year-to-date report package. Prepare an internal checksum-protected report for approver review.`
+      });
+    }
+
     const supplierPayables = this.db.prepare(`
       SELECT supplier_invoices.id, supplier_invoices.job_id, supplier_invoices.invoice_number,
         supplier_invoices.supplier, supplier_invoices.total, supplier_invoices.due_at, jobs.title,
@@ -36204,7 +37109,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -36255,6 +37160,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_material_receipt',
       'review_equipment_custody',
       'review_expense_receipt',
+      'review_environmental_activity',
+      'prepare_environmental_report',
       'review_worker_availability_conflict',
       'review_worker_qualification_gap',
       'review_expiring_worker_credential',
@@ -37203,6 +38110,60 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             after: task,
             metadata: { expenseId: expense.id, approvalId: expense.approval_id || null, externalCommitments: 0, fundsMoved: false }
           });
+        }
+
+        const environmentalActivityReviews = preview.filter(action => action.type === 'review_environmental_activity').slice(0, 3);
+        for (const action of environmentalActivityReviews) {
+          const activity = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ? AND job_id = ?').get(action.activityId, action.jobId);
+          if (!activity || activity.status !== 'pending_approval') {
+            blocked.push({ ...action, status: 'blocked', reason: 'The environmental activity is no longer pending review.' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review environmental activity ${activity.description}`,
+            description: `${action.message} Verify the retained evidence and factor source before resolving its existing approval. Do not infer a factor, certify the result, or submit it externally.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'autonomous_cycle',
+            data: {
+              environmentalActivityId: activity.id,
+              approvalId: activity.approval_id || null,
+              internalOnly: true,
+              externalCommitments: 0,
+              certificationClaimed: false
+            }
+          }, { actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, certificationClaimed: false });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_environmental_activity_review_task',
+            actor,
+            after: task,
+            metadata: { activityId: activity.id, approvalId: activity.approval_id || null, externalCommitments: 0, certificationClaimed: false }
+          });
+        }
+
+        const environmentalReports = preview.filter(action => action.type === 'prepare_environmental_report').slice(0, 3);
+        for (const action of environmentalReports) {
+          try {
+            const result = this.requestEnvironmentalReport(action.jobId, {
+              periodStart: action.periodStart,
+              periodEnd: action.periodEnd
+            }, { actor });
+            if (result.replayed || result.report.status !== 'pending_approval') continue;
+            applied.push({
+              ...action,
+              reportId: result.report.id,
+              approvalId: result.approval?.id || null,
+              status: 'report_prepared',
+              externalCommitments: 0,
+              certificationClaimed: false
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message, code: error.code || 'environmental_report_blocked' });
+          }
         }
 
         const clientReplyFollowUps = preview.filter(action => action.type === 'client_reply_follow_up').slice(0, 3);
@@ -38664,6 +39625,43 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (!approval) issues.push({ severity: 'error', message: `Pending expense reversal ${expense.id} lacks its matching pending approval.` });
       }
     }
+    const environmentalActivityRows = this.db.prepare('SELECT * FROM environmental_activities').all();
+    for (const activityRow of environmentalActivityRows) {
+      const activity = this.mapEnvironmentalActivity(activityRow);
+      if (!activity.integrityValid) {
+        issues.push({ severity: 'error', message: `Environmental activity ${activity.id} failed retained quantity, factor, entry, or source verification.` });
+      }
+      if (['approved', 'pending_reversal', 'reversed'].includes(activity.status)) {
+        const approval = activity.approvalId
+          ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'environmental_activity' AND target_id = ? AND status = 'approved'").get(activity.approvalId, activity.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Recognized environmental activity ${activity.id} lacks its matching approved review.` });
+      }
+      if (activity.status === 'pending_reversal') {
+        const approval = activity.reversalApprovalId
+          ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'environmental_activity_reversal' AND target_id = ? AND status = 'pending'").get(activity.reversalApprovalId, activity.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Pending environmental reversal ${activity.id} lacks its matching pending approval.` });
+      }
+    }
+    for (const reportRow of this.db.prepare('SELECT * FROM environmental_reports').all()) {
+      const report = this.mapEnvironmentalReport(reportRow);
+      if (!report.integrityValid) {
+        issues.push({ severity: 'error', message: `Environmental report ${report.id} failed snapshot or CSV checksum verification.` });
+      }
+      if (report.status === 'approved') {
+        const approval = report.approvalId
+          ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'environmental_report' AND target_id = ? AND status = 'approved'").get(report.approvalId, report.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Approved environmental report ${report.id} lacks its matching approved review.` });
+      }
+      if (report.status === 'pending_approval') {
+        const approval = report.approvalId
+          ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'environmental_report' AND target_id = ? AND status = 'pending'").get(report.approvalId, report.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Pending environmental report ${report.id} lacks its matching pending approval.` });
+      }
+    }
     const purchaseOrdersWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM purchase_orders WHERE status IN ('approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued') AND approval_id IS NULL").get().count || 0);
     if (purchaseOrdersWithoutApproval) issues.push({ severity: 'warning', message: `${purchaseOrdersWithoutApproval} purchase order commitment(s) have no approval gate.` });
     const supplierInvoicesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM supplier_invoices WHERE status IN ('approved', 'partially_paid', 'paid') AND approval_id IS NULL").get().count || 0);
@@ -38819,6 +39817,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         materialReceipts: this.count('material_receipts'),
         materialReceiptLines: this.count('material_receipt_lines'),
         expenses: this.count('expenses'),
+        environmentalActivities: this.count('environmental_activities'),
+        environmentalReports: this.count('environmental_reports'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -40222,6 +41222,111 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapEnvironmentalActivity(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const integrityValid = Boolean(
+      row.entry_fingerprint
+      && row.source_fingerprint
+      && row.entry_fingerprint === this.environmentalActivityFingerprint({
+        jobId: row.job_id,
+        workerId: row.worker_id,
+        activityDate: row.activity_date,
+        category: row.category,
+        ghgScope: row.ghg_scope,
+        description: row.description,
+        quantity: row.quantity,
+        unit: row.unit,
+        emissionFactor: row.emission_factor,
+        factorSource: row.factor_source,
+        factorReference: row.factor_reference,
+        evidenceReference: row.evidence_reference,
+        evidenceDocumentId: row.evidence_document_id,
+        notes: row.notes
+      })
+      && row.source_fingerprint === this.environmentalActivitySourceFingerprint({
+        jobId: row.job_id,
+        activityDate: row.activity_date,
+        category: row.category,
+        description: row.description,
+        quantity: row.quantity,
+        unit: row.unit,
+        evidenceReference: row.evidence_reference
+      })
+      && roundMeasurement(normalizeNumber(row.quantity, 0) * normalizeNumber(row.emission_factor, 0)) === roundMeasurement(row.emissions_kg_co2e)
+    );
+    const emissionsKgCo2e = roundMeasurement(row.emissions_kg_co2e);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      workerId: row.worker_id || null,
+      workerName: data.workerName || null,
+      activityDate: row.activity_date,
+      category: row.category,
+      ghgScope: row.ghg_scope,
+      description: row.description,
+      quantity: roundMeasurement(row.quantity),
+      unit: row.unit,
+      emissionFactor: roundMeasurement(row.emission_factor, 9),
+      emissionsKgCo2e,
+      emissionsTonnesCo2e: roundMeasurement(emissionsKgCo2e / 1000),
+      recognizedKgCo2e: ['approved', 'pending_reversal'].includes(row.status) ? emissionsKgCo2e : 0,
+      factorSource: row.factor_source,
+      factorReference: row.factor_reference,
+      evidenceReference: row.evidence_reference,
+      evidenceDocumentId: row.evidence_document_id || null,
+      status: row.status,
+      approvalId: row.approval_id || null,
+      reversalApprovalId: row.reversal_approval_id || null,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      sourceFingerprint: row.source_fingerprint,
+      integrityValid,
+      notes: row.notes,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapEnvironmentalReport(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const csvChecksumValid = sha256Text(String(row.csv_content ?? '')) === row.csv_checksum;
+    const snapshotValid = Boolean(
+      snapshot
+      && snapshot.format === ENVIRONMENTAL_REPORT_FORMAT
+      && snapshot.job?.id === row.job_id
+      && snapshot.periodStart === row.period_start
+      && snapshot.periodEnd === row.period_end
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.csvChecksum === row.csv_checksum
+      && Array.isArray(snapshot.activities)
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      periodStart: row.period_start,
+      periodEnd: row.period_end,
+      status: row.status,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      csvChecksum: row.csv_checksum,
+      snapshot,
+      summary: snapshot?.summary || {},
+      activityCount: Array.isArray(snapshot?.activities) ? snapshot.activities.length : 0,
+      approvalId: row.approval_id || null,
+      integrityValid: snapshotValid && csvChecksumValid,
+      sourceCurrent: false,
+      downloadPath: `/api/ledger/environmental-reports/${encodeURIComponent(row.id)}/content`,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapBillingMilestone(row) {
     if (!row) return null;
     return {
@@ -40971,6 +42076,51 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.amount = mapped?.costAmount ?? data.amount ?? null;
       preview.currency = mapped?.currency || data.currency || 'EUR';
       preview.reason = data.reason || null;
+      preview.integrityValid = mapped?.integrityValid ?? null;
+    } else if (targetType === 'environmental_activity') {
+      const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapEnvironmentalActivity(row) : null;
+      primaryEffect = `Approve ${mapped?.description || data.description || 'environmental activity'} for ${roundMeasurement(mapped?.emissionsKgCo2e ?? data.emissionsKgCo2e, 3)} kg CO2e.`;
+      addEffect('Include the retained activity in the current job environmental register and future report source snapshots.');
+      addSafeguard('Quantity, unit, GHG scope, evidence, factor value, factor source, and both replay fingerprints are rechecked before approval.');
+      addSafeguard('The calculation uses operator-supplied factor provenance and does not claim regulatory certification, offsetting, or external submission.');
+      riskLevel = (mapped?.emissionsKgCo2e ?? data.emissionsKgCo2e ?? 0) >= 1000 ? 'high' : 'medium';
+      preview.activityDate = mapped?.activityDate || data.activityDate || null;
+      preview.category = mapped?.category || data.category || null;
+      preview.ghgScope = mapped?.ghgScope || data.ghgScope || null;
+      preview.quantity = mapped?.quantity ?? data.quantity ?? null;
+      preview.unit = mapped?.unit || data.unit || null;
+      preview.emissionFactor = mapped?.emissionFactor ?? data.emissionFactor ?? null;
+      preview.emissionsKgCo2e = mapped?.emissionsKgCo2e ?? data.emissionsKgCo2e ?? null;
+      preview.factorSource = mapped?.factorSource || data.factorSource || null;
+      preview.factorReference = mapped?.factorReference || data.factorReference || null;
+      preview.evidenceReference = mapped?.evidenceReference || data.evidenceReference || null;
+      preview.integrityValid = mapped?.integrityValid ?? null;
+    } else if (targetType === 'environmental_activity_reversal') {
+      const row = this.db.prepare('SELECT * FROM environmental_activities WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapEnvironmentalActivity(row) : null;
+      primaryEffect = `Reverse ${mapped?.description || data.description || 'environmental activity'}.`;
+      addEffect(`Remove ${roundMeasurement(mapped?.emissionsKgCo2e ?? data.emissionsKgCo2e, 3)} kg CO2e from the recognized job register while retaining the original source.`);
+      addSafeguard('This is a compensating ledger decision; the original activity, factor provenance, approval, and audit history remain retained.');
+      addSafeguard('Existing approved report packages remain immutable and become visibly stale when their source basis changes.');
+      riskLevel = 'high';
+      preview.emissionsKgCo2e = mapped?.emissionsKgCo2e ?? data.emissionsKgCo2e ?? null;
+      preview.reason = data.reason || null;
+      preview.integrityValid = mapped?.integrityValid ?? null;
+    } else if (targetType === 'environmental_report') {
+      const row = this.db.prepare('SELECT * FROM environmental_reports WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapEnvironmentalReport(row) : null;
+      primaryEffect = `Approve the environmental report for ${mapped?.periodStart || data.periodStart || ''} to ${mapped?.periodEnd || data.periodEnd || ''}.`;
+      addEffect(`Release a checksum-verified CSV package covering ${mapped?.activityCount ?? data.activityCount ?? 0} approved activity record(s) and ${roundMeasurement(mapped?.summary?.totalKgCo2e ?? data.totalKgCo2e, 3)} kg CO2e.`);
+      addSafeguard('Approval fails if any source decision is pending, the approved activity set changed, or a snapshot or CSV checksum no longer matches.');
+      addSafeguard('Approval does not submit the report, certify a footprint, buy offsets, contact a client, or create an external commitment.');
+      riskLevel = 'high';
+      preview.periodStart = mapped?.periodStart || data.periodStart || null;
+      preview.periodEnd = mapped?.periodEnd || data.periodEnd || null;
+      preview.activityCount = mapped?.activityCount ?? data.activityCount ?? null;
+      preview.totalKgCo2e = mapped?.summary?.totalKgCo2e ?? data.totalKgCo2e ?? null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.csvChecksum = mapped?.csvChecksum || data.csvChecksum || null;
       preview.integrityValid = mapped?.integrityValid ?? null;
     } else if (targetType === 'supplier_invoice') {
       const row = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(approval.targetId || approval.target_id);

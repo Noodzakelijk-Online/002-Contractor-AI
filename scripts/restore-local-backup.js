@@ -529,6 +529,49 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('040_governed_environmental_reporting')) {
+        for (const table of ['environmental_activities', 'environmental_reports']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup environmental-reporting schema is incomplete: ${table}.`);
+          }
+        }
+        const activityColumns = new Set(database.prepare('PRAGMA table_info(environmental_activities)').all().map(row => row.name));
+        for (const column of [
+          'activity_date',
+          'ghg_scope',
+          'emission_factor',
+          'emissions_kg_co2e',
+          'factor_source',
+          'factor_reference',
+          'evidence_reference',
+          'entry_key',
+          'entry_fingerprint',
+          'source_fingerprint',
+          'reversal_approval_id'
+        ]) {
+          if (!activityColumns.has(column)) {
+            throw new Error(`Backup environmental-reporting schema is incomplete: environmental_activities.${column}.`);
+          }
+        }
+        const reportColumns = new Set(database.prepare('PRAGMA table_info(environmental_reports)').all().map(row => row.name));
+        for (const column of ['source_hash', 'snapshot_hash', 'snapshot_json', 'csv_checksum', 'csv_content', 'approval_id']) {
+          if (!reportColumns.has(column)) {
+            throw new Error(`Backup environmental-reporting schema is incomplete: environmental_reports.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_environmental_activity_job_status_date',
+          'idx_environmental_activity_worker_date',
+          'idx_environmental_activity_pending_reversal',
+          'idx_environmental_report_job_period',
+          'idx_environmental_report_pending_source'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup environmental-reporting constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

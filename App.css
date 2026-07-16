@@ -487,6 +487,34 @@
 .equipment-field-form .modal-actions { padding: 0 22px 18px; }
 .equipment-return-form { border-left: 3px solid #b75c32; }
 .field-expense-receipt-form { border-top: 1px solid #dfe8e4; border-bottom: 1px solid #dfe8e4; background: #fbfcfc; }
+.field-environmental-panel { border-top: 1px solid #dfe8e4; border-bottom: 1px solid #dfe8e4; background: #f8fbf9; }
+.field-environmental-panel > form > .form-grid { padding-top: 0; }
+.environmental-calculation { display: grid; align-content: center; min-height: 66px; padding: 10px 12px; border-left: 3px solid #39815f; background: #eef6f1; }
+.environmental-calculation span { color: #62736b; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.environmental-calculation strong { margin-top: 4px; color: #244f3b; font-size: 15px; }
+.environmental-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 22px 16px; border-top: 1px solid #dfe8e4; border-bottom: 1px solid #dfe8e4; }
+.environmental-summary > div { display: grid; gap: 3px; padding: 10px 12px; border-right: 1px solid #e4ebe7; }
+.environmental-summary > div:last-child { border-right: 0; }
+.environmental-summary span { color: #718079; font-size: 10px; }
+.environmental-summary strong { color: #2d4239; font-size: 12px; }
+.field-environmental-list { display: grid; margin: 0 22px 16px; border-top: 1px solid #dfe8e4; }
+.field-environmental-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 68px; padding: 10px 4px; border-bottom: 1px solid #e7eeea; }
+.field-environmental-row > div { display: grid; min-width: 0; gap: 3px; }
+.field-environmental-row > div:last-child { grid-template-columns: auto auto; align-items: center; justify-content: end; }
+.field-environmental-row > div:last-child > strong { grid-column: 1 / -1; text-align: right; }
+.field-environmental-row strong { min-width: 0; overflow: hidden; color: #2d4239; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.field-environmental-row small { min-width: 0; overflow: hidden; color: #74817c; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.environmental-report-control { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(130px, 0.5fr) minmax(130px, 0.5fr) auto; align-items: end; gap: 12px; margin: 0 22px; padding: 14px 0; border-top: 1px solid #dfe8e4; }
+.environmental-report-control > div { display: grid; align-self: center; gap: 3px; }
+.environmental-report-control strong { color: #2d4239; font-size: 12px; }
+.environmental-report-control small { color: #74817c; font-size: 10px; }
+.environmental-report-control label { display: grid; gap: 5px; color: #65766e; font-size: 10px; font-weight: 700; }
+.environmental-report-control input { min-width: 0; }
+.environmental-report-list { display: grid; margin: 0 22px 16px; border-top: 1px solid #e4ebe7; }
+.environmental-report-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; min-height: 48px; border-bottom: 1px solid #e7eeea; }
+.environmental-report-list > div > span:first-child { display: grid; min-width: 0; gap: 2px; }
+.environmental-report-list strong { color: #2d4239; font-size: 11px; }
+.environmental-report-list small { color: #74817c; font-size: 10px; }
 .field-expense-receipt-list { display: grid; margin: 0 22px 16px; overflow: hidden; border: 1px solid #dfe8e4; border-radius: 6px; background: #fff; }
 .field-expense-receipt-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 58px; padding: 10px 12px; border-bottom: 1px solid #edf1ef; }
 .field-expense-receipt-row:last-child { border-bottom: 0; }
@@ -499,7 +527,7 @@
 .status-lost { color: #aa342a; background: #fbe9e7; }
 @media (max-width: 920px) { .equipment-row { grid-template-columns: minmax(0, 1fr) auto; }.equipment-details { grid-column: 1 / -1; grid-row: 2; }.equipment-custody-row { grid-template-columns: 8px minmax(0, 1fr) auto; }.equipment-custody-values { grid-column: 2; grid-row: 2; } }
 @media (max-width: 760px) { .equipment-row { grid-template-columns: minmax(0, 1fr); }.equipment-details { grid-column: 1; grid-row: auto; }.equipment-custody-heading-actions { justify-content: flex-start; }.equipment-custody-heading-actions .primary-button { width: 100%; }.equipment-custody-row { grid-template-columns: 7px minmax(0, 1fr); gap: 10px; padding: 13px 14px; }.equipment-custody-values { grid-column: 2; grid-template-columns: repeat(2, minmax(0, 1fr)); }.equipment-custody-row > .secondary-button { width: 100%; grid-column: 1 / -1; }.equipment-custody-preview { grid-template-columns: 1fr; }.equipment-custody-preview > div { border-top: 1px solid #d8e5df; border-left: 0; }.equipment-custody-preview > div:first-child { border-top: 0; }.equipment-field-selector { grid-template-columns: 1fr; padding: 14px; }.equipment-field-custody-row { grid-template-columns: 7px minmax(0, 1fr); padding: 12px 14px; }.equipment-field-custody-row small { white-space: normal; }.equipment-field-custody-row .secondary-button { width: 100%; grid-column: 1 / -1; }.equipment-field-form-heading { padding: 9px 14px; }.equipment-field-form .modal-actions { padding: 0 16px 16px; }.equipment-field-form .primary-button { width: 100%; min-height: 42px; }.equipment-modal .modal-actions, .equipment-custody-modal .modal-actions, .equipment-return-modal .modal-actions, .equipment-inspection-modal .modal-actions, .equipment-maintenance-modal .modal-actions, .equipment-retirement-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }.equipment-modal .modal-actions button, .equipment-custody-modal .modal-actions button, .equipment-return-modal .modal-actions button, .equipment-inspection-modal .modal-actions button, .equipment-maintenance-modal .modal-actions button, .equipment-retirement-modal .modal-actions button { width: 100%; } }
-@media (max-width: 760px) { .field-expense-receipt-list { margin: 0 14px 14px; }.field-expense-receipt-row { align-items: start; gap: 10px; padding: 11px; }.field-expense-receipt-row small { overflow-wrap: anywhere; white-space: normal; }.field-expense-receipt-form .primary-button { width: 100%; min-height: 42px; } }
+@media (max-width: 760px) { .field-expense-receipt-list { margin: 0 14px 14px; }.field-expense-receipt-row { align-items: start; gap: 10px; padding: 11px; }.field-expense-receipt-row small { overflow-wrap: anywhere; white-space: normal; }.field-expense-receipt-form .primary-button { width: 100%; min-height: 42px; }.environmental-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0 14px 14px; }.environmental-summary > div:nth-child(2) { border-right: 0; }.environmental-summary > div:nth-child(-n+2) { border-bottom: 1px solid #e4ebe7; }.field-environmental-list,.environmental-report-list { margin: 0 14px 14px; }.field-environmental-row { align-items: start; gap: 10px; padding: 11px 0; }.field-environmental-row small { overflow-wrap: anywhere; white-space: normal; }.field-environmental-panel .primary-button { width: 100%; min-height: 42px; }.environmental-report-control { grid-template-columns: 1fr 1fr; margin: 0 14px; }.environmental-report-control > div,.environmental-report-control > button { grid-column: 1 / -1; }.environmental-report-control > button { width: 100%; }.environmental-report-list > div { grid-template-columns: minmax(0, 1fr) auto auto; padding: 8px 0; }.environmental-report-list > div > .status:last-child { grid-column: 1 / -1; justify-self: start; } }
 .task-create-form { grid-template-columns: minmax(0, 1.5fr) minmax(120px, .5fr); }
 .task-create-form .form-span { grid-column: 1 / -1; }
 .task-list { margin-top: 16px; }

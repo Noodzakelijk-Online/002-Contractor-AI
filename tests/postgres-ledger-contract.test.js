@@ -568,6 +568,44 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(hostedExpense.status, 'approved');
     assert.equal(hostedExpense.costAmount, 100);
     assert.equal(hostedExpense.integrityValid, true);
+    const hostedEnvironmentalPayload = {
+      entryKey: `postgres-environmental-${Date.now()}`,
+      workerId: attendanceWorker.id,
+      activityDate: new Date().toISOString().slice(0, 10),
+      category: 'electricity',
+      ghgScope: 'scope_2',
+      description: 'PostgreSQL temporary site power',
+      quantity: 250,
+      unit: 'kWh',
+      emissionFactor: 0.35,
+      factorSource: 'PostgreSQL retained factor library',
+      factorReference: `postgres-factor:electricity:${Date.now()}`,
+      evidenceReference: `postgres-meter:${Date.now()}`,
+      notes: 'Hosted environmental reporting contract evidence.'
+    };
+    const hostedEnvironmentalRequest = ledger.createEnvironmentalActivity(job.id, hostedEnvironmentalPayload, { actor: 'postgres_contract_test' });
+    assert.equal(hostedEnvironmentalRequest.activity.status, 'pending_approval');
+    assert.equal(hostedEnvironmentalRequest.activity.integrityValid, true);
+    assert.equal(ledger.createEnvironmentalActivity(job.id, hostedEnvironmentalPayload, { actor: 'postgres_contract_replay' }).replayed, true);
+    ledger.resolveApproval(hostedEnvironmentalRequest.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_approver',
+      reason: 'Hosted power statement, scope, quantity, and factor provenance verified.'
+    });
+    const hostedEnvironmentalActivity = ledger.getEnvironmentalActivity(hostedEnvironmentalRequest.activity.id);
+    assert.equal(hostedEnvironmentalActivity.status, 'approved');
+    assert.equal(hostedEnvironmentalActivity.emissionsKgCo2e, 87.5);
+    assert.equal(hostedEnvironmentalActivity.integrityValid, true);
+    const hostedEnvironmentalReportRequest = ledger.requestEnvironmentalReport(job.id, {}, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(hostedEnvironmentalReportRequest.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_approver',
+      reason: 'Hosted environmental report source and checksums verified.'
+    });
+    const hostedEnvironmentalReport = ledger.getEnvironmentalReportContent(hostedEnvironmentalReportRequest.report.id);
+    assert.equal(hostedEnvironmentalReport.report.integrityValid, true);
+    assert.equal(hostedEnvironmentalReport.report.sourceCurrent, true);
+    assert.match(hostedEnvironmentalReport.content, /PostgreSQL temporary site power/);
     const hostedQualificationRequirement = ledger.createQualificationRequirement(job.id, {
       credentialType: 'vca',
       title: 'Hosted VCA site qualification',
@@ -1325,11 +1363,14 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(dashboard.metrics.documentTransmittals >= 1);
     assert.ok(dashboard.metrics.projectMeetings >= 1);
     assert.ok(dashboard.metrics.approvedCostForecasts >= 1);
+    assert.ok(dashboard.metrics.approvedEnvironmentalActivities >= 1);
+    assert.ok(dashboard.metrics.approvedEnvironmentalReports >= 1);
+    assert.ok(dashboard.metrics.environmentalKgCo2e >= 87.5);
     assert.ok(Array.isArray(dashboard.nextActions));
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '039_governed_expense_receipts');
+    assert.equal(migrations.currentVersion, '040_governed_environmental_reporting');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1410,12 +1451,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('039_governed_expense_receipts'));
+  assert.deepEqual(versions, Array(4).fill('040_governed_environmental_reporting'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 39);
+  assert.equal(Number(migrationCount.count), 40);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1947,7 +1988,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '039_governed_expense_receipts');
+    assert.equal(ledger.migrationStatus().currentVersion, '040_governed_environmental_reporting');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

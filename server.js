@@ -1194,6 +1194,7 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
         || pathName === '/api/ledger/attendance'
@@ -1208,6 +1209,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/check-out$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
 
@@ -1285,6 +1287,31 @@ function projectFieldExpenseReceipt(expense) {
   };
 }
 
+function projectFieldEnvironmentalActivity(activity) {
+  if (!activity) return null;
+  return {
+    id: activity.id,
+    jobId: activity.jobId,
+    workerId: activity.workerId,
+    workerName: activity.workerName,
+    activityDate: activity.activityDate,
+    category: activity.category,
+    ghgScope: activity.ghgScope,
+    description: activity.description,
+    quantity: activity.quantity,
+    unit: activity.unit,
+    emissionFactor: activity.emissionFactor,
+    emissionsKgCo2e: activity.emissionsKgCo2e,
+    factorSource: activity.factorSource,
+    factorReference: activity.factorReference,
+    evidenceReference: activity.evidenceReference,
+    status: activity.status,
+    notes: activity.notes,
+    createdAt: activity.createdAt,
+    updatedAt: activity.updatedAt
+  };
+}
+
 function projectFieldJobSummary(job = {}) {
   return {
     id: job.id,
@@ -1359,6 +1386,9 @@ function projectFieldJobDetail(req, detail) {
         : []
     ),
     timeLogs: projectFieldRecords(timeLogs),
+    environmentalActivities: (detail.environmentalActivities || [])
+      .filter(activity => scopeWorkerId && String(activity.workerId || '') === String(scopeWorkerId))
+      .map(projectFieldEnvironmentalActivity),
     qualityChecks: projectFieldRecords(detail.qualityChecks),
     safetyChecks: projectFieldRecords(detail.safetyChecks),
     punchItems: projectFieldRecords(detail.punchItems),
@@ -1415,6 +1445,27 @@ function expenseReceiptPayloadForOperator(req, payload = {}) {
     submittedBy: identity.workerName,
     submitted_by: identity.workerName,
     source: 'field_expense_receipt'
+  };
+}
+
+function environmentalActivityPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field environmental capture requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    submittedBy: identity.workerName,
+    submitted_by: identity.workerName,
+    source: 'field_environmental_activity'
   };
 }
 
@@ -3600,6 +3651,142 @@ app.post('/api/ledger/jobs/:id/expense-receipts/:expenseId/reversal', (req, res)
   }), 201);
 });
 
+app.get('/api/ledger/jobs/:id/environmental-activities', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const fieldScoped = req.operator?.role === 'field_worker';
+    const activities = operatingLedger.listEnvironmentalActivities({
+      jobId: req.params.id,
+      workerId: fieldScoped ? fieldWorkerIdentity(req).workerId : req.query.workerId,
+      status: req.query.status,
+      periodStart: req.query.periodStart || req.query.period_start,
+      periodEnd: req.query.periodEnd || req.query.period_end,
+      limit: req.query.limit
+    });
+    const projectedActivities = fieldScoped ? activities.map(projectFieldEnvironmentalActivity) : activities;
+    const register = fieldScoped
+      ? {
+          summary: {
+            totalRecords: projectedActivities.length,
+            recognizedRecords: projectedActivities.filter(activity => activity.status === 'approved').length,
+            pendingRecords: projectedActivities.filter(activity => activity.status === 'pending_approval').length,
+            pendingReversals: projectedActivities.filter(activity => activity.status === 'pending_reversal').length,
+            totalKgCo2e: projectedActivities
+              .filter(activity => ['approved', 'pending_reversal'].includes(activity.status))
+              .reduce((sum, activity) => sum + Number(activity.emissionsKgCo2e || 0), 0)
+          },
+          readyForReport: false,
+          blockers: [],
+          policy: { certificationClaimed: false, externalSubmission: false, reportUnit: 'kg_co2e' }
+        }
+      : operatingLedger.calculateEnvironmentalRegister(req.params.id, req.query || {});
+    return {
+      success: true,
+      activities: projectedActivities,
+      register: {
+        periodStart: register.periodStart || null,
+        periodEnd: register.periodEnd || null,
+        sourceHash: fieldScoped ? null : register.sourceHash,
+        summary: register.summary,
+        readyForReport: register.readyForReport,
+        blockers: register.blockers,
+        policy: register.policy
+      },
+      reports: fieldScoped ? [] : operatingLedger.listEnvironmentalReports({ jobId: req.params.id, limit: 20 }),
+      policy: {
+        approvalRequired: true,
+        exactReplay: true,
+        sourcedFactors: true,
+        compensatingReversal: true,
+        externalSubmission: false,
+        certificationClaimed: false,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/environmental-activities', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = environmentalActivityPayloadForOperator(req, req.body || {});
+    const result = operatingLedger.createEnvironmentalActivity(req.params.id, payload, {
+      actor: actorFromRequest(req, 'dashboard')
+    });
+    return {
+      success: true,
+      activity: req.operator?.role === 'field_worker' ? projectFieldEnvironmentalActivity(result.activity) : result.activity,
+      approval: req.operator?.role === 'field_worker' ? null : result.approval,
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0,
+      certificationClaimed: false
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/environmental-activities/:activityId/reversal', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestEnvironmentalActivityReversal(req.params.id, req.params.activityId, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0,
+    certificationClaimed: false
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/environmental-reports', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestEnvironmentalReport(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0,
+    certificationClaimed: false
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/environmental-reports', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    reports: operatingLedger.listEnvironmentalReports({ jobId: req.params.id, status: req.query.status, limit: req.query.limit })
+  }));
+});
+
+app.get('/api/ledger/environmental-reports/:reportId/content', (req, res) => {
+  try {
+    const result = operatingLedger.getEnvironmentalReportContent(req.params.reportId);
+    operatingLedger.audit({
+      entityType: 'environmental_report',
+      entityId: result.report.id,
+      jobId: result.report.jobId,
+      action: 'download_environmental_report',
+      actor: actorFromRequest(req, 'authenticated_operator'),
+      after: {
+        periodStart: result.report.periodStart,
+        periodEnd: result.report.periodEnd,
+        csvChecksum: result.report.csvChecksum,
+        externalSubmission: false,
+        certificationClaimed: false
+      }
+    });
+    const filename = `contractor-ai-environmental-${result.report.periodStart}-${result.report.periodEnd}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Length', String(Buffer.byteLength(result.content, 'utf8')));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Contractor-AI-SHA256', result.report.csvChecksum);
+    return res.end(result.content);
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'environmental_report_download_failed', error.statusCode ? error.message : 'Unable to retrieve the retained environmental report.', serializeError(error));
+  }
+});
+
 app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -5611,6 +5798,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         expenseReceiptApproval: 'source_current_approval_gated',
         expenseReceiptReversal: 'approval_gated_compensating_record',
         expenseReceiptVatBasis: 'retained_net_tax_total',
+        environmentalActivityEntryKey: 'durable',
+        environmentalFactorProvenance: 'operator_supplied_and_retained',
+        environmentalActivityApproval: 'source_verified_approval_gated',
+        environmentalActivityReversal: 'approval_gated_compensating_record',
+        environmentalReportIntegrity: 'source_hash_snapshot_hash_csv_sha256',
+        environmentalCertificationClaimed: false,
         taskLifecycle: 'retained',
         taskCompletionEvidenceRequired: true,
         fieldTaskScopeEnforced: true,

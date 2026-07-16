@@ -25,6 +25,7 @@ import {
   GitBranch,
   HardHat,
   LayoutDashboard,
+  Leaf,
   Link2,
   LoaderCircle,
   LockKeyhole,
@@ -204,6 +205,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? 'material-receipts'
       : type === 'expense_receipt'
         ? 'expense-receipts'
+      : type === 'environmental_activity'
+        ? 'environmental-activities'
       : type === 'equipment_check_out'
         ? 'equipment-custody/check-out'
       : type === 'equipment_return' && custodySessionId
@@ -375,6 +378,29 @@ function emptyFieldExpenseReceiptDraft() {
     costCode: 'MAT-100',
     notes: '',
   }
+}
+
+function emptyFieldEnvironmentalDraft() {
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    jobId: '',
+    activityDate: futureDateInput(0),
+    category: 'fuel',
+    ghgScope: 'scope_1',
+    description: '',
+    quantity: '',
+    unit: 'litre',
+    emissionFactor: '',
+    factorSource: '',
+    factorReference: '',
+    evidenceReference: '',
+    notes: '',
+  }
+}
+
+function emptyEnvironmentalReportDraft() {
+  const today = futureDateInput(0)
+  return { periodStart: `${today.slice(0, 4)}-01-01`, periodEnd: today }
 }
 
 function emptyAttendanceDraft() {
@@ -7845,6 +7871,13 @@ function App() {
   const [fieldMaterialReceiptPlans, setFieldMaterialReceiptPlans] = useState([])
   const [fieldExpenseReceipt, setFieldExpenseReceipt] = useState(() => emptyFieldExpenseReceiptDraft())
   const [fieldExpenseReceipts, setFieldExpenseReceipts] = useState([])
+  const [fieldEnvironmentalActivity, setFieldEnvironmentalActivity] = useState(() => emptyFieldEnvironmentalDraft())
+  const [fieldEnvironmentalActivities, setFieldEnvironmentalActivities] = useState([])
+  const [environmentalRegister, setEnvironmentalRegister] = useState(null)
+  const [environmentalReports, setEnvironmentalReports] = useState([])
+  const [environmentalReportDraft, setEnvironmentalReportDraft] = useState(() => emptyEnvironmentalReportDraft())
+  const [environmentalReversal, setEnvironmentalReversal] = useState(null)
+  const [environmentalReversalReason, setEnvironmentalReversalReason] = useState('')
   const [fieldEquipmentCheckout, setFieldEquipmentCheckout] = useState(() => emptyEquipmentCheckoutDraft())
   const [fieldEquipmentReturn, setFieldEquipmentReturn] = useState(() => emptyEquipmentReturnDraft())
   const [fieldEquipmentPlans, setFieldEquipmentPlans] = useState([])
@@ -9406,6 +9439,168 @@ function App() {
           return
         }
       }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function selectFieldEnvironmentalJob(jobId) {
+    setFieldEnvironmentalActivity({ ...emptyFieldEnvironmentalDraft(), jobId })
+    setFieldEnvironmentalActivities([])
+    setEnvironmentalRegister(null)
+    setEnvironmentalReports([])
+    setEnvironmentalReportDraft(emptyEnvironmentalReportDraft())
+    if (!jobId || navigator.onLine === false) return
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/environmental-activities?limit=20`)
+      setFieldEnvironmentalActivities(result.activities || [])
+      setEnvironmentalRegister(result.register || null)
+      setEnvironmentalReports(result.reports || [])
+      if (result.register?.periodStart && result.register?.periodEnd) {
+        setEnvironmentalReportDraft({ periodStart: result.register.periodStart, periodEnd: result.register.periodEnd })
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  function updateEnvironmentalCategory(category) {
+    const defaults = {
+      fuel: { unit: 'litre', ghgScope: 'scope_1' },
+      electricity: { unit: 'kWh', ghgScope: 'scope_2' },
+      district_heat: { unit: 'kWh', ghgScope: 'scope_2' },
+      refrigerant: { unit: 'kg', ghgScope: 'scope_1' },
+      transport: { unit: 'km', ghgScope: 'scope_3' },
+      material: { unit: 'kg', ghgScope: 'scope_3' },
+      waste: { unit: 'kg', ghgScope: 'scope_3' },
+      water: { unit: 'm3', ghgScope: 'scope_3' },
+      accommodation: { unit: 'night', ghgScope: 'scope_3' },
+      other: { unit: 'unit', ghgScope: 'unclassified' },
+    }
+    setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, category, ...(defaults[category] || defaults.other) })
+  }
+
+  async function recordFieldEnvironmentalActivity(event) {
+    event.preventDefault()
+    const quantity = Number(fieldEnvironmentalActivity.quantity)
+    const emissionFactor = Number(fieldEnvironmentalActivity.emissionFactor)
+    if (
+      !fieldEnvironmentalActivity.jobId ||
+      !fieldEnvironmentalActivity.activityDate ||
+      fieldEnvironmentalActivity.description.trim().length < 3 ||
+      !(quantity > 0) ||
+      !fieldEnvironmentalActivity.unit.trim() ||
+      fieldEnvironmentalActivity.emissionFactor === '' ||
+      !Number.isFinite(emissionFactor) ||
+      emissionFactor < 0 ||
+      fieldEnvironmentalActivity.factorSource.trim().length < 3 ||
+      fieldEnvironmentalActivity.factorReference.trim().length < 3 ||
+      fieldEnvironmentalActivity.evidenceReference.trim().length < 3
+    ) {
+      setError('Choose a job and retain the date, activity, positive quantity, unit, emission factor, factor source, and source evidence reference.')
+      return
+    }
+    const jobId = fieldEnvironmentalActivity.jobId
+    const payload = {
+      activityDate: fieldEnvironmentalActivity.activityDate,
+      category: fieldEnvironmentalActivity.category,
+      ghgScope: fieldEnvironmentalActivity.ghgScope,
+      description: fieldEnvironmentalActivity.description.trim(),
+      quantity,
+      unit: fieldEnvironmentalActivity.unit.trim(),
+      emissionFactor,
+      factorSource: fieldEnvironmentalActivity.factorSource.trim(),
+      factorReference: fieldEnvironmentalActivity.factorReference.trim(),
+      evidenceReference: fieldEnvironmentalActivity.evidenceReference.trim(),
+      notes: fieldEnvironmentalActivity.notes.trim() || null,
+      source: 'field_dashboard',
+    }
+    const draft = {
+      id: fieldEnvironmentalActivity.entryKey,
+      type: 'environmental_activity',
+      jobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setFieldEnvironmentalActivity({ ...emptyFieldEnvironmentalDraft(), jobId })
+        notify('Environmental activity was saved locally with its source and factor provenance. It will sync after reconnection.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      notify(result.replayed
+        ? 'This environmental activity was already retained; no duplicate reporting source was created.'
+        : `${result.activity?.description || 'Environmental activity'} was retained for source review. No certification or external submission was made.`)
+      await selectFieldEnvironmentalJob(jobId)
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setFieldEnvironmentalActivity({ ...emptyFieldEnvironmentalDraft(), jobId })
+          notify('Connection interrupted. The complete environmental record was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function prepareEnvironmentalReport(event) {
+    event.preventDefault()
+    const jobId = fieldEnvironmentalActivity.jobId
+    if (!jobId || !environmentalReportDraft.periodStart || !environmentalReportDraft.periodEnd) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/environmental-reports`, {
+        method: 'POST',
+        body: JSON.stringify(environmentalReportDraft),
+      })
+      notify(result.replayed
+        ? 'The current environmental report package is already retained.'
+        : 'Environmental report package retained for approver review. Nothing was submitted or certified externally.')
+      await selectFieldEnvironmentalJob(jobId)
+      await refresh()
+      if (capabilities.approvals && result.approval?.id) openApprovals({ jobId, approvalId: result.approval.id })
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function submitEnvironmentalReversal(event) {
+    event.preventDefault()
+    if (!environmentalReversal || environmentalReversalReason.trim().length < 8) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(environmentalReversal.jobId)}/environmental-activities/${encodeURIComponent(environmentalReversal.id)}/reversal`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: environmentalReversalReason.trim() }),
+      })
+      const jobId = environmentalReversal.jobId
+      setEnvironmentalReversal(null)
+      setEnvironmentalReversalReason('')
+      notify('Environmental correction retained for approver review. The original source and historical reports remain available.')
+      await selectFieldEnvironmentalJob(jobId)
+      await refresh()
+      if (capabilities.approvals && result.approval?.id) openApprovals({ jobId, approvalId: result.approval.id })
+    } catch (requestError) {
       setError(requestError.message)
     } finally {
       setSubmitting(false)
@@ -14489,6 +14684,177 @@ function App() {
                     <Empty title="No equipment handoff available" detail="This job has no checkout-ready retained equipment reservation." />
                   ) : null}
                   <p className="attendance-policy">Custody records are internal operational evidence. External hire, spend, and statutory inspection remain separately governed.</p>
+                </section>
+                <section className="evidence-form field-environmental-panel" data-testid="field-environmental-panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Environmental activity</h2>
+                      <p>Retain measured site activity with the exact evidence and emission-factor source used for the calculation.</p>
+                    </div>
+                    <Leaf size={20} />
+                  </div>
+                  <form data-testid="field-environmental-activity-form" onSubmit={recordFieldEnvironmentalActivity}>
+                    <div className="form-grid">
+                      <label>
+                        Job
+                        <select required value={fieldEnvironmentalActivity.jobId} onChange={(event) => void selectFieldEnvironmentalJob(event.target.value)}>
+                          <option value="">Select an active job</option>
+                          {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        Activity date
+                        <input required type="date" max={futureDateInput(0)} value={fieldEnvironmentalActivity.activityDate} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, activityDate: event.target.value })} />
+                      </label>
+                      <label>
+                        Category
+                        <select value={fieldEnvironmentalActivity.category} onChange={(event) => updateEnvironmentalCategory(event.target.value)}>
+                          <option value="fuel">Fuel</option>
+                          <option value="electricity">Electricity</option>
+                          <option value="district_heat">District heat</option>
+                          <option value="refrigerant">Refrigerant</option>
+                          <option value="transport">Transport</option>
+                          <option value="material">Material</option>
+                          <option value="waste">Waste</option>
+                          <option value="water">Water</option>
+                          <option value="accommodation">Accommodation</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </label>
+                      <label>
+                        GHG scope
+                        <select value={fieldEnvironmentalActivity.ghgScope} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, ghgScope: event.target.value })}>
+                          <option value="scope_1">Scope 1</option>
+                          <option value="scope_2">Scope 2</option>
+                          <option value="scope_3">Scope 3</option>
+                          <option value="unclassified">Unclassified</option>
+                        </select>
+                      </label>
+                      <label className="form-span">
+                        Activity description
+                        <input required minLength="3" maxLength="240" value={fieldEnvironmentalActivity.description} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, description: event.target.value })} placeholder="Generator diesel, temporary power, delivery distance, waste transfer" />
+                      </label>
+                      <label>
+                        Quantity
+                        <input required type="number" min="0.000001" step="any" inputMode="decimal" value={fieldEnvironmentalActivity.quantity} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, quantity: event.target.value })} />
+                      </label>
+                      <label>
+                        Unit
+                        <input required maxLength="24" value={fieldEnvironmentalActivity.unit} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, unit: event.target.value })} placeholder="litre, kWh, kg, km" />
+                      </label>
+                      <label>
+                        Factor (kg CO2e / unit)
+                        <input required type="number" min="0" step="any" inputMode="decimal" value={fieldEnvironmentalActivity.emissionFactor} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, emissionFactor: event.target.value })} />
+                      </label>
+                      <div className="environmental-calculation" aria-live="polite">
+                        <span>Calculated emissions</span>
+                        <strong>{roundDisplay(Number(fieldEnvironmentalActivity.quantity || 0) * Number(fieldEnvironmentalActivity.emissionFactor || 0))} kg CO2e</strong>
+                      </div>
+                      <label>
+                        Factor source
+                        <input required minLength="3" maxLength="240" value={fieldEnvironmentalActivity.factorSource} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, factorSource: event.target.value })} placeholder="Authority, supplier, or retained factor library" />
+                      </label>
+                      <label>
+                        Factor reference
+                        <input required minLength="3" maxLength="500" value={fieldEnvironmentalActivity.factorReference} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, factorReference: event.target.value })} placeholder="Publication version, URL, or controlled record ID" />
+                      </label>
+                      <label className="form-span">
+                        Activity evidence reference
+                        <input required minLength="3" maxLength="500" value={fieldEnvironmentalActivity.evidenceReference} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, evidenceReference: event.target.value })} placeholder="Meter statement, delivery ticket, fuel receipt, or waste transfer note" />
+                      </label>
+                      <label className="form-span">
+                        Review note
+                        <textarea maxLength="2000" value={fieldEnvironmentalActivity.notes} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, notes: event.target.value })} placeholder="Measurement boundary, allocation basis, or retained context" />
+                      </label>
+                    </div>
+                    <div className="modal-actions">
+                      <button className="primary-button" disabled={submitting}>
+                        <Leaf size={16} />
+                        {submitting ? 'Recording...' : navigator.onLine === false ? 'Save activity offline' : 'Request source review'}
+                      </button>
+                    </div>
+                  </form>
+                  {environmentalRegister?.summary ? (
+                    <div className="environmental-summary" aria-label="Environmental register summary">
+                      <div><span>Recognized</span><strong>{roundDisplay(environmentalRegister.summary.totalKgCo2e || 0)} kg CO2e</strong></div>
+                      <div><span>Approved sources</span><strong>{environmentalRegister.summary.recognizedRecords || 0}</strong></div>
+                      <div><span>Pending review</span><strong>{environmentalRegister.summary.pendingRecords || 0}</strong></div>
+                      <div><span>Pending correction</span><strong>{environmentalRegister.summary.pendingReversals || 0}</strong></div>
+                    </div>
+                  ) : null}
+                  {fieldEnvironmentalActivities.length ? (
+                    <div className="field-environmental-list" aria-label="Recent environmental activities">
+                      {fieldEnvironmentalActivities.map((activity) => (
+                        <div className="field-environmental-row" key={activity.id}>
+                          <div>
+                            <strong>{activity.description}</strong>
+                            <small>{formatDate(activity.activityDate)} / {formatStatus(activity.category)} / {roundDisplay(activity.quantity)} {activity.unit} x {roundDisplay(activity.emissionFactor)}</small>
+                            <small>{activity.factorSource} / {activity.evidenceReference}</small>
+                          </div>
+                          <div>
+                            <strong>{roundDisplay(activity.emissionsKgCo2e)} kg CO2e</strong>
+                            <span className={`status status-${activity.status}`}>{formatStatus(activity.status)}</span>
+                            {!fieldScoped && activity.status === 'approved' ? (
+                              <button
+                                type="button"
+                                className="icon-button icon-button-small"
+                                aria-label={`Request reversal for ${activity.description}`}
+                                title="Request compensating reversal"
+                                onClick={() => {
+                                  setEnvironmentalReversal(activity)
+                                  setEnvironmentalReversalReason('')
+                                }}
+                              >
+                                <Undo2 size={14} />
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : fieldEnvironmentalActivity.jobId && navigator.onLine !== false ? (
+                    <Empty title="No environmental activity retained" detail="Record the first measured source before preparing a report." />
+                  ) : null}
+                  {!fieldScoped && fieldEnvironmentalActivity.jobId ? (
+                    <form className="environmental-report-control" data-testid="environmental-report-form" onSubmit={prepareEnvironmentalReport}>
+                      <div>
+                        <strong>Environmental report</strong>
+                        <small>Freeze approved sources into a checksum-protected CSV package.</small>
+                      </div>
+                      <label>
+                        From
+                        <input required type="date" max={environmentalReportDraft.periodEnd} value={environmentalReportDraft.periodStart} onChange={(event) => setEnvironmentalReportDraft({ ...environmentalReportDraft, periodStart: event.target.value })} />
+                      </label>
+                      <label>
+                        Through
+                        <input required type="date" min={environmentalReportDraft.periodStart} max={futureDateInput(0)} value={environmentalReportDraft.periodEnd} onChange={(event) => setEnvironmentalReportDraft({ ...environmentalReportDraft, periodEnd: event.target.value })} />
+                      </label>
+                      <button className="secondary-button" disabled={submitting || !environmentalRegister?.readyForReport}>
+                        <FileDown size={16} />
+                        Prepare report
+                      </button>
+                    </form>
+                  ) : null}
+                  {!fieldScoped && environmentalReports.length ? (
+                    <div className="environmental-report-list" aria-label="Environmental reports">
+                      {environmentalReports.map((report) => (
+                        <div key={report.id}>
+                          <span>
+                            <strong>{formatDate(report.periodStart)} to {formatDate(report.periodEnd)}</strong>
+                            <small>{report.activityCount} source(s) / {roundDisplay(report.summary?.totalKgCo2e || 0)} kg CO2e</small>
+                          </span>
+                          <span className={`status status-${report.status}`}>{formatStatus(report.status)}</span>
+                          {report.status === 'approved' ? (
+                            <a className="icon-button icon-button-small" href={report.downloadPath} aria-label={`Download environmental report ${report.periodStart} to ${report.periodEnd}`} title="Download verified CSV">
+                              <FileDown size={14} />
+                            </a>
+                          ) : null}
+                          {!report.sourceCurrent ? <span className="status status-attention">Source changed</span> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <p className="attendance-policy">Calculations use the retained operator-supplied factor source. Approval does not certify a footprint, submit a report, or buy offsets.</p>
                 </section>
                 <form className="evidence-form field-expense-receipt-form" data-testid="field-expense-receipt-form" onSubmit={recordFieldExpenseReceipt}>
                   <div className="panel-heading">
@@ -19919,6 +20285,49 @@ function App() {
                   }
                 >
                   <MailCheck size={15} /> {submitting ? 'Recording...' : 'Record verified receipt'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+      {environmentalReversal ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="environmental-reversal-title" data-testid="environmental-reversal-modal">
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Compensating correction</p>
+                <h2 id="environmental-reversal-title">Reverse environmental activity</h2>
+                <p>{environmentalReversal.description}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close environmental reversal" onClick={() => {
+                setEnvironmentalReversal(null)
+                setEnvironmentalReversalReason('')
+              }}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitEnvironmentalReversal}>
+              <div className="form-grid">
+                <div className="field-record-context form-span">
+                  <span>Recognized source</span>
+                  <strong>{roundDisplay(environmentalReversal.emissionsKgCo2e)} kg CO2e</strong>
+                  <p>{roundDisplay(environmentalReversal.quantity)} {environmentalReversal.unit} / {environmentalReversal.factorSource}</p>
+                </div>
+                <label className="form-span">
+                  Correction reason
+                  <textarea required minLength="8" maxLength="1000" autoFocus value={environmentalReversalReason} onChange={(event) => setEnvironmentalReversalReason(event.target.value)} placeholder="Identify the corrected source or allocation evidence." />
+                </label>
+                <p className="workflow-note form-span">Approval removes this amount from the current recognized register only. The original activity, source evidence, factor provenance, and historical report packages remain retained.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => {
+                  setEnvironmentalReversal(null)
+                  setEnvironmentalReversalReason('')
+                }}>Cancel</button>
+                <button className="primary-button" disabled={submitting || environmentalReversalReason.trim().length < 8}>
+                  <Undo2 size={16} />
+                  {submitting ? 'Requesting...' : 'Request reversal approval'}
                 </button>
               </div>
             </form>
