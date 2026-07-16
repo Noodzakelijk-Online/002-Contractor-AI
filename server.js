@@ -1,330 +1,5035 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const multer = require('multer');
 const fs = require('fs');
+const crypto = require('crypto');
+const zlib = require('node:zlib');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
+const { ContractorOperatingLedger, LEDGER_CAPABILITY_BLUEPRINT, JOB_OPERATING_PLAYBOOKS } = require('./operating-ledger');
+const { OpenMeteoWeatherService } = require('./weather-service');
+const { EvidenceStorageError, createEvidenceStorage } = require('./evidence-storage');
+const { verifySqliteBackupDatabase } = require('./scripts/restore-local-backup');
 
 const app = express();
 const port = process.env.PORT || 3000;
+const weatherService = new OpenMeteoWeatherService({
+  enabled: process.env.WEATHER_PROVIDER_ENABLED !== 'false'
+});
+const configuredStateFile = process.env.STATE_FILE ? path.resolve(process.env.STATE_FILE) : null;
+const dataDir = process.env.CONTRACTOR_AI_DATA_DIR
+  ? path.resolve(process.env.CONTRACTOR_AI_DATA_DIR)
+  : configuredStateFile
+    ? path.dirname(configuredStateFile)
+    : path.join(__dirname, 'data');
+const distDir = path.join(__dirname, 'dist');
+const runtimeMode = String(process.env.CONTRACTOR_AI_RUNTIME_MODE || 'local').trim().toLowerCase();
+const storageMode = String(process.env.CONTRACTOR_AI_STORAGE_MODE || 'local').trim().toLowerCase();
+const trustedProxyRaw = String(process.env.CONTRACTOR_AI_TRUST_PROXY || '').trim();
+const trustedProxyEntries = trustedProxyRaw.split(',').map(value => value.trim()).filter(Boolean);
+let trustedProxyError = null;
+if (trustedProxyRaw) {
+  const unsafeShortcut = trustedProxyEntries.some(value => /^(?:true|false|\d+|\*|0\.0\.0\.0\/0|::\/0)$/i.test(value));
+  try {
+    if (unsafeShortcut || trustedProxyEntries.length === 0) {
+      throw new Error('Use explicit proxy IP addresses, CIDR ranges, or Express subnet names instead of a universal or hop-count trust rule.');
+    }
+    app.set('trust proxy', trustedProxyEntries.join(', '));
+  } catch (error) {
+    trustedProxyError = error;
+    app.set('trust proxy', false);
+  }
+} else {
+  app.set('trust proxy', false);
+}
+const hostedDatabaseUrl = runtimeMode === 'hosted' ? String(process.env.CONTRACTOR_AI_DATABASE_URL || '').trim() : '';
+const hostedPublicUrl = String(process.env.CONTRACTOR_AI_PUBLIC_URL || '').trim();
+const hostedPublicUrlDetails = (() => {
+  if (!hostedPublicUrl) return { protocol: '', origin: '', valid: false };
+  try {
+    const url = new URL(hostedPublicUrl);
+    return {
+      protocol: url.protocol,
+      origin: url.origin,
+      valid: !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash
+    };
+  } catch {
+    return { protocol: 'invalid', origin: '', valid: false };
+  }
+})();
+const hostingProvider = String(process.env.CONTRACTOR_AI_HOSTING_PROVIDER || '').trim();
+const hostingRegion = String(process.env.CONTRACTOR_AI_HOSTING_REGION || '').trim();
+const dataResidency = String(process.env.CONTRACTOR_AI_DATA_RESIDENCY || '').trim().toUpperCase();
+const dpaReference = String(process.env.CONTRACTOR_AI_DPA_REFERENCE || '').trim();
+const postgresBackupMode = String(process.env.CONTRACTOR_AI_POSTGRES_BACKUP_MODE || '').trim().toLowerCase();
+const objectVersioningEnabled = process.env.CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED === 'true';
+const backupPolicyReference = String(process.env.CONTRACTOR_AI_BACKUP_POLICY_REFERENCE || '').trim();
+const hostedDatabaseSslMode = (() => {
+  if (!hostedDatabaseUrl) return '';
+  try {
+    return String(new URL(hostedDatabaseUrl).searchParams.get('sslmode') || 'verify-full').trim().toLowerCase();
+  } catch {
+    return 'invalid';
+  }
+})();
+const stateFile = configuredStateFile
+  ? configuredStateFile
+  : path.join(dataDir, 'server-state.json');
+const ledgerFile = process.env.LEDGER_DB_FILE
+  ? path.resolve(process.env.LEDGER_DB_FILE)
+  : path.join(dataDir, 'contractor-ledger.sqlite');
+const uploadDir = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.join(dataDir, 'uploads');
+const evidenceStorageOptions = {
+  endpoint: process.env.CONTRACTOR_AI_S3_ENDPOINT,
+  bucket: process.env.CONTRACTOR_AI_S3_BUCKET,
+  region: process.env.CONTRACTOR_AI_S3_REGION || 'eu-central-1',
+  accessKeyId: process.env.CONTRACTOR_AI_S3_ACCESS_KEY_ID,
+  secretAccessKey: process.env.CONTRACTOR_AI_S3_SECRET_ACCESS_KEY,
+  prefix: process.env.CONTRACTOR_AI_S3_PREFIX || 'contractor-ai/evidence',
+  timeoutMs: process.env.CONTRACTOR_AI_STORAGE_TIMEOUT_MS
+};
+let evidenceStorage;
+let evidenceStorageInitError = null;
+try {
+  evidenceStorage = createEvidenceStorage({ mode: storageMode, rootDir: uploadDir, projectRoot: __dirname, s3: evidenceStorageOptions });
+} catch (error) {
+  evidenceStorageInitError = error;
+}
+const evidenceStorageEndpointProtocol = (() => {
+  if (!evidenceStorageOptions.endpoint) return '';
+  try {
+    return new URL(evidenceStorageOptions.endpoint).protocol;
+  } catch {
+    return 'invalid';
+  }
+})();
+const evidenceStorageVerificationTtlMs = Math.max(5_000, Number(process.env.CONTRACTOR_AI_STORAGE_VERIFY_TTL_MS || 60_000));
+let evidenceStorageVerificationCache = evidenceStorageInitError
+  ? {
+      ready: false,
+      status: 'unavailable',
+      mode: storageMode,
+      checkedAt: new Date().toISOString(),
+      code: evidenceStorageInitError.code || 'storage_initialization_failed'
+    }
+  : null;
+let evidenceStorageVerificationPromise = null;
+const maxUploadBytes = Math.max(1024, Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 * 1024));
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+const isProduction = process.env.NODE_ENV === 'production';
+const dashboardAuthRequired = isProduction || process.env.CONTRACTOR_AI_REQUIRE_AUTH === 'true';
+const dashboardAuthToken = process.env.CONTRACTOR_AI_AUTH_TOKEN || process.env.DASHBOARD_AUTH_TOKEN || '';
+const minimumOperatorTokenLength = 32;
+const roleTokenConfig = parseRoleTokens(process.env.CONTRACTOR_AI_ROLE_TOKENS);
+const operatorSessionCookieName = 'contractor_ai_session';
+const operatorSessionTtlSeconds = boundedInteger(process.env.CONTRACTOR_AI_SESSION_TTL_SECONDS, 28_800, 900, 86_400);
+const authLoginRateWindowMs = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_WINDOW_MS, 900_000, 60_000, 86_400_000);
+const authLoginRateLimit = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_LIMIT, 10, 3, 100);
+const operatorSessionSigningKey = createOperatorSessionSigningKey();
+const httpKeepAliveTimeoutMs = boundedInteger(process.env.CONTRACTOR_AI_HTTP_KEEP_ALIVE_TIMEOUT_MS, 65_000, 5_000, 300_000);
+const httpHeadersTimeoutMs = boundedInteger(
+  process.env.CONTRACTOR_AI_HTTP_HEADERS_TIMEOUT_MS,
+  70_000,
+  httpKeepAliveTimeoutMs + 1_000,
+  310_000
+);
+const verifiedIntegrationIds = new Set(
+  String(process.env.CONTRACTOR_AI_VERIFIED_INTEGRATIONS || '').split(',').map(value => value.trim()).filter(Boolean)
+);
+const autonomousSchedulerEnabled = process.env.CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED === 'true';
+const autonomousSchedulerIntervalSeconds = Math.max(30, Number(process.env.CONTRACTOR_AI_AUTONOMOUS_INTERVAL_SECONDS || 300));
+const autonomousSchedulerLeaseSeconds = Math.max(30, Number(process.env.CONTRACTOR_AI_AUTONOMOUS_LEASE_SECONDS || 120));
+const AUTONOMOUS_SCHEDULER_KEY = 'ledger_autonomous_cycle';
+const apiRateWindowMs = boundedInteger(process.env.CONTRACTOR_AI_RATE_WINDOW_MS, 60_000, 1_000, 86_400_000);
+const apiRateLimit = boundedInteger(process.env.CONTRACTOR_AI_RATE_LIMIT, 1_000, 50, 1_000_000);
+const apiRateBucketLimit = boundedInteger(process.env.CONTRACTOR_AI_RATE_BUCKET_LIMIT, 5_000, 100, 100_000);
+const apiRateSigningKey = configuredOperatorTokens().length
+  ? operatorSessionSigningKey
+  : crypto.createHash('sha256').update('contractor-ai-local-api-rate\0').update(path.resolve(ledgerFile)).digest();
+function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.floor(parsed)));
+}
+
+function configureHttpServer(server) {
+  if (!server) return server;
+  server.keepAliveTimeout = httpKeepAliveTimeoutMs;
+  server.headersTimeout = httpHeadersTimeoutMs;
+  return server;
+}
+
+function createRequestId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isTemplatePlaceholder(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized.includes('replace-with')
+    || normalized.includes('example-provider')
+    || normalized.includes('contractor.example.eu');
+}
+
+function isConfiguredReference(value, minimumLength = 8) {
+  const normalized = String(value || '').trim();
+  return normalized.length >= minimumLength && !isTemplatePlaceholder(normalized);
+}
+
+function isStrongOperatorToken(value) {
+  return typeof value === 'string'
+    && value.length >= minimumOperatorTokenLength
+    && value === value.trim()
+    && !isTemplatePlaceholder(value);
+}
+
+function runtimeConfiguration(options = {}) {
+  const issues = [];
+  const hosted = runtimeMode === 'hosted';
+  const storageVerification = options.storageVerification ?? evidenceStorageVerificationCache;
+  const hasConfiguredAuthToken = isStrongOperatorToken(dashboardAuthToken) || roleTokenConfig.principals.length > 0;
+  const templateValues = [
+    ['authentication', dashboardAuthToken],
+    ['database', hostedDatabaseUrl],
+    ['public_url', hostedPublicUrl],
+    ['hosting_provider', hostingProvider],
+    ['hosting_region', hostingRegion],
+    ['dpa_reference', dpaReference],
+    ['backup_policy_reference', backupPolicyReference],
+    ['trusted_proxy', trustedProxyRaw],
+    ['cors', process.env.CORS_ORIGINS],
+    ['object_storage_endpoint', evidenceStorageOptions.endpoint],
+    ['object_storage_bucket', evidenceStorageOptions.bucket],
+    ['object_storage_access_key', evidenceStorageOptions.accessKeyId],
+    ['object_storage_secret', evidenceStorageOptions.secretAccessKey]
+  ].filter(([, value]) => isTemplatePlaceholder(value)).map(([key]) => key);
+  if (!['local', 'hosted'].includes(runtimeMode)) {
+    issues.push({ code: 'invalid_runtime_mode', message: 'CONTRACTOR_AI_RUNTIME_MODE must be local or hosted.' });
+  }
+  if (!['local', 's3'].includes(storageMode)) {
+    issues.push({ code: 'invalid_storage_mode', message: 'CONTRACTOR_AI_STORAGE_MODE must be local or s3.' });
+  }
+  if (hosted && !dashboardAuthRequired) {
+    issues.push({ code: 'hosted_auth_required', message: 'Hosted mode requires dashboard/API authentication.' });
+  }
+  if (roleTokenConfig.issues.length) {
+    issues.push(...roleTokenConfig.issues);
+  }
+  if (dashboardAuthToken && !isStrongOperatorToken(dashboardAuthToken)) {
+    issues.push({
+      code: 'weak_auth_token',
+      message: `CONTRACTOR_AI_AUTH_TOKEN must be an unpadded, non-template secret containing at least ${minimumOperatorTokenLength} characters.`
+    });
+  }
+  const legacyOwnerTokenConflict = isStrongOperatorToken(dashboardAuthToken)
+    ? roleTokenConfig.principals.find(principal => principal.token === dashboardAuthToken && principal.role !== 'owner')
+    : null;
+  if (legacyOwnerTokenConflict) {
+    issues.push({
+      code: 'ambiguous_owner_token',
+      message: `CONTRACTOR_AI_AUTH_TOKEN cannot also identify the ${legacyOwnerTokenConflict.id} ${legacyOwnerTokenConflict.role} principal.`
+    });
+  }
+  if (isProduction && !hasConfiguredAuthToken) {
+    issues.push({ code: 'production_auth_token_required', message: 'Production requires a strong CONTRACTOR_AI_AUTH_TOKEN or role token configuration.' });
+  }
+  if (isProduction && templateValues.length) {
+    issues.push({ code: 'template_placeholder_configured', message: `Production configuration contains template placeholder values for: ${templateValues.join(', ')}.` });
+  }
+  if (hosted && !hasConfiguredAuthToken) {
+    issues.push({ code: 'hosted_auth_token_required', message: 'Hosted mode requires a strong authentication token or role token configuration.' });
+  }
+  if (hosted && (!hostedPublicUrlDetails.valid || hostedPublicUrlDetails.protocol !== 'https:')) {
+    issues.push({ code: 'hosted_public_https_required', message: 'Hosted mode requires CONTRACTOR_AI_PUBLIC_URL to be an HTTPS origin without credentials, query parameters, or a path.' });
+  }
+  if (hosted && hostedPublicUrlDetails.origin && !allowedOrigins.includes(hostedPublicUrlDetails.origin)) {
+    issues.push({ code: 'hosted_public_origin_not_allowed', message: 'CORS_ORIGINS must include the exact CONTRACTOR_AI_PUBLIC_URL origin.' });
+  }
+  if (trustedProxyError) {
+    issues.push({ code: 'invalid_trusted_proxy', message: trustedProxyError.message || 'CONTRACTOR_AI_TRUST_PROXY is invalid.' });
+  } else if (hosted && trustedProxyEntries.length === 0) {
+    issues.push({ code: 'hosted_trusted_proxy_required', message: 'Hosted mode requires an explicit CONTRACTOR_AI_TRUST_PROXY ingress IP, CIDR range, or named subnet.' });
+  }
+  if (hosted && !isConfiguredReference(hostingProvider, 2)) {
+    issues.push({ code: 'hosted_provider_required', message: 'Hosted mode requires the contracted EU hosting provider name in CONTRACTOR_AI_HOSTING_PROVIDER.' });
+  }
+  if (hosted && !isConfiguredReference(hostingRegion, 2)) {
+    issues.push({ code: 'hosted_region_required', message: 'Hosted mode requires the provider region in CONTRACTOR_AI_HOSTING_REGION.' });
+  }
+  if (hosted && dataResidency !== 'EU') {
+    issues.push({ code: 'hosted_eu_residency_required', message: 'Hosted mode requires an explicit CONTRACTOR_AI_DATA_RESIDENCY=EU declaration.' });
+  }
+  if (hosted && !isConfiguredReference(dpaReference)) {
+    issues.push({ code: 'hosted_dpa_required', message: 'Hosted mode requires a retained DPA reference in CONTRACTOR_AI_DPA_REFERENCE.' });
+  }
+  if (hosted && !['snapshot', 'pitr'].includes(postgresBackupMode)) {
+    issues.push({ code: 'hosted_postgres_backup_required', message: 'Hosted mode requires CONTRACTOR_AI_POSTGRES_BACKUP_MODE to be snapshot or pitr.' });
+  }
+  if (hosted && !objectVersioningEnabled) {
+    issues.push({ code: 'hosted_object_versioning_required', message: 'Hosted mode requires versioning on the private evidence bucket and CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED=true.' });
+  }
+  if (hosted && !isConfiguredReference(backupPolicyReference)) {
+    issues.push({ code: 'hosted_backup_policy_required', message: 'Hosted mode requires a retained recovery-policy reference in CONTRACTOR_AI_BACKUP_POLICY_REFERENCE.' });
+  }
+  if (hosted && storageMode !== 's3') {
+    issues.push({ code: 'durable_object_storage_required', message: 'Hosted mode requires S3-compatible EU object storage for evidence files.' });
+  }
+  if (hosted && storageMode === 's3' && evidenceStorageEndpointProtocol !== 'https:') {
+    issues.push({ code: 'hosted_object_storage_tls_required', message: 'Hosted mode requires an HTTPS S3-compatible object storage endpoint.' });
+  }
+  if (evidenceStorageInitError) {
+    issues.push({ code: evidenceStorageInitError.code || 'storage_initialization_failed', message: evidenceStorageInitError.message });
+  }
+  if (hosted && storageMode === 's3' && !storageVerification) {
+    issues.push({ code: 'object_storage_verification_pending', message: 'Hosted object storage has not completed a read/write verification.' });
+  } else if (storageVerification && !storageVerification.ready) {
+    issues.push({
+      code: storageVerification.code || 'object_storage_unavailable',
+      message: 'Evidence storage is not currently readable and writable.'
+    });
+  }
+  if (hosted && !hostedDatabaseUrl) {
+    issues.push({ code: 'durable_database_required', message: 'Hosted mode requires CONTRACTOR_AI_DATABASE_URL for the managed PostgreSQL migration target.' });
+  }
+  if (hosted && ['disable', 'allow', 'prefer', 'invalid'].includes(hostedDatabaseSslMode)) {
+    issues.push({ code: 'hosted_postgres_tls_required', message: 'Hosted mode requires a valid PostgreSQL connection with TLS required; use sslmode=require or verify-full.' });
+  }
+  if (hosted && operatingLedger?.databaseMode !== 'postgres') {
+    issues.push({ code: 'hosted_postgres_adapter_required', message: 'Hosted mode requires the PostgreSQL ledger adapter.' });
+  }
+  return {
+    mode: runtimeMode,
+    storageMode,
+    databaseMode: operatingLedger?.databaseMode || (hostedDatabaseUrl ? 'postgres' : 'sqlite'),
+    auth: {
+      required: dashboardAuthRequired,
+      legacyOwnerTokenConfigured: isStrongOperatorToken(dashboardAuthToken),
+      minimumTokenLength: minimumOperatorTokenLength,
+      configuredRoles: [...new Set(roleTokenConfig.principals.map(principal => principal.role))],
+      configuredPrincipalCount: configuredOperatorTokens().length,
+      loginRateLimit: {
+        durability: 'ledger',
+        keyMaterial: 'hmac-sha256',
+        limit: authLoginRateLimit,
+        windowMs: authLoginRateWindowMs,
+        successfulLoginResetsFailures: true,
+        multiReplicaSafe: true
+      }
+    },
+    hosting: {
+      publicHttps: hostedPublicUrlDetails.protocol === 'https:' && hostedPublicUrlDetails.valid,
+      publicOriginAllowed: Boolean(hostedPublicUrlDetails.origin && allowedOrigins.includes(hostedPublicUrlDetails.origin)),
+      trustedProxyConfigured: trustedProxyEntries.length > 0 && !trustedProxyError,
+      trustedProxyEntryCount: trustedProxyError ? 0 : trustedProxyEntries.length,
+      provider: hostingProvider || null,
+      region: hostingRegion || null,
+      dataResidency: dataResidency || null,
+      dpaConfigured: isConfiguredReference(dpaReference),
+      recovery: {
+        postgresBackupMode: ['snapshot', 'pitr'].includes(postgresBackupMode) ? postgresBackupMode : null,
+        objectVersioningEnabled,
+        policyConfigured: isConfiguredReference(backupPolicyReference)
+      }
+    },
+    evidenceStorage: {
+      status: storageVerification?.status || 'unverified',
+      verified: Boolean(storageVerification?.ready),
+      checkedAt: storageVerification?.checkedAt || null,
+      code: storageVerification?.code || null
+    },
+    autonomousScheduler: {
+      enabled: autonomousSchedulerEnabled,
+      intervalSeconds: autonomousSchedulerIntervalSeconds
+    },
+    requestRateLimit: {
+      durability: 'ledger',
+      keyMaterial: 'hmac-sha256-bucket',
+      limit: apiRateLimit,
+      windowMs: apiRateWindowMs,
+      bucketCount: apiRateBucketLimit,
+      boundedCardinality: true,
+      multiReplicaSafe: true
+    },
+    ready: issues.length === 0,
+    issues
+  };
+}
+
+function setSecurityHeaders(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data:",
+    "style-src 'self'",
+    "script-src 'self'",
+    "connect-src 'self'"
+  ].join('; '));
+  if (req.path === '/client-portal.html') res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  if (isProduction) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+}
+
+function attachRequestContext(req, res, next) {
+  const incomingRequestId = req.headers['x-request-id'];
+  req.requestId = typeof incomingRequestId === 'string' && incomingRequestId.trim()
+    ? incomingRequestId.trim().slice(0, 100)
+    : createRequestId();
+  res.setHeader('X-Request-Id', req.requestId);
+
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    if (!req.path.startsWith('/api')) return;
+    const statusCode = res.statusCode;
+    const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info';
+    log(level, 'api_request', {
+      requestId: req.requestId,
+      method: req.method,
+      path: logSafeRequestPath(req),
+      statusCode,
+      durationMs: Date.now() - startedAt
+    });
+  });
+
+  next();
+}
+
+function rateLimitApi(req, res, next) {
+  if (!req.path.startsWith('/api/') || req.path === '/api/health/ready') return next();
+  try {
+    const state = operatingLedger.recordApiRateLimitRequest(apiRateLimitKey(req), {
+      limit: apiRateLimit,
+      windowMs: apiRateWindowMs
+    });
+    const resetSeconds = setApiRateLimitHeaders(res, state);
+    if (state.limited) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return sendError(req, res, 429, 'rate_limited', 'Too many requests. Try again shortly.');
+    }
+    return next();
+  } catch (error) {
+    log('error', 'api_rate_limit_unavailable', { requestId: req.requestId, error: serializeError(error) });
+    return sendError(req, res, 503, 'api_rate_limit_unavailable', 'Request protection is temporarily unavailable.');
+  }
+}
+
+function apiRateLimitKey(req) {
+  const remoteAddress = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  const clientDigest = crypto.createHmac('sha256', apiRateSigningKey)
+    .update('contractor-ai-api-client\0')
+    .update(remoteAddress)
+    .digest();
+  const bucket = clientDigest.readUInt32BE(0) % apiRateBucketLimit;
+  return crypto.createHmac('sha256', apiRateSigningKey)
+    .update('contractor-ai-api-bucket\0')
+    .update(String(bucket))
+    .digest('hex');
+}
+
+function setApiRateLimitHeaders(res, state) {
+  const resetSeconds = Math.max(1, Math.ceil((Date.parse(state.expiresAt) - Date.now()) / 1000));
+  res.setHeader('RateLimit-Limit', String(state.limit));
+  res.setHeader('RateLimit-Remaining', String(state.remaining));
+  res.setHeader('RateLimit-Reset', String(resetSeconds));
+  res.setHeader('RateLimit-Policy', `${state.limit};w=${Math.ceil(apiRateWindowMs / 1000)}`);
+  return resetSeconds;
+}
+
+function authenticationRateLimitKey(req) {
+  const remoteAddress = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  return crypto.createHmac('sha256', operatorSessionSigningKey).update('contractor-ai-auth-login\0').update(remoteAddress).digest('hex');
+}
+
+function setAuthenticationRateLimitHeaders(res, state) {
+  const resetSeconds = Math.max(1, Math.ceil((Date.parse(state.expiresAt) - Date.now()) / 1000));
+  res.setHeader('RateLimit-Limit', String(authLoginRateLimit));
+  res.setHeader('RateLimit-Remaining', String(state.remaining));
+  res.setHeader('RateLimit-Reset', String(resetSeconds));
+  res.setHeader('RateLimit-Policy', `${authLoginRateLimit};w=${Math.ceil(authLoginRateWindowMs / 1000)}`);
+  return resetSeconds;
+}
+
+function authenticationRateLimitUnavailable(req, res, error) {
+  log('error', 'authentication_rate_limit_unavailable', { requestId: req.requestId, error: serializeError(error) });
+  return sendError(req, res, 503, 'authentication_rate_limit_unavailable', 'Sign-in protection is temporarily unavailable.');
+}
+
+function rateLimitAuthLogin(req, res, next) {
+  try {
+    const keyHash = authenticationRateLimitKey(req);
+    const state = operatingLedger.getAuthenticationRateLimit(keyHash, {
+      limit: authLoginRateLimit,
+      windowMs: authLoginRateWindowMs
+    });
+    req.authenticationRateLimit = { keyHash };
+    const resetSeconds = setAuthenticationRateLimitHeaders(res, state);
+    if (state.limited) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return sendError(req, res, 429, 'authentication_rate_limited', 'Too many sign-in attempts. Try again later.');
+    }
+    return next();
+  } catch (error) {
+    return authenticationRateLimitUnavailable(req, res, error);
+  }
+}
+
+function recordAuthenticationFailure(req, res) {
+  try {
+    const state = operatingLedger.recordAuthenticationFailure(req.authenticationRateLimit.keyHash, {
+      limit: authLoginRateLimit,
+      windowMs: authLoginRateWindowMs
+    });
+    const resetSeconds = setAuthenticationRateLimitHeaders(res, state);
+    if (state.attemptCount > authLoginRateLimit) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return sendError(req, res, 429, 'authentication_rate_limited', 'Too many sign-in attempts. Try again later.');
+    }
+    return sendError(req, res, 401, 'authentication_failed', 'The supplied access key is not valid.');
+  } catch (error) {
+    return authenticationRateLimitUnavailable(req, res, error);
+  }
+}
+
+function validateEvidenceUpload(file) {
+  const mimeType = String(file?.mimeType || '').toLowerCase();
+  const extension = path.extname(String(file?.originalName || '')).toLowerCase();
+  const allowed = new Map([
+    ['image/jpeg', new Set(['.jpg', '.jpeg'])],
+    ['image/png', new Set(['.png'])],
+    ['image/webp', new Set(['.webp'])],
+    ['application/pdf', new Set(['.pdf'])],
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', new Set(['.docx'])]
+  ]);
+  if (allowed.get(mimeType)?.has(extension) !== true) {
+    return { valid: false, code: 'unsupported_upload_type', message: 'Evidence uploads must be JPEG, PNG, WebP, PDF, or DOCX with a matching filename extension.' };
+  }
+
+  const bytes = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from(file?.buffer || '');
+  const startsWith = signature => bytes.length >= signature.length && bytes.subarray(0, signature.length).equals(Buffer.from(signature));
+  const signatureMatches = (
+    (mimeType === 'image/jpeg' && startsWith([0xff, 0xd8, 0xff])) ||
+    (mimeType === 'image/png' && startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ||
+    (mimeType === 'image/webp' && startsWith([0x52, 0x49, 0x46, 0x46]) && bytes.subarray(8, 12).equals(Buffer.from('WEBP'))) ||
+    (mimeType === 'application/pdf' && startsWith('%PDF-')) ||
+    (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' && startsWith([0x50, 0x4b, 0x03, 0x04]))
+  );
+  if (!signatureMatches) {
+    return { valid: false, code: 'upload_signature_mismatch', message: 'The file contents do not match the declared evidence type.' };
+  }
+  return { valid: true };
+}
+
+function sanitizeUploadFilename(value) {
+  const base = path.basename(String(value || 'upload.bin')).replace(/[^\w.\- ]+/g, '_').trim();
+  const normalized = base.replace(/\s+/g, '-').slice(0, 120);
+  return normalized || 'upload.bin';
+}
+
+function safeFieldName(value) {
+  return String(value || '').replace(/[^\w.\-:[\]]+/g, '').slice(0, 120);
+}
+
+class UploadRequestError extends Error {
+  constructor(statusCode, code, message, details) {
+    super(message);
+    this.statusCode = statusCode;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function readRequestBuffer(req, limitBytes = maxUploadBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > limitBytes) {
+        reject(new UploadRequestError(413, 'upload_too_large', `Upload exceeds ${limitBytes} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function parseMultipartDisposition(value = '') {
+  const result = {};
+  for (const part of String(value).split(';')) {
+    const [rawKey, ...rawValue] = part.trim().split('=');
+    if (!rawKey || !rawValue.length) continue;
+    const key = rawKey.trim().toLowerCase();
+    const joined = rawValue.join('=').trim();
+    result[key] = joined.replace(/^"|"$/g, '');
+  }
+  return result;
+}
+
+function parseMultipartBody(buffer, contentType = '') {
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
+  if (!boundary) {
+    throw new UploadRequestError(400, 'missing_multipart_boundary', 'Multipart boundary is missing');
+  }
+
+  const body = buffer.toString('latin1');
+  const delimiter = `--${boundary}`;
+  const parts = body.split(delimiter).slice(1, -1);
+  const fields = {};
+  const files = [];
+
+  for (let rawPart of parts) {
+    if (rawPart.startsWith('\r\n')) rawPart = rawPart.slice(2);
+    if (rawPart.endsWith('\r\n')) rawPart = rawPart.slice(0, -2);
+    const headerEnd = rawPart.indexOf('\r\n\r\n');
+    if (headerEnd === -1) continue;
+
+    const headerLines = rawPart.slice(0, headerEnd).split('\r\n');
+    const headers = {};
+    for (const line of headerLines) {
+      const separator = line.indexOf(':');
+      if (separator === -1) continue;
+      headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+    }
+
+    const disposition = parseMultipartDisposition(headers['content-disposition']);
+    const fieldName = safeFieldName(disposition.name);
+    if (!fieldName) continue;
+
+    const content = rawPart.slice(headerEnd + 4);
+    if (disposition.filename !== undefined) {
+      const originalName = sanitizeUploadFilename(disposition.filename);
+      const bytes = Buffer.from(content, 'latin1');
+      if (!bytes.length || !originalName) continue;
+      files.push({
+        fieldName,
+        originalName,
+        mimeType: headers['content-type'] || 'application/octet-stream',
+        size: bytes.length,
+        buffer: bytes
+      });
+      continue;
+    }
+
+    const value = Buffer.from(content, 'latin1').toString('utf8');
+    if (fields[fieldName] === undefined) {
+      fields[fieldName] = value;
+    } else if (Array.isArray(fields[fieldName])) {
+      fields[fieldName].push(value);
+    } else {
+      fields[fieldName] = [fields[fieldName], value];
+    }
+  }
+
+  return { fields, files };
+}
+
+async function storeUploadedFile(file) {
+  const validation = validateEvidenceUpload(file);
+  if (!validation.valid) {
+    throw new UploadRequestError(415, validation.code, validation.message);
+  }
+  if (!evidenceStorage) {
+    throw new UploadRequestError(503, evidenceStorageInitError?.code || 'storage_unavailable', evidenceStorageInitError?.message || 'Evidence storage is unavailable.');
+  }
+  try {
+    const stored = await evidenceStorage.store(file);
+    return { originalName: file.originalName, ...stored };
+  } catch (error) {
+    if (error instanceof EvidenceStorageError) {
+      throw new UploadRequestError(error.statusCode, error.code, error.message);
+    }
+    throw error;
+  }
+}
+
+async function readUploadPayload(req, options = {}) {
+  const contentType = req.headers['content-type'] || '';
+  if (!contentType.includes('multipart/form-data')) {
+    const payload = req.body || {};
+    options.authorizePayload?.(payload);
+    return { payload, file: null };
+  }
+
+  const buffer = await readRequestBuffer(req, maxUploadBytes);
+  const parsed = parseMultipartBody(buffer, contentType);
+  options.authorizePayload?.(parsed.fields);
+  const file = parsed.files.find(item => item.fieldName === 'evidenceFile') || parsed.files[0] || null;
+  const payload = {
+    ...parsed.fields,
+    ...(file ? {
+      filename: parsed.fields.filename || file.originalName,
+      name: parsed.fields.name || file.originalName,
+      fileType: parsed.fields.fileType || file.mimeType,
+      mimeType: file.mimeType,
+      size: file.size
+    } : {})
+  };
+
+  return { payload, file };
+}
+
+function withStoredUpload(payload, storedFile) {
+  if (!storedFile) return payload;
+  return {
+    ...payload,
+    filename: payload.filename || storedFile.originalName,
+    name: payload.name || storedFile.originalName,
+    fileType: payload.fileType || storedFile.mimeType,
+    mimeType: storedFile.mimeType,
+    size: storedFile.size,
+    storageRef: storedFile.storageRef,
+    uploadedFile: {
+      originalName: storedFile.originalName,
+      storedName: storedFile.filename,
+      storageRef: storedFile.storageRef,
+      mimeType: storedFile.mimeType,
+      size: storedFile.size,
+      sha256: storedFile.sha256 || null
+    }
+  };
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function uploadIdempotencyClaim(req, payload, file) {
+  const supplied = req.headers['idempotency-key'];
+  const key = String(Array.isArray(supplied) ? supplied[0] : supplied || '').trim();
+  if (!key) return null;
+  if (!/^[A-Za-z0-9._:-]{8,200}$/.test(key)) {
+    throw new UploadRequestError(400, 'invalid_idempotency_key', 'Idempotency-Key must contain 8 to 200 safe characters.');
+  }
+
+  const principal = req.operator?.authenticated
+    ? `${req.operator.role}:${req.operator.id || 'authenticated'}`
+    : `${req.operator?.role || 'owner'}:local`;
+  const principalHash = crypto.createHash('sha256').update(principal).digest('hex');
+  const scope = `POST /api/ledger/upload:${principalHash}`;
+  const keyHash = crypto.createHash('sha256').update(`${scope}\0${key}`).digest('hex');
+  const requestHash = crypto.createHash('sha256').update(stableJson({
+    payload,
+    file: file ? {
+      originalName: file.originalName,
+      mimeType: file.mimeType,
+      size: file.size,
+      sha256: crypto.createHash('sha256').update(file.buffer).digest('hex')
+    } : null
+  })).digest('hex');
+  const claim = operatingLedger.claimIdempotentRequest({ keyHash, scope, requestHash });
+  return { ...claim, keyHash, requestHash };
+}
+
+function serializeError(error) {
+  if (!error) {
+    return { message: 'Unknown error' };
+  }
+  return {
+    message: error.message || String(error),
+    name: error.name || 'Error',
+    stack: isProduction ? undefined : error.stack
+  };
+}
+
+function log(level, message, meta = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    ...meta
+  };
+  const output = JSON.stringify(entry);
+  if (level === 'error') {
+    console.error(output);
+  } else if (level === 'warn') {
+    console.warn(output);
+  } else {
+    console.log(output);
+  }
+}
+
+async function verifyEvidenceStorage({ force = false } = {}) {
+  const cachedAt = Date.parse(evidenceStorageVerificationCache?.checkedAt || '');
+  const cacheFresh = Number.isFinite(cachedAt) && Date.now() - cachedAt < evidenceStorageVerificationTtlMs;
+  if (!force && evidenceStorageVerificationCache && cacheFresh) {
+    return evidenceStorageVerificationCache;
+  }
+  if (evidenceStorageVerificationPromise) {
+    return evidenceStorageVerificationPromise;
+  }
+  if (!evidenceStorage || typeof evidenceStorage.verify !== 'function') {
+    evidenceStorageVerificationCache = {
+      ready: false,
+      status: 'unavailable',
+      mode: storageMode,
+      checkedAt: new Date().toISOString(),
+      code: evidenceStorageInitError?.code || 'storage_verification_unavailable'
+    };
+    return evidenceStorageVerificationCache;
+  }
+
+  evidenceStorageVerificationPromise = (async () => {
+    const startedAt = Date.now();
+    try {
+      const result = await evidenceStorage.verify();
+      evidenceStorageVerificationCache = {
+        ready: true,
+        status: 'verified',
+        mode: result?.mode || storageMode,
+        checkedAt: result?.checkedAt || new Date().toISOString(),
+        latencyMs: Date.now() - startedAt,
+        code: null
+      };
+    } catch (error) {
+      evidenceStorageVerificationCache = {
+        ready: false,
+        status: 'unavailable',
+        mode: storageMode,
+        checkedAt: new Date().toISOString(),
+        latencyMs: Date.now() - startedAt,
+        code: error?.code || 'storage_verification_failed'
+      };
+      log('warn', 'evidence_storage_verification_failed', {
+        mode: storageMode,
+        code: evidenceStorageVerificationCache.code,
+        latencyMs: evidenceStorageVerificationCache.latencyMs
+      });
+    }
+    return evidenceStorageVerificationCache;
+  })();
+
+  try {
+    return await evidenceStorageVerificationPromise;
+  } finally {
+    evidenceStorageVerificationPromise = null;
+  }
+}
+
+function logSafeRequestPath(req) {
+  return String(req.originalUrl || req.path || '')
+    .replace(/(\/api\/client-portal\/)[^/?#]+/g, '$1[redacted]');
+}
+
+function isClientPortalApiPath(pathname) {
+  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/selections\/[^/]+\/responses)?$/.test(String(pathname || ''));
+}
+
+function sendError(req, res, statusCode, code, message, details) {
+  const payload = {
+    error: {
+      code,
+      message,
+      requestId: req.requestId
+    }
+  };
+
+  if (details && (!isProduction || statusCode < 500)) {
+    payload.error.details = details;
+  }
+
+  return res.status(statusCode).json(payload);
+}
+
+function asyncHandler(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function safeEqualToken(candidate, expected) {
+  const candidateBuffer = Buffer.from(String(candidate || ''), 'utf8');
+  const expectedBuffer = Buffer.from(String(expected || ''), 'utf8');
+  return candidateBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function parseRoleTokens(rawValue) {
+  if (!rawValue) return { principals: [], issues: [] };
+  const allowedRoles = new Set(['owner', 'approver', 'office_operator', 'field_worker']);
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== 'object') {
+      return { principals: [], issues: [{ code: 'invalid_role_tokens', message: 'CONTRACTOR_AI_ROLE_TOKENS must be a role map or an operator principal list.' }] };
+    }
+    const candidates = [];
+    const issues = [];
+
+    if (Array.isArray(parsed)) {
+      parsed.forEach((configuredValue, index) => candidates.push({ configuredValue, source: 'principal_list', index }));
+    } else if (Object.prototype.hasOwnProperty.call(parsed, 'operators')) {
+      if (!Array.isArray(parsed.operators)) {
+        issues.push({ code: 'invalid_operator_principals', message: 'CONTRACTOR_AI_ROLE_TOKENS.operators must be an array.' });
+      } else {
+        parsed.operators.forEach((configuredValue, index) => candidates.push({ configuredValue, source: 'principal_list', index }));
+      }
+      for (const key of Object.keys(parsed).filter(key => key !== 'operators')) {
+        issues.push({ code: 'ambiguous_operator_config', message: `Do not mix the operators list with the legacy ${key} role key.` });
+      }
+    } else {
+      for (const [role, configuredRole] of Object.entries(parsed)) {
+        if (!allowedRoles.has(role)) {
+          issues.push({ code: 'invalid_role_tokens', message: `Unsupported operator role: ${role}.` });
+          continue;
+        }
+        const values = Array.isArray(configuredRole) ? configuredRole : [configuredRole];
+        values.forEach((configuredValue, index) => candidates.push({ configuredValue, role, source: values.length === 1 ? 'legacy_role' : 'role_list', index }));
+      }
+    }
+
+    const principals = [];
+    const principalIds = new Set();
+    const tokens = new Set();
+    for (const candidate of candidates) {
+      const isStructuredToken = candidate.configuredValue && typeof candidate.configuredValue === 'object' && !Array.isArray(candidate.configuredValue);
+      if (!isStructuredToken && typeof candidate.configuredValue !== 'string') {
+        issues.push({ code: 'invalid_operator_principal', message: 'Each configured operator must be a token string or an object containing role and token.' });
+        continue;
+      }
+      const role = String(candidate.role || candidate.configuredValue.role || '').trim();
+      if (!allowedRoles.has(role)) {
+        issues.push({ code: 'invalid_role_tokens', message: `Unsupported operator role: ${role || '(missing)'}.` });
+        continue;
+      }
+      const token = isStructuredToken ? candidate.configuredValue.token : candidate.configuredValue;
+      if (!isStrongOperatorToken(token)) {
+        issues.push({ code: 'weak_role_token', message: `The ${role} token must be an unpadded, non-template secret containing at least ${minimumOperatorTokenLength} characters.` });
+        continue;
+      }
+      const configuredId = isStructuredToken ? candidate.configuredValue.id || candidate.configuredValue.operatorId : null;
+      const id = String(configuredId || (candidate.source === 'legacy_role' ? role : '')).trim();
+      if (!id) {
+        issues.push({ code: 'operator_id_required', message: `Operator ${candidate.index + 1} in the ${role} list requires a stable id.` });
+        continue;
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,79}$/.test(id)) {
+        issues.push({ code: 'invalid_operator_id', message: `Operator id ${id || '(missing)'} must contain 2 to 80 safe characters.` });
+        continue;
+      }
+      if (principalIds.has(id)) {
+        issues.push({ code: 'duplicate_operator_id', message: `Operator id ${id} is configured more than once.` });
+        continue;
+      }
+      if (tokens.has(token)) {
+        issues.push({ code: 'duplicate_operator_token', message: `Operator ${id} reuses another operator token.` });
+        continue;
+      }
+
+      let scope = null;
+      if (role === 'field_worker') {
+        const jobIds = isStructuredToken && Array.isArray(candidate.configuredValue.jobIds)
+          ? [...new Set(candidate.configuredValue.jobIds.map(value => String(value || '').trim()).filter(Boolean))]
+          : [];
+        const workerId = isStructuredToken ? String(candidate.configuredValue.workerId || '').trim() : '';
+        if (!workerId && jobIds.length === 0) {
+          issues.push({ code: 'field_worker_scope_required', message: 'A field_worker token must declare a workerId or one or more jobIds.' });
+          continue;
+        }
+        scope = { workerId: workerId || null, jobIds };
+      }
+      const name = isStructuredToken ? String(candidate.configuredValue.name || candidate.configuredValue.displayName || '').trim() : '';
+      principals.push({ id, name: name.slice(0, 120) || null, role, token, scope });
+      principalIds.add(id);
+      tokens.add(token);
+    }
+    return { principals, issues };
+  } catch {
+    return { principals: [], issues: [{ code: 'invalid_role_tokens', message: 'CONTRACTOR_AI_ROLE_TOKENS is not valid JSON.' }] };
+  }
+}
+
+function configuredOperatorTokens() {
+  const entries = roleTokenConfig.principals.map(principal => ({ ...principal }));
+  if (isStrongOperatorToken(dashboardAuthToken) && !entries.some(entry => entry.token === dashboardAuthToken)) {
+    entries.push({
+      id: entries.some(entry => entry.id === 'owner') ? 'legacy_owner' : 'owner',
+      name: 'Owner',
+      role: 'owner',
+      token: dashboardAuthToken,
+      scope: null
+    });
+  }
+  return entries;
+}
+
+function createOperatorSessionSigningKey() {
+  const material = configuredOperatorTokens()
+    .map(entry => `${entry.id}:${entry.role}:${entry.token}`)
+    .sort()
+    .join('\u0000');
+  return material
+    ? crypto.createHash('sha256').update('contractor-ai-operator-session\u0000').update(material).digest()
+    : crypto.randomBytes(32);
+}
+
+function operatorTokenFingerprint(token) {
+  return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('base64url').slice(0, 24);
+}
+
+function operatorSessionIdHash(sessionId) {
+  return crypto.createHash('sha256').update(String(sessionId || ''), 'utf8').digest('base64url');
+}
+
+function resolveOperatorToken(suppliedToken) {
+  for (const entry of configuredOperatorTokens()) {
+    if (safeEqualToken(suppliedToken, entry.token)) {
+      return { id: entry.id, name: entry.name, role: entry.role, scope: entry.scope, token: entry.token };
+    }
+  }
+  return null;
+}
+
+function requestCookie(req, name) {
+  const cookieHeader = String(req.headers.cookie || '');
+  for (const part of cookieHeader.split(';')) {
+    const [rawName, ...rawValue] = part.trim().split('=');
+    if (rawName !== name) continue;
+    try {
+      return decodeURIComponent(rawValue.join('='));
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function signOperatorSession(operator) {
+  const now = Math.floor(Date.now() / 1000);
+  const sessionId = crypto.randomBytes(24).toString('base64url');
+  const payload = {
+    version: 2,
+    audience: 'contractor-ai-dashboard',
+    sessionId,
+    operatorId: operator.id,
+    role: operator.role,
+    tokenFingerprint: operatorTokenFingerprint(operator.token),
+    issuedAt: now,
+    expiresAt: now + operatorSessionTtlSeconds
+  };
+  operatingLedger.createOperatorSession({
+    sessionIdHash: operatorSessionIdHash(sessionId),
+    operatorId: operator.id,
+    role: operator.role,
+    tokenFingerprint: payload.tokenFingerprint,
+    issuedAt: new Date(payload.issuedAt * 1000).toISOString(),
+    expiresAt: new Date(payload.expiresAt * 1000).toISOString()
+  });
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', operatorSessionSigningKey).update(encodedPayload).digest('base64url');
+  return { value: `${encodedPayload}.${signature}`, expiresAt: new Date(payload.expiresAt * 1000).toISOString() };
+}
+
+function verifyOperatorSession(value) {
+  if (!value || value.length > 4096) return null;
+  const parts = value.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const expectedSignature = crypto.createHmac('sha256', operatorSessionSigningKey).update(parts[0]).digest('base64url');
+  if (!safeEqualToken(parts[1], expectedSignature)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.version !== 2 || payload.audience !== 'contractor-ai-dashboard') return null;
+    if (typeof payload.sessionId !== 'string' || payload.sessionId.length !== 32) return null;
+    if (!Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt)) return null;
+    if (payload.issuedAt > now + 60 || payload.expiresAt <= now || payload.expiresAt - payload.issuedAt > operatorSessionTtlSeconds) return null;
+    const configured = configuredOperatorTokens().find(entry => (
+      entry.id === payload.operatorId
+      && entry.role === payload.role
+      && safeEqualToken(operatorTokenFingerprint(entry.token), payload.tokenFingerprint)
+    ));
+    if (!configured) return null;
+    const sessionIdHash = operatorSessionIdHash(payload.sessionId);
+    const retainedSession = operatingLedger.getOperatorSession(sessionIdHash, { at: new Date(now * 1000).toISOString() });
+    if (
+      !retainedSession
+      || retainedSession.operatorId !== configured.id
+      || retainedSession.role !== configured.role
+      || !safeEqualToken(retainedSession.tokenFingerprint, payload.tokenFingerprint)
+      || Date.parse(retainedSession.issuedAt) !== payload.issuedAt * 1000
+      || Date.parse(retainedSession.expiresAt) !== payload.expiresAt * 1000
+    ) return null;
+    return {
+      id: configured.id,
+      name: configured.name,
+      role: configured.role,
+      scope: configured.scope,
+      authMethod: 'session',
+      sessionIdHash
+    };
+  } catch {
+    return null;
+  }
+}
+
+function operatorSessionCookie(value, maxAgeSeconds) {
+  const secure = isProduction || runtimeMode === 'hosted';
+  const attributes = [
+    `${operatorSessionCookieName}=${encodeURIComponent(value)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+    `Expires=${new Date(Date.now() + Math.max(0, maxAgeSeconds) * 1000).toUTCString()}`,
+    'Priority=High'
+  ];
+  if (secure) attributes.push('Secure');
+  return attributes.join('; ');
+}
+
+function extractAuthToken(req) {
+  const headerToken = req.headers['x-contractor-ai-token'] || req.headers['x-api-key'];
+  if (Array.isArray(headerToken)) return headerToken[0];
+  if (headerToken) return String(headerToken);
+
+  const authorization = req.headers.authorization || '';
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i);
+  if (bearer) return bearer[1].trim();
+
+  const basic = authorization.match(/^Basic\s+(.+)$/i);
+  if (basic) {
+    try {
+      const decoded = Buffer.from(basic[1], 'base64').toString('utf8');
+      const separator = decoded.indexOf(':');
+      return separator >= 0 ? decoded.slice(separator + 1) : decoded;
+    } catch {
+      return '';
+    }
+  }
+
+  return '';
+}
+
+function resolveOperatorRole(req) {
+  const suppliedToken = extractAuthToken(req);
+  if (suppliedToken) {
+    const operator = resolveOperatorToken(suppliedToken);
+    return operator ? { id: operator.id, name: operator.name, role: operator.role, scope: operator.scope, authMethod: 'token' } : null;
+  }
+  return verifyOperatorSession(requestCookie(req, operatorSessionCookieName));
+}
+
+function actorFromRequest(req, fallback = 'Contractor.AI') {
+  if (!req.operator?.authenticated) return fallback;
+  const role = req.operator.role;
+  const id = req.operator.id;
+  return id && id !== role ? `role:${role}:${id}` : `role:${role}`;
+}
+
+function requireDashboardAuth(req, res, next) {
+  const clientPortalRoute = isClientPortalApiPath(req.path);
+  const publicAuthRoute = req.path === '/api/session' || req.path === '/api/auth/login' || req.path === '/api/auth/logout';
+  const operatorAppShell = ['GET', 'HEAD'].includes(req.method) && !req.path.startsWith('/api/');
+  const operator = dashboardAuthRequired ? resolveOperatorRole(req) : null;
+  req.operator = operator
+    ? { ...operator, authenticated: true }
+    : { role: 'owner', scope: null, authenticated: false, authMethod: dashboardAuthRequired ? null : 'local' };
+
+  if (!dashboardAuthRequired || req.method === 'OPTIONS' || req.path === '/api/health/ready' || clientPortalRoute || publicAuthRoute || operatorAppShell) {
+    return next();
+  }
+
+  if (configuredOperatorTokens().length === 0) {
+    return sendError(
+      req,
+      res,
+      503,
+      'auth_not_configured',
+      'Contractor.AI is locked because dashboard/API auth is required but no strong authentication token is configured'
+    );
+  }
+
+  if (operator) {
+    return next();
+  }
+
+  res.setHeader('WWW-Authenticate', 'Bearer realm="Contractor.AI"');
+  return sendError(req, res, 401, 'authentication_required', 'Authentication is required for Contractor.AI dashboard and API access');
+}
+
+function allowsOperatorRequest(role, req) {
+  if (!req.path.startsWith('/api/') || req.method === 'OPTIONS') return true;
+  if (role === 'owner') return true;
+  const isRead = ['GET', 'HEAD'].includes(req.method);
+  const pathName = req.path;
+  if (isRead && pathName === '/api/session') return true;
+  const ledgerRead = pathName.startsWith('/api/ledger/');
+
+  if (role === 'approver') {
+    return (isRead && ledgerRead) || (req.method === 'POST' && /^\/api\/ledger\/approvals\/[^/]+\/resolve$/.test(pathName));
+  }
+
+  if (role === 'office_operator') {
+    if (isRead && (ledgerRead || pathName === '/api/health' || pathName === '/api/readiness')) return true;
+    if (!['POST', 'PUT', 'PATCH'].includes(req.method) || !ledgerRead) return false;
+    return !/^\/api\/ledger\/approvals\/[^/]+\/resolve$/.test(pathName);
+  }
+
+  if (role === 'field_worker') {
+    if (isRead) {
+      return pathName === '/api/health'
+        || pathName === '/api/readiness'
+        || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
+        || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
+    }
+    if (req.method === 'POST' && pathName === '/api/ledger/upload') return true;
+    if (req.method === 'PATCH' && /^\/api\/ledger\/jobs\/[^/]+\/lifecycle\/task\/[^/]+$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
+    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs)$/.test(pathName);
+  }
+
+  return false;
+}
+
+function fieldWorkerCanAccessJob(req, jobId) {
+  if (req.operator?.role !== 'field_worker') return true;
+  const scope = req.operator.scope;
+  if (!scope || !jobId) return false;
+  const normalizedJobId = String(jobId);
+  if (scope.jobIds?.includes(normalizedJobId)) return true;
+  if (!scope.workerId) return false;
+  try {
+    const detail = operatingLedger.getJobDetail(normalizedJobId);
+    return detail.assignments.some(assignment => (
+      String(assignment.workerId || '') === scope.workerId
+      && !['released', 'cancelled', 'completed', 'closed', 'rejected'].includes(String(assignment.status || '').toLowerCase())
+    ));
+  } catch {
+    return false;
+  }
+}
+
+function scopedLedgerJobs(req, filters = {}) {
+  const jobs = operatingLedger.listJobs(filters);
+  return req.operator?.role === 'field_worker'
+    ? jobs.filter(job => fieldWorkerCanAccessJob(req, job.id)).map(projectFieldJobSummary)
+    : jobs;
+}
+
+const FIELD_RECORD_PRIVATE_KEYS = new Set([
+  'amount', 'approval', 'approvalId', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
+  'data', 'email', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'portalToken',
+  'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
+  'taxAmount', 'taxRate', 'token', 'total'
+]);
+
+function projectFieldRecord(record) {
+  if (!record || typeof record !== 'object') return record;
+  if (Array.isArray(record)) return record.map(projectFieldRecord);
+  return Object.fromEntries(
+    Object.entries(record)
+      .filter(([key]) => !FIELD_RECORD_PRIVATE_KEYS.has(key))
+      .map(([key, value]) => [key, projectFieldRecord(value)])
+  );
+}
+
+function projectFieldRecords(records) {
+  return Array.isArray(records) ? records.map(projectFieldRecord) : [];
+}
+
+function projectFieldJobSummary(job = {}) {
+  return {
+    id: job.id,
+    title: job.title,
+    clientName: job.clientName,
+    jobType: job.jobType,
+    description: job.description,
+    address: job.address,
+    city: job.city,
+    region: job.region,
+    country: job.country,
+    priority: job.priority,
+    status: job.status,
+    phase: job.phase,
+    riskLevel: job.riskLevel,
+    estimatedHours: job.estimatedHours,
+    progressPercent: job.progressPercent,
+    scheduledStart: job.scheduledStart,
+    scheduledEnd: job.scheduledEnd,
+    targetCompletion: job.targetCompletion,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    fieldScoped: true
+  };
+}
+
+function fieldWorkerIdentity(req) {
+  const workerId = req.operator?.role === 'field_worker' ? req.operator.scope?.workerId : null;
+  if (!workerId) return { workerId: null, workerName: req.operator?.name || 'Field worker', hourlyRate: 0 };
+  try {
+    const worker = operatingLedger.getWorker(workerId);
+    return { workerId: worker.id, workerName: worker.name, hourlyRate: Number(worker.hourlyRate || 0) };
+  } catch {
+    return { workerId, workerName: req.operator?.name || 'Field worker', hourlyRate: 0 };
+  }
+}
+
+function projectFieldJobDetail(req, detail) {
+  const scopeWorkerId = req.operator?.scope?.workerId || null;
+  const timeLogs = scopeWorkerId
+    ? (detail.timeLogs || []).filter(log => String(log.workerId || '') === String(scopeWorkerId))
+    : [];
+  return {
+    ...projectFieldJobSummary(detail),
+    tasks: projectFieldRecords(detail.tasks),
+    fieldReports: projectFieldRecords(detail.fieldReports),
+    rfis: projectFieldRecords(detail.rfis),
+    submittals: projectFieldRecords(detail.submittals),
+    permits: projectFieldRecords(detail.permits),
+    inspections: projectFieldRecords(detail.inspections),
+    observations: projectFieldRecords(detail.observations),
+    incidents: projectFieldRecords(detail.incidents),
+    safetyMeetings: projectFieldRecords(detail.safetyMeetings),
+    orientations: projectFieldRecords(detail.orientations),
+    jhas: projectFieldRecords(detail.jhas),
+    sdsSheets: projectFieldRecords(detail.sdsSheets),
+    siteAccessLogs: projectFieldRecords(detail.siteAccessLogs),
+    assignments: projectFieldRecords(detail.assignments),
+    tools: projectFieldRecords(detail.tools),
+    materials: projectFieldRecords(detail.materials),
+    documents: projectFieldRecords(detail.documents),
+    progress: projectFieldRecords(detail.progress),
+    timeLogs: projectFieldRecords(timeLogs),
+    qualityChecks: projectFieldRecords(detail.qualityChecks),
+    safetyChecks: projectFieldRecords(detail.safetyChecks),
+    punchItems: projectFieldRecords(detail.punchItems),
+    workerInstructions: projectFieldRecords(detail.workerInstructions),
+    weather: projectFieldRecords(detail.weather),
+    approvals: [],
+    communications: []
+  };
+}
+
+function jobForOperator(req, jobId, options = {}) {
+  const detail = operatingLedger.getJobDetail(jobId, {
+    includeAudit: req.operator?.role === 'field_worker' ? false : options.includeAudit === true
+  });
+  return req.operator?.role === 'field_worker' ? projectFieldJobDetail(req, detail) : detail;
+}
+
+function dashboardForOperator(req) {
+  if (req.operator?.role !== 'field_worker') return operatingLedger.dashboardSummary();
+  const jobs = scopedLedgerJobs(req, { limit: 500 });
+  return { fieldScoped: true, jobCount: jobs.length };
+}
+
+function timeLogPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    rate: identity.hourlyRate,
+    hourlyRate: identity.hourlyRate,
+    hourly_rate: identity.hourlyRate
+  };
+}
+
+function taskLifecyclePayloadForOperator(req) {
+  const payload = req.body || {};
+  if (req.operator?.role !== 'field_worker') return payload;
+
+  const requestedStatus = String(payload.status || '').trim().toLowerCase();
+  if (!['in_progress', 'blocked', 'completed'].includes(requestedStatus)) {
+    const error = new Error('Field workers can start, block, or complete assigned job tasks.');
+    error.statusCode = 403;
+    error.code = 'field_task_transition_forbidden';
+    throw error;
+  }
+
+  const detail = operatingLedger.getJobDetail(req.params.id, { includeAudit: false });
+  const task = (detail.tasks || []).find(item => String(item.id) === String(req.params.recordId));
+  if (!task) {
+    const error = new Error('Task not found for this job');
+    error.statusCode = 404;
+    error.code = 'task_not_found';
+    throw error;
+  }
+  const workerId = req.operator.scope?.workerId || null;
+  if (task.assigneeId && (!workerId || String(task.assigneeId) !== String(workerId))) {
+    const error = new Error('This task is assigned to another crew member.');
+    error.statusCode = 403;
+    error.code = 'field_task_scope_forbidden';
+    throw error;
+  }
+
+  return {
+    status: requestedStatus,
+    notes: payload.notes || payload.note || null,
+    evidence: Array.isArray(payload.evidence) ? payload.evidence : []
+  };
+}
+
+function recordForOperator(req, record) {
+  return req.operator?.role === 'field_worker' ? projectFieldRecord(record) : record;
+}
+
+function requestedLedgerJobId(req) {
+  const match = String(req.path || '').match(/^\/api\/ledger\/jobs\/([^/]+)/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function requireOperatorAuthorization(req, res, next) {
+  const clientPortalRoute = isClientPortalApiPath(req.path);
+  if (clientPortalRoute || req.path === '/api/session' || req.path === '/api/auth/login' || req.path === '/api/auth/logout') return next();
+  if (!allowsOperatorRequest(req.operator?.role || 'owner', req)) {
+    return sendError(req, res, 403, 'insufficient_role', 'Your operator role cannot perform this action.');
+  }
+  const jobId = requestedLedgerJobId(req);
+  if (jobId && !fieldWorkerCanAccessJob(req, jobId)) {
+    return sendError(req, res, 403, 'field_job_scope_forbidden', 'This field worker is not assigned to the requested job.');
+  }
+  return next();
+}
+
+function requireSessionMutationOrigin(req, res, next) {
+  if (req.operator?.authMethod !== 'session' || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) {
+    return sendError(req, res, 403, 'session_origin_required', 'Cookie-authenticated changes require a same-origin browser request.');
+  }
+  let requestOrigin = '';
+  try {
+    requestOrigin = new URL(`${req.protocol}://${req.get('host')}`).origin;
+  } catch {
+    requestOrigin = '';
+  }
+  if (origin !== requestOrigin && !allowedOrigins.includes(origin)) {
+    return sendError(req, res, 403, 'session_origin_forbidden', 'The browser origin is not allowed to change Contractor.AI records.');
+  }
+  return next();
+}
 
 // Middleware
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.static('public'));
-
-// Configure multer for file uploads
-const upload = multer({ 
-  dest: 'uploads/',
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+app.disable('x-powered-by');
+app.use(setSecurityHeaders);
+app.use(attachRequestContext);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  }
+}));
+app.use(rateLimitApi);
+app.use(requireDashboardAuth);
+app.use(requireSessionMutationOrigin);
+app.use(requireOperatorAuthorization);
+app.use(express.json({ limit: '2mb' }));
+app.use((req, res, next) => {
+  if (
+    req.operator?.authenticated
+    && req.body
+    && typeof req.body === 'object'
+    && !Array.isArray(req.body)
+  ) {
+    req.body.actor = actorFromRequest(req);
+  }
+  next();
+});
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use((req, res, next) => {
+  if (req.operator?.authenticated && req.body && typeof req.body === 'object') {
+    Object.defineProperty(req.body, 'actor', {
+      value: actorFromRequest(req),
+      enumerable: false,
+      configurable: true
+    });
+  }
+  next();
 });
 
-// Contractor configuration
-const CONTRACTOR_CONFIG = {
-  email: 'noodzakelijkonline@gmail.com',
-  phone: '+31068351517',
-  company: 'Contractor AI Solutions',
-  services: ['Garden Maintenance', 'General House Services', 'Renovations']
-};
-
-// Mock data for demonstration
-let jobs = [
-  {
-    id: 1,
-    title: 'Bathroom Renovation',
-    client: 'Maria van der Berg',
-    address: 'Hoofdstraat 123, Amsterdam',
-    status: 'in_progress',
-    priority: 'critical',
-    worker: 'Anna Kowalski',
-    estimatedCost: 1512,
-    actualCost: 1200,
-    progress: 65,
-    startDate: '2024-10-15',
-    estimatedCompletion: '2024-10-22',
-    tools: ['Tile saw', 'Plumbing tools', 'Safety equipment'],
-    description: 'Complete bathroom renovation including tiles, plumbing, and fixtures'
-  },
-  {
-    id: 2,
-    title: 'Gutter Cleaning & Inspection',
-    client: 'Jan de Vries',
-    address: 'Kerkstraat 45, Utrecht',
-    status: 'scheduled',
-    priority: 'high',
-    worker: 'Marco Silva',
-    estimatedCost: 90,
-    actualCost: 0,
-    progress: 0,
-    startDate: '2024-10-18',
-    estimatedCompletion: '2024-10-18',
-    tools: ['Ladder', 'Pressure washer', 'Safety harness'],
-    description: 'Clean gutters and inspect for damage or blockages'
-  },
-  {
-    id: 3,
-    title: 'Weekly Lawn Maintenance',
-    client: 'Sophie Janssen',
-    address: 'Parkweg 78, Rotterdam',
-    status: 'completed',
-    priority: 'medium',
-    worker: 'Lisa Chen',
-    estimatedCost: 45,
-    actualCost: 45,
-    progress: 100,
-    startDate: '2024-10-14',
-    estimatedCompletion: '2024-10-14',
-    tools: ['Lawn mower', 'Trimmer', 'Rake'],
-    description: 'Regular lawn mowing and garden maintenance'
+app.post('/api/auth/login', rateLimitAuthLogin, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!dashboardAuthRequired) {
+    return sendError(req, res, 409, 'authentication_not_required', 'This local runtime does not require operator authentication.');
   }
-];
-
-let workers = [
-  {
-    id: 1,
-    name: 'Anna Kowalski',
-    specialty: 'Bathroom Specialist',
-    status: 'active',
-    location: 'Amsterdam',
-    rating: 4.9,
-    completedJobs: 127,
-    currentJob: 'Bathroom Renovation'
-  },
-  {
-    id: 2,
-    name: 'Marco Silva',
-    specialty: 'Gutter Specialist',
-    status: 'available',
-    location: 'Utrecht',
-    rating: 4.7,
-    completedJobs: 89,
-    currentJob: null
-  },
-  {
-    id: 3,
-    name: 'Lisa Chen',
-    specialty: 'Garden Maintenance',
-    status: 'traveling',
-    location: 'Rotterdam',
-    rating: 4.8,
-    completedJobs: 156,
-    currentJob: null
+  if (configuredOperatorTokens().length === 0) {
+    return sendError(req, res, 503, 'auth_not_configured', 'Contractor.AI authentication is not configured.');
   }
-];
-
-// Routes
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// API Routes
-app.get('/api/dashboard', (req, res) => {
-  const criticalJobs = jobs.filter(job => job.priority === 'critical').length;
-  const aiHandling = jobs.filter(job => job.status === 'in_progress').length;
-  const todayRevenue = jobs
-    .filter(job => job.status === 'completed' && job.startDate === '2024-10-14')
-    .reduce((sum, job) => sum + job.actualCost, 0);
-  
-  res.json({
-    metrics: {
-      criticalJobs,
-      aiHandling,
-      todayRevenue,
-      onTimeRate: 94
-    },
-    jobs,
-    workers,
-    weather: {
-      location: 'Amsterdam',
-      condition: 'Partly Cloudy',
-      temperature: 16,
-      precipitation: 20,
-      recommendation: 'Good conditions for outdoor work'
-    },
-    aiInsights: [
-      'Schedule optimization: Move gutter cleaning to avoid rain tomorrow',
-      'Resource alert: Tile saw available after Tuesday',
-      'Client satisfaction: Maria van der Berg rated last job 5 stars'
-    ]
+  const suppliedToken = typeof req.body?.token === 'string' ? req.body.token : '';
+  const operator = resolveOperatorToken(suppliedToken);
+  if (!operator) {
+    return recordAuthenticationFailure(req, res);
+  }
+  try {
+    operatingLedger.clearAuthenticationRateLimit(req.authenticationRateLimit.keyHash);
+    setAuthenticationRateLimitHeaders(res, operatingLedger.getAuthenticationRateLimit(req.authenticationRateLimit.keyHash, {
+      limit: authLoginRateLimit,
+      windowMs: authLoginRateWindowMs
+    }));
+  } catch (error) {
+    return authenticationRateLimitUnavailable(req, res, error);
+  }
+  const session = signOperatorSession(operator);
+  res.setHeader('Set-Cookie', operatorSessionCookie(session.value, operatorSessionTtlSeconds));
+  log('info', 'operator_session_started', { requestId: req.requestId, operatorId: operator.id, role: operator.role, expiresAt: session.expiresAt });
+  return res.json({
+    authenticated: true,
+    operatorId: operator.id,
+    name: operator.name,
+    role: operator.role,
+    expiresAt: session.expiresAt
   });
 });
 
-app.get('/api/jobs', (req, res) => {
-  res.json(jobs);
-});
-
-app.get('/api/jobs/:id', (req, res) => {
-  const job = jobs.find(j => j.id === parseInt(req.params.id));
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Set-Cookie', operatorSessionCookie('', 0));
+  if (req.operator?.authMethod === 'session' && req.operator.sessionIdHash) {
+    const revoked = operatingLedger.revokeOperatorSession(req.operator.sessionIdHash, {
+      reason: 'operator_logout'
+    });
+    log('info', 'operator_session_ended', {
+      requestId: req.requestId,
+      operatorId: req.operator.id,
+      role: req.operator.role,
+      revoked
+    });
   }
-  res.json(job);
+  return res.status(204).end();
 });
 
-app.post('/api/jobs', (req, res) => {
-  const newJob = {
-    id: jobs.length + 1,
-    ...req.body,
-    status: 'scheduled',
-    progress: 0,
-    actualCost: 0,
-    startDate: new Date().toISOString().split('T')[0]
+app.get('/api/session', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const role = req.operator?.role || 'owner';
+  const fieldWorker = role === 'field_worker';
+  const fieldIdentity = fieldWorker ? fieldWorkerIdentity(req) : null;
+  return res.json({
+    authentication: {
+      required: dashboardAuthRequired,
+      authenticated: Boolean(req.operator?.authenticated),
+      method: req.operator?.authMethod || null,
+      sessionTtlSeconds: dashboardAuthRequired ? operatorSessionTtlSeconds : null
+    },
+    operator: {
+      id: req.operator?.id || (req.operator?.authenticated ? role : 'local_owner'),
+      name: req.operator?.name || (fieldIdentity?.workerName ?? null),
+      role,
+      authenticated: Boolean(req.operator?.authenticated),
+      fieldScoped: fieldWorker,
+      worker: fieldIdentity ? { id: fieldIdentity.workerId, name: fieldIdentity.workerName } : null,
+      capabilities: {
+        dashboard: !fieldWorker,
+        intake: role === 'owner' || role === 'office_operator',
+        pipeline: !fieldWorker,
+        approvals: role === 'owner' || role === 'approver',
+        dispatch: !fieldWorker,
+        resources: !fieldWorker,
+        finance: !fieldWorker,
+        clientSuccess: !fieldWorker,
+        fieldEvidence: role === 'owner' || role === 'office_operator' || fieldWorker,
+        maintenance: role === 'owner'
+      }
+    }
+  });
+});
+
+function loadLegacyStateForMigration() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    return {
+      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+      workers: Array.isArray(parsed.workers) ? parsed.workers : [],
+      tools: Array.isArray(parsed.tools) ? parsed.tools : []
+    };
+  } catch {
+    return { jobs: [], workers: [], tools: [] };
+  }
+}
+
+function analyzeUploadPayload(payload = {}) {
+  const filename = String(payload.filename || payload.name || 'field-evidence').trim() || 'field-evidence';
+  const fileType = String(payload.fileType || payload.type || 'unknown').toLowerCase();
+  const categoryInput = String(payload.category || payload.documentCategory || '').toLowerCase();
+  const notes = String(payload.notes || payload.observation || payload.description || '').trim();
+  const combined = `${filename} ${fileType} ${categoryInput} ${notes}`.toLowerCase();
+  const size = Math.max(0, Number(payload.size || 0));
+  const riskLevel = String(payload.riskLevel || payload.risk || '').toLowerCase();
+  const amount = Number(payload.amount || payload.value || 0);
+
+  let category = 'document';
+  if (fileType.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic)$/i.test(filename) || combined.includes('photo')) {
+    category = 'field_photo';
+  }
+  if (combined.includes('invoice') || combined.includes('factuur') || amount > 0) {
+    category = 'invoice';
+  }
+  if (combined.includes('safety') || combined.includes('vca') || combined.includes('jha') || combined.includes('incident') || combined.includes('veilig')) {
+    category = 'safety';
+  }
+  if (combined.includes('closeout') || combined.includes('handover') || combined.includes('as-built') || combined.includes('wkb') || combined.includes('oplever')) {
+    category = 'closeout';
+  }
+
+  const riskDetected = ['high', 'critical'].includes(riskLevel)
+    || /blocked|unsafe|incident|damage|leak|injury|near miss|gevaar|schade/i.test(notes);
+  const suggestions = [];
+  if (category === 'field_photo') suggestions.push('Attach the photo to today\'s daily log', 'Tag the location and job for Wkb evidence');
+  if (category === 'invoice') suggestions.push('Route invoice to finance review', 'Create a job cost entry for budget tracking');
+  if (category === 'safety') suggestions.push('Create a safety checklist follow-up', 'Escalate high-risk observations immediately');
+  if (category === 'closeout') suggestions.push('Add to handover package', 'Review Wkb and client closeout completeness');
+  if (category === 'document') suggestions.push('Store in project document control', 'Create a review task for the project team');
+  if (riskDetected) suggestions.unshift('Open a safety or quality follow-up before closing the day');
+
+  return {
+    fileType,
+    size,
+    category,
+    confidence: category === 'document' && fileType === 'unknown' ? 'medium' : 'high',
+    riskDetected,
+    riskLevel: riskLevel || (riskDetected ? 'high' : 'low'),
+    amount,
+    summary: `${filename} classified as ${category.replace('_', ' ')}${riskDetected ? ' with risk follow-up required' : ''}.`,
+    suggestions
   };
-  jobs.push(newJob);
-  res.json(newJob);
-});
+}
 
-app.put('/api/jobs/:id', (req, res) => {
-  const jobIndex = jobs.findIndex(j => j.id === parseInt(req.params.id));
-  if (jobIndex === -1) {
-    return res.status(404).json({ error: 'Job not found' });
+let legacyStateForMigration = loadLegacyStateForMigration();
+const operatingLedger = new ContractorOperatingLedger({
+  dbFile: ledgerFile,
+  databaseUrl: hostedDatabaseUrl || null,
+  stateProvider: () => legacyStateForMigration,
+  logger: log
+});
+// The legacy JSON file is only an import source during construction. All live
+// reads and writes are ledger-backed after the synchronous migration completes.
+legacyStateForMigration = { jobs: [], workers: [], tools: [] };
+function autonomousSchedulerStatus() {
+  return {
+    enabled: autonomousSchedulerEnabled,
+    intervalSeconds: autonomousSchedulerIntervalSeconds,
+    leaseSeconds: autonomousSchedulerLeaseSeconds,
+    job: operatingLedger.getScheduledJob(AUTONOMOUS_SCHEDULER_KEY)
+  };
+}
+
+function runDurableAutonomousCycle(options = {}) {
+  const claim = operatingLedger.claimScheduledJob(AUTONOMOUS_SCHEDULER_KEY, {
+    intervalSeconds: autonomousSchedulerIntervalSeconds,
+    leaseSeconds: autonomousSchedulerLeaseSeconds,
+    now: options.now
+  });
+  if (!claim.claimed) return { success: true, ran: false, claim, scheduler: autonomousSchedulerStatus() };
+
+  try {
+    const result = operatingLedger.runAutonomousCycle({
+      actor: 'durable_scheduler',
+      maxActions: Math.max(1, Math.min(25, Number(options.maxActions || 10))),
+      source: 'durable_scheduler',
+      actionType: options.actionType ?? options.action_type,
+      actionTypes: options.actionTypes ?? options.action_types,
+      jobId: options.jobId ?? options.job_id,
+      jobIds: options.jobIds ?? options.job_ids
+    });
+    const completion = operatingLedger.completeScheduledJob(AUTONOMOUS_SCHEDULER_KEY, claim.leaseId, {
+      success: true,
+      actionCount: result.applied?.length || 0,
+      blockedCount: result.blocked?.length || 0,
+      ranAt: result.ranAt || new Date().toISOString()
+    }, { actor: 'durable_scheduler', now: options.now });
+    return { success: true, ran: true, result, completion, scheduler: autonomousSchedulerStatus() };
+  } catch (error) {
+    const completion = operatingLedger.completeScheduledJob(AUTONOMOUS_SCHEDULER_KEY, claim.leaseId, {
+      success: false,
+      error: error.message || 'Autonomous scheduler failed.'
+    }, { actor: 'durable_scheduler', now: options.now });
+    log('error', 'durable_autonomous_cycle_failed', { error: serializeError(error) });
+    return { success: false, ran: true, error: serializeError(error), completion, scheduler: autonomousSchedulerStatus() };
   }
-  jobs[jobIndex] = { ...jobs[jobIndex], ...req.body };
-  res.json(jobs[jobIndex]);
+}
+
+function durableAutonomousCycleResponse(execution, options = {}) {
+  if (!execution.success) return execution;
+  if (execution.ran) {
+    return {
+      ...execution.result,
+      durable: {
+        ran: true,
+        completed: Boolean(execution.completion?.completed),
+        schedulerKey: AUTONOMOUS_SCHEDULER_KEY
+      },
+      scheduler: execution.scheduler
+    };
+  }
+  const preview = operatingLedger.runAutonomousCycle({
+    ...options,
+    actor: 'durable_scheduler_preview',
+    dryRun: true
+  });
+  return {
+    ...preview,
+    dryRun: false,
+    ranAt: null,
+    applied: [],
+    blocked: [],
+    durable: {
+      ran: false,
+      reason: execution.claim?.reason || 'not_due',
+      schedulerKey: AUTONOMOUS_SCHEDULER_KEY
+    },
+    scheduler: execution.scheduler
+  };
+}
+
+const autonomousSchedulerTimers = new Set();
+
+function registerAutonomousSchedulerTimer(timer) {
+  timer.unref();
+  autonomousSchedulerTimers.add(timer);
+  return timer;
+}
+
+function clearAutonomousSchedulerTimers() {
+  const count = autonomousSchedulerTimers.size;
+  for (const timer of autonomousSchedulerTimers) {
+    clearTimeout(timer);
+    clearInterval(timer);
+  }
+  autonomousSchedulerTimers.clear();
+  return count;
+}
+
+if (autonomousSchedulerEnabled) {
+  registerAutonomousSchedulerTimer(setInterval(
+    () => runDurableAutonomousCycle(),
+    autonomousSchedulerIntervalSeconds * 1000
+  ));
+  registerAutonomousSchedulerTimer(setTimeout(() => runDurableAutonomousCycle(), 500));
+}
+
+async function handleLedgerRequest(req, res, action, successStatus = 200) {
+  try {
+    const payload = await action();
+    return res.status(successStatus).json(payload);
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    return sendError(
+      req,
+      res,
+      statusCode,
+      error.code || (statusCode === 404 ? 'not_found' : statusCode === 400 ? 'bad_request' : statusCode === 409 ? 'conflict' : 'ledger_error'),
+      error.message || 'Ledger request failed',
+      error.details || serializeError(error)
+    );
+  }
+}
+
+function resolveUploadLedgerJobDetail(payload = {}) {
+  const jobId = payload.ledgerJobId || payload.ledger_job_id || payload.jobId || payload.job_id || null;
+  if (!jobId) return null;
+  try {
+    return operatingLedger.getJobDetail(jobId);
+  } catch {
+    return null;
+  }
+}
+
+function createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload = {}, analysis = {}) {
+  if (!ledgerDetail?.id || !ledgerDocument?.id) return { records: {}, actions: [] };
+
+  const filename = ledgerDocument.filename || payload.filename || payload.name || 'uploaded evidence';
+  const notes = String(payload.notes || payload.observation || payload.description || analysis.summary || '').trim();
+  const evidenceRef = ledgerDocument.storageRef || ledgerDocument.filename || ledgerDocument.id;
+  const photos = ledgerDocument.type === 'photo' ? [evidenceRef].filter(Boolean) : [];
+  const records = {
+    progress: operatingLedger.addProgressUpdate(ledgerDetail.id, {
+      progressPercent: ledgerDetail.progressPercent || ledgerDetail.progress || 0,
+      note: `Uploaded evidence recorded: ${filename}. ${analysis.summary || notes}`.trim(),
+      photos,
+      source: 'upload_evidence'
+    }, { actor: 'upload_api' })
+  };
+  const actions = [{ type: 'record_ledger_progress_evidence', id: records.progress.id, message: 'Ledger progress evidence recorded.' }];
+
+  if (analysis.riskDetected) {
+    records.task = operatingLedger.addTask(ledgerDetail.id, {
+      title: `Review uploaded evidence: ${filename}`,
+      description: `${analysis.summary || 'Uploaded evidence requires review.'} ${notes}`.trim(),
+      status: 'open',
+      priority: ['high', 'critical'].includes(String(analysis.riskLevel || '').toLowerCase()) ? 'high' : 'medium',
+      source: 'upload_evidence'
+    }, { actor: 'upload_api' });
+    actions.push({ type: 'create_ledger_evidence_review_task', id: records.task.id, message: 'Ledger review task created from uploaded evidence.' });
+  }
+
+  if (analysis.category === 'safety' || ['high', 'critical'].includes(String(analysis.riskLevel || '').toLowerCase())) {
+    records.safetyCheck = operatingLedger.addSafetyCheck(ledgerDetail.id, {
+      title: `Review uploaded safety evidence: ${filename}`,
+      status: 'pending_review',
+      riskLevel: analysis.riskLevel || 'high',
+      notes: notes || analysis.summary,
+      hazards: [analysis.summary || 'Uploaded safety evidence requires review'],
+      requiresApproval: true
+    }, { actor: 'upload_api' });
+    actions.push({ type: 'create_ledger_safety_review', id: records.safetyCheck.id, approvalId: records.safetyCheck.approvalId || records.safetyCheck.approval?.id || null, message: 'Ledger safety review created.' });
+  }
+
+  const qualityTerms = `${filename} ${notes} ${analysis.summary || ''}`.toLowerCase();
+  if (analysis.category === 'field_photo' && (analysis.riskDetected || /defect|damage|crack|quality|issue|poor|leak|schade/i.test(qualityTerms))) {
+    records.qualityCheck = operatingLedger.addQualityCheck(ledgerDetail.id, {
+      title: `Review uploaded quality evidence: ${filename}`,
+      status: 'pending_review',
+      result: 'pending',
+      defectsOpen: 1,
+      defects: [{ title: 'Uploaded evidence needs quality review', documentId: ledgerDocument.id }],
+      notes: notes || analysis.summary,
+      photos,
+      wkbEvidence: true,
+      requiresApproval: true
+    }, { actor: 'upload_api' });
+    actions.push({ type: 'create_ledger_quality_review', id: records.qualityCheck.id, approvalId: records.qualityCheck.approvalId || records.qualityCheck.approval?.id || null, message: 'Ledger quality review created.' });
+  }
+
+  return { records, actions };
+}
+
+// API Routes
+app.all('/api/dashboard', (req, res) => res.status(410).json({
+  error: {
+    code: 'dashboard_facade_retired',
+    message: 'The unversioned dashboard facade is retired. Use the operating-ledger dashboard and resource routes.',
+    requestId: req.requestId
+  },
+  migration: {
+    dashboard: '/api/ledger/dashboard',
+    jobs: '/api/ledger/jobs',
+    workers: '/api/ledger/workers',
+    tools: '/api/ledger/tools',
+    weather: '/api/ledger/weather'
+  }
+}));
+
+app.get('/api/ledger/dashboard', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    dashboard: operatingLedger.dashboardSummary()
+  }));
 });
 
-app.get('/api/workers', (req, res) => {
-  res.json(workers);
+app.get('/api/ledger/organization', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    organization: operatingLedger.getOrganizationProfile()
+  }));
+});
+
+app.put('/api/ledger/organization', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can change the retained business identity.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    organization: operatingLedger.updateOrganizationProfile(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }));
+});
+
+app.get('/api/ledger/weather', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    weather: operatingLedger.weatherOverview()
+  }));
+});
+
+app.get('/api/ledger/documents/:id/content', async (req, res) => {
+  try {
+    const document = operatingLedger.getDocument(req.params.id);
+    if (!fieldWorkerCanAccessJob(req, document.jobId)) {
+      return sendError(req, res, 403, 'field_job_scope_forbidden', 'This field worker is not assigned to the evidence job.');
+    }
+    if (!evidenceStorage) throw evidenceStorageInitError || new EvidenceStorageError('storage_unavailable', 'Evidence storage is unavailable.');
+    const evidence = await evidenceStorage.read(document.storageRef);
+    operatingLedger.audit({
+      entityType: 'document',
+      entityId: document.id,
+      jobId: document.jobId,
+      action: 'download_document',
+      actor: req.operator?.role || 'authenticated_operator',
+      after: { storageRef: document.storageRef, filename: document.filename }
+    });
+    res.setHeader('Content-Type', document.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(evidence.length));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(document.filename || 'evidence')}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.end(evidence);
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || (error.statusCode ? 'not_found' : 'evidence_download_failed'), error.statusCode ? error.message : 'Unable to retrieve the retained evidence file.', serializeError(error));
+  }
+});
+
+app.get('/api/ledger/documents/:id/issue-package', (req, res) => {
+  try {
+    const issuePackage = operatingLedger.getIssuePackage(req.params.id, {
+      actor: actorFromRequest(req, 'authenticated_operator')
+    });
+    res.setHeader('Content-Type', issuePackage.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(Buffer.byteLength(issuePackage.content, 'utf8')));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(issuePackage.filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.end(issuePackage.content);
+  } catch (error) {
+    return sendError(
+      req,
+      res,
+      error.statusCode || 500,
+      error.code || 'issue_package_download_failed',
+      error.statusCode ? error.message : 'Unable to prepare the retained issue package for download.',
+      serializeError(error)
+    );
+  }
+});
+
+app.get('/api/ledger/capabilities', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const coverage = operatingLedger.ledgerCapabilityCoverage();
+    return {
+      success: true,
+      summary: coverage.summary,
+      capabilities: coverage.capabilities,
+      blueprint: LEDGER_CAPABILITY_BLUEPRINT,
+      playbooks: JOB_OPERATING_PLAYBOOKS.map(playbook => ({
+        key: playbook.key,
+        label: playbook.label,
+        keywords: playbook.keywords,
+        tasks: playbook.tasks.length,
+        tools: playbook.tools.length,
+        materials: playbook.materials.length
+      })),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+});
+
+app.get('/api/ledger/command-plan', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.buildTodayCommandPlan(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/command-plan', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can apply command-plan automation.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const result = mode === 'preview'
+      ? operatingLedger.buildTodayCommandPlan(payload)
+      : operatingLedger.applyTodayCommandPlan(payload, { actor: payload.actor || 'dashboard' });
+    return {
+      success: true,
+      ...result,
+      commandPlan: mode === 'preview'
+        ? result
+        : operatingLedger.buildTodayCommandPlan({ mode: payload.refreshMode || 'all', limit: 100 }),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/playbooks', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    playbooks: operatingLedger.listJobPlaybooks()
+  }));
+});
+
+app.get('/api/ledger/jobs', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    jobs: scopedLedgerJobs(req, req.query || {}),
+    dashboard: req.operator?.role === 'field_worker'
+      ? { fieldScoped: true, jobCount: scopedLedgerJobs(req, req.query || {}).length }
+      : operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/opportunities', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunities: operatingLedger.listOpportunities(req.query || {}),
+    forecast: operatingLedger.opportunityForecast(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/opportunities', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunity: operatingLedger.createOpportunity(req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    forecast: operatingLedger.opportunityForecast()
+  }), 201);
+});
+
+app.get('/api/ledger/opportunities/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunity: operatingLedger.getOpportunity(req.params.id)
+  }));
+});
+
+app.patch('/api/ledger/opportunities/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    opportunity: operatingLedger.updateOpportunity(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    forecast: operatingLedger.opportunityForecast()
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/activities', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createOpportunityActivity(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    opportunity: operatingLedger.getOpportunity(req.params.id)
+  }), 201);
+});
+
+app.patch('/api/ledger/opportunities/:id/activities/:activityId', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    activity: operatingLedger.updateOpportunityActivity(req.params.id, req.params.activityId, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    opportunity: operatingLedger.getOpportunity(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/convert', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.convertOpportunityToJob(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    }),
+    forecast: operatingLedger.opportunityForecast()
+  }), 201);
+});
+
+app.post('/api/ledger/intake', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    job: operatingLedger.createIntake(req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    job: jobForOperator(req, req.params.id, { includeAudit: true })
+  }));
+});
+
+app.put('/api/ledger/jobs/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.patch('/api/ledger/jobs/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/archive', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestJobArchive(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/restore', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestJobRestore(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/playbook', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.buildJobPlaybookPlan(req.params.id, req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/playbook', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const result = mode === 'preview'
+      ? operatingLedger.buildJobPlaybookPlan(req.params.id, payload)
+      : operatingLedger.applyJobPlaybook(req.params.id, payload, { actor: payload.actor || 'dashboard' });
+    return {
+      success: true,
+      ...result,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/jobs/:id/capability-plan', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.buildJobCapabilityPlan(req.params.id, req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/capability-plan', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const result = mode === 'preview'
+      ? operatingLedger.buildJobCapabilityPlan(req.params.id, payload)
+      : operatingLedger.applyJobCapabilityPlan(req.params.id, payload, { actor: actorFromRequest(req, payload.actor || 'dashboard') });
+    return {
+      success: true,
+      ...result,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/tasks', (req, res) => {
+  return handleLedgerRequest(req, res, () => operatingLedger.transaction(() => {
+    const payload = req.body || {};
+    const actor = actorFromRequest(req, payload.actor || 'dashboard');
+    const task = operatingLedger.addTask(req.params.id, payload, { actor });
+    const predecessorTaskId = payload.predecessorTaskId || payload.predecessor_task_id || null;
+    const dependency = predecessorTaskId
+      ? operatingLedger.addTaskDependency(req.params.id, {
+        predecessorTaskId,
+        successorTaskId: task.id,
+        lagHours: payload.lagHours || payload.lag_hours || 0,
+        source: payload.source || 'task_create'
+      }, { actor })
+      : null;
+    return {
+      success: true,
+      task,
+      dependency,
+      job: operatingLedger.getJobDetail(req.params.id)
+    };
+  }), 201);
+});
+
+app.patch('/api/ledger/jobs/:id/tasks/:taskId/schedule', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    task: operatingLedger.updateTaskSchedule(req.params.id, req.params.taskId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/work-plan/calculate', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    plan: operatingLedger.calculateJobSchedule(req.params.id, req.body || {})
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/task-dependencies', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    dependency: operatingLedger.addTaskDependency(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/task-dependencies/:dependencyId/cancel', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    dependency: operatingLedger.cancelTaskDependency(req.params.id, req.params.dependencyId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/schedule-baselines', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestScheduleBaseline(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/quote', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    quote: operatingLedger.createQuote(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/quotes/:quoteId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareQuoteIssuePackage(
+      req.params.id,
+      req.params.quoteId,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/quotes/:quoteId/acceptance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const acceptance = operatingLedger.requestQuoteAcceptance(
+      req.params.id,
+      req.params.quoteId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...acceptance,
+      job: operatingLedger.getJobDetail(req.params.id)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/site-visits', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    siteVisit: operatingLedger.createSiteVisit(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/change-orders', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    changeOrder: operatingLedger.createChangeOrder(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/acceptance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const acceptance = operatingLedger.requestChangeOrderAcceptance(
+      req.params.id,
+      req.params.changeOrderId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...acceptance,
+      job: operatingLedger.getJobDetail(req.params.id),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/field-reports', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    fieldReport: recordForOperator(req, operatingLedger.createFieldReport(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/rfis', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    rfi: recordForOperator(req, operatingLedger.createRfi(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/submittals', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    submittal: recordForOperator(req, operatingLedger.createSubmittalRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/client-selections', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    clientSelection: operatingLedger.createClientSelection(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/permits', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    permit: operatingLedger.createPermitRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/inspection-templates', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    templates: operatingLedger.listInspectionTemplates({
+      includeSuperseded: req.query.includeSuperseded === 'true',
+      discipline: req.query.discipline
+    })
+  }));
+});
+
+app.post('/api/ledger/inspection-templates', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    template: operatingLedger.createInspectionTemplate(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/inspection-checklists', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    inspection: operatingLedger.createInspectionFromTemplate(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/inspections', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    inspection: operatingLedger.createInspectionRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.submitInspectionChecklist(req.params.id, req.params.inspectionId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      inspection: recordForOperator(req, result.inspection),
+      submission: recordForOperator(req, result.submission),
+      observations: (result.observations || []).map(record => recordForOperator(req, record)),
+      approval: req.operator?.role === 'field_worker' ? null : result.approval,
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/observations', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const observation = operatingLedger.createObservationRecord(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      observation: recordForOperator(req, observation),
+      replayed: observation.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/incidents', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const incident = operatingLedger.createIncidentRecord(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      incident: recordForOperator(req, incident),
+      replayed: incident.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/safety-meetings', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    safetyMeeting: operatingLedger.createSafetyMeeting(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/orientations', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    orientation: operatingLedger.createWorkerOrientation(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/jhas', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    jha: operatingLedger.createJhaRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/sds-sheets', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    sdsSheet: operatingLedger.createSdsSheet(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/site-access', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    siteAccessLog: operatingLedger.createSiteAccessLog(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/assignments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    assignment: operatingLedger.addAssignment(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard', optional: false }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/assignments/:assignmentId/release', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    assignment: operatingLedger.releaseAssignment(req.params.id, req.params.assignmentId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/tools', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    toolReservation: operatingLedger.reserveTool(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/tools/:reservationId/release', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    toolReservation: operatingLedger.releaseToolReservation(req.params.id, req.params.reservationId, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/materials', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    materialRequirement: operatingLedger.addMaterialRequirement(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.patch('/api/ledger/jobs/:id/materials/:materialId/status', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    materialRequirement: operatingLedger.updateMaterialRequirementStatus(
+      req.params.id,
+      req.params.materialId,
+      req.body || {},
+      { actor: req.body?.actor || 'dashboard' }
+    ),
+    deliveryMode: 'record_only',
+    externalCommitments: 0,
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/route-plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    routePlan: operatingLedger.createRoutePlan(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/loading-plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    loadingPlan: operatingLedger.createLoadingPlan(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/procurement-orders', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    procurementOrder: operatingLedger.createProcurementOrder(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/procurement-orders/:orderId/request-approval', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestProcurementApproval(req.params.id, req.params.orderId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/worker-instructions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    workerInstruction: operatingLedger.createWorkerInstruction(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/dispatch', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    dispatch: operatingLedger.createDispatchPack(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/dispatch', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listDispatchReadiness(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/workforce', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listWorkforceReadiness(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/inventory', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listInventoryReadiness(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/field-assurance', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listFieldAssurance(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/field-assurance-pack', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    pack: operatingLedger.prepareFieldAssurancePack(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/finance', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listFinanceReadiness(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/client-success', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.listClientSuccess(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/progress', (req, res) => {
+  const requestedStatus = String(req.body?.status || '').trim().toLowerCase();
+  if (req.operator?.role === 'field_worker' && ['completed', 'closed', 'cancelled', 'archived'].includes(requestedStatus)) {
+    return sendError(req, res, 403, 'field_completion_approval_required', 'Field workers can record progress and blockers, but job completion requires an office approval workflow.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    progress: recordForOperator(req, operatingLedger.addProgressUpdate(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/communication', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const direction = String(payload.direction || 'outbound').trim().toLowerCase();
+    const outbound = direction !== 'inbound';
+    const communication = operatingLedger.addCommunication(req.params.id, outbound
+      ? { ...payload, direction: 'outbound', status: 'draft', sentAt: null, sent_at: null, requiresApproval: true }
+      : { ...payload, direction: 'inbound', status: 'received', requiresApproval: false }, { actor: payload.actor || 'dashboard' });
+    return {
+      success: true,
+      communication,
+      job: operatingLedger.getJobDetail(req.params.id),
+      deliveryMode: outbound ? 'draft_only' : 'record_only',
+      notSent: outbound,
+      approvalRequired: outbound,
+      approval: communication.approval || null,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/communications', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    communications: operatingLedger.listCommunications(req.query || {}),
+    summary: operatingLedger.communicationSummary(),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    access: operatingLedger.listClientPortalAccess(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    access: operatingLedger.createClientPortalAccess(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/client-portal-access/:id/revoke', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    access: operatingLedger.revokeClientPortalAccess(req.params.id, { actor: req.body?.actor || 'dashboard' })
+  }));
+});
+
+app.get('/api/client-portal/:token', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.getClientPortalSnapshot(req.params.token)
+  }));
+});
+
+app.post('/api/client-portal/:token/messages', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.addClientPortalMessage(req.params.token, req.body || {});
+    return {
+      success: true,
+      deliveryMode: 'record_only',
+      notSent: false,
+      approvalRequired: false,
+      ...result
+    };
+  }, 201);
+});
+
+app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.submitClientPortalSelectionResponse(
+      req.params.token,
+      req.params.selectionId,
+      req.body || {},
+      { actor: 'client_portal' }
+    );
+    return {
+      success: true,
+      approvalRequired: true,
+      externalCommitments: 0,
+      ...result
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/documents', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    document: recordForOperator(req, operatingLedger.addDocument(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/controlled-document-revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createControlledDocumentRevision(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/document-transmittals', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createDocumentTransmittal(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/issue', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    transmittal: operatingLedger.recordDocumentTransmittalIssue(
+      req.params.id,
+      req.params.transmittalId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalDeliveryInitiated: false,
+    externalDeliveryPerformedByContractorAI: false
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/receipts/:receiptId/acknowledge', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.acknowledgeDocumentTransmittal(
+      req.params.id,
+      req.params.transmittalId,
+      req.params.receiptId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    meeting: operatingLedger.createProjectMeeting(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/submit', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.submitProjectMeetingMinutes(req.params.id, req.params.meetingId, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalDeliveryInitiated: false
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/issue', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    meeting: operatingLedger.recordProjectMeetingIssue(
+      req.params.id,
+      req.params.meetingId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalDeliveryInitiated: false,
+    externalDeliveryPerformedByContractorAI: false
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/actions/:actionId/complete', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.completeProjectMeetingAction(
+      req.params.id,
+      req.params.meetingId,
+      req.params.actionId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/follow-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createProjectMeetingFollowUp(
+      req.params.id,
+      req.params.meetingId,
+      req.body || {},
+      { actor: actorFromRequest(req, 'dashboard') }
+    ),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/time-logs', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = timeLogPayloadForOperator(req, req.body || {});
+    return {
+      success: true,
+      timeLog: recordForOperator(req, operatingLedger.addTimeLog(req.params.id, payload, { actor: req.body?.actor || 'dashboard' })),
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/daily-logs', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = timeLogPayloadForOperator(req, req.body || {});
+    const dailyLog = operatingLedger.recordFieldDailyLog(req.params.id, payload, { actor: req.body?.actor || 'dashboard' });
+    return {
+      success: true,
+      dailyLog: req.operator?.role === 'field_worker'
+        ? {
+            ...dailyLog,
+            fieldReport: projectFieldRecord(dailyLog.fieldReport),
+            timeLog: projectFieldRecord(dailyLog.timeLog),
+            safetyCheck: projectFieldRecord(dailyLog.safetyCheck),
+            approvals: dailyLog.approvals.length
+          }
+        : dailyLog,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    expense: operatingLedger.addExpense(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/finance-costs', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    costs: operatingLedger.recordJobCosts(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/invoices', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    invoice: operatingLedger.createInvoice(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/invoices/:invoiceId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareInvoiceIssuePackage(
+      req.params.id,
+      req.params.invoiceId,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/invoices/:invoiceId/credit-notes', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    creditNote: operatingLedger.createCreditNote(
+      req.params.id,
+      req.params.invoiceId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/credit-notes/:creditNoteId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareCreditNoteIssuePackage(
+      req.params.id,
+      req.params.creditNoteId,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id),
+      finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/quality-checks', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    qualityCheck: operatingLedger.addQualityCheck(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/safety-checks', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    safetyCheck: recordForOperator(req, operatingLedger.addSafetyCheck(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/payments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPayment(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/invoices/:invoiceId/payments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPayment(req.params.id, {
+      ...(req.body || {}),
+      invoiceId: req.params.invoiceId
+    }, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ mode: 'payment', limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/payments/follow-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPaymentFollowUp(req.params.id, null, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/payments/:paymentId/follow-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    payment: operatingLedger.recordPaymentFollowUp(req.params.id, req.params.paymentId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/budget-lines', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    budgetLine: operatingLedger.createBudgetLine(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/billing-milestones', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    billingMilestone: operatingLedger.createBillingMilestone(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/purchase-orders', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    purchaseOrder: operatingLedger.createPurchaseOrder(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/supplier-invoices', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    supplierInvoice: operatingLedger.createSupplierInvoice(
+      req.params.id,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary(),
+    externalPaymentInitiated: false
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/supplier-invoices/:supplierInvoiceId/payments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    supplierPayment: operatingLedger.recordSupplierInvoicePayment(
+      req.params.id,
+      req.params.supplierInvoiceId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary(),
+    externalPaymentInitiated: false
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/draw-requests', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    drawRequest: operatingLedger.createDrawRequest(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/lien-waivers', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    lienWaiver: operatingLedger.createLienWaiver(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/finance-handoffs', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    financeHandoff: operatingLedger.createFinanceHandoff(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/finance-handoffs/prepare', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    financeHandoff: operatingLedger.prepareFinanceHandoff(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/punch-items', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const punchItem = operatingLedger.createPunchItem(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      punchItem: recordForOperator(req, punchItem),
+      replayed: punchItem.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/warranty-claims', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    warrantyClaim: operatingLedger.createWarrantyClaim(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/aftercare', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    aftercare: operatingLedger.addAftercareItem(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.patch('/api/ledger/jobs/:id/lifecycle/:recordType/:recordId', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.params.recordType === 'task' ? taskLifecyclePayloadForOperator(req) : (req.body || {});
+    const result = operatingLedger.transitionLifecycleRecord(
+      req.params.id,
+      req.params.recordType,
+      req.params.recordId,
+      payload,
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      record: recordForOperator(req, result.record),
+      approval: req.operator?.role === 'field_worker' ? null : result.approval,
+      approvalRequired: result.approvalRequired,
+      job: jobForOperator(req, req.params.id, { includeAudit: true }),
+      dashboard: dashboardForOperator(req)
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/recurring-plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    recurringPlan: operatingLedger.createRecurringPlan(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/closeout', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    closeout: operatingLedger.createCloseoutPackage(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/handover-readiness', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    readiness: operatingLedger.assessHandoverReadiness(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/handover-packages', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    package: operatingLedger.prepareHandoverIssuePackage(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id, { includeAudit: true }),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.get('/api/ledger/approvals', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    approvals: operatingLedger.listApprovals(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
+    return {
+      success: true,
+      approval,
+      job: approval.jobId ? operatingLedger.getJobDetail(approval.jobId) : null,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+});
+
+app.get('/api/ledger/audit', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can inspect the global audit history.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const history = operatingLedger.listAuditPage(req.query || {});
+    return { success: true, ...history };
+  });
+});
+
+app.get('/api/ledger/learning', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    profiles: operatingLedger.listLearningProfiles(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/learning/rebuild', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    profile: operatingLedger.rebuildLearningProfile(
+      req.body?.jobType || req.body?.job_type || req.body?.service,
+      { actor: req.body?.actor || 'dashboard' }
+    ),
+    profiles: operatingLedger.listLearningProfiles({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/learning/recommend', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.recommendFromLearning(req.body || {})
+  }));
+});
+
+app.post('/api/ledger/autonomous-cycle', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can preview or request autonomous ledger work.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const options = req.body || {};
+    if (options.dryRun === true) return operatingLedger.runAutonomousCycle(options);
+    return durableAutonomousCycleResponse(runDurableAutonomousCycle(options), options);
+  });
+});
+
+app.get('/api/ledger/scheduler', (req, res) => {
+  return res.json({ success: true, scheduler: autonomousSchedulerStatus() });
+});
+
+app.post('/api/ledger/scheduler/run', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can request a durable autonomous scheduler run.');
+  }
+  const result = runDurableAutonomousCycle(req.body || {});
+  return res.status(result.success ? 200 : 500).json(result);
+});
+
+app.get('/api/ledger/debug', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    diagnostics: operatingLedger.diagnose(),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.get('/api/ledger/workers', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const workers = operatingLedger.listWorkers(req.query || {});
+    return {
+      success: true,
+      workers,
+      summary: operatingLedger.summarizeWorkers(operatingLedger.listWorkers({ limit: 500 })),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+});
+
+app.get('/api/ledger/workers/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    worker: operatingLedger.getWorker(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/workers', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    worker: operatingLedger.upsertWorker(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.put('/api/ledger/workers/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    worker: operatingLedger.upsertWorker(
+      { ...(req.body || {}), id: req.params.id },
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+function requestWorkerRetirement(req, res) {
+  return handleLedgerRequest(req, res, () => {
+    const retirement = operatingLedger.requestWorkerRetirement(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    if (!retirement) {
+      const error = new Error('Worker not found');
+      error.statusCode = 404;
+      error.code = 'worker_not_found';
+      throw error;
+    }
+    return {
+      success: true,
+      deleted: false,
+      retained: true,
+      retired: retirement.retired,
+      requiresApproval: retirement.requiresApproval,
+      operationStatus: retirement.operationStatus,
+      approval: retirement.approval,
+      worker: retirement.worker,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+}
+
+app.post('/api/ledger/workers/:id/retirement', requestWorkerRetirement);
+
+app.delete('/api/ledger/workers/:id', (req, res) => {
+  return requestWorkerRetirement(req, res);
+});
+
+app.get('/api/ledger/tools', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const tools = operatingLedger.listTools(req.query || {});
+    return {
+      success: true,
+      tools,
+      summary: operatingLedger.summarizeTools(operatingLedger.listTools({ limit: 500 })),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+});
+
+app.post('/api/ledger/tools', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    tool: operatingLedger.upsertTool(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.put('/api/ledger/tools/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    tool: operatingLedger.upsertTool(
+      { ...(req.body || {}), id: req.params.id },
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/tools/:id/inspections', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.recordToolInspection(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    if (!result) {
+      const error = new Error('Tool not found');
+      error.statusCode = 404;
+      error.code = 'tool_not_found';
+      throw error;
+    }
+    return {
+      success: true,
+      ...result,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/tools/:id/maintenance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.recordToolMaintenance(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    if (!result) {
+      const error = new Error('Tool not found');
+      error.statusCode = 404;
+      error.code = 'tool_not_found';
+      throw error;
+    }
+    return {
+      success: true,
+      ...result,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+function requestToolRetirement(req, res) {
+  return handleLedgerRequest(req, res, () => {
+    const retirement = operatingLedger.requestToolRetirement(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    if (!retirement) {
+      const error = new Error('Tool not found');
+      error.statusCode = 404;
+      error.code = 'tool_not_found';
+      throw error;
+    }
+    return {
+      success: true,
+      deleted: false,
+      retained: true,
+      retired: retirement.retired,
+      requiresApproval: retirement.requiresApproval,
+      operationStatus: retirement.operationStatus,
+      approval: retirement.approval,
+      tool: retirement.tool,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  });
+}
+
+app.post('/api/ledger/tools/:id/retirement', requestToolRetirement);
+
+app.delete('/api/ledger/tools/:id', requestToolRetirement);
+
+app.get('/api/ledger/clients', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const clients = operatingLedger.listClients(req.query || {});
+    return {
+      success: true,
+      clients,
+      summary: operatingLedger.summarizeClients(clients)
+    };
+  });
+});
+
+app.post('/api/ledger/clients', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    client: operatingLedger.createClient(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }), 201);
+});
+
+app.put('/api/ledger/clients/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    client: operatingLedger.updateClient(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }));
+});
+
+app.get('/api/ledger/trade-partners', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const partners = operatingLedger.listTradePartners(req.query || {});
+    return {
+      success: true,
+      partners,
+      summary: operatingLedger.summarizeTradePartners(
+        operatingLedger.listTradePartners({ includeRetired: true, limit: 500 })
+      )
+    };
+  });
+});
+
+app.get('/api/ledger/trade-partners/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    partner: operatingLedger.getTradePartner(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/trade-partners', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    partner: operatingLedger.upsertTradePartner(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.put('/api/ledger/trade-partners/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    partner: operatingLedger.upsertTradePartner(
+      { ...(req.body || {}), id: req.params.id },
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/trade-partners/:id/retirement', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestTradePartnerRetirement(
+      req.params.id,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+function retiredLedgerFacadeRoute(req, res) {
+  const resource = req.baseUrl.split('/').filter(Boolean).at(-1) || 'resource';
+  const targets = {
+    clients: '/api/ledger/clients',
+    approvals: '/api/ledger/approvals',
+    audit: '/api/ledger/audit',
+    communication: '/api/ledger/communications',
+    weather: '/api/ledger/weather/assess',
+    schedule: '/api/ledger/schedule/recommend'
+  };
+  return res.status(410).json({
+    error: {
+      code: 'ledger_facade_route_retired',
+      message: `The /api/${resource} facade is retired. Use the ledger API.`
+    },
+    migration: { endpoint: targets[resource] || '/api/ledger/dashboard' }
+  });
+}
+
+app.use('/api/clients', retiredLedgerFacadeRoute);
+app.use('/api/approvals', retiredLedgerFacadeRoute);
+app.use('/api/audit', retiredLedgerFacadeRoute);
+app.use('/api/communication', retiredLedgerFacadeRoute);
+app.post('/api/ledger/weather/assess', (req, res) => {
+  return handleLedgerRequest(req, res, async () => {
+    const jobId = req.body?.jobId || req.body?.job_id;
+    const actor = req.body?.actor || 'dashboard';
+    let job = operatingLedger.getJobDetail(jobId, { includeAudit: true });
+    const input = req.body || {};
+    const liveRequested = input.live === true || input.useLiveWeather === true || input.use_live_weather === true;
+    const defaultForecastAt = input.forecastAt
+      || input.forecast_at
+      || job.scheduledStart
+      || job.targetCompletion
+      || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const liveForecast = liveRequested
+      ? await weatherService.assess({
+          ...input,
+          location: input.location || job.address || job.city || job.region,
+          address: input.address || job.address,
+          city: input.city || job.city,
+          region: input.region || job.region,
+          forecastAt: defaultForecastAt
+        })
+      : null;
+    const weatherPayload = liveForecast
+      ? {
+          ...input,
+          ...liveForecast,
+          source: liveForecast.source,
+          provider: liveForecast.provider,
+          weatherSensitive: input.weatherSensitive ?? input.weather_sensitive
+        }
+      : input;
+    const weather = operatingLedger.assessWeather(jobId, weatherPayload, { actor });
+    job = operatingLedger.getJobDetail(jobId, { includeAudit: true });
+    const recommendationPayload = { ...weatherPayload };
+    if (!recommendationPayload.plannedStart && !recommendationPayload.planned_start) {
+      const existingStart = job.scheduledStart || job.scheduled_start || job.plannedStart || job.planned_start || job.targetCompletion || job.requestedDate || job.requested_date;
+      const start = existingStart ? new Date(existingStart) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+      if (Number.isNaN(start.getTime())) start.setTime(Date.now() + 24 * 60 * 60 * 1000);
+      if (!existingStart) start.setHours(8, 0, 0, 0);
+      const estimatedHours = Math.max(1, Number(req.body?.estimatedHours || req.body?.estimated_hours || job.estimatedHours || job.estimated_hours || 6) || 6);
+      recommendationPayload.plannedStart = start.toISOString();
+      recommendationPayload.plannedEnd = recommendationPayload.plannedEnd || recommendationPayload.planned_end || new Date(start.getTime() + estimatedHours * 60 * 60 * 1000).toISOString();
+    }
+    const recommendation = operatingLedger.recommendSchedule(jobId, recommendationPayload, { actor, audit: false });
+    return {
+      success: true,
+      weather,
+      provider: liveForecast ? {
+        name: liveForecast.provider.name,
+        source: liveForecast.source,
+        fetchedAt: liveForecast.fetchedAt,
+        weatherDescription: liveForecast.weatherDescription
+      } : { name: 'manual_assessment', source: 'manual' },
+      recommendation,
+      nextActions: recommendation.nextActions || [],
+      nextAction: (recommendation.nextActions || [])[0] || null,
+      job,
+      dispatch: operatingLedger.listDispatchReadiness().summary,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/schedule/recommend', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    recommendation: operatingLedger.recommendSchedule(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
+  }));
+});
+
+app.post('/api/ledger/schedule/prepare-dispatch', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.prepareScheduleDispatch(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/schedule/request-approval', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestScheduleApproval(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.use('/api/weather', retiredLedgerFacadeRoute);
+app.use('/api/schedule', retiredLedgerFacadeRoute);
+
+function retiredConstructionRoute(req, res) {
+  return res.status(410).json({
+    error: {
+      code: 'legacy_construction_retired',
+      message: 'The construction compatibility API is retired. Use the operating-ledger job routes.'
+    },
+    migration: {
+      intake: '/api/ledger/intake',
+      dashboard: '/api/ledger/dashboard',
+      jobRecords: '/api/ledger/jobs/:jobId/*',
+      approvals: '/api/ledger/approvals'
+    }
+  });
+}
+
+app.use('/api/construction', retiredConstructionRoute);
+function retiredLegacyResourceRoute(req, res) {
+  const resource = req.baseUrl.endsWith('/workers') ? 'workers'
+    : req.baseUrl.endsWith('/tools') ? 'tools'
+      : 'jobs';
+  const migration = resource === 'jobs'
+    ? { collection: '/api/ledger/jobs', intake: '/api/ledger/intake', records: '/api/ledger/jobs/:jobId/*' }
+    : { collection: `/api/ledger/${resource}` };
+  return res.status(410).json({
+    error: {
+      code: 'legacy_resource_route_retired',
+      message: `The /api/${resource} compatibility API is retired. Use the operating-ledger API.`
+    },
+    migration
+  });
+}
+
+app.use('/api/jobs', retiredLegacyResourceRoute);
+app.use('/api/workers', retiredLegacyResourceRoute);
+app.use('/api/tools', retiredLegacyResourceRoute);
+
+function retiredLegacyAutonomyRoute(req, res) {
+  return res.status(410).json({
+    error: {
+      code: 'legacy_autonomy_retired',
+      message: 'Legacy simulated autonomy is retired. Use /api/ledger/command-plan for review or /api/ledger/autonomous-cycle for approval-gated ledger automation.',
+      requestId: req.requestId
+    }
+  });
+}
+
+app.get('/api/ai/status', retiredLegacyAutonomyRoute);
+app.post('/api/ai/analyze', retiredLegacyAutonomyRoute);
+app.post('/api/ai/autonomous-cycle', retiredLegacyAutonomyRoute);
+app.post('/api/operations/cycle', (req, res) => res.status(410).json({
+  error: {
+    code: 'legacy_operations_cycle_retired',
+    message: 'The mixed legacy operations cycle is retired. Use /api/ledger/autonomous-cycle or the durable ledger scheduler.'
+  }
+}));
+
+app.post('/api/ledger/communications/:id/delivery-receipt', (req, res) => {
+  if (!['owner', 'office_operator'].includes(req.operator?.role || 'owner')) {
+    return sendError(req, res, 403, 'delivery_receipt_forbidden', 'Only an owner or office operator can record a verified delivery receipt.');
+  }
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    const integration = String(payload.integration || '').trim();
+    if (!integration || !verifiedIntegrationIds.has(integration)) {
+      const error = new Error('A configured verified integration is required to record external delivery.');
+      error.statusCode = 409;
+      error.code = 'verified_integration_required';
+      throw error;
+    }
+    const communication = operatingLedger.recordCommunicationDelivery(req.params.id, {
+      integration,
+      providerMessageId: payload.providerMessageId || payload.provider_message_id || null,
+      sentAt: payload.sentAt || payload.sent_at || null,
+      receipt: payload.receipt || null
+    }, { actor: payload.actor || actorFromRequest(req, 'delivery_receipt_api') });
+    return { success: true, communication, job: operatingLedger.getJobDetail(communication.jobId), dashboard: operatingLedger.dashboardSummary() };
+  });
+});
+app.post('/api/emergency/activate', (req, res) => res.status(410).json({
+  error: {
+    code: 'emergency_autonomy_retired',
+    message: 'Emergency auto-dispatch is retired. Create a ledger intake, record the incident, and resolve the required approval gates before any commitment.',
+    requestId: req.requestId
+  }
+}));
+app.post('/api/ai/chat', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'conversational_ai_route_retired',
+      message: 'Unpersisted conversational AI is retired. Use the ledger command plan for reviewable operational guidance.',
+      requestId: req.requestId
+    },
+    migration: { endpoint: '/api/ledger/command-plan', method: 'GET' }
+  });
+});
+
+app.post('/api/simulate/client-request', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'simulation_retired',
+      message: 'Sample client requests are retired. Create a persisted job through /api/ledger/intake instead.',
+      requestId: req.requestId
+    }
+  });
+
 });
 
 // AI Chat endpoint
-app.post('/api/ai/chat', (req, res) => {
-  const { message } = req.body;
-  
-  // Simple AI response simulation
-  let response = "I'm analyzing your request...";
-  
-  if (message.toLowerCase().includes('schedule') || message.toLowerCase().includes('plan')) {
-    response = "Based on current weather and worker availability, I recommend scheduling outdoor work for tomorrow morning. Anna is available for bathroom work, and Marco can handle the gutter cleaning after 2 PM.";
-  } else if (message.toLowerCase().includes('weather')) {
-    response = "Current weather in Amsterdam: 16°C, partly cloudy with 20% chance of rain. Good conditions for most outdoor work. I recommend completing gutter cleaning before tomorrow's forecasted rain.";
-  } else if (message.toLowerCase().includes('worker') || message.toLowerCase().includes('team')) {
-    response = "Your team status: Anna is currently working on the bathroom renovation (65% complete), Marco is available for new assignments, and Lisa just completed the lawn maintenance job with excellent client feedback.";
-  } else if (message.toLowerCase().includes('client') || message.toLowerCase().includes('customer')) {
-    response = "Client updates: Maria van der Berg's bathroom renovation is progressing well. I've sent her a progress update with photos. Jan de Vries confirmed availability for tomorrow's gutter cleaning.";
-  }
-  
-  res.json({ 
-    response,
-    confidence: 'high',
-    suggestions: [
-      'Review today\'s schedule',
-      'Check weather forecast',
-      'Send client updates',
-      'Optimize routes'
-    ]
+app.post('/api/legacy/ai/chat', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'legacy_chat_retired',
+      message: 'Legacy simulated chat is retired. Use the persisted command plan and ledger views instead.',
+      requestId: req.requestId
+    }
   });
 });
 
 // Simulate client request
-app.post('/api/simulate/client-request', (req, res) => {
-  const clientRequests = [
-    {
-      client: 'Emma Bakker',
-      phone: '+31612345678',
-      address: 'Nieuwmarkt 12, Amsterdam',
-      service: 'Kitchen renovation',
-      urgency: 'medium',
-      budget: '€2000-3000',
-      description: 'Need kitchen cabinets replaced and new countertop installed'
-    },
-    {
-      client: 'Pieter Visser',
-      phone: '+31687654321',
-      address: 'Lange Voorhout 89, Den Haag',
-      service: 'Garden maintenance',
-      urgency: 'low',
-      budget: '€100-200',
-      description: 'Monthly garden cleanup and hedge trimming'
+app.post('/api/legacy/simulate/client-request', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'simulation_retired',
+      message: 'Sample client requests are retired. Create a persisted job through /api/ledger/intake instead.',
+      requestId: req.requestId
     }
-  ];
-  
-  const request = clientRequests[Math.floor(Math.random() * clientRequests.length)];
-  
-  // Simulate AI analysis
-  const aiAnalysis = {
-    estimatedDuration: '2-3 days',
-    recommendedWorker: 'Anna Kowalski',
-    estimatedCost: request.budget,
-    requiredTools: ['Power tools', 'Measuring equipment', 'Safety gear'],
-    schedulingSuggestion: 'Next available slot: October 20-22',
-    confidence: 'high'
-  };
-  
-  res.json({
-    request,
-    aiAnalysis,
-    status: 'analyzed',
-    nextSteps: [
-      'Send quote to client',
-      'Schedule initial consultation',
-      'Reserve required tools',
-      'Assign worker'
-    ]
   });
 });
 
-// Test email/SMS endpoint
 app.post('/api/test/notifications', (req, res) => {
-  const { type } = req.body;
-  
-  // Simulate sending notification
-  setTimeout(() => {
-    res.json({
-      success: true,
-      message: `${type} notification sent successfully to ${CONTRACTOR_CONFIG.email}`,
-      timestamp: new Date().toISOString(),
-      details: {
-        recipient: type === 'email' ? CONTRACTOR_CONFIG.email : CONTRACTOR_CONFIG.phone,
-        subject: 'Contractor AI System Test',
-        content: 'This is a test notification from your Contractor AI system. All systems are operational!'
+  return res.status(410).json({
+    error: {
+      code: 'test_notification_route_retired',
+      message: 'Synthetic notification drafts are retired. Create a job-linked communication draft in the operating ledger.',
+      requestId: req.requestId
+    },
+    migration: {
+      endpoint: '/api/ledger/jobs/:jobId/communication',
+      method: 'POST',
+      approvalRequired: true
+    }
+  });
+});
+
+// Ledger evidence intake accepts JSON metadata and bounded multipart uploads.
+app.post('/api/ledger/upload', async (req, res) => {
+  let uploadPayload;
+  let idempotency = null;
+  let retainedUpload = null;
+  let ledgerCommitted = false;
+  try {
+    uploadPayload = await readUploadPayload(req, {
+      authorizePayload(payload) {
+        const requestedJobId = payload.jobId || payload.job_id || payload.ledgerJobId || payload.ledger_job_id;
+        if (!requestedJobId) {
+          throw new UploadRequestError(400, 'ledger_job_required', 'Evidence uploads must identify an operating-ledger job.');
+        }
+        if (req.operator?.role === 'field_worker' && !fieldWorkerCanAccessJob(req, requestedJobId)) {
+          throw new UploadRequestError(403, 'field_job_scope_forbidden', 'This field worker is not assigned to the evidence job.');
+        }
+        if (!resolveUploadLedgerJobDetail(payload, actorFromRequest(req, 'upload_api'))?.id) {
+          throw new UploadRequestError(404, 'ledger_job_not_found', 'The requested operating-ledger job was not found.');
+        }
       }
     });
-  }, 1000);
+    idempotency = uploadIdempotencyClaim(req, uploadPayload.payload || {}, uploadPayload.file);
+    if (idempotency?.replayed) {
+      res.setHeader('Idempotent-Replayed', 'true');
+      return res.status(idempotency.responseStatus).json(idempotency.responseBody);
+    }
+    if (idempotency && !idempotency.claimed) {
+      if (idempotency.reason === 'request_conflict') {
+        throw new UploadRequestError(409, 'idempotency_key_reused', 'This Idempotency-Key was already used for a different evidence request.');
+      }
+      if (idempotency.reason === 'request_in_progress') {
+        res.setHeader('Retry-After', String(Math.max(1, Math.ceil(Number(idempotency.retryAfterMs || 1000) / 1000))));
+        throw new UploadRequestError(409, 'idempotent_request_in_progress', 'The matching evidence request is still being processed.');
+      }
+      throw new UploadRequestError(503, 'idempotency_claim_failed', 'The evidence retry identity could not be claimed safely.');
+    }
+
+    const storedFile = uploadPayload.file ? await storeUploadedFile(uploadPayload.file) : null;
+    retainedUpload = storedFile;
+    const payload = withStoredUpload(uploadPayload.payload || {}, storedFile);
+    const analysis = {
+      ...analyzeUploadPayload(payload),
+      upload: storedFile ? {
+        storageRef: storedFile.storageRef,
+        mimeType: storedFile.mimeType,
+        size: storedFile.size,
+        sha256: storedFile.sha256 || null
+      } : null
+    };
+    const actor = actorFromRequest(req, 'upload_api');
+    const responseBody = operatingLedger.transaction(() => {
+      const ledgerDetail = resolveUploadLedgerJobDetail(payload, actor);
+      const ledgerDocument = operatingLedger.addDocument(ledgerDetail.id, {
+        type: analysis.category === 'field_photo' || String(payload.fileType || '').startsWith('image/') ? 'photo' : 'document',
+        title: payload.title || storedFile?.originalName || payload.filename || payload.name || 'Uploaded evidence',
+        filename: storedFile?.originalName || payload.filename || payload.name || null,
+        mimeType: storedFile?.mimeType || payload.fileType || payload.mimeType || payload.mime_type || null,
+        sizeBytes: storedFile?.size || payload.size || payload.sizeBytes || payload.size_bytes || 0,
+        storageRef: storedFile?.storageRef || payload.storageRef || payload.url || null,
+        status: analysis.riskDetected ? 'needs_review' : 'stored',
+        tags: [analysis.category, payload.category, payload.riskLevel].filter(Boolean),
+        analysis
+      }, { actor });
+      const ledgerFollowUp = createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload, analysis, actor);
+      const body = {
+        success: true,
+        filename: payload.filename || payload.name || 'metadata-only',
+        uploadedFile: storedFile,
+        analysis,
+        ledgerDocument,
+        ledgerFollowUp,
+        actions: ledgerFollowUp.actions,
+        migration: {
+          legacyBuildAttachmentRetired: payload.attachToBuild !== undefined,
+          job: `/api/ledger/jobs/${ledgerDetail.id}`
+        }
+      };
+      if (idempotency?.claimed) {
+        const completed = operatingLedger.completeIdempotentRequest(
+          idempotency.keyHash,
+          idempotency.requestHash,
+          200,
+          body,
+          idempotency.leaseId
+        );
+        if (!completed) {
+          throw new UploadRequestError(503, 'idempotency_completion_failed', 'The evidence retry receipt could not be completed safely.');
+        }
+      }
+      return body;
+    });
+    ledgerCommitted = true;
+    return res.json(responseBody);
+  } catch (error) {
+    if (retainedUpload && !ledgerCommitted && evidenceStorage?.remove) {
+      try {
+        await evidenceStorage.remove(retainedUpload.storageRef);
+      } catch (cleanupError) {
+        log('warn', 'unreferenced_evidence_cleanup_failed', {
+          requestId: req.requestId,
+          code: cleanupError.code || 'evidence_cleanup_failed'
+        });
+      }
+    }
+    if (idempotency?.claimed) {
+      operatingLedger.releaseIdempotentRequest(idempotency.keyHash, idempotency.requestHash, idempotency.leaseId);
+    }
+    if (error instanceof UploadRequestError) {
+      return sendError(req, res, error.statusCode, error.code, error.message, error.details);
+    }
+    throw error;
+  }
 });
 
-// File upload endpoint
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
+app.all('/api/upload', (req, res) => res.status(410).json({
+  error: {
+    code: 'upload_facade_retired',
+    message: 'The unversioned evidence upload facade is retired. Use the operating-ledger evidence endpoint.',
+    requestId: req.requestId
+  },
+  migration: {
+    endpoint: '/api/ledger/upload',
+    method: 'POST'
   }
-  
-  // Simulate AI analysis of uploaded file
-  const analysis = {
-    fileType: req.file.mimetype,
-    size: req.file.size,
-    analysis: 'Image processed successfully. Detected: work in progress, good quality, no safety issues identified.',
-    confidence: 'high',
-    suggestions: ['Continue current approach', 'Document completion photos']
-  };
-  
+}));
+
+// Debug diagnostics. Disabled in production unless DEBUG_DIAGNOSTICS=true.
+app.get('/api/debug/diagnostics', (req, res) => {
+  if (isProduction && process.env.DEBUG_DIAGNOSTICS !== 'true') {
+    return sendError(req, res, 404, 'not_found', 'Diagnostics are disabled');
+  }
+
+  const ledgerDiagnostics = operatingLedger.diagnose();
   res.json({
-    success: true,
-    filename: req.file.filename,
-    analysis
+    status: ledgerDiagnostics.valid ? 'ok' : 'attention',
+    requestId: req.requestId,
+    generatedAt: new Date().toISOString(),
+    uptimeSeconds: Math.round(process.uptime()),
+    memory: {
+      rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024)
+    },
+    environment: {
+      nodeEnv: process.env.NODE_ENV || 'development',
+      diagnosticsEnabled: true
+    },
+    persistence: {
+      mode: 'ledger_only',
+      ledgerFile: isProduction ? 'hidden' : ledgerFile,
+      legacyImportSourcePresent: !isProduction && fs.existsSync(stateFile)
+    },
+    ledger: {
+      diagnostics: ledgerDiagnostics,
+      summary: operatingLedger.dashboardSummary()
+    }
   });
 });
+
+const OPERATIONAL_EXPORT_FORMAT = 'contractor-ai-operational-export/v2';
+const OPERATIONAL_EXPORT_CANONICALIZATION = 'contractor-ai-stable-json/v1';
+
+function operationalExport() {
+  const dashboard = operatingLedger.dashboardSummary();
+  const payload = JSON.parse(JSON.stringify({
+    exportedAt: new Date().toISOString(),
+    format: OPERATIONAL_EXPORT_FORMAT,
+    purpose: 'operator_reconciliation',
+    restorable: false,
+    runtime: runtimeConfiguration(),
+    dashboard,
+    organization: operatingLedger.getOrganizationProfile(),
+    opportunities: operatingLedger.listOpportunities({ includeClosed: true, limit: 500 }),
+    opportunityActivities: operatingLedger.listOpportunityActivities({ limit: 1_000 }),
+    jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
+    tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
+    supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
+    supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
+    billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
+    taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
+    scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
+    inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
+    inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
+    projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
+    handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
+    approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
+    audit: operatingLedger.listAudit({ limit: 1_000 })
+  }));
+  return {
+    ...payload,
+    integrity: {
+      algorithm: 'sha256',
+      canonicalization: OPERATIONAL_EXPORT_CANONICALIZATION,
+      digest: crypto.createHash('sha256').update(stableJson(payload)).digest('hex')
+    }
+  };
+}
+
+function validateOperationalExport(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return { valid: false, code: 'invalid_operational_export', problems: ['The selected file is not a Contractor.AI operational export.'] };
+  }
+  if (snapshot.format === 'contractor-ai-operational-export/v1') {
+    return { valid: false, code: 'legacy_export_unverifiable', problems: ['Version 1 exports have no integrity digest. Create a new export before relying on it for reconciliation.'] };
+  }
+  const problems = [];
+  if (snapshot.format !== OPERATIONAL_EXPORT_FORMAT) problems.push('The selected file uses an unsupported Contractor.AI export format.');
+  if (snapshot.purpose !== 'operator_reconciliation' || snapshot.restorable !== false) {
+    problems.push('The export must identify itself as a non-restorable operator reconciliation artifact.');
+  }
+  if (!snapshot.exportedAt || Number.isNaN(Date.parse(snapshot.exportedAt))) problems.push('Export timestamp is missing or invalid.');
+  if (!snapshot.runtime || typeof snapshot.runtime !== 'object' || Array.isArray(snapshot.runtime)) problems.push('Export is missing runtime metadata.');
+  if (!snapshot.dashboard || typeof snapshot.dashboard !== 'object' || Array.isArray(snapshot.dashboard)) problems.push('Export is missing the dashboard summary.');
+  for (const key of [
+    'jobs',
+    'tradePartners',
+    'supplierInvoices',
+    'supplierInvoicePayments',
+    'billingMilestones',
+    'taskDependencies',
+    'scheduleBaselines',
+    'handoverPackages',
+    'approvals',
+    'audit'
+  ]) {
+    if (!Array.isArray(snapshot[key])) problems.push(`Export is missing the ${key} collection.`);
+  }
+  for (const key of ['opportunities', 'opportunityActivities', 'inspectionTemplates', 'inspectionChecklistSubmissions']) {
+    if (snapshot[key] !== undefined && !Array.isArray(snapshot[key])) {
+      problems.push(`Export ${key} must be a collection when present.`);
+    }
+  }
+  if (snapshot.projectControls !== undefined) {
+    if (!snapshot.projectControls || typeof snapshot.projectControls !== 'object' || Array.isArray(snapshot.projectControls)) {
+      problems.push('Export projectControls must be an object when present.');
+    } else {
+      for (const key of ['rfis', 'submittals', 'controlledDocuments']) {
+        if (!Array.isArray(snapshot.projectControls[key])) problems.push(`Export projectControls is missing the ${key} collection.`);
+      }
+      if (snapshot.projectControls.transmittals !== undefined && !Array.isArray(snapshot.projectControls.transmittals)) {
+        problems.push('Export projectControls transmittals must be a collection when present.');
+      }
+      if (snapshot.projectControls.meetings !== undefined && !Array.isArray(snapshot.projectControls.meetings)) {
+        problems.push('Export projectControls meetings must be a collection when present.');
+      }
+    }
+  }
+  const integrity = snapshot.integrity;
+  if (
+    integrity?.algorithm !== 'sha256'
+    || integrity?.canonicalization !== OPERATIONAL_EXPORT_CANONICALIZATION
+    || !/^[a-f0-9]{64}$/.test(String(integrity?.digest || ''))
+  ) {
+    problems.push('Export integrity metadata is missing or invalid.');
+  }
+  if (problems.length) return { valid: false, code: 'invalid_operational_export', problems };
+
+  const { integrity: suppliedIntegrity, ...payload } = snapshot;
+  const expectedDigest = crypto.createHash('sha256').update(stableJson(payload)).digest('hex');
+  if (suppliedIntegrity.digest !== expectedDigest) {
+    return { valid: false, code: 'export_integrity_failed', problems: ['The export contents do not match its SHA-256 integrity digest.'] };
+  }
+  return {
+    valid: true,
+    format: snapshot.format,
+    exportedAt: snapshot.exportedAt,
+    artifactType: 'operational_export',
+    purpose: snapshot.purpose,
+    restorable: false,
+    integrity: { verified: true, algorithm: 'sha256', digest: expectedDigest },
+    counts: {
+      jobs: snapshot.jobs.length,
+      opportunities: Array.isArray(snapshot.opportunities) ? snapshot.opportunities.length : 0,
+      opportunityActivities: Array.isArray(snapshot.opportunityActivities) ? snapshot.opportunityActivities.length : 0,
+      tradePartners: snapshot.tradePartners.length,
+      supplierInvoices: snapshot.supplierInvoices.length,
+      supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
+      billingMilestones: snapshot.billingMilestones.length,
+      taskDependencies: snapshot.taskDependencies.length,
+      scheduleBaselines: snapshot.scheduleBaselines.length,
+      inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
+      inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
+      rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
+      submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
+      transmittals: Array.isArray(snapshot.projectControls?.transmittals) ? snapshot.projectControls.transmittals.length : 0,
+      meetings: Array.isArray(snapshot.projectControls?.meetings) ? snapshot.projectControls.meetings.length : 0,
+      controlledDocuments: Array.isArray(snapshot.projectControls?.controlledDocuments) ? snapshot.projectControls.controlledDocuments.length : 0,
+      handoverPackages: snapshot.handoverPackages.length,
+      approvals: snapshot.approvals.length,
+      audit: snapshot.audit.length
+    }
+  };
+}
+
+function sha256File(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+function copyEvidenceBackup(sourceRoot, backupDir) {
+  const source = path.resolve(sourceRoot);
+  const targetRoot = path.resolve(backupDir, 'evidence');
+  if (targetRoot.startsWith(`${source}${path.sep}`) || source.startsWith(`${targetRoot}${path.sep}`) || source === targetRoot) {
+    throw new Error('Evidence and backup directories must not overlap.');
+  }
+  const copied = [];
+  const entries = [];
+  if (!fs.existsSync(source)) return { copied, entries };
+  fs.mkdirSync(targetRoot, { recursive: true });
+
+  const visit = (directory, relativeDirectory = '') => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new Error(`Evidence backup refuses symbolic link: ${entry.name}`);
+      const relative = path.join(relativeDirectory, entry.name);
+      const sourcePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(sourcePath, relative);
+        continue;
+      }
+      if (!entry.isFile() || entry.name.startsWith('.')) continue;
+      const target = path.resolve(targetRoot, relative);
+      if (!target.startsWith(`${targetRoot}${path.sep}`)) throw new Error('Evidence backup path could not be resolved safely.');
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(sourcePath, target);
+      const manifestPath = path.posix.join('evidence', relative.replace(/\\/g, '/'));
+      copied.push(path.relative(__dirname, target).replace(/\\/g, '/'));
+      entries.push({ file: manifestPath, bytes: fs.statSync(target).size, sha256: sha256File(target) });
+    }
+  };
+  visit(source);
+  return { copied, entries };
+}
+
+function assertLocalBackupMode() {
+  if (operatingLedger.databaseMode === 'sqlite') return;
+  const error = new Error('Hosted recovery uses the configured PostgreSQL backup policy and versioned object storage; no incomplete local package was created.');
+  error.statusCode = 409;
+  error.code = 'provider_recovery_required';
+  throw error;
+}
+
+function backupOperationalState() {
+  assertLocalBackupMode();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupRoot = path.join(dataDir, 'backups');
+  const backupDir = path.join(backupRoot, timestamp);
+  fs.mkdirSync(backupDir, { recursive: true });
+  if (operatingLedger.databaseMode === 'sqlite') {
+    try {
+      operatingLedger.db.exec('PRAGMA wal_checkpoint(FULL)');
+    } catch (error) {
+      log('warn', 'ledger_backup_checkpoint_failed', { error: serializeError(error) });
+    }
+  }
+
+  const copied = [];
+  const manifestFiles = [];
+  const backupSources = operatingLedger.databaseMode === 'sqlite'
+    ? [stateFile, ledgerFile, `${ledgerFile}-wal`, `${ledgerFile}-shm`]
+    : [stateFile];
+  for (const source of backupSources) {
+    if (!fs.existsSync(source)) continue;
+    const target = path.join(backupDir, path.basename(source));
+    fs.copyFileSync(source, target);
+    copied.push(path.relative(__dirname, target).replace(/\\/g, '/'));
+    manifestFiles.push({ file: path.basename(target), bytes: fs.statSync(target).size, sha256: sha256File(target) });
+  }
+  const evidenceBackup = operatingLedger.databaseMode === 'sqlite'
+    ? copyEvidenceBackup(uploadDir, backupDir)
+    : { copied: [], entries: [] };
+  copied.push(...evidenceBackup.copied);
+  manifestFiles.push(...evidenceBackup.entries);
+  const exportFile = path.join(backupDir, 'operational-export.json');
+  fs.writeFileSync(exportFile, JSON.stringify(operationalExport(), null, 2));
+  copied.push(path.relative(__dirname, exportFile).replace(/\\/g, '/'));
+  manifestFiles.push({ file: path.basename(exportFile), bytes: fs.statSync(exportFile).size, sha256: sha256File(exportFile) });
+  const manifest = {
+    format: 'contractor-ai-backup-manifest/v2',
+    backupId: timestamp,
+    createdAt: new Date().toISOString(),
+    databaseMode: operatingLedger.databaseMode,
+    database: operatingLedger.databaseMode === 'sqlite'
+      ? { engine: 'sqlite', file: path.basename(ledgerFile) }
+      : { engine: operatingLedger.databaseMode, file: null },
+    evidence: {
+      included: operatingLedger.databaseMode === 'sqlite',
+      fileCount: evidenceBackup.entries.length
+    },
+    files: manifestFiles
+  };
+  const manifestFile = path.join(backupDir, 'manifest.json');
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+  copied.push(path.relative(__dirname, manifestFile).replace(/\\/g, '/'));
+  return {
+    backupId: timestamp,
+    databaseMode: operatingLedger.databaseMode,
+    files: copied,
+    evidenceFiles: evidenceBackup.entries.length,
+    verification: { valid: true, checkedFiles: manifestFiles.length },
+    providerBackupRequired: operatingLedger.databaseMode === 'postgres'
+  };
+}
+
+function backupDirectoryForId(backupId) {
+  const normalizedId = String(backupId || '').trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(normalizedId)) {
+    const error = new Error('Backup id is invalid.');
+    error.statusCode = 400;
+    error.code = 'invalid_backup_id';
+    throw error;
+  }
+  const backupRoot = path.resolve(dataDir, 'backups');
+  const backupDir = path.resolve(backupRoot, normalizedId);
+  if (path.dirname(backupDir) !== backupRoot) {
+    const error = new Error('Backup id is invalid.');
+    error.statusCode = 400;
+    error.code = 'invalid_backup_id';
+    throw error;
+  }
+  return backupDir;
+}
+
+function readBackupManifest(backupId) {
+  const backupDir = backupDirectoryForId(backupId);
+  const manifestFile = path.join(backupDir, 'manifest.json');
+  if (!fs.existsSync(manifestFile)) {
+    const error = new Error('Backup manifest was not found.');
+    error.statusCode = 404;
+    error.code = 'backup_not_found';
+    throw error;
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  if (!['contractor-ai-backup-manifest/v1', 'contractor-ai-backup-manifest/v2'].includes(manifest?.format) || !Array.isArray(manifest.files)) {
+    const error = new Error('Backup manifest is invalid.');
+    error.statusCode = 422;
+    error.code = 'invalid_backup_manifest';
+    throw error;
+  }
+  if (manifest.backupId && manifest.backupId !== String(backupId)) {
+    const error = new Error('Backup manifest id does not match its retained directory.');
+    error.statusCode = 422;
+    error.code = 'invalid_backup_manifest';
+    throw error;
+  }
+  if (manifest.format === 'contractor-ai-backup-manifest/v2') {
+    const evidenceEntries = manifest.files.filter(entry => String(entry?.file || '').replace(/\\/g, '/').startsWith('evidence/'));
+    if (manifest.databaseMode === 'sqlite' && (manifest.evidence?.included !== true || Number(manifest.evidence?.fileCount) !== evidenceEntries.length)) {
+      const error = new Error('Backup evidence manifest is incomplete.');
+      error.statusCode = 422;
+      error.code = 'invalid_backup_manifest';
+      throw error;
+    }
+  }
+  return { backupDir, manifest };
+}
+
+function safeManifestTarget(backupDir, manifestPath) {
+  const normalized = String(manifestPath || '').replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  if (!normalized || path.posix.isAbsolute(normalized) || segments.some(segment => !segment || segment === '.' || segment === '..')) {
+    return null;
+  }
+  const target = path.resolve(backupDir, ...segments);
+  return target.startsWith(`${backupDir}${path.sep}`) ? target : null;
+}
+
+function verifyOperationalBackup(backupId) {
+  const { backupDir, manifest } = readBackupManifest(backupId);
+  const failures = [];
+  const seenFiles = new Set();
+  for (const entry of manifest.files) {
+    const file = String(entry?.file || '');
+    if (seenFiles.has(file)) {
+      failures.push({ file, reason: 'duplicate_manifest_path' });
+      continue;
+    }
+    seenFiles.add(file);
+    const target = safeManifestTarget(backupDir, file);
+    if (!target) {
+      failures.push({ file, reason: 'unsafe_manifest_path' });
+      continue;
+    }
+    if (!fs.existsSync(target)) {
+      failures.push({ file, reason: 'missing_file' });
+      continue;
+    }
+    const stats = fs.lstatSync(target);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      failures.push({ file, reason: 'unsafe_file_type' });
+      continue;
+    }
+    const actualBytes = stats.size;
+    const actualHash = sha256File(target);
+    if (actualBytes !== Number(entry.bytes) || actualHash !== entry.sha256) {
+      failures.push({ file, reason: 'checksum_mismatch' });
+    }
+  }
+  return {
+    backupId: manifest.backupId,
+    createdAt: manifest.createdAt,
+    databaseMode: manifest.databaseMode,
+    valid: failures.length === 0,
+    checkedFiles: manifest.files.length,
+    failures,
+    providerBackupRequired: manifest.databaseMode === 'postgres'
+  };
+}
+
+function validateOperationalRestore(backupId) {
+  const verification = verifyOperationalBackup(backupId);
+  if (!verification.valid) return { ...verification, restorable: false, databaseVerification: null };
+
+  const { backupDir, manifest } = readBackupManifest(backupId);
+  const failures = [...verification.failures];
+  if (manifest.format !== 'contractor-ai-backup-manifest/v2') {
+    failures.push({ file: 'manifest.json', reason: 'legacy_manifest_not_restorable' });
+  }
+  if (manifest.databaseMode !== 'sqlite') {
+    failures.push({ file: 'manifest.json', reason: 'provider_recovery_required' });
+  }
+  const databaseFile = String(manifest.database?.file || path.basename(ledgerFile));
+  const databaseEntry = manifest.files.find(entry => entry.file === databaseFile);
+  if (!databaseEntry || !safeManifestTarget(backupDir, databaseFile)) {
+    failures.push({ file: databaseFile, reason: 'missing_restore_database' });
+  }
+
+  let databaseVerification = null;
+  if (failures.length === 0) {
+    try {
+      databaseVerification = verifySqliteBackupDatabase(path.join(backupDir, databaseFile));
+    } catch (error) {
+      failures.push({ file: databaseFile, reason: 'sqlite_restore_validation_failed', message: error.message });
+    }
+  }
+  return {
+    ...verification,
+    valid: failures.length === 0,
+    restorable: failures.length === 0,
+    failures,
+    databaseVerification
+  };
+}
+
+function writeTarString(header, offset, length, value) {
+  const encoded = Buffer.from(String(value || ''), 'utf8');
+  if (encoded.length > length) throw new Error(`Backup archive path field exceeds ${length} bytes.`);
+  encoded.copy(header, offset);
+}
+
+function writeTarOctal(header, offset, length, value) {
+  const octal = Math.max(0, Number(value) || 0).toString(8);
+  if (octal.length > length - 1) throw new Error('Backup archive numeric field is too large.');
+  writeTarString(header, offset, length, `${octal.padStart(length - 1, '0')}\0`);
+}
+
+function splitTarPath(archivePath) {
+  const normalized = String(archivePath || '').replace(/\\/g, '/');
+  if (Buffer.byteLength(normalized, 'utf8') <= 100) return { name: normalized, prefix: '' };
+  for (let index = normalized.lastIndexOf('/'); index > 0; index = normalized.lastIndexOf('/', index - 1)) {
+    const prefix = normalized.slice(0, index);
+    const name = normalized.slice(index + 1);
+    if (Buffer.byteLength(name, 'utf8') <= 100 && Buffer.byteLength(prefix, 'utf8') <= 155) {
+      return { name, prefix };
+    }
+  }
+  throw new Error(`Backup archive path is too long: ${normalized}`);
+}
+
+function createTarHeader(archivePath, stats) {
+  const { name, prefix } = splitTarPath(archivePath);
+  const header = Buffer.alloc(512, 0);
+  writeTarString(header, 0, 100, name);
+  writeTarOctal(header, 100, 8, 0o600);
+  writeTarOctal(header, 108, 8, 0);
+  writeTarOctal(header, 116, 8, 0);
+  writeTarOctal(header, 124, 12, stats.size);
+  writeTarOctal(header, 136, 12, Math.floor(stats.mtimeMs / 1000));
+  header.fill(0x20, 148, 156);
+  header[156] = '0'.charCodeAt(0);
+  writeTarString(header, 257, 6, 'ustar\0');
+  writeTarString(header, 263, 2, '00');
+  writeTarString(header, 265, 32, 'contractor-ai');
+  writeTarString(header, 297, 32, 'contractor-ai');
+  writeTarString(header, 345, 155, prefix);
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  const encodedChecksum = `${checksum.toString(8).padStart(6, '0')}\0 `;
+  writeTarString(header, 148, 8, encodedChecksum);
+  return header;
+}
+
+async function* backupArchiveChunks(backupId, backupDir, manifest) {
+  const root = backupId;
+  const sources = [
+    { file: 'manifest.json', target: path.join(backupDir, 'manifest.json') },
+    ...manifest.files.map(entry => ({ file: String(entry.file), target: safeManifestTarget(backupDir, entry.file) }))
+  ];
+  const archivePaths = new Set();
+  for (const source of sources) {
+    if (!source.target) throw new Error(`Backup archive contains an unsafe path: ${source.file}`);
+    const archivePath = path.posix.join(root, source.file.replace(/\\/g, '/'));
+    if (archivePaths.has(archivePath)) throw new Error(`Backup archive contains a duplicate path: ${source.file}`);
+    archivePaths.add(archivePath);
+    const stats = fs.lstatSync(source.target);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Backup archive refuses unsafe file type: ${source.file}`);
+    yield createTarHeader(archivePath, stats);
+    for await (const chunk of fs.createReadStream(source.target)) yield chunk;
+    const padding = (512 - (stats.size % 512)) % 512;
+    if (padding) yield Buffer.alloc(padding, 0);
+  }
+  yield Buffer.alloc(1024, 0);
+}
+
+function listOperationalBackups() {
+  const backupRoot = path.join(dataDir, 'backups');
+  if (!fs.existsSync(backupRoot)) return [];
+  return fs.readdirSync(backupRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => {
+      try {
+        const { manifest } = readBackupManifest(entry.name);
+        return {
+          backupId: manifest.backupId,
+          createdAt: manifest.createdAt,
+          databaseMode: manifest.databaseMode,
+          format: manifest.format,
+          files: manifest.files.length,
+          evidenceFiles: Number(manifest.evidence?.fileCount || 0),
+          downloadAvailable: manifest.databaseMode === 'sqlite'
+        };
+      } catch {
+        return { backupId: entry.name, createdAt: null, databaseMode: 'unknown', files: 0, manifestStatus: 'unreadable' };
+      }
+    })
+    .sort((left, right) => String(right.backupId).localeCompare(String(left.backupId)));
+}
+
+function isQaRecord(record) {
+  const text = [
+    record?.id,
+    record?.title,
+    record?.name,
+    record?.description,
+    record?.summary,
+    record?.reason,
+    record?.role,
+    record?.category,
+    record?.company,
+    record?.clientName,
+    record?.client_name,
+    record?.client?.name,
+    record?.client?.company
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/\b(browser|qa|demo|sample)\b/.test(text)) return true;
+
+  // These are the three historical local seed records. Match their full
+  // identity rather than every legacy import so a controlled QA reset cannot
+  // archive migrated customer work.
+  const legacySeedSignatures = new Set([
+    'legacy_job_1|bathroom renovation|maria van der berg',
+    'legacy_job_2|gutter cleaning & inspection|jan de vries',
+    'legacy_job_3|weekly lawn maintenance|sophie janssen'
+  ]);
+  const signature = [record?.id, record?.title, record?.clientName || record?.client_name]
+    .map(value => String(value || '').trim().toLowerCase())
+    .join('|');
+  if (legacySeedSignatures.has(signature)) return true;
+
+  const exactTestFixtureSignatures = new Set([
+    'replay-safe field progress|field progress client|verify exact offline retries and transactional rollback.'
+  ]);
+  const fixtureSignature = [record?.title, record?.clientName || record?.client_name, record?.description]
+    .map(value => String(value || '').trim().toLowerCase())
+    .join('|');
+  return exactTestFixtureSignatures.has(fixtureSignature);
+}
+
+app.get('/api/operations/export', (req, res) => {
+  res.setHeader('Content-Disposition', 'attachment; filename="contractor-ai-operational-export.json"');
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(operationalExport());
+});
+
+app.post('/api/operations/exports/validate', (req, res) => {
+  const result = validateOperationalExport(req.body?.snapshot || req.body);
+  if (!result.valid) {
+    return sendError(req, res, 422, result.code, 'The operational export failed integrity validation.', { problems: result.problems });
+  }
+  return res.json({
+    success: true,
+    ...result,
+    nextStep: 'Use this export for human-readable reconciliation only. Use a verified backup package for local recovery.'
+  });
+});
+
+app.post('/api/operations/backup', (req, res) => {
+  try {
+    return res.status(201).json({ success: true, backup: backupOperationalState() });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_failed', error.statusCode ? error.message : 'Unable to create a local operational backup.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/backups', (req, res) => {
+  try {
+    assertLocalBackupMode();
+    return res.json({ backups: listOperationalBackups() });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_list_failed', error.statusCode ? error.message : 'Unable to list local operational backups.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/backups/:backupId/verify', (req, res) => {
+  try {
+    assertLocalBackupMode();
+    const verification = verifyOperationalBackup(req.params.backupId);
+    return res.status(verification.valid ? 200 : 409).json({ verification });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_verification_failed', error.statusCode ? error.message : 'Unable to verify backup integrity.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/backups/:backupId/download', asyncHandler(async (req, res) => {
+  if (operatingLedger.databaseMode !== 'sqlite') {
+    return sendError(req, res, 409, 'provider_recovery_required', 'Hosted recovery uses the configured PostgreSQL backup policy and versioned object storage.');
+  }
+  try {
+    const verification = verifyOperationalBackup(req.params.backupId);
+    if (!verification.valid) {
+      return res.status(409).json({
+        error: {
+          code: 'backup_integrity_failed',
+          message: 'The backup package was not downloaded because integrity verification failed.',
+          requestId: req.requestId
+        },
+        verification
+      });
+    }
+    const { backupDir, manifest } = readBackupManifest(req.params.backupId);
+    const manifestHash = sha256File(path.join(backupDir, 'manifest.json'));
+    const filename = `contractor-ai-backup-${manifest.backupId}.tar.gz`;
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Contractor-AI-Manifest-SHA256', manifestHash);
+    log('info', 'backup_package_download', {
+      requestId: req.requestId,
+      backupId: manifest.backupId,
+      actor: actorFromRequest(req, 'local_owner'),
+      files: verification.checkedFiles
+    });
+    await pipeline(
+      Readable.from(backupArchiveChunks(manifest.backupId, backupDir, manifest)),
+      zlib.createGzip({ level: zlib.constants.Z_BEST_SPEED }),
+      res
+    );
+  } catch (error) {
+    if (res.headersSent) throw error;
+    return sendError(req, res, error.statusCode || 500, error.code || 'backup_package_failed', error.statusCode ? error.message : 'Unable to create the verified backup package.', serializeError(error));
+  }
+}));
+
+app.post('/api/operations/restore/validate', (req, res) => {
+  if (req.body?.snapshot || req.body?.format) {
+    return sendError(req, res, 422, 'operational_export_not_restorable', 'Operational exports are reconciliation artifacts and cannot be used as restore packages.', {
+      exportValidationEndpoint: '/api/operations/exports/validate',
+      requiredArtifact: 'contractor-ai-backup-manifest/v2'
+    });
+  }
+  const backupId = String(req.body?.backupId || '').trim();
+  if (!backupId) return sendError(req, res, 400, 'backup_id_required', 'Select a retained local backup package to validate for restore.');
+  try {
+    assertLocalBackupMode();
+    const verification = validateOperationalRestore(backupId);
+    return res.status(verification.valid ? 200 : 409).json({
+      success: verification.valid,
+      valid: verification.valid,
+      artifactType: 'backup_package',
+      restorable: verification.restorable,
+      verification,
+      nextStep: verification.valid
+        ? `Stop the application, then run npm run restore:local -- --backup-id ${backupId} --confirm RESTORE_${backupId}.`
+        : 'Do not restore this package. Create and verify a new local backup.'
+    });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'restore_validation_failed', error.statusCode ? error.message : 'Unable to validate the local restore package.', serializeError(error));
+  }
+});
+
+app.get('/api/operations/audit-integrity', (req, res) => {
+  const integrity = operatingLedger.verifyAuditIntegrity();
+  return res.status(integrity.valid ? 200 : 503).json({
+    success: integrity.valid,
+    integrity
+  });
+});
+
+async function operationalReadiness() {
+  const storageVerification = await verifyEvidenceStorage();
+  const runtime = runtimeConfiguration({ storageVerification });
+  const ledgerDiagnostics = operatingLedger.diagnose();
+  const status = runtime.ready && ledgerDiagnostics.valid ? 'ready' : 'attention';
+  return { status, runtime, ledgerDiagnostics, storageVerification };
+}
+
+app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
+  const localSQLite = runtime.mode === 'local' && runtime.databaseMode === 'sqlite';
+  const hostedPostgres = runtime.mode === 'hosted' && runtime.databaseMode === 'postgres';
+  const organization = operatingLedger.getOrganizationProfile();
+  return res.json({
+    status,
+    localFirst: true,
+    capabilities: {
+      export: {
+        available: true,
+        format: OPERATIONAL_EXPORT_FORMAT,
+        purpose: 'operator_reconciliation',
+        restorable: false,
+        integrity: 'sha256',
+        validationEndpoint: '/api/operations/exports/validate'
+      },
+      backup: {
+        available: localSQLite,
+        databaseMode: runtime.databaseMode,
+        manifestVerification: localSQLite,
+        evidenceIncluded: localSQLite,
+        portableDownload: localSQLite,
+        packageFormat: localSQLite ? 'tar.gz' : null
+      },
+      restore: {
+        available: localSQLite,
+        validation: localSQLite ? 'retained_backup_id' : 'provider_managed',
+        stoppedRuntimeRequired: localSQLite,
+        providerRecoveryRequired: hostedPostgres
+      },
+      providerRecovery: {
+        available: hostedPostgres,
+        postgresBackupMode: runtime.hosting.recovery.postgresBackupMode,
+        objectVersioningEnabled: runtime.hosting.recovery.objectVersioningEnabled,
+        policyConfigured: runtime.hosting.recovery.policyConfigured,
+        applicationPackageAvailable: localSQLite
+      },
+      hostedMigration: {
+        available: localSQLite,
+        source: localSQLite ? 'verified_backup_v2' : null,
+        target: 'postgresql+s3',
+        evidenceReadBackVerification: true,
+        emptyTargetRequired: true,
+        command: localSQLite ? 'npm run migrate:hosted' : null
+      },
+      persistence: {
+        databaseMode: runtime.databaseMode,
+        durable: runtime.mode === 'hosted' ? hostedPostgres : localSQLite,
+        schemaInitialization: {
+          serialized: true,
+          mechanism: runtime.databaseMode === 'postgres' ? 'postgres_advisory_lock' : 'sqlite_write_transaction'
+        }
+      },
+      commercialIssue: {
+        available: organization.readiness.ready,
+        organizationStatus: organization.readiness.status,
+        missingFields: organization.readiness.missingFields,
+        packageFormat: 'html',
+        integrity: 'sha256',
+        deliveryMode: 'approval_gated_draft',
+        clientAcceptanceRequired: true,
+        externalCommitments: 0
+      },
+      auditIntegrity: {
+        ...ledgerDiagnostics.auditIntegrity,
+        verificationEndpoint: '/api/operations/audit-integrity',
+        historyEndpoint: '/api/ledger/audit',
+        historyAccess: 'owner_only',
+        historyPagination: 'sequence_cursor',
+        historyFilters: ['query', 'jobId', 'entityType', 'entityId', 'action', 'actor', 'from', 'until'],
+        appendMode: 'atomic_hash_chain',
+        tamperEvidence: ['modified_event', 'deleted_event', 'sequence_gap', 'stale_head']
+      },
+      requestSafety: {
+        apiRateLimit: runtime.requestRateLimit,
+        evidenceUploadIdempotency: 'durable',
+        evidenceUploadLeaseOwnership: 'unique_claim_token',
+        evidenceUploadReclaimSafe: true,
+        progressEntryKey: 'durable',
+        dailyLogEntryKey: 'durable',
+        taskLifecycle: 'retained',
+        taskCompletionEvidenceRequired: true,
+        fieldTaskScopeEnforced: true,
+        fieldMutationAtomicity: true,
+        equipmentRetirement: 'approval_gated',
+        equipmentActiveReservationGate: true,
+        equipmentDormantReservationRelease: 'retained_atomic',
+        equipmentInspectionReadiness: 'derived_and_reservation_gated',
+        equipmentInspectionEvidence: 'retained_internal_history',
+        equipmentMaintenanceEvidence: 'retained_internal_history',
+        equipmentReinspectionGate: true,
+        equipmentDispatchReadiness: 'live_canonical_state',
+        workforceDispatchReadiness: 'live_canonical_state',
+        unavailableWorkerDispatchGate: true,
+        assignmentScopedCrewEvidence: true,
+        releasedAssignmentEvidenceInvalidation: true,
+        workerInstructionPublication: 'approval_gated',
+        browserOutboxScope: 'operator',
+        replayRetentionHours: 24,
+        payloadConflictRejected: true
+      },
+      evidenceStorage: {
+        mode: runtime.storageMode,
+        privateAccess: Boolean(evidenceStorage),
+        status: storageVerification.status,
+        verifiedAt: storageVerification.checkedAt,
+        latencyMs: storageVerification.latencyMs ?? null,
+        errorCode: storageVerification.code || null,
+        initializationError: evidenceStorageInitError?.code || null
+      },
+      authentication: {
+        required: runtime.auth.required,
+        configuredRoles: runtime.auth.configuredRoles,
+        loginRateLimit: runtime.auth.loginRateLimit
+      },
+      communications: {
+        outboundDraftOnly: true,
+        deliveryReceiptApprovalRequired: true,
+        verifiedIntegrationCount: verifiedIntegrationIds.size
+      },
+      invoicing: {
+        serverCalculatedTotals: true,
+        stagedBillingPlans: true,
+        milestoneApprovalRequired: true,
+        milestoneInvoiceLinkage: 'one_to_one',
+        durableNumbering: true,
+        immutableHtmlPackage: true,
+        ubl21Export: true,
+        peppolProfile: 'billing_3',
+        structuredReadinessChecks: true,
+        networkSubmission: false,
+        deliveryReceiptApprovalRequired: true
+      },
+      automation: {
+        ledgerOnly: true,
+        schedulerEnabled: runtime.autonomousScheduler.enabled,
+        intervalSeconds: runtime.autonomousScheduler.intervalSeconds,
+        coordination: 'durable_compare_and_swap_lease',
+        multiReplicaSafe: true,
+        externalCommitments: 0
+      }
+    },
+    runtime,
+    ledger: {
+      valid: ledgerDiagnostics.valid,
+      issueCount: ledgerDiagnostics.issueCount,
+      migrations: ledgerDiagnostics.migrations,
+      auditIntegrity: ledgerDiagnostics.auditIntegrity
+    }
+  });
+}));
+
+app.post('/api/operations/reset-qa', (req, res) => {
+  if (req.body?.confirmation !== 'RESET_QA') {
+    return sendError(req, res, 400, 'confirmation_required', 'Set confirmation to RESET_QA before archiving QA and demo records.');
+  }
+  try {
+    const actor = req.body?.actor || 'operations_reset';
+    const backup = backupOperationalState();
+    const ledgerJobs = operatingLedger.listJobs({ includeArchived: true, limit: 500 })
+      .filter(job => job.status !== 'archived' && isQaRecord(job));
+    const qaOpportunities = operatingLedger.listOpportunities({ includeClosed: true, limit: 500 })
+      .filter(opportunity => !['archived', 'won'].includes(opportunity.stage) && isQaRecord(opportunity));
+    const qaWorkers = operatingLedger.listWorkers({ limit: 500 })
+      .filter(worker => worker.status !== 'retired' && isQaRecord(worker));
+    const qaTools = operatingLedger.listTools({ limit: 500 })
+      .filter(tool => tool.status !== 'retired' && isQaRecord(tool));
+    const qaJobIds = new Set(ledgerJobs.map(job => job.id));
+    const qaApprovals = operatingLedger.listApprovals({ status: 'pending', limit: 500 })
+      .filter(approval => qaJobIds.has(approval.jobId) || isQaRecord(approval));
+    for (const approval of qaApprovals) {
+      operatingLedger.resolveApproval(approval.id, {
+        status: 'rejected',
+        resolvedBy: actor,
+        reason: 'QA/demo record archived by the controlled local reset.'
+      }, { actor });
+    }
+    for (const job of ledgerJobs) {
+      operatingLedger.updateJob(job.id, {
+        status: 'archived',
+        phase: 'archived',
+        data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
+      }, { actor });
+    }
+    for (const opportunity of qaOpportunities) {
+      operatingLedger.updateOpportunity(opportunity.id, {
+        stage: 'archived',
+        data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
+      }, { actor });
+    }
+    for (const worker of qaWorkers) {
+      operatingLedger.retireWorker(worker.id, { actor });
+    }
+    for (const tool of qaTools) {
+      operatingLedger.retireTool(tool.id, { actor });
+    }
+    return res.json({
+      success: true,
+      backup,
+      archivedLedgerJobIds: ledgerJobs.map(job => job.id),
+      archivedOpportunityIds: qaOpportunities.map(opportunity => opportunity.id),
+      retiredWorkerIds: qaWorkers.map(worker => worker.id),
+      retiredToolIds: qaTools.map(tool => tool.id),
+      rejectedApprovalIds: qaApprovals.map(approval => approval.id),
+      archivedCount: ledgerJobs.length + qaOpportunities.length + qaWorkers.length + qaTools.length,
+      dashboard: operatingLedger.dashboardSummary()
+    });
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'qa_reset_failed', error.statusCode ? error.message : 'Unable to archive QA and demo records.', serializeError(error));
+  }
+});
+
+app.get('/api/readiness', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics } = await operationalReadiness();
+  return res.status(status === 'ready' ? 200 : 503).json({
+    status,
+    runtime,
+    ledger: {
+      valid: ledgerDiagnostics.valid,
+      issueCount: ledgerDiagnostics.issueCount,
+      migrations: ledgerDiagnostics.migrations,
+      auditIntegrity: ledgerDiagnostics.auditIntegrity
+    },
+    deployment: {
+      localFirst: true,
+      hostedRequirements: [
+        'EU-region container host',
+        'managed PostgreSQL via CONTRACTOR_AI_DATABASE_URL',
+        'S3-compatible EU object storage',
+        'HTTPS public origin and a strong auth token',
+        'retained DPA and recovery-policy references',
+        'PostgreSQL backups and evidence object versioning'
+      ]
+    }
+  });
+}));
+
+app.get('/api/health/ready', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
+  return res.status(status === 'ready' ? 200 : 503).json({
+    status,
+    requestId: req.requestId,
+    checkedAt: new Date().toISOString(),
+    checks: {
+      configuration: runtime.ready ? 'ready' : 'attention',
+      database: ledgerDiagnostics.valid ? 'ready' : 'attention',
+      evidenceStorage: storageVerification.status
+    }
+  });
+}));
 
 // Health check
 app.get('/api/health', (req, res) => {
+  const ledgerDiagnostics = operatingLedger.diagnose();
+  const runtime = runtimeConfiguration();
   res.json({
-    status: 'healthy',
+    status: ledgerDiagnostics.valid && runtime.ready ? 'healthy' : 'degraded',
+    requestId: req.requestId,
     timestamp: new Date().toISOString(),
     version: '1.0.0',
+    uptimeSeconds: Math.round(process.uptime()),
     services: {
-      ai: 'operational',
-      database: 'operational',
-      notifications: 'operational'
-    }
+      ai: 'ledger_only',
+      database: ledgerDiagnostics.valid ? 'operational' : 'attention',
+      evidenceStorage: runtime.evidenceStorage.status,
+      notifications: 'draft_only',
+      ledger: ledgerDiagnostics.valid ? 'operational' : 'attention'
+    },
+    runtime,
+    diagnostics: {
+      issueCount: ledgerDiagnostics.issueCount,
+      errorCount: ledgerDiagnostics.issues.filter(issue => issue.severity === 'error').length,
+      warningCount: ledgerDiagnostics.issues.filter(issue => issue.severity === 'warning').length,
+      ledgerIssueCount: ledgerDiagnostics.issueCount
+    },
+    migrations: ledgerDiagnostics.migrations
   });
 });
 
-// Start server
-app.listen(port, () => {
-  console.log(`Contractor AI System running on port ${port}`);
-  console.log(`Dashboard: http://localhost:${port}`);
-  console.log(`API Health: http://localhost:${port}/api/health`);
+app.use('/api', (req, res) => {
+  return sendError(req, res, 404, 'not_found', 'API endpoint not found');
 });
+
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir, { index: false, fallthrough: true }));
+}
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (!fs.existsSync(path.join(distDir, 'index.html'))) {
+    return sendError(req, res, 503, 'web_client_not_built', 'Run npm run build before starting the production web client.');
+  }
+  return res.sendFile(path.join(distDir, 'index.html'));
+});
+
+app.use((error, req, res, next) => {
+  const statusCode = Number(error?.statusCode || error?.status || 0);
+  const invalidJson = error?.type === 'entity.parse.failed'
+    || (error instanceof SyntaxError && statusCode === 400 && Object.prototype.hasOwnProperty.call(error, 'body'));
+  const requestTooLarge = error?.type === 'entity.too.large' || statusCode === 413;
+  const handledRequestError = invalidJson || requestTooLarge;
+  log(handledRequestError ? 'warn' : 'error', handledRequestError ? 'request_body_rejected' : 'unhandled_request_error', {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.originalUrl,
+    code: invalidJson ? 'invalid_json' : requestTooLarge ? 'request_body_too_large' : 'internal_error',
+    ...(handledRequestError ? {} : { error: serializeError(error) })
+  });
+
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  if (invalidJson) {
+    return sendError(req, res, 400, 'invalid_json', 'Request body must contain valid JSON');
+  }
+  if (requestTooLarge) {
+    return sendError(req, res, 413, 'request_body_too_large', 'Request body exceeds the configured size limit');
+  }
+
+  return sendError(req, res, 500, 'internal_error', 'Unexpected server error', serializeError(error));
+});
+
+async function startDirectServer() {
+  const storageVerification = await verifyEvidenceStorage({ force: true });
+  const startupRuntime = runtimeConfiguration({ storageVerification });
+  if (isProduction && !startupRuntime.ready) {
+    log('error', 'production_runtime_not_ready', { issues: startupRuntime.issues.map(issue => issue.code) });
+    await shutdownRuntime({ signal: 'startup_not_ready' });
+    process.exitCode = 1;
+    return;
+  }
+  directServer = configureHttpServer(app.listen(port, () => {
+    log('info', 'server_started', {
+      port,
+      dashboard: `http://localhost:${port}`,
+      health: `http://localhost:${port}/api/health`,
+      readiness: `http://localhost:${port}/api/health/ready`
+    });
+  }));
+  return directServer;
+}
+
+let directServer = null;
+let shutdownPromise = null;
+
+function closeHttpServer(server, timeoutMs = 10_000) {
+  if (!server?.listening) return Promise.resolve({ drained: true, forced: false });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      server.closeAllConnections?.();
+      finish(null, { drained: false, forced: true });
+    }, timeoutMs);
+    timeout.unref();
+    server.close(error => finish(error, { drained: true, forced: false }));
+    server.closeIdleConnections?.();
+  });
+}
+
+function shutdownRuntime({ server = directServer, signal = 'shutdown', timeoutMs = 10_000 } = {}) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const timersCleared = clearAutonomousSchedulerTimers();
+    log('info', 'runtime_shutdown_started', { signal, timersCleared });
+    const http = await closeHttpServer(server, timeoutMs);
+    operatingLedger.close();
+    log('info', 'runtime_shutdown_completed', { signal, timersCleared, http });
+    return { signal, timersCleared, http };
+  })().catch(error => {
+    log('error', 'runtime_shutdown_failed', { signal, error: serializeError(error) });
+    throw error;
+  });
+  return shutdownPromise;
+}
+
+app.locals.runtimeControl = Object.freeze({
+  configureHttpServer,
+  shutdown: options => shutdownRuntime(options),
+  schedulerTimerCount: () => autonomousSchedulerTimers.size,
+  httpTimeouts: Object.freeze({
+    keepAliveTimeoutMs: httpKeepAliveTimeoutMs,
+    headersTimeoutMs: httpHeadersTimeoutMs
+  })
+});
+
+function handleFatalRuntimeError(event, error) {
+  log('error', event, { error: serializeError(error) });
+  process.exitCode = 1;
+  if (require.main !== module) return;
+  shutdownRuntime({ signal: event })
+    .catch(() => {})
+    .finally(() => process.exit(1));
+}
+
+process.on('unhandledRejection', reason => handleFatalRuntimeError('unhandled_rejection', reason));
+process.on('uncaughtException', error => handleFatalRuntimeError('uncaught_exception', error));
+
+// Start server only when run directly. Serverless hosts import the app.
+if (require.main === module) {
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.once(signal, () => {
+      shutdownRuntime({ signal })
+        .then(() => { process.exitCode = 0; })
+        .catch(() => { process.exitCode = 1; });
+    });
+  }
+  startDirectServer().catch(error => {
+    log('error', 'runtime_startup_failed', { error: serializeError(error) });
+    shutdownRuntime({ signal: 'startup_failed' })
+      .catch(() => {})
+      .finally(() => { process.exitCode = 1; });
+  });
+}
 
 module.exports = app;
 
