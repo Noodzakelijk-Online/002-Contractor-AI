@@ -540,6 +540,26 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       });
       attendanceAssignment = ledger.getJobDetail(job.id).assignments.find(record => record.id === attendanceAssignment.id);
     }
+    const hostedQualificationRequirement = ledger.createQualificationRequirement(job.id, {
+      credentialType: 'vca',
+      title: 'Hosted VCA site qualification',
+      role: 'Site installer'
+    }, { actor: 'postgres_contract_test' }).requirement;
+    const hostedCredentialRequest = ledger.requestWorkerCredential(attendanceWorker.id, {
+      credentialType: 'vca_basic',
+      issuer: 'Hosted SSVV source',
+      credentialNumber: `POSTGRES-VCA-${Date.now()}`,
+      issuedOn: new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10),
+      expiresOn: new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10),
+      evidenceReference: 'Hosted PostgreSQL retained VCA evidence'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(hostedCredentialRequest.approval.id, {
+      status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted worker credential source verified.'
+    });
+    const hostedCredential = ledger.getWorkerCredential(hostedCredentialRequest.credential.id);
+    assert.equal(hostedCredential.status, 'approved');
+    assert.equal(ledger.assessWorkerQualifications(attendanceWorker.id, { jobId: job.id, role: 'Site installer' }).status, 'ready');
+    assert.ok(ledger.getJobDetail(job.id).qualificationRequirements.some(item => item.id === hostedQualificationRequirement.id));
     const attendanceOrientation = ledger.createWorkerOrientation(job.id, {
       assignmentId: attendanceAssignment.id,
       workerId: attendanceWorker.id,
@@ -1180,7 +1200,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '034_weekly_timesheets');
+    assert.equal(migrations.currentVersion, '035_workforce_qualifications');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1261,12 +1281,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('034_weekly_timesheets'));
+  assert.deepEqual(versions, Array(4).fill('035_workforce_qualifications'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 34);
+    assert.equal(Number(migrationCount.count), 35);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1767,7 +1787,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '034_weekly_timesheets');
+    assert.equal(ledger.migrationStatus().currentVersion, '035_workforce_qualifications');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

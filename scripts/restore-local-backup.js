@@ -428,6 +428,26 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('035_workforce_qualifications')) {
+        for (const table of ['worker_credentials', 'job_qualification_requirements']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup workforce-qualification schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_worker_credentials_worker_type',
+          'idx_worker_credentials_expiry',
+          'idx_worker_credentials_pending',
+          'idx_worker_credentials_approved',
+          'idx_job_qualification_requirements_job',
+          'idx_job_qualification_requirements_status'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup workforce-qualification constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

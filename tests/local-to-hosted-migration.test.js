@@ -385,6 +385,23 @@ function createBackupFixture(t, suffix = 'success') {
     });
     attendanceAssignment = source.getJobDetail(job.id).assignments.find(item => item.id === attendanceAssignment.id);
   }
+  const qualificationRequirement = source.createQualificationRequirement(job.id, {
+    credentialType: 'vca',
+    title: 'Migration VCA site qualification',
+    role: 'Installer'
+  }, { actor: 'migration_fixture' }).requirement;
+  const credentialRequest = source.requestWorkerCredential(attendanceWorker.id, {
+    credentialType: 'vca_vol',
+    issuer: 'Migration SSVV source',
+    credentialNumber: `MIGRATION-VCA-${suffix}`,
+    issuedOn: new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10),
+    expiresOn: new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10),
+    evidenceReference: `Migration retained VCA evidence ${suffix}`
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(credentialRequest.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration worker credential source verified.'
+  });
+  const workerCredential = source.getWorkerCredential(credentialRequest.credential.id);
   const attendanceOrientation = source.createWorkerOrientation(job.id, {
     assignmentId: attendanceAssignment.id,
     workerId: attendanceWorker.id,
@@ -467,7 +484,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet };
+  return { attendanceSession, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -557,7 +574,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '034_weekly_timesheets');
+  assert.equal(migration.migrationVersion, '035_workforce_qualifications');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -611,6 +628,16 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedAttendance.status, 'checked_out');
     assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);
     assert.equal(migratedAttendance.data.payrollDerived, false);
+    const migratedCredential = hosted.getWorkerCredential(fixture.workerCredential.id);
+    assert.equal(migratedCredential.status, 'approved');
+    assert.equal(migratedCredential.snapshotHash, fixture.workerCredential.snapshotHash);
+    assert.equal(migratedCredential.credentialType, 'vca_vol');
+    assert.ok(detail.qualificationRequirements.some(item => item.id === fixture.qualificationRequirement.id && item.status === 'active'));
+    assert.equal(hosted.assessWorkerQualifications(migratedCredential.workerId, {
+      jobId: fixture.job.id,
+      role: 'Installer',
+      at: new Date().toISOString()
+    }).status, 'ready');
     const migratedTimesheet = hosted.getWeeklyTimesheet(fixture.weeklyTimesheet.id);
     assert.equal(migratedTimesheet.status, 'approved');
     assert.equal(migratedTimesheet.integrityValid, true);

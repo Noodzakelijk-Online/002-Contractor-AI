@@ -1307,6 +1307,7 @@ function projectFieldJobDetail(req, detail) {
     jhas: projectFieldRecords(detail.jhas),
     sdsSheets: projectFieldRecords(detail.sdsSheets),
     siteAccessLogs: projectFieldRecords(detail.siteAccessLogs),
+    qualificationRequirements: projectFieldRecords(detail.qualificationRequirements),
     assignments: projectFieldRecords(detail.assignments),
     tools: projectFieldRecords(detail.tools),
     materials: projectFieldRecords(detail.materials),
@@ -2814,6 +2815,44 @@ app.post('/api/ledger/jobs/:id/assignments/:assignmentId/release', (req, res) =>
   }));
 });
 
+app.get('/api/ledger/jobs/:id/qualification-requirements', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    requirements: operatingLedger.listQualificationRequirements({
+      jobId: req.params.id,
+      includeRetired: req.query.includeRetired || req.query.include_retired,
+      limit: req.query.limit
+    })
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/qualification-requirements', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createQualificationRequirement(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    qualificationRegister: operatingLedger.listQualificationRegister(),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/qualification-requirements/:requirementId/retirement', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestQualificationRequirementRetirement(
+      req.params.id,
+      req.params.requirementId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    job: operatingLedger.getJobDetail(req.params.id),
+    qualificationRegister: operatingLedger.listQualificationRegister(),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 202);
+});
+
 app.post('/api/ledger/jobs/:id/tools', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3757,6 +3796,13 @@ app.get('/api/ledger/workers', (req, res) => {
   });
 });
 
+app.get('/api/ledger/qualifications', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    qualificationRegister: operatingLedger.listQualificationRegister(req.query || {})
+  }));
+});
+
 app.get('/api/ledger/workers/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3781,6 +3827,31 @@ app.put('/api/ledger/workers/:id', (req, res) => {
     ),
     dashboard: operatingLedger.dashboardSummary()
   }));
+});
+
+app.get('/api/ledger/workers/:id/credentials', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    worker: operatingLedger.getWorker(req.params.id),
+    credentials: operatingLedger.listWorkerCredentials({
+      workerId: req.params.id,
+      includeHistory: req.query.includeHistory || req.query.include_history,
+      limit: req.query.limit
+    }),
+    catalog: operatingLedger.workforceQualificationCatalog()
+  }));
+});
+
+app.post('/api/ledger/workers/:id/credentials', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestWorkerCredential(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    worker: operatingLedger.getWorker(req.params.id),
+    qualificationRegister: operatingLedger.listQualificationRegister(),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
 });
 
 function requestWorkerRetirement(req, res) {

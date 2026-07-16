@@ -468,6 +468,20 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     const deniedFieldWorkerDirectory = await request(baseUrl, '/api/ledger/workers?limit=10', { headers: fieldHeaders });
     assert.equal(deniedFieldWorkerDirectory.response.status, 403);
     assert.equal(deniedFieldWorkerDirectory.body.error.code, 'insufficient_role');
+    const officeQualifications = await request(baseUrl, '/api/ledger/qualifications', { headers: officeHeaders });
+    assert.equal(officeQualifications.response.status, 200);
+    const approverQualifications = await request(baseUrl, '/api/ledger/qualifications', { headers: approverHeaders });
+    assert.equal(approverQualifications.response.status, 200);
+    const deniedFieldQualifications = await request(baseUrl, '/api/ledger/qualifications', { headers: fieldHeaders });
+    assert.equal(deniedFieldQualifications.response.status, 403);
+    assert.equal(deniedFieldQualifications.body.error.code, 'insufficient_role');
+    const deniedApproverCredentialMutation = await request(baseUrl, '/api/ledger/workers/field-worker-role-scope/credentials', {
+      method: 'POST',
+      headers: approverHeaders,
+      body: JSON.stringify({ credentialType: 'vca_basic', evidenceReference: 'Unauthorized approver mutation.' })
+    });
+    assert.equal(deniedApproverCredentialMutation.response.status, 403);
+    assert.equal(deniedApproverCredentialMutation.body.error.code, 'insufficient_role');
 
     const officeRetirementWorker = await request(baseUrl, '/api/ledger/workers', {
       method: 'POST',

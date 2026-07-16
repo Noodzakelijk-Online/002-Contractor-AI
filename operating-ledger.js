@@ -144,6 +144,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'instructions', label: 'Worker instructions', table: 'worker_instructions', detailKey: 'workerInstructions' }
   ],
   'safety-quality': [
+    { key: 'qualification', label: 'Worker qualifications', table: 'job_qualification_requirements', detailKey: 'qualificationRequirements', readyStatuses: ['active', 'pending_retirement'] },
     { key: 'orientation', label: 'Worker orientation', table: 'worker_orientations', detailKey: 'orientations' },
     { key: 'jha', label: 'JHA / risk assessment', table: 'jha_records', detailKey: 'jhas' },
     { key: 'sds', label: 'SDS register', table: 'sds_sheets', detailKey: 'sdsSheets' },
@@ -181,7 +182,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'wkb', label: 'Wkb-style handover dossier', table: 'documents', detailKey: 'documents', recordType: 'handover_issue_package', readyStatuses: ['prepared'] },
     { key: 'invoice', label: 'VAT/UBL invoice signal', table: 'invoices', detailKey: 'invoices' },
     { key: 'credit_note', label: 'Invoice correction signal', table: 'credit_notes', detailKey: 'creditNotes' },
-    { key: 'vca', label: 'VCA/SDS safety proof', table: 'sds_sheets', detailKey: 'sdsSheets' },
+    { key: 'vca', label: 'Worker VCA requirement', table: 'job_qualification_requirements', detailKey: 'qualificationRequirements', credentialType: 'vca', readyStatuses: ['active', 'pending_retirement'] },
     { key: 'site_access', label: 'Site access proof', table: 'site_access_logs', detailKey: 'siteAccessLogs' },
     { key: 'approval_audit', label: 'Approval audit', table: 'approvals', detailKey: 'approvals' },
     { key: 'audit', label: 'Change audit', table: 'audit_events', detailKey: 'audit' }
@@ -294,6 +295,44 @@ const ASSIGNMENT_CLOSED_STATUSES = new Set([
   'declined',
   'offline'
 ]);
+
+const WORKFORCE_CREDENTIAL_CATALOG = Object.freeze([
+  { key: 'vca_basic', label: 'VCA Basic', requirementKeys: ['vca', 'vca_basic'] },
+  { key: 'vca_vol', label: 'VCA VOL', requirementKeys: ['vca', 'vca_vol'] },
+  { key: 'gpi', label: 'GPI construction site access', requirementKeys: ['gpi'] },
+  { key: 'bhv', label: 'BHV emergency response', requirementKeys: ['bhv', 'first_aid'] },
+  { key: 'first_aid', label: 'First aid', requirementKeys: ['first_aid'] },
+  { key: 'forklift', label: 'Forklift operator', requirementKeys: ['forklift', 'equipment_operator'] },
+  { key: 'aerial_work_platform', label: 'Aerial work platform operator', requirementKeys: ['aerial_work_platform', 'equipment_operator'] },
+  { key: 'excavator', label: 'Excavator operator', requirementKeys: ['excavator', 'equipment_operator'] },
+  { key: 'electrical_nen3140', label: 'NEN 3140 electrical qualification', requirementKeys: ['electrical_nen3140', 'electrical'] },
+  { key: 'scaffolding', label: 'Scaffolding qualification', requirementKeys: ['scaffolding'] },
+  { key: 'asbestos', label: 'Asbestos safety qualification', requirementKeys: ['asbestos'] },
+  { key: 'driving_license', label: 'Driving licence', requirementKeys: ['driving_license'] },
+  { key: 'other', label: 'Other retained qualification', requirementKeys: ['other'] }
+]);
+
+const WORKFORCE_REQUIREMENT_CATALOG = Object.freeze([
+  { key: 'vca', label: 'VCA (Basic or VOL)' },
+  { key: 'vca_basic', label: 'VCA Basic' },
+  { key: 'vca_vol', label: 'VCA VOL' },
+  { key: 'gpi', label: 'GPI construction site access' },
+  { key: 'bhv', label: 'BHV emergency response' },
+  { key: 'first_aid', label: 'First aid' },
+  { key: 'equipment_operator', label: 'Equipment operator qualification' },
+  { key: 'forklift', label: 'Forklift operator' },
+  { key: 'aerial_work_platform', label: 'Aerial work platform operator' },
+  { key: 'excavator', label: 'Excavator operator' },
+  { key: 'electrical', label: 'Electrical qualification' },
+  { key: 'electrical_nen3140', label: 'NEN 3140 electrical qualification' },
+  { key: 'scaffolding', label: 'Scaffolding qualification' },
+  { key: 'asbestos', label: 'Asbestos safety qualification' },
+  { key: 'driving_license', label: 'Driving licence' },
+  { key: 'other', label: 'Other retained qualification' }
+]);
+
+const WORKFORCE_CREDENTIAL_BY_KEY = new Map(WORKFORCE_CREDENTIAL_CATALOG.map(item => [item.key, item]));
+const WORKFORCE_REQUIREMENT_BY_KEY = new Map(WORKFORCE_REQUIREMENT_CATALOG.map(item => [item.key, item]));
 
 const TOOL_RESERVATION_CLOSED_STATUSES = new Set([
   'released',
@@ -532,7 +571,8 @@ function capabilityRequirementActionTarget(requirementKey) {
     orientation: 'orientation_form',
     jha: 'jha_form',
     sds: 'sds_form',
-    vca: 'sds_form',
+    qualification: 'qualification_control',
+    vca: 'qualification_control',
     permit: 'permit_form',
     inspection: 'inspection_form',
     observation: 'observation_form',
@@ -593,6 +633,8 @@ const CAPABILITY_MANUAL_COMMITMENT_REQUIREMENTS = new Set([
   'tools',
   'equipment',
   'assignment',
+  'qualification',
+  'vca',
   'orientation',
   'site_access',
   'attendance',
@@ -2732,6 +2774,66 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON weekly_timesheets(worker_id, period_start) WHERE status = 'approved';
         CREATE INDEX IF NOT EXISTS idx_timesheet_exports_period
           ON timesheet_exports(period_start DESC, created_at DESC);
+      `);
+    }
+  },
+  {
+    version: '035_workforce_qualifications',
+    description: 'Retain approval-backed worker credential revisions and approval-gated job qualification requirements.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS worker_credentials (
+          id TEXT PRIMARY KEY,
+          worker_id TEXT NOT NULL,
+          credential_type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          issuer TEXT,
+          credential_number TEXT,
+          issued_on TEXT,
+          expires_on TEXT,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          evidence_reference TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT,
+          supersedes_credential_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(worker_id) REFERENCES workers(id),
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          FOREIGN KEY(supersedes_credential_id) REFERENCES worker_credentials(id),
+          UNIQUE(worker_id, credential_type, version_number)
+        );
+        CREATE TABLE IF NOT EXISTS job_qualification_requirements (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          credential_type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          role_key TEXT NOT NULL DEFAULT '*',
+          mandatory INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'active',
+          retirement_approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(retirement_approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, credential_type, role_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_credentials_worker_type
+          ON worker_credentials(worker_id, credential_type, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_worker_credentials_expiry
+          ON worker_credentials(status, expires_on, worker_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_credentials_pending
+          ON worker_credentials(worker_id, credential_type) WHERE status = 'pending_approval';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_credentials_approved
+          ON worker_credentials(worker_id, credential_type) WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_job_qualification_requirements_job
+          ON job_qualification_requirements(job_id, status, credential_type);
+        CREATE INDEX IF NOT EXISTS idx_job_qualification_requirements_status
+          ON job_qualification_requirements(status, updated_at DESC);
       `);
     }
   }
@@ -6990,6 +7092,12 @@ class ContractorOperatingLedger {
       active: Number(row.active_count || 0),
       dormant: Number(row.dormant_count || 0)
     }]));
+    const credentialsByWorker = new Map();
+    for (const row of this.db.prepare("SELECT * FROM worker_credentials WHERE status IN ('pending_approval', 'approved') ORDER BY worker_id, credential_type, version_number DESC").all()) {
+      const credentials = credentialsByWorker.get(row.worker_id) || [];
+      credentials.push(this.mapWorkerCredential(row));
+      credentialsByWorker.set(row.worker_id, credentials);
+    }
     return this.db.prepare(`
       SELECT * FROM workers
       WHERE (? = '' OR lower(name || ' ' || COALESCE(role, '') || ' ' || COALESCE(home_region, '') || ' ' || COALESCE(email, '') || ' ' || skills_json) LIKE ?)
@@ -7002,7 +7110,8 @@ class ContractorOperatingLedger {
         retirementApprovalId: pendingRetirements.get(worker.id) || null,
         activeAssignmentCount: workerAssignments.active,
         dormantAssignmentCount: workerAssignments.dormant,
-        retainedAssignmentCount: workerAssignments.active + workerAssignments.dormant
+        retainedAssignmentCount: workerAssignments.active + workerAssignments.dormant,
+        qualification: this.workerCredentialSummaryFromCredentials(credentialsByWorker.get(worker.id) || [])
       };
     }).filter(worker => !status || worker.status === status).slice(0, limit);
   }
@@ -7027,7 +7136,8 @@ class ContractorOperatingLedger {
       retirementApprovalId: pendingRetirement?.id || null,
       activeAssignmentCount: assignmentScope.operational.length,
       dormantAssignmentCount: assignmentScope.dormant.length,
-      retainedAssignmentCount: assignmentScope.retained.length
+      retainedAssignmentCount: assignmentScope.retained.length,
+      qualification: this.workerCredentialSummary(workerId)
     };
   }
 
@@ -7043,8 +7153,660 @@ class ContractorOperatingLedger {
         else summary.unavailable += 1;
       }
       if (worker.retirementApprovalId) summary.pendingRetirement += 1;
+      if (worker.qualification?.approved) summary.credentialed += 1;
+      summary.pendingCredentials += Number(worker.qualification?.pending || 0);
+      summary.expiringCredentials += Number(worker.qualification?.expiring || 0);
+      summary.expiredCredentials += Number(worker.qualification?.expired || 0);
       return summary;
-    }, { total: 0, active: 0, available: 0, unavailable: 0, pendingRetirement: 0, retired: 0, activeAssignments: 0, dormantAssignments: 0 });
+    }, { total: 0, active: 0, available: 0, unavailable: 0, pendingRetirement: 0, retired: 0, activeAssignments: 0, dormantAssignments: 0, credentialed: 0, pendingCredentials: 0, expiringCredentials: 0, expiredCredentials: 0 });
+  }
+
+  workforceQualificationCatalog() {
+    return {
+      credentials: WORKFORCE_CREDENTIAL_CATALOG.map(item => ({ key: item.key, label: item.label })),
+      requirements: WORKFORCE_REQUIREMENT_CATALOG.map(item => ({ key: item.key, label: item.label }))
+    };
+  }
+
+  normalizeWorkerCredentialType(value) {
+    const credentialType = normalizeStatus(value, '');
+    if (!WORKFORCE_CREDENTIAL_BY_KEY.has(credentialType)) {
+      throw ledgerInputError(
+        'worker_credential_type_invalid',
+        `Credential type must be one of: ${WORKFORCE_CREDENTIAL_CATALOG.map(item => item.key).join(', ')}.`
+      );
+    }
+    return credentialType;
+  }
+
+  normalizeQualificationRequirementType(value) {
+    const credentialType = normalizeStatus(value, '');
+    if (!WORKFORCE_REQUIREMENT_BY_KEY.has(credentialType)) {
+      throw ledgerInputError(
+        'qualification_requirement_type_invalid',
+        `Qualification requirement must be one of: ${WORKFORCE_REQUIREMENT_CATALOG.map(item => item.key).join(', ')}.`
+      );
+    }
+    return credentialType;
+  }
+
+  normalizeQualificationRole(value) {
+    const role = normalizeText(value, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!role || role === 'all' || role === 'all_roles') return '*';
+    if (role.length > 80) throw ledgerInputError('qualification_role_invalid', 'Qualification role must be 80 characters or fewer.');
+    return role;
+  }
+
+  normalizeCredentialDate(value, label, options = {}) {
+    if (value === undefined || value === null || value === '') return null;
+    const raw = normalizeText(value, '');
+    const timestamp = Date.parse(raw.length === 10 ? `${raw}T00:00:00.000Z` : raw);
+    if (!Number.isFinite(timestamp)) throw ledgerInputError('worker_credential_date_invalid', `${label} must be a valid date.`);
+    const normalized = new Date(timestamp).toISOString().slice(0, 10);
+    if (options.notFuture && timestamp > Date.now() + 24 * 60 * 60 * 1000) {
+      throw ledgerInputError('worker_credential_issued_future', `${label} cannot be in the future.`);
+    }
+    return normalized;
+  }
+
+  workerCredentialSnapshot(record = {}) {
+    return {
+      workerId: record.worker_id || record.workerId,
+      credentialType: record.credential_type || record.credentialType,
+      title: record.title,
+      issuer: record.issuer || null,
+      credentialNumber: record.credential_number || record.credentialNumber || null,
+      issuedOn: record.issued_on || record.issuedOn || null,
+      expiresOn: record.expires_on || record.expiresOn || null,
+      versionNumber: normalizeNumber(record.version_number ?? record.versionNumber, 1),
+      evidenceReference: record.evidence_reference || record.evidenceReference,
+      supersedesCredentialId: record.supersedes_credential_id || record.supersedesCredentialId || null
+    };
+  }
+
+  verifyWorkerCredentialSnapshot(row) {
+    const snapshot = fromJson(row?.snapshot_json, null);
+    if (!row || !snapshot || sha256Json(snapshot) !== row.snapshot_hash || sha256Json(this.workerCredentialSnapshot(row)) !== row.snapshot_hash) {
+      throw ledgerInputError(
+        'worker_credential_snapshot_integrity_failed',
+        'The retained worker credential snapshot failed integrity verification.',
+        { credentialId: row?.id || null },
+        409
+      );
+    }
+    return snapshot;
+  }
+
+  listWorkerCredentials(filters = {}) {
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const credentialType = normalizeStatus(filters.credentialType || filters.credential_type, '');
+    const includeHistory = normalizeBoolean(filters.includeHistory ?? filters.include_history, false);
+    const limit = safeLimit(filters.limit, 250, 1000);
+    const clauses = [];
+    const values = [];
+    if (workerId) { clauses.push('worker_credentials.worker_id = ?'); values.push(workerId); }
+    if (status) { clauses.push('worker_credentials.status = ?'); values.push(status); }
+    if (credentialType) { clauses.push('worker_credentials.credential_type = ?'); values.push(credentialType); }
+    if (!includeHistory && !status) clauses.push("worker_credentials.status IN ('pending_approval', 'approved')");
+    return this.db.prepare(`
+      SELECT worker_credentials.*, workers.name AS worker_name
+      FROM worker_credentials
+      JOIN workers ON workers.id = worker_credentials.worker_id
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY workers.name ASC, worker_credentials.credential_type ASC, worker_credentials.version_number DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapWorkerCredential(row));
+  }
+
+  getWorkerCredential(credentialId) {
+    const row = this.db.prepare(`
+      SELECT worker_credentials.*, workers.name AS worker_name
+      FROM worker_credentials JOIN workers ON workers.id = worker_credentials.worker_id
+      WHERE worker_credentials.id = ?
+    `).get(String(credentialId || ''));
+    if (!row) throw ledgerInputError('worker_credential_not_found', 'Worker credential not found.', null, 404);
+    this.verifyWorkerCredentialSnapshot(row);
+    return this.mapWorkerCredential(row);
+  }
+
+  requestWorkerCredential(workerId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const worker = this.getWorker(workerId);
+      if (worker.status === 'retired') {
+        throw ledgerInputError('worker_credential_worker_retired', 'New credential evidence cannot be requested for a retired worker.', { workerId }, 409);
+      }
+      const credentialType = this.normalizeWorkerCredentialType(payload.credentialType || payload.credential_type);
+      const catalogEntry = WORKFORCE_CREDENTIAL_BY_KEY.get(credentialType);
+      const title = normalizeText(payload.title, catalogEntry.label);
+      if (title.length < 2 || title.length > 160) throw ledgerInputError('worker_credential_title_invalid', 'Credential title must be between 2 and 160 characters.');
+      const issuer = normalizeText(payload.issuer, '');
+      if (issuer.length > 160) throw ledgerInputError('worker_credential_issuer_invalid', 'Credential issuer must be 160 characters or fewer.');
+      const credentialNumber = normalizeText(payload.credentialNumber || payload.credential_number, '');
+      if (credentialNumber.length > 120) throw ledgerInputError('worker_credential_number_invalid', 'Credential number must be 120 characters or fewer.');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 4 || evidenceReference.length > 500) {
+        throw ledgerInputError('worker_credential_evidence_required', 'Credential evidence reference must be between 4 and 500 characters.');
+      }
+      const issuedOn = this.normalizeCredentialDate(payload.issuedOn || payload.issued_on, 'Issued date', { notFuture: true });
+      const expiresOn = this.normalizeCredentialDate(payload.expiresOn || payload.expires_on, 'Expiry date');
+      if (issuedOn && expiresOn && Date.parse(expiresOn) < Date.parse(issuedOn)) {
+        throw ledgerInputError('worker_credential_expiry_before_issue', 'Credential expiry date cannot be before its issued date.');
+      }
+      if (expiresOn && Date.parse(`${expiresOn}T23:59:59.999Z`) < Date.now()) {
+        throw ledgerInputError('worker_credential_already_expired', 'Expired credential evidence cannot be submitted as a current qualification.');
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM worker_credentials
+        WHERE worker_id = ? AND credential_type = ? AND status = 'pending_approval'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(workerId, credentialType);
+      const approved = this.db.prepare(`
+        SELECT * FROM worker_credentials
+        WHERE worker_id = ? AND credential_type = ? AND status = 'approved'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(workerId, credentialType);
+      const latest = this.db.prepare(`
+        SELECT * FROM worker_credentials WHERE worker_id = ? AND credential_type = ?
+        ORDER BY version_number DESC LIMIT 1
+      `).get(workerId, credentialType);
+      const versionNumber = pending
+        ? normalizeNumber(pending.version_number, 1)
+        : normalizeNumber(latest?.version_number, 0) + 1;
+      const snapshot = this.workerCredentialSnapshot({
+        workerId,
+        credentialType,
+        title,
+        issuer: issuer || null,
+        credentialNumber: credentialNumber || null,
+        issuedOn,
+        expiresOn,
+        versionNumber,
+        evidenceReference,
+        supersedesCredentialId: approved?.id || null
+      });
+      const snapshotHash = sha256Json(snapshot);
+      if (pending) {
+        if (pending.snapshot_hash === snapshotHash) {
+          return { credential: this.mapWorkerCredential({ ...pending, worker_name: worker.name }), approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)), replayed: true };
+        }
+        throw ledgerInputError(
+          'worker_credential_review_pending',
+          `${catalogEntry.label} already has a pending review for ${worker.name}. Resolve it before submitting different evidence.`,
+          { credentialId: pending.id, approvalId: pending.approval_id },
+          409
+        );
+      }
+      const id = makeId('credential');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO worker_credentials (
+          id, worker_id, credential_type, title, issuer, credential_number, issued_on, expires_on,
+          version_number, status, evidence_reference, snapshot_hash, snapshot_json, approval_id,
+          supersedes_credential_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, NULL, ?, ?, ?, ?)
+      `).run(
+        id, workerId, credentialType, title, issuer || null, credentialNumber || null, issuedOn, expiresOn,
+        versionNumber, evidenceReference, snapshotHash, toJson(snapshot), approved?.id || null,
+        toJson({ source: payload.source || 'qualification_control', requestedBy: options.actor || payload.actor || 'dashboard' }), timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'worker_credential',
+        targetId: id,
+        approvalType: 'worker_credential_verification',
+        requestedBy: options.actor || payload.actor || 'dashboard',
+        summary: `Verify ${catalogEntry.label} for ${worker.name}`,
+        reason: `Verify retained credential identity, issuer, dates, and evidence reference before this qualification can satisfy job readiness.`,
+        data: { credentialId: id, workerId, workerName: worker.name, ...snapshot, snapshotHash }
+      }, { actor: options.actor || payload.actor || 'dashboard', audit: false });
+      this.db.prepare('UPDATE worker_credentials SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const credential = this.getWorkerCredential(id);
+      this.audit({
+        entityType: 'worker_credential', entityId: id, action: 'request_worker_credential_verification',
+        actor: options.actor || payload.actor || 'dashboard', after: credential,
+        metadata: { workerId, credentialType, approvalId: approval.id, snapshotHash, externalCommitments: 0 }
+      });
+      return { credential, approval, replayed: false };
+    });
+  }
+
+  applyWorkerCredentialApproval(credentialId, timestamp = nowIso()) {
+    const row = this.db.prepare('SELECT * FROM worker_credentials WHERE id = ?').get(credentialId);
+    if (!row || row.status !== 'pending_approval') return row ? this.mapWorkerCredential(row) : null;
+    const snapshot = this.verifyWorkerCredentialSnapshot(row);
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE target_type = 'worker_credential' AND target_id = ? AND status = 'approved'
+      ORDER BY resolved_at DESC, created_at DESC LIMIT 1
+    `).get(credentialId);
+    if (!approval) {
+      throw ledgerInputError('worker_credential_approval_missing', 'Verified worker credentials require a retained approval resolution.', { credentialId }, 409);
+    }
+    if (snapshot.expiresOn && Date.parse(`${snapshot.expiresOn}T23:59:59.999Z`) < Date.now()) {
+      throw ledgerInputError('worker_credential_expired_before_approval', 'This credential expired before its verification decision was completed.', { credentialId, expiresOn: snapshot.expiresOn }, 409);
+    }
+    const worker = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(row.worker_id);
+    if (!worker || normalizeStatus(worker.status, '') === 'retired') {
+      throw ledgerInputError('worker_credential_worker_inactive', 'Credential verification cannot complete for a missing or retired worker.', { workerId: row.worker_id }, 409);
+    }
+    const previous = this.db.prepare(`
+      SELECT * FROM worker_credentials
+      WHERE worker_id = ? AND credential_type = ? AND status = 'approved' AND id <> ?
+      ORDER BY version_number DESC LIMIT 1
+    `).get(row.worker_id, row.credential_type, credentialId);
+    if (previous) {
+      this.db.prepare("UPDATE worker_credentials SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'approved'")
+        .run(timestamp, previous.id);
+    }
+    const data = fromJson(row.data_json, {});
+    this.db.prepare(`
+      UPDATE worker_credentials
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...data,
+      verifiedAt: approval.resolved_at || timestamp,
+      verifiedBy: approval.resolved_by || approval.requested_by || 'approval',
+      approvalId: approval.id
+    }), timestamp, credentialId);
+    const after = this.getWorkerCredential(credentialId);
+    this.audit({
+      entityType: 'worker_credential', entityId: credentialId, action: 'verify_worker_credential',
+      actor: approval.resolved_by || 'approval', before: this.mapWorkerCredential(row), after,
+      metadata: { workerId: row.worker_id, credentialType: row.credential_type, approvalId: approval.id, supersededCredentialId: previous?.id || null, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  restoreRejectedWorkerCredential(approval, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM worker_credentials WHERE id = ?').get(approval.target_id);
+    if (!row || row.status !== 'pending_approval') return null;
+    const timestamp = options.timestamp || nowIso();
+    const data = fromJson(row.data_json, {});
+    this.db.prepare(`
+      UPDATE worker_credentials SET status = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(status, toJson({
+      ...data,
+      decision: { status, resolvedAt: timestamp, resolvedBy: options.actor || 'approval', reason: options.reason || null }
+    }), timestamp, row.id);
+    return this.mapWorkerCredential(this.db.prepare('SELECT * FROM worker_credentials WHERE id = ?').get(row.id));
+  }
+
+  listQualificationRequirements(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const includeRetired = normalizeBoolean(filters.includeRetired ?? filters.include_retired, false);
+    const limit = safeLimit(filters.limit, 250, 1000);
+    const clauses = [];
+    const values = [];
+    if (jobId) { clauses.push('requirements.job_id = ?'); values.push(jobId); }
+    if (status) { clauses.push('requirements.status = ?'); values.push(status); }
+    if (!includeRetired && !status) clauses.push("requirements.status IN ('active', 'pending_retirement')");
+    return this.db.prepare(`
+      SELECT requirements.*, jobs.title AS job_title
+      FROM job_qualification_requirements requirements
+      JOIN jobs ON jobs.id = requirements.job_id
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY jobs.title ASC, requirements.credential_type ASC, requirements.role_key ASC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapQualificationRequirement(row));
+  }
+
+  createQualificationRequirement(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const credentialType = this.normalizeQualificationRequirementType(payload.credentialType || payload.credential_type);
+      const catalogEntry = WORKFORCE_REQUIREMENT_BY_KEY.get(credentialType);
+      const roleKey = this.normalizeQualificationRole(payload.role || payload.roleKey || payload.role_key);
+      const title = normalizeText(payload.title, catalogEntry.label);
+      if (title.length < 2 || title.length > 160) throw ledgerInputError('qualification_requirement_title_invalid', 'Requirement title must be between 2 and 160 characters.');
+      const mandatory = normalizeBoolean(payload.mandatory, true);
+      const existing = this.db.prepare(`
+        SELECT * FROM job_qualification_requirements
+        WHERE job_id = ? AND credential_type = ? AND role_key = ? LIMIT 1
+      `).get(jobId, credentialType, roleKey);
+      const timestamp = nowIso();
+      if (existing) {
+        if (existing.status === 'pending_retirement') {
+          throw ledgerInputError(
+            'qualification_requirement_retirement_pending',
+            'This qualification requirement has a pending retirement decision.',
+            { requirementId: existing.id, approvalId: existing.retirement_approval_id },
+            409
+          );
+        }
+        if (existing.status === 'active') return { requirement: this.mapQualificationRequirement({ ...existing, job_title: job.title }), replayed: true };
+        this.db.prepare(`
+          UPDATE job_qualification_requirements
+          SET title = ?, mandatory = ?, status = 'active', retirement_approval_id = NULL, data_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          title, mandatory ? 1 : 0,
+          toJson({ ...fromJson(existing.data_json, {}), restoredAt: timestamp, restoredBy: options.actor || payload.actor || 'dashboard' }),
+          timestamp, existing.id
+        );
+        const restored = this.mapQualificationRequirement({
+          ...this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(existing.id),
+          job_title: job.title
+        });
+        this.audit({ entityType: 'job_qualification_requirement', entityId: existing.id, jobId, action: 'restore_qualification_requirement', actor: options.actor || payload.actor || 'dashboard', before: this.mapQualificationRequirement(existing), after: restored, metadata: { externalCommitments: 0 } });
+        return { requirement: restored, replayed: false };
+      }
+      const id = makeId('qualification');
+      this.db.prepare(`
+        INSERT INTO job_qualification_requirements (
+          id, job_id, credential_type, title, role_key, mandatory, status,
+          retirement_approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?, ?)
+      `).run(
+        id, jobId, credentialType, title, roleKey, mandatory ? 1 : 0,
+        toJson({ source: payload.source || 'qualification_control', createdBy: options.actor || payload.actor || 'dashboard' }),
+        timestamp, timestamp
+      );
+      const requirement = this.mapQualificationRequirement({
+        ...this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(id),
+        job_title: job.title
+      });
+      this.audit({ entityType: 'job_qualification_requirement', entityId: id, jobId, action: 'create_qualification_requirement', actor: options.actor || payload.actor || 'dashboard', after: requirement, metadata: { credentialType, roleKey, mandatory, externalCommitments: 0 } });
+      return { requirement, replayed: false };
+    });
+  }
+
+  requestQualificationRequirementRetirement(jobId, requirementId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ? AND job_id = ?').get(requirementId, jobId);
+      if (!row) throw ledgerInputError('qualification_requirement_not_found', 'Qualification requirement not found for this job.', null, 404);
+      if (row.status === 'retired') return { requirement: this.mapQualificationRequirement({ ...row, job_title: job.title }), approval: null, replayed: true };
+      if (row.status === 'pending_retirement') {
+        const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.retirement_approval_id);
+        return { requirement: this.mapQualificationRequirement({ ...row, job_title: job.title }), approval: approval ? this.mapApproval(approval) : null, replayed: true };
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) throw ledgerInputError('qualification_requirement_retirement_reason_required', 'Removing a qualification requirement requires an operational reason of at least eight characters.');
+      const timestamp = nowIso();
+      const before = this.mapQualificationRequirement({ ...row, job_title: job.title });
+      const approval = this.createApproval({
+        targetType: 'job_qualification_requirement_retirement',
+        targetId: row.id,
+        jobId,
+        approvalType: 'safety_requirement_retirement',
+        requestedBy: options.actor || payload.actor || 'dashboard',
+        summary: `Remove ${row.title} requirement from ${job.title}`,
+        reason,
+        data: { requirementId: row.id, jobId, jobTitle: job.title, credentialType: row.credential_type, title: row.title, roleKey: row.role_key, mandatory: Boolean(row.mandatory) }
+      }, { actor: options.actor || payload.actor || 'dashboard', audit: false });
+      this.db.prepare(`
+        UPDATE job_qualification_requirements SET status = 'pending_retirement', retirement_approval_id = ?, updated_at = ? WHERE id = ?
+      `).run(approval.id, timestamp, row.id);
+      const requirement = this.mapQualificationRequirement({
+        ...this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(row.id),
+        job_title: job.title
+      });
+      this.audit({ entityType: 'job_qualification_requirement', entityId: row.id, jobId, action: 'request_qualification_requirement_retirement', actor: options.actor || payload.actor || 'dashboard', before, after: requirement, metadata: { approvalId: approval.id, externalCommitments: 0 } });
+      return { requirement, approval, replayed: false };
+    });
+  }
+
+  applyQualificationRequirementRetirement(requirementId, timestamp = nowIso()) {
+    const row = this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(requirementId);
+    if (!row || row.status !== 'pending_retirement') return row ? this.mapQualificationRequirement(row) : null;
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE target_type = 'job_qualification_requirement_retirement' AND target_id = ? AND status = 'approved'
+      ORDER BY resolved_at DESC, created_at DESC LIMIT 1
+    `).get(requirementId);
+    if (!approval || approval.id !== row.retirement_approval_id) {
+      throw ledgerInputError('qualification_requirement_retirement_approval_missing', 'Removing a qualification requirement requires its retained approval resolution.', { requirementId }, 409);
+    }
+    const before = this.mapQualificationRequirement(row);
+    this.db.prepare("UPDATE job_qualification_requirements SET status = 'retired', updated_at = ? WHERE id = ? AND status = 'pending_retirement'")
+      .run(timestamp, requirementId);
+    const after = this.mapQualificationRequirement(this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(requirementId));
+    this.audit({ entityType: 'job_qualification_requirement', entityId: requirementId, jobId: row.job_id, action: 'retire_qualification_requirement', actor: approval.resolved_by || 'approval', before, after, metadata: { approvalId: approval.id, externalCommitments: 0 } });
+    return after;
+  }
+
+  restoreRejectedQualificationRequirementRetirement(approval, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(approval.target_id);
+    if (!row || row.status !== 'pending_retirement') return null;
+    const timestamp = options.timestamp || nowIso();
+    const data = fromJson(row.data_json, {});
+    this.db.prepare(`
+      UPDATE job_qualification_requirements
+      SET status = 'active', retirement_approval_id = NULL, data_json = ?, updated_at = ? WHERE id = ?
+    `).run(toJson({
+      ...data,
+      retirementDecision: { status, approvalId: approval.id, resolvedAt: timestamp, resolvedBy: options.actor || 'approval', reason: options.reason || null }
+    }), timestamp, row.id);
+    return this.mapQualificationRequirement(this.db.prepare('SELECT * FROM job_qualification_requirements WHERE id = ?').get(row.id));
+  }
+
+  credentialSatisfiesRequirement(credentialType, requirementType) {
+    const credential = WORKFORCE_CREDENTIAL_BY_KEY.get(normalizeStatus(credentialType, ''));
+    return Boolean(credential?.requirementKeys.includes(normalizeStatus(requirementType, '')));
+  }
+
+  assessWorkerQualifications(workerId, options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const roleKey = this.normalizeQualificationRole(options.role || options.roleKey || options.role_key);
+    const atValue = options.at || options.plannedEnd || options.planned_end || options.plannedStart || options.planned_start || nowIso();
+    const atTimestamp = Date.parse(atValue);
+    if (!Number.isFinite(atTimestamp)) throw ledgerInputError('qualification_assessment_date_invalid', 'Qualification assessment date is invalid.');
+    const at = new Date(atTimestamp).toISOString();
+    const scopedRequirements = Array.isArray(options.requirements)
+      ? options.requirements
+      : jobId ? this.listQualificationRequirements({ jobId, limit: 500 }) : [];
+    const requirements = scopedRequirements.filter(requirement => requirement.roleKey === '*' || requirement.roleKey === roleKey);
+    const credentialRows = Array.isArray(options.credentialRows) ? options.credentialRows : this.db.prepare(`
+      SELECT worker_credentials.*, workers.name AS worker_name
+      FROM worker_credentials JOIN workers ON workers.id = worker_credentials.worker_id
+      WHERE worker_credentials.worker_id = ? AND worker_credentials.status IN ('approved', 'pending_approval')
+      ORDER BY worker_credentials.version_number DESC
+    `).all(workerId);
+    const approved = credentialRows.filter(row => row.status === 'approved');
+    const pending = credentialRows.filter(row => row.status === 'pending_approval');
+    const blockers = [];
+    const warnings = [];
+    const items = [];
+    for (const requirement of requirements) {
+      const candidates = approved.filter(row => this.credentialSatisfiesRequirement(row.credential_type, requirement.credentialType));
+      const pendingCandidate = pending.find(row => this.credentialSatisfiesRequirement(row.credential_type, requirement.credentialType));
+      let credential = null;
+      let integrityError = null;
+      for (const candidate of candidates) {
+        try {
+          this.verifyWorkerCredentialSnapshot(candidate);
+          credential = candidate;
+          break;
+        } catch (error) {
+          integrityError = error;
+        }
+      }
+      const expiryTimestamp = credential?.expires_on ? Date.parse(`${credential.expires_on}T23:59:59.999Z`) : null;
+      const expired = credential && Number.isFinite(expiryTimestamp) && expiryTimestamp < atTimestamp;
+      const expiresSoon = credential && Number.isFinite(expiryTimestamp)
+        && expiryTimestamp >= atTimestamp && expiryTimestamp <= atTimestamp + 30 * 24 * 60 * 60 * 1000;
+      let status = 'ready';
+      let message = null;
+      if (integrityError && !credential) {
+        status = 'integrity_failed';
+        message = `${requirement.title} evidence failed integrity verification.`;
+      } else if (!credential) {
+        status = pendingCandidate ? 'pending_approval' : 'missing';
+        message = pendingCandidate
+          ? `${requirement.title} evidence is waiting for approval.`
+          : `${requirement.title} evidence is missing.`;
+      } else if (expired) {
+        status = 'expired';
+        message = `${requirement.title} expired on ${credential.expires_on}.`;
+      } else if (expiresSoon) {
+        status = 'expiring';
+        message = `${requirement.title} expires on ${credential.expires_on}.`;
+      }
+      const mappedCredential = credential ? this.mapWorkerCredential(credential) : null;
+      const item = {
+        requirement,
+        credential: mappedCredential,
+        pendingCredentialId: pendingCandidate?.id || null,
+        pendingApprovalId: pendingCandidate?.approval_id || null,
+        status,
+        ready: status === 'ready' || status === 'expiring',
+        message
+      };
+      items.push(item);
+      if (!item.ready && requirement.mandatory) {
+        blockers.push({
+          type: `worker_qualification_${status}`,
+          severity: 'high',
+          requirementId: requirement.id,
+          credentialType: requirement.credentialType,
+          pendingCredentialId: item.pendingCredentialId,
+          approvalId: item.pendingApprovalId,
+          message
+        });
+      } else if (message) {
+        warnings.push({
+          type: status === 'expiring' ? 'worker_qualification_expiring' : `worker_qualification_${status}`,
+          severity: status === 'expiring' ? 'medium' : 'low',
+          requirementId: requirement.id,
+          credentialId: mappedCredential?.id || null,
+          credentialType: requirement.credentialType,
+          message
+        });
+      }
+    }
+    return {
+      workerId,
+      jobId: jobId || null,
+      roleKey,
+      assessedAt: at,
+      status: blockers.length ? 'blocked' : warnings.length ? 'review' : requirements.length ? 'ready' : 'not_required',
+      ready: blockers.length === 0,
+      requirementCount: requirements.length,
+      blockers,
+      warnings,
+      items
+    };
+  }
+
+  workerCredentialSummaryFromCredentials(credentials = []) {
+    const approved = credentials.filter(item => item.status === 'approved');
+    const pending = credentials.filter(item => item.status === 'pending_approval');
+    const now = Date.now();
+    const expiresSoonAt = now + 30 * 24 * 60 * 60 * 1000;
+    const expired = approved.filter(item => item.expiresOn && Date.parse(`${item.expiresOn}T23:59:59.999Z`) < now);
+    const expiring = approved.filter(item => {
+      if (!item.expiresOn) return false;
+      const timestamp = Date.parse(`${item.expiresOn}T23:59:59.999Z`);
+      return timestamp >= now && timestamp <= expiresSoonAt;
+    });
+    return {
+      credentials,
+      approved: approved.length,
+      pending: pending.length,
+      expired: expired.length,
+      expiring: expiring.length,
+      status: expired.length ? 'expired' : pending.length ? 'pending_approval' : expiring.length ? 'expiring' : approved.length ? 'current' : 'missing'
+    };
+  }
+
+  workerCredentialSummary(workerId) {
+    return this.workerCredentialSummaryFromCredentials(this.listWorkerCredentials({ workerId, includeHistory: false, limit: 100 }));
+  }
+
+  listQualificationRegister(filters = {}) {
+    const workers = this.listWorkers({ includeInactive: true, limit: safeLimit(filters.workerLimit || filters.worker_limit, 500, 1000) });
+    const requirements = this.listQualificationRequirements({ includeRetired: normalizeBoolean(filters.includeRetired, false), limit: 1000 });
+    const requirementsByJob = new Map();
+    for (const requirement of requirements) {
+      const rows = requirementsByJob.get(requirement.jobId) || [];
+      rows.push(requirement);
+      requirementsByJob.set(requirement.jobId, rows);
+    }
+    const credentialRowsByWorker = new Map();
+    for (const credential of this.db.prepare("SELECT * FROM worker_credentials WHERE status IN ('approved', 'pending_approval') ORDER BY worker_id, version_number DESC").all()) {
+      const rows = credentialRowsByWorker.get(credential.worker_id) || [];
+      rows.push(credential);
+      credentialRowsByWorker.set(credential.worker_id, rows);
+    }
+    const jobRows = this.db.prepare(`
+      SELECT DISTINCT jobs.*
+      FROM jobs JOIN job_qualification_requirements requirements ON requirements.job_id = jobs.id
+      WHERE requirements.status IN ('active', 'pending_retirement')
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY jobs.updated_at DESC
+    `).all();
+    const assignmentRowsByJob = new Map();
+    for (const assignment of this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name
+      FROM assignments
+      LEFT JOIN workers ON workers.id = assignments.worker_id
+      JOIN jobs ON jobs.id = assignments.job_id
+      WHERE ${this.activeAssignmentStatusSql('assignments')}
+        AND ${this.operationalJobStatusSql('jobs')}
+        AND EXISTS (
+          SELECT 1 FROM job_qualification_requirements requirements
+          WHERE requirements.job_id = assignments.job_id
+            AND requirements.status IN ('active', 'pending_retirement')
+        )
+      ORDER BY assignments.job_id, assignments.created_at ASC
+    `).all()) {
+      const rows = assignmentRowsByJob.get(assignment.job_id) || [];
+      rows.push(assignment);
+      assignmentRowsByJob.set(assignment.job_id, rows);
+    }
+    const jobs = jobRows.map(row => {
+      const job = this.mapJob(row);
+      const assignmentRows = assignmentRowsByJob.get(job.id) || [];
+      const assignmentAssessments = assignmentRows.map(row => {
+        const assignment = this.mapAssignment(row);
+        return {
+          assignmentId: assignment.id,
+          workerId: assignment.workerId,
+          workerName: assignment.workerName,
+          role: assignment.role,
+          assessment: assignment.workerId ? this.assessWorkerQualifications(assignment.workerId, {
+            jobId: job.id,
+            role: assignment.role,
+            at: assignment.scheduledEnd || job.scheduledEnd || assignment.scheduledStart || job.scheduledStart || nowIso(),
+            requirements: requirementsByJob.get(job.id) || [],
+            credentialRows: credentialRowsByWorker.get(assignment.workerId) || []
+          }) : {
+            status: 'blocked', ready: false, blockers: [{ type: 'worker_record_missing', severity: 'high', message: 'Assignment has no retained worker identity.' }], warnings: [], items: []
+          }
+        };
+      });
+      return {
+        jobId: job.id,
+        jobTitle: job.title,
+        status: job.status,
+        scheduledStart: job.scheduledStart,
+        scheduledEnd: job.scheduledEnd,
+        requirements: requirementsByJob.get(job.id) || [],
+        assignments: assignmentAssessments,
+        blockedAssignments: assignmentAssessments.filter(item => !item.assessment.ready).length,
+        readyAssignments: assignmentAssessments.filter(item => item.assessment.ready).length
+      };
+    });
+    const workerRows = workers.map(worker => ({ worker, qualification: worker.qualification || this.workerCredentialSummary(worker.id) }));
+    const summary = workerRows.reduce((result, row) => {
+      if (row.qualification.approved) result.workersWithApprovedCredentials += 1;
+      if (row.qualification.pending) result.pendingCredentials += row.qualification.pending;
+      if (row.qualification.expiring) result.expiringCredentials += row.qualification.expiring;
+      if (row.qualification.expired) result.expiredCredentials += row.qualification.expired;
+      return result;
+    }, {
+      workers: workerRows.length,
+      workersWithApprovedCredentials: 0,
+      pendingCredentials: 0,
+      expiringCredentials: 0,
+      expiredCredentials: 0,
+      activeRequirements: requirements.filter(item => item.status !== 'retired').length,
+      blockedAssignments: jobs.reduce((sum, job) => sum + job.blockedAssignments, 0)
+    });
+    return { catalog: this.workforceQualificationCatalog(), summary, workers: workerRows, requirements, jobs };
   }
 
   retireWorker(workerId, options = {}) {
@@ -18736,6 +19498,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         409
       );
     }
+    const qualification = this.assessWorkerQualifications(assignment.workerId, {
+      jobId,
+      role: assignment.role,
+      at: nowIso()
+    });
+    if (!qualification.ready) {
+      throw ledgerInputError(
+        'attendance_worker_qualification_required',
+        'Current mandatory worker qualifications are required before site attendance can be recorded.',
+        { jobId, assignmentId: assignment.id, workerId: assignment.workerId, blockers: qualification.blockers },
+        409
+      );
+    }
     return access;
   }
 
@@ -21575,12 +22350,30 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         Boolean(orientation && ['completed', 'approved', 'cleared', 'valid'].includes(orientation.status))
       );
       const accessStatuses = ['checked_in', 'cleared', 'approved', 'granted'];
+      const jobRequirements = this.listQualificationRequirements({ jobId, limit: 500 });
+      const mandatoryJobRequirements = jobRequirements.filter(requirement => requirement.mandatory);
+      const qualification = assignment?.workerId
+        ? this.assessWorkerQualifications(assignment.workerId, {
+            jobId,
+            role: assignment.role,
+            at: assignment.scheduledEnd || assignment.scheduledStart || timestamp
+          })
+        : mandatoryJobRequirements.length
+          ? {
+              status: 'blocked',
+              ready: false,
+              blockers: [{ type: 'worker_assignment_missing', severity: 'high', message: 'A retained worker assignment is required to verify job qualifications.' }],
+              warnings: [],
+              items: []
+            }
+          : { status: 'not_required', ready: true, blockers: [], warnings: [], items: [] };
+      const qualificationValid = qualification.ready === true;
       const checkedOut = requestedStatus === 'checked_out';
-      const needsApproval = orientationValid && normalizeBoolean(
+      const needsApproval = orientationValid && qualificationValid && normalizeBoolean(
         payload.requiresApproval,
         accessStatuses.includes(requestedStatus) || normalizeBoolean(payload.grantsAccess || payload.grants_access, false)
       );
-      const status = !orientationValid && accessStatuses.includes(requestedStatus)
+      const status = (!orientationValid || !qualificationValid) && accessStatuses.includes(requestedStatus)
         ? 'blocked'
         : needsApproval && accessStatuses.includes(requestedStatus)
           ? 'pending_approval'
@@ -21606,7 +22399,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           workerId,
           accessPoint: payload.accessPoint || payload.access_point || null,
           location: payload.location || null,
-          blockedReason: !orientationValid ? (payload.blockedReason || payload.blocked_reason || 'Valid orientation is required before site access.') : null,
+          blockedReason: !orientationValid
+            ? (payload.blockedReason || payload.blocked_reason || 'Valid orientation is required before site access.')
+            : !qualificationValid
+              ? qualification.blockers.map(item => item.message).filter(Boolean).join(' ') || 'Current worker qualifications are required before site access.'
+              : null,
+          qualificationStatus: qualification.status,
+          qualificationBlockers: qualification.blockers,
           notes: payload.notes || payload.note || null,
           source: payload.source || null
         }),
@@ -21628,7 +22427,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             workerName,
             workerId,
             assignmentId,
-            orientationId: orientation?.id || orientationId || null
+            orientationId: orientation?.id || orientationId || null,
+            qualificationStatus: qualification.status
           }
         }, { actor, audit: false });
         this.db.prepare('UPDATE site_access_logs SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
@@ -24595,6 +25395,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         scheduledEnd: plannedEnd || assignment.scheduledEnd,
         excludeAssignmentId: assignment.id
       }).filter(conflict => String(conflict.jobId) !== String(jobId || assignment.jobId));
+      const qualification = this.assessWorkerQualifications(worker.id, {
+        jobId: jobId || assignment.jobId,
+        role: assignment.role || worker.role,
+        at: plannedEnd || assignment.scheduledEnd || plannedStart || assignment.scheduledStart || nowIso()
+      });
 
       let blocker = null;
       if (pendingRetirement) {
@@ -24620,34 +25425,43 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         };
       }
 
-      if (blocker) {
-        const enrichedBlocker = {
+      const qualificationBlockers = qualification.blockers.map(item => ({
+        ...item,
+        assignmentId: assignment.id,
+        workerId: worker.id,
+        workerName: worker.name
+      }));
+      if (blocker || qualificationBlockers.length) {
+        const enrichedBlockers = [blocker ? {
           ...blocker,
           assignmentId: assignment.id,
           workerId: worker.id,
           workerName: worker.name
-        };
-        blockers.push(enrichedBlocker);
+        } : null, ...qualificationBlockers].filter(Boolean);
+        blockers.push(...enrichedBlockers);
         items.push({
           assignmentId: assignment.id,
           workerId: worker.id,
           workerName: worker.name,
           workerStatus,
-          status: blocker.type,
+          status: blocker?.type || qualification.status,
           conflicts: conflicts.length,
+          qualification,
           blocked: true
         });
       } else {
         if (warningStatuses.has(workerStatus)) {
           warnings.push(`${worker.name} is marked ${workerStatus}; confirm the retained assignment matches the dispatch window.`);
         }
+        for (const warning of qualification.warnings) warnings.push(`${worker.name}: ${warning.message}`);
         items.push({
           assignmentId: assignment.id,
           workerId: worker.id,
           workerName: worker.name,
           workerStatus,
-          status: warningStatuses.has(workerStatus) ? 'review' : 'ready',
+          status: warningStatuses.has(workerStatus) || qualification.warnings.length ? 'review' : 'ready',
           conflicts: 0,
+          qualification,
           blocked: false
         });
       }
@@ -24670,6 +25484,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       blocked: blockers.length,
       warnings: warnings.length,
       conflicts: blockers.filter(blocker => blocker.type === 'worker_conflict').length,
+      qualificationBlockers: blockers.filter(blocker => blocker.type.startsWith('worker_qualification_')).length,
       items,
       blockers,
       warningMessages: warnings,
@@ -25903,6 +26718,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
           WHERE id = ? AND status = 'pending_approval'
         `).run(status, timestamp, timestamp, before.target_id);
+      } else if (before.target_type === 'worker_credential') {
+        this.restoreRejectedWorkerCredential(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
+      } else if (before.target_type === 'job_qualification_requirement_retirement') {
+        this.restoreRejectedQualificationRequirementRetirement(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'document_transmittal') {
         const transmittalData = fromJson(
           this.db.prepare('SELECT data_json FROM document_transmittals WHERE id = ?').get(before.target_id)?.data_json,
@@ -26423,6 +27250,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyAttendanceAdjustment(targetId);
     } else if (targetType === 'weekly_timesheet') {
       this.applyWeeklyTimesheetApproval(targetId);
+    } else if (targetType === 'worker_credential') {
+      this.applyWorkerCredentialApproval(targetId, timestamp);
+    } else if (targetType === 'job_qualification_requirement_retirement') {
+      this.applyQualificationRequirementRetirement(targetId, timestamp);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -26766,12 +27597,28 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
     } else if (targetType === 'assignment') {
-      const assignment = this.db.prepare('SELECT data_json FROM assignments WHERE id = ?').get(targetId);
+      const assignment = this.db.prepare('SELECT * FROM assignments WHERE id = ?').get(targetId);
       const data = fromJson(assignment?.data_json, {});
       const requestedStatus = normalizeStatus(data.requestedStatus, 'planned');
       const approvedStatus = ['planned', 'scheduled', 'active', 'in_progress', 'approved'].includes(requestedStatus)
         ? requestedStatus
         : 'planned';
+      if (assignment && ['active', 'in_progress'].includes(approvedStatus)) {
+        const worker = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(assignment.worker_id);
+        const qualification = worker ? this.assessWorkerQualifications(worker.id, {
+          jobId: assignment.job_id,
+          role: assignment.role || worker.role,
+          at: assignment.scheduled_end || assignment.scheduled_start || timestamp
+        }) : { ready: false, blockers: [{ type: 'worker_record_missing', message: 'Assignment worker record is missing.' }] };
+        if (!qualification.ready) {
+          throw ledgerInputError(
+            'assignment_worker_qualification_required',
+            'Active field assignment approval is blocked until all mandatory worker qualifications are current.',
+            { assignmentId: targetId, workerId: assignment.worker_id, blockers: qualification.blockers },
+            409
+          );
+        }
+      }
       this.db.prepare('UPDATE assignments SET status = ?, data_json = ?, updated_at = ? WHERE id = ?')
         .run(approvedStatus, toJson({ ...data, approvedAt: timestamp }), timestamp, targetId);
       this.db.prepare("UPDATE jobs SET phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM assignments WHERE id = ?)")
@@ -27090,11 +27937,68 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         : 'current';
       this.db.prepare('UPDATE sds_sheets SET status = ?, updated_at = ? WHERE id = ?').run(approvedStatus, timestamp, targetId);
     } else if (targetType === 'site_access_log') {
-      const access = this.db.prepare('SELECT data_json FROM site_access_logs WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(access?.data_json, {}).requestedStatus, 'checked_in');
+      const access = this.db.prepare('SELECT * FROM site_access_logs WHERE id = ?').get(targetId);
+      const accessData = fromJson(access?.data_json, {});
+      const requestedStatus = normalizeStatus(accessData.requestedStatus, 'checked_in');
       const approvedStatus = ['checked_in', 'checked_out', 'cleared', 'approved', 'granted'].includes(requestedStatus)
         ? requestedStatus
         : 'checked_in';
+      if (access && ['checked_in', 'cleared', 'approved', 'granted'].includes(approvedStatus)) {
+        const assignmentExpected = Boolean(accessData.assignmentId || accessData.workerId);
+        const assignment = this.resolveCrewAssignment(access.job_id, {
+          assignmentId: accessData.assignmentId,
+          workerId: accessData.workerId,
+          workerName: access.worker_name
+        });
+        const orientation = this.resolveSiteAccessOrientation(access.job_id, {
+          orientationId: access.orientation_id,
+          assignmentId: accessData.assignmentId,
+          workerId: accessData.workerId,
+          workerName: access.worker_name
+        });
+        const orientationData = fromJson(orientation?.data_json, {});
+        const orientationValidUntil = orientationData.validUntil || orientationData.valid_until || null;
+        const orientationIdentityValid = assignment
+          ? this.crewEvidenceIdentityMatches(orientation, assignment)
+          : normalizeText(orientation?.worker_name, '').toLowerCase() === normalizeText(access.worker_name, '').toLowerCase();
+        const orientationValid = Boolean(
+          orientation
+          && ['completed', 'approved', 'cleared', 'valid'].includes(normalizeStatus(orientation.status, ''))
+          && orientationIdentityValid
+          && (!orientationValidUntil || !Number.isFinite(Date.parse(orientationValidUntil)) || Date.parse(orientationValidUntil) >= Date.now())
+        );
+        if (!orientationValid) {
+          throw ledgerInputError('site_access_orientation_stale', 'Site access approval is blocked because its retained matching orientation is no longer current.', { siteAccessLogId: targetId }, 409);
+        }
+        if (assignmentExpected && !assignment) {
+          throw ledgerInputError('site_access_assignment_stale', 'Site access approval is blocked because its retained worker assignment is no longer active.', { siteAccessLogId: targetId }, 409);
+        }
+        const requirements = this.listQualificationRequirements({ jobId: access.job_id, limit: 500 });
+        const mandatoryRequirements = requirements.filter(requirement => requirement.mandatory);
+        if (!assignment && mandatoryRequirements.length) {
+          throw ledgerInputError(
+            'site_access_worker_qualification_required',
+            'Site access approval is blocked because a retained worker assignment is required to verify mandatory qualifications.',
+            { siteAccessLogId: targetId, blockers: [{ type: 'worker_assignment_missing', severity: 'high', message: 'A retained worker assignment is required to verify job qualifications.' }] },
+            409
+          );
+        }
+        if (assignment) {
+          const qualification = this.assessWorkerQualifications(assignment.workerId, {
+            jobId: access.job_id,
+            role: assignment.role,
+            at: assignment.scheduledEnd || assignment.scheduledStart || timestamp
+          });
+          if (!qualification.ready) {
+            throw ledgerInputError(
+              'site_access_worker_qualification_required',
+              'Site access approval is blocked until all mandatory worker qualifications are current.',
+              { siteAccessLogId: targetId, assignmentId: assignment.id, workerId: assignment.workerId, blockers: qualification.blockers },
+              409
+            );
+          }
+        }
+      }
       this.db.prepare(`
         UPDATE site_access_logs
         SET status = ?,
@@ -27988,6 +28892,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       toolConflicts: 0,
       workerConflicts: 0,
       workerReadinessBlockers: 0,
+      workerQualificationBlockers: 0,
       missingWorkerRecords: 0,
       unavailableWorkers: 0,
       retirementPendingWorkers: 0,
@@ -28017,6 +28922,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.toolConflicts += normalizeNumber(row.counts?.toolConflicts, 0);
       summary.workerConflicts += normalizeNumber(row.counts?.workerConflicts, 0);
       summary.workerReadinessBlockers += normalizeNumber(row.counts?.workerReadinessBlockers, 0);
+      summary.workerQualificationBlockers += normalizeNumber(row.counts?.workerQualificationBlockers, 0);
       summary.missingWorkerRecords += (row.blockers || [])
         .filter(blocker => blocker.type === 'worker_record_missing').length;
       summary.unavailableWorkers += (row.blockers || [])
@@ -28102,6 +29008,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             workerConflicts: normalizeNumber(recommendation.readiness?.workforce?.conflicts, 0),
             workerReadinessBlockers: normalizeNumber(recommendation.readiness?.workforce?.blocked, 0),
             workerReadinessWarnings: normalizeNumber(recommendation.readiness?.workforce?.warnings, 0),
+            workerQualificationBlockers: normalizeNumber(recommendation.readiness?.workforce?.qualificationBlockers, 0),
             toolReadinessBlockers: normalizeNumber(recommendation.readiness?.tools?.blocked, 0),
             toolReadinessWarnings: normalizeNumber(recommendation.readiness?.tools?.warnings, 0)
           }
@@ -30298,6 +31205,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       jhas: this.db.prepare('SELECT * FROM jha_records WHERE job_id = ? ORDER BY due_at DESC, created_at DESC').all(jobId).map(row => this.mapJha(row)),
       sdsSheets: this.db.prepare('SELECT * FROM sds_sheets WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapSdsSheet(row)),
       siteAccessLogs: this.db.prepare('SELECT * FROM site_access_logs WHERE job_id = ? ORDER BY checked_in_at DESC, created_at DESC').all(jobId).map(row => this.mapSiteAccessLog(row)),
+      qualificationRequirements: this.db.prepare("SELECT * FROM job_qualification_requirements WHERE job_id = ? ORDER BY credential_type ASC, role_key ASC").all(jobId).map(row => this.mapQualificationRequirement(row)),
       assignments: this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapAssignment(row)),
       tools: this.db.prepare('SELECT * FROM tool_reservations WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapToolReservation(row)),
       materials: this.db.prepare('SELECT * FROM material_requirements WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapMaterialRequirement(row)),
@@ -30410,6 +31318,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       progress_updates: 'status',
       time_logs: 'status',
       weekly_timesheets: 'status',
+      job_qualification_requirements: 'status',
       worker_instructions: 'status',
       worker_orientations: 'status',
       jha_records: 'status',
@@ -30446,8 +31355,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const closed = Array.from(new Set([...LEDGER_CLOSED_STATUSES, ...(requirement.readyStatuses || [])]));
     const placeholders = closed.map(() => '?').join(',');
     const scope = this.activeRecordScope(requirement.table);
-    const typeClause = requirement.recordType ? 'AND records.type = ?' : '';
-    const params = requirement.recordType ? [requirement.recordType, ...closed] : closed;
+    const typeClause = requirement.recordType
+      ? 'AND records.type = ?'
+      : requirement.credentialType
+        ? 'AND records.credential_type = ?'
+        : '';
+    const params = requirement.recordType
+      ? [requirement.recordType, ...closed]
+      : requirement.credentialType
+        ? [requirement.credentialType, ...closed]
+        : closed;
     return Number(this.db.prepare(`
       SELECT COUNT(DISTINCT records.id) AS count
       FROM ${scope.from}
@@ -30469,7 +31386,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           : [];
       const records = requirement.recordType
         ? allRecords.filter(record => normalizeStatus(record?.type, '') === requirement.recordType)
-        : allRecords;
+        : requirement.credentialType
+          ? allRecords.filter(record => normalizeStatus(record?.credentialType, '') === requirement.credentialType)
+          : allRecords;
       const readyStatuses = new Set(requirement.readyStatuses || []);
       const recordOpen = record => !readyStatuses.has(normalizeStatus(record?.status, '')) && isLedgerCapabilityRecordOpen(record);
       const openCount = Array.isArray(value)
@@ -31110,7 +32029,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (key === 'instructions') addCreated(action, this.createWorkerInstruction(jobId, data, { actor }));
         if (key === 'orientation') addCreated(action, this.createWorkerOrientation(jobId, data, { actor }));
         if (key === 'jha') addCreated(action, this.createJhaRecord(jobId, data, { actor }));
-        if (key === 'sds' || key === 'vca') addCreated(action, this.createSdsSheet(jobId, data, { actor }));
+        if (key === 'sds') addCreated(action, this.createSdsSheet(jobId, data, { actor }));
         if (key === 'permit') addCreated(action, this.createPermitRecord(jobId, data, { actor }));
         if (key === 'inspection') addCreated(action, this.createInspectionRecord(jobId, data, { actor }));
         if (key === 'observation') addCreated(action, this.createObservationRecord(jobId, data, { actor }));
@@ -31650,6 +32569,67 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         severity: 'high',
         message: `${conflict.workerName} is assigned across ${conflict.jobTitle} and ${conflict.conflictingJobTitle}; approve, release, or reschedule before dispatch.`
       });
+    }
+
+    const qualificationAssignments = this.db.prepare(`
+      SELECT DISTINCT assignments.id, assignments.job_id, assignments.worker_id, assignments.role,
+        assignments.scheduled_start, assignments.scheduled_end, workers.name AS worker_name, jobs.title AS job_title
+      FROM assignments
+      JOIN workers ON workers.id = assignments.worker_id
+      JOIN jobs ON jobs.id = assignments.job_id
+      JOIN job_qualification_requirements requirements ON requirements.job_id = assignments.job_id
+        AND requirements.status IN ('active', 'pending_retirement')
+      WHERE ${this.activeAssignmentStatusSql('assignments')}
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY assignments.updated_at DESC
+      LIMIT 100
+    `).all();
+    for (const assignment of qualificationAssignments) {
+      const assessment = this.assessWorkerQualifications(assignment.worker_id, {
+        jobId: assignment.job_id,
+        role: assignment.role,
+        at: assignment.scheduled_end || assignment.scheduled_start || nowIso()
+      });
+      if (assessment.blockers.length) {
+        const sourceHash = sha256Json(assessment.blockers.map(item => ({ type: item.type, requirementId: item.requirementId, credentialType: item.credentialType, approvalId: item.approvalId || null })));
+        const taskId = `task_${sha256Text(`qualification-gap:${assignment.id}:${sourceHash}`).slice(0, 24)}`;
+        const existingTask = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+        if (!existingTask) {
+          actions.push({
+            type: 'review_worker_qualification_gap',
+            jobId: assignment.job_id,
+            assignmentId: assignment.id,
+            workerId: assignment.worker_id,
+            workerName: assignment.worker_name,
+            jobTitle: assignment.job_title,
+            taskId,
+            sourceHash,
+            blockers: assessment.blockers,
+            severity: 'high',
+            message: `${assignment.worker_name} has ${assessment.blockers.length} mandatory qualification blocker${assessment.blockers.length === 1 ? '' : 's'} for ${assignment.job_title}.`
+          });
+        }
+      } else if (assessment.warnings.some(item => item.type === 'worker_qualification_expiring')) {
+        const expiring = assessment.warnings.filter(item => item.type === 'worker_qualification_expiring');
+        const sourceHash = sha256Json(expiring.map(item => ({ requirementId: item.requirementId, credentialId: item.credentialId, message: item.message })));
+        const taskId = `task_${sha256Text(`qualification-expiry:${assignment.id}:${sourceHash}`).slice(0, 24)}`;
+        const existingTask = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+        if (!existingTask) {
+          actions.push({
+            type: 'review_expiring_worker_credential',
+            jobId: assignment.job_id,
+            assignmentId: assignment.id,
+            workerId: assignment.worker_id,
+            workerName: assignment.worker_name,
+            jobTitle: assignment.job_title,
+            taskId,
+            sourceHash,
+            warnings: expiring,
+            severity: 'medium',
+            message: `${assignment.worker_name} has qualification evidence expiring within 30 days of the ${assignment.job_title} work window.`
+          });
+        }
+      }
     }
 
     const toolConflicts = this.detectToolReservationConflicts(5);
@@ -32942,6 +33922,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_stale_attendance',
       'review_missing_timesheet',
       'review_stale_timesheet',
+      'review_worker_qualification_gap',
+      'review_expiring_worker_credential',
       'aftercare_follow_up',
       'recurring_job_due',
       'refresh_learning_profile'
@@ -34233,6 +35215,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const qualificationReviews = preview.filter(action => (
+          ['review_worker_qualification_gap', 'review_expiring_worker_credential'].includes(action.type)
+        )).slice(0, 10);
+        for (const action of qualificationReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`qualification-review:${action.assignmentId}:${action.sourceHash || ''}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const isGap = action.type === 'review_worker_qualification_gap';
+          const task = this.addTask(action.jobId, {
+            title: `${isGap ? 'Resolve qualification gap' : 'Review expiring qualification'}: ${action.workerName || 'crew member'}`,
+            description: `${action.message} Retain current source evidence through the worker credential approval workflow. Do not infer, renew, issue, or externally verify a certificate automatically.`,
+            priority: isGap ? 'high' : 'medium',
+            dueAt: futureIsoDate(isGap ? 1 : 7),
+            source: 'qualification_monitor',
+            data: {
+              assignmentId: action.assignmentId,
+              workerId: action.workerId,
+              sourceHash: action.sourceHash || null,
+              blockerCount: action.blockers?.length || 0,
+              warningCount: action.warnings?.length || 0,
+              internalOnly: true,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: isGap ? 'autonomous_create_qualification_gap_task' : 'autonomous_create_credential_expiry_task',
+            actor, after: task,
+            metadata: { assignmentId: action.assignmentId, workerId: action.workerId, sourceHash: action.sourceHash || null, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -34604,6 +35622,51 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     for (const timesheetExport of this.db.prepare("SELECT * FROM timesheet_exports WHERE status = 'prepared'").all()) {
       if (!this.mapTimesheetExport(timesheetExport).integrityValid) {
         issues.push({ severity: 'error', message: `Timesheet export ${timesheetExport.id} failed retained snapshot or CSV checksum verification.` });
+      }
+    }
+    const invalidWorkerCredentials = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM worker_credentials credentials
+      LEFT JOIN workers ON workers.id = credentials.worker_id
+      WHERE workers.id IS NULL OR credentials.version_number < 1
+        OR LENGTH(TRIM(credentials.evidence_reference)) < 4
+        OR (credentials.issued_on IS NOT NULL AND credentials.expires_on IS NOT NULL AND credentials.expires_on < credentials.issued_on)
+    `).get().count || 0);
+    if (invalidWorkerCredentials) issues.push({ severity: 'error', message: `${invalidWorkerCredentials} worker credential record(s) violate worker, version, evidence, or date invariants.` });
+    const credentialRows = this.db.prepare("SELECT * FROM worker_credentials WHERE status IN ('pending_approval', 'approved', 'superseded')").all();
+    for (const credential of credentialRows) {
+      if (!WORKFORCE_CREDENTIAL_BY_KEY.has(credential.credential_type)) {
+        issues.push({ severity: 'error', message: `Worker credential ${credential.id} uses an unsupported credential type.` });
+        continue;
+      }
+      try {
+        this.verifyWorkerCredentialSnapshot(credential);
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Worker credential ${credential.id} failed retained snapshot verification: ${error.code || error.message}.` });
+      }
+      if (['pending_approval', 'approved'].includes(credential.status)) {
+        const expectedApprovalStatus = credential.status === 'approved' ? 'approved' : 'pending';
+        const approval = this.db.prepare(`
+          SELECT id FROM approvals
+          WHERE id = ? AND target_type = 'worker_credential' AND target_id = ? AND status = ?
+        `).get(credential.approval_id, credential.id, expectedApprovalStatus);
+        if (!approval) issues.push({ severity: 'error', message: `Worker credential ${credential.id} lacks its matching ${expectedApprovalStatus} decision.` });
+      }
+      if (credential.status === 'approved' && credential.expires_on && Date.parse(`${credential.expires_on}T23:59:59.999Z`) < Date.now()) {
+        issues.push({ severity: 'warning', message: `Approved worker credential ${credential.id} expired on ${credential.expires_on} and no longer satisfies readiness.` });
+      }
+    }
+    const requirementRows = this.db.prepare('SELECT * FROM job_qualification_requirements').all();
+    for (const requirement of requirementRows) {
+      if (!WORKFORCE_REQUIREMENT_BY_KEY.has(requirement.credential_type)) {
+        issues.push({ severity: 'error', message: `Qualification requirement ${requirement.id} uses an unsupported credential type.` });
+      }
+      if (requirement.status === 'pending_retirement') {
+        const approval = this.db.prepare(`
+          SELECT id FROM approvals
+          WHERE id = ? AND target_type = 'job_qualification_requirement_retirement' AND target_id = ? AND status = 'pending'
+        `).get(requirement.retirement_approval_id, requirement.id);
+        if (!approval) issues.push({ severity: 'error', message: `Qualification requirement ${requirement.id} lacks its pending retirement decision.` });
       }
     }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
@@ -35174,6 +36237,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         attendanceAdjustments: this.count('attendance_adjustments'),
         weeklyTimesheets: this.count('weekly_timesheets'),
         timesheetExports: this.count('timesheet_exports'),
+        workerCredentials: this.count('worker_credentials'),
+        qualificationRequirements: this.count('job_qualification_requirements'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -35399,6 +36464,55 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       hourlyRate: normalizeNumber(row.hourly_rate, 0),
       skills: fromJson(row.skills_json, []),
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapWorkerCredential(row) {
+    if (!row) return null;
+    const credentialType = normalizeStatus(row.credential_type, 'other');
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      workerId: row.worker_id,
+      workerName: row.worker_name || null,
+      credentialType,
+      credentialLabel: WORKFORCE_CREDENTIAL_BY_KEY.get(credentialType)?.label || row.title,
+      title: row.title,
+      issuer: row.issuer,
+      credentialNumber: row.credential_number,
+      issuedOn: row.issued_on,
+      expiresOn: row.expires_on,
+      versionNumber: normalizeNumber(row.version_number, 1),
+      status: normalizeStatus(row.status, 'pending_approval'),
+      evidenceReference: row.evidence_reference,
+      snapshotHash: row.snapshot_hash,
+      approvalId: row.approval_id,
+      supersedesCredentialId: row.supersedes_credential_id,
+      verifiedAt: data.verifiedAt || null,
+      verifiedBy: data.verifiedBy || null,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapQualificationRequirement(row) {
+    if (!row) return null;
+    const credentialType = normalizeStatus(row.credential_type, 'other');
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      jobTitle: row.job_title || null,
+      credentialType,
+      credentialLabel: WORKFORCE_REQUIREMENT_BY_KEY.get(credentialType)?.label || row.title,
+      title: row.title,
+      roleKey: row.role_key || '*',
+      mandatory: Boolean(row.mandatory),
+      status: normalizeStatus(row.status, 'active'),
+      retirementApprovalId: row.retirement_approval_id,
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -37104,6 +38218,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.currency = mapped?.currency || data.currency || 'EUR';
       preview.reference = mapped?.reference || data.reference || null;
       preview.paidAt = mapped?.paidAt || null;
+    } else if (targetType === 'worker_credential') {
+      const row = this.db.prepare('SELECT * FROM worker_credentials WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapWorkerCredential(row) : null;
+      primaryEffect = `Verify ${mapped?.title || data.title || 'worker credential'} for ${data.workerName || mapped?.workerName || 'the retained worker'}.`;
+      addEffect('Make this immutable credential revision available to job qualification readiness checks.');
+      if (mapped?.supersedesCredentialId) addEffect('Supersede the prior approved revision only after this decision succeeds.');
+      addSafeguard('Approval rechecks snapshot integrity, worker status, and expiry before changing qualification state.');
+      addSafeguard('No certificate is issued, renewed, or confirmed with an external authority by Contractor.AI.');
+      riskLevel = 'high';
+      preview.credentialType = mapped?.credentialType || data.credentialType || null;
+      preview.issuer = mapped?.issuer || data.issuer || null;
+      preview.credentialNumber = mapped?.credentialNumber || data.credentialNumber || null;
+      preview.expiresOn = mapped?.expiresOn || data.expiresOn || null;
+      preview.evidenceReference = mapped?.evidenceReference || data.evidenceReference || null;
+    } else if (targetType === 'job_qualification_requirement_retirement') {
+      primaryEffect = `Remove the ${data.title || 'worker qualification'} readiness requirement from ${data.jobTitle || 'this job'}.`;
+      addEffect(`Stop enforcing ${data.credentialType || 'the retained qualification'} for ${data.roleKey === '*' ? 'all assigned roles' : data.roleKey || 'the retained role'}.`);
+      addSafeguard('The requirement remains active while this decision is pending and is restored automatically after rejection or cancellation.');
+      addSafeguard('Removing a safety requirement does not modify or delete worker credential history.');
+      riskLevel = 'high';
+      preview.credentialType = data.credentialType || null;
+      preview.roleKey = data.roleKey || '*';
+      preview.mandatory = data.mandatory !== false;
     } else if (targetType === 'assignment') {
       primaryEffect = `Approve worker assignment for ${data.workerName || data.workerId || 'worker'}.`;
       addEffect(`Set assignment to ${data.requestedStatus || 'planned'} for ${data.scheduledStart || 'the proposed start'} through ${data.scheduledEnd || 'the proposed end'}.`);

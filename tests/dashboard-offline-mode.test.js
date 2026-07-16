@@ -66,6 +66,19 @@ test('finance dashboard freezes server-derived cost forecasts through approval-b
   assert.match(dashboardSource, /Cost forecast .* retained from the current cost-code evidence/);
 });
 
+test('workforce qualifications use retained approval-backed evidence and job readiness controls', () => {
+  assert.match(dashboardSource, /api\('\/api\/ledger\/qualifications'\)/);
+  assert.match(dashboardSource, /\/qualification-requirements`/);
+  assert.match(dashboardSource, /\/credentials`/);
+  assert.match(dashboardSource, /data-testid="qualification-workspace"/);
+  assert.match(dashboardSource, /data-testid="credential-editor"/);
+  assert.match(dashboardSource, /data-testid="qualification-requirement-editor"/);
+  assert.match(dashboardSource, /data-testid="qualification-retirement-modal"/);
+  assert.match(dashboardSource, /It does not satisfy job readiness until verified/);
+  assert.match(dashboardSource, /The requirement remains enforced until approval/);
+  assert.match(dashboardSource, /Contractor\.AI does not issue, renew, or contact a certificate authority/);
+});
+
 test('field updates use a bounded operator-scoped IndexedDB outbox only for interrupted requests', () => {
   assert.match(outboxSource, /const DATABASE_VERSION = 2/);
   assert.match(outboxSource, /indexedDB\.open\(DATABASE_NAME, DATABASE_VERSION\)/);

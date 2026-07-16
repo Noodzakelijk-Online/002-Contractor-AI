@@ -667,6 +667,29 @@ function emptyOpportunityActivityDraft() {
   }
 }
 
+function emptyWorkerCredentialDraft(worker = null) {
+  return {
+    workerId: worker?.id || '',
+    credentialType: 'vca_basic',
+    title: '',
+    issuer: '',
+    credentialNumber: '',
+    issuedOn: new Date().toISOString().slice(0, 10),
+    expiresOn: '',
+    evidenceReference: '',
+  }
+}
+
+function emptyQualificationRequirementDraft(job = null) {
+  return {
+    jobId: job?.id || '',
+    credentialType: 'vca',
+    title: '',
+    role: '',
+    mandatory: true,
+  }
+}
+
 function emptyProductionBaselineLine(index = 0) {
   return {
     lineKey: `production-line-${index + 1}`,
@@ -1007,14 +1030,16 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       const result = await api('/api/ledger/trade-partners?includeRetired=true&limit=200')
       return { tradePartners: result.partners || [], tradePartnerSummary: result.summary || {} }
     }
-    const [workforce, workers] = await Promise.all([
+    const [workforce, workers, qualifications] = await Promise.all([
       api('/api/ledger/workforce?limit=100'),
       api('/api/ledger/workers?limit=500'),
+      api('/api/ledger/qualifications'),
     ])
     return {
       workforce,
       workers: workers.workers || [],
       workerSummary: workers.summary || {},
+      qualificationRegister: qualifications.qualificationRegister || { catalog: { credentials: [], requirements: [] }, summary: {}, workers: [], requirements: [], jobs: [] },
     }
   }
   if (section === 'finance') return { finance: await api('/api/ledger/finance?limit=100') }
@@ -2204,6 +2229,174 @@ function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitti
   )
 }
 
+function QualificationWorkspace({ register, workers, canCoordinate, canApprove, submitting, onAddCredential, onCreateRequirement, onRetireRequirement, onOpenApprovals, onOpenJob }) {
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState('all')
+  const workerRows = register?.workers?.length
+    ? register.workers
+    : (workers || EMPTY_LIST).map((worker) => ({ worker, qualification: worker.qualification || { credentials: [], status: 'missing' } }))
+  const visibleWorkers = useMemo(() => {
+    const search = query.trim().toLowerCase()
+    return workerRows.filter((row) => {
+      if (filter !== 'all' && row.qualification?.status !== filter) return false
+      if (!search) return true
+      return JSON.stringify({
+        name: row.worker?.name,
+        role: row.worker?.role,
+        credentials: row.qualification?.credentials?.map((item) => [item.title, item.issuer, item.credentialNumber]),
+      }).toLowerCase().includes(search)
+    })
+  }, [filter, query, workerRows])
+  const summary = register?.summary || {}
+  const requirements = register?.requirements || EMPTY_LIST
+  const jobsById = new Map((register?.jobs || EMPTY_LIST).map((job) => [job.jobId, job]))
+
+  return (
+    <div className="qualification-workspace" role="tabpanel" data-testid="qualification-workspace">
+      <div className="resource-summary qualification-summary" aria-label="Qualification summary">
+        <div><span>Credentialed workers</span><strong>{summary.workersWithApprovedCredentials || 0}</strong></div>
+        <div><span>Pending review</span><strong>{summary.pendingCredentials || 0}</strong></div>
+        <div><span>Expiring / expired</span><strong>{(summary.expiringCredentials || 0) + (summary.expiredCredentials || 0)}</strong></div>
+        <div><span>Blocked assignments</span><strong>{summary.blockedAssignments || 0}</strong></div>
+      </div>
+      <div className="qualification-toolbar">
+        <label className="search-control">
+          <Search size={16} />
+          <span className="visually-hidden">Search workforce qualifications</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search worker or credential" />
+        </label>
+        <div className="resource-tabs" role="tablist" aria-label="Credential state">
+          {[
+            ['all', 'All'],
+            ['current', 'Current'],
+            ['pending_approval', 'Pending'],
+            ['expiring', 'Expiring'],
+            ['missing', 'Missing'],
+          ].map(([key, label]) => (
+            <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'resource-tab-active' : ''} onClick={() => setFilter(key)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {canCoordinate ? (
+          <button type="button" className="primary-button" disabled={submitting} onClick={onCreateRequirement}>
+            <Plus size={16} />
+            Add job requirement
+          </button>
+        ) : null}
+      </div>
+
+      <section className="qualification-band" aria-labelledby="worker-credential-heading">
+        <div className="qualification-band-heading">
+          <div>
+            <h3 id="worker-credential-heading">Worker credentials</h3>
+            <p>Only approved, integrity-valid evidence satisfies job readiness. Pending revisions do not replace the current approved source.</p>
+          </div>
+          <span>{visibleWorkers.length} worker{visibleWorkers.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="qualification-worker-list">
+          {visibleWorkers.map((row) => {
+            const worker = row.worker
+            const qualification = row.qualification || {}
+            const credentials = qualification.credentials || EMPTY_LIST
+            const pending = credentials.find((item) => item.status === 'pending_approval')
+            return (
+              <article className="qualification-worker-row" key={worker.id}>
+                <div className="qualification-worker-identity">
+                  <span className="qualification-icon"><ShieldCheck size={17} /></span>
+                  <div>
+                    <div className="qualification-title-line">
+                      <h4>{worker.name}</h4>
+                      <span className={`status status-${qualification.status || 'missing'}`}>{formatStatus(qualification.status || 'missing')}</span>
+                    </div>
+                    <p>{worker.role || 'Role not retained'} / {worker.activeAssignmentCount || 0} active assignment{worker.activeAssignmentCount === 1 ? '' : 's'}</p>
+                  </div>
+                </div>
+                <div className="credential-list">
+                  {credentials.map((credential) => (
+                    <div className="credential-line" key={credential.id}>
+                      <span className={`credential-state credential-state-${credential.status}`}>{formatStatus(credential.status)}</span>
+                      <strong>{credential.title}</strong>
+                      <span>{credential.issuer || 'Issuer not retained'}</span>
+                      <span>{credential.expiresOn ? `Expires ${formatDate(credential.expiresOn)}` : 'No expiry retained'}</span>
+                    </div>
+                  ))}
+                  {!credentials.length ? <span className="qualification-empty">No current or pending credential evidence.</span> : null}
+                </div>
+                <div className="qualification-row-actions">
+                  {pending && canApprove ? (
+                    <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pending.approvalId })}>
+                      <ClipboardCheck size={15} />
+                      Review
+                    </button>
+                  ) : null}
+                  {canCoordinate && worker.status !== 'retired' ? (
+                    <button type="button" className="secondary-button" disabled={submitting} onClick={() => onAddCredential(worker)}>
+                      <Plus size={15} />
+                      {qualification.approved ? 'Add revision' : 'Add evidence'}
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            )
+          })}
+          {!visibleWorkers.length ? <Empty title="No matching qualification records" detail="Workers matching this credential state will appear here." /> : null}
+        </div>
+      </section>
+
+      <section className="qualification-band qualification-requirement-band" aria-labelledby="job-requirement-heading">
+        <div className="qualification-band-heading">
+          <div>
+            <h3 id="job-requirement-heading">Job requirements</h3>
+            <p>Requirements apply to assigned roles and remain enforced while a retirement decision is pending.</p>
+          </div>
+          <span>{requirements.length} active requirement{requirements.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="qualification-requirement-list">
+          {requirements.map((requirement) => {
+            const job = jobsById.get(requirement.jobId)
+            return (
+              <article className="qualification-requirement-row" key={requirement.id}>
+                <div>
+                  <div className="qualification-title-line">
+                    <h4>{requirement.title}</h4>
+                    <span className={`status status-${requirement.status}`}>{formatStatus(requirement.status)}</span>
+                  </div>
+                  <p>{requirement.jobTitle || job?.jobTitle || requirement.jobId}</p>
+                </div>
+                <div className="qualification-requirement-values">
+                  <span>Type <strong>{requirement.credentialLabel}</strong></span>
+                  <span>Role <strong>{requirement.roleKey === '*' ? 'All assigned roles' : formatStatus(requirement.roleKey)}</strong></span>
+                  <span>Readiness <strong>{job ? `${job.readyAssignments} ready / ${job.blockedAssignments} blocked` : 'No active job row'}</strong></span>
+                </div>
+                <div className="qualification-row-actions">
+                  {requirement.retirementApprovalId && canApprove ? (
+                    <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: requirement.retirementApprovalId, jobId: requirement.jobId, jobTitle: requirement.jobTitle })}>
+                      <ClipboardCheck size={15} />
+                      Review removal
+                    </button>
+                  ) : null}
+                  {onOpenJob ? (
+                    <button type="button" className="icon-button" aria-label={`Open ${requirement.jobTitle || 'job'}`} onClick={() => onOpenJob({ id: requirement.jobId })}>
+                      <ArrowUpRight size={16} />
+                    </button>
+                  ) : null}
+                  {canCoordinate && requirement.status === 'active' ? (
+                    <button type="button" className="icon-button danger-icon" aria-label={`Request removal of ${requirement.title}`} disabled={submitting} onClick={() => onRetireRequirement(requirement)}>
+                      <Archive size={16} />
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            )
+          })}
+          {!requirements.length ? <Empty title="No qualification requirements" detail="Add a job requirement before dispatch when a role needs VCA, GPI, equipment, electrical, or other retained proof." /> : null}
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function EquipmentDirectory({
   tools,
   summary,
@@ -2687,6 +2880,7 @@ function ResourcesWorkspace({
   inventory,
   workers,
   workerSummary,
+  qualificationRegister,
   tools,
   toolSummary,
   tradePartners,
@@ -2707,6 +2901,9 @@ function ResourcesWorkspace({
   onCreateWorker,
   onEditWorker,
   onRetireWorker,
+  onAddCredential,
+  onCreateQualificationRequirement,
+  onRetireQualificationRequirement,
   onCreateEquipment,
   onEditEquipment,
   onInspectEquipment,
@@ -2728,6 +2925,7 @@ function ResourcesWorkspace({
   const isPartners = view === 'partners'
   const isTimesheets = view === 'timesheets'
   const isCrewDirectory = isWorkforce && workforceMode === 'crew'
+  const isQualifications = isWorkforce && workforceMode === 'qualifications'
   const stream = isWorkforce ? workforce : inventory
   const rows = stream?.jobs || EMPTY_LIST
   const summary = stream?.summary || {}
@@ -2744,6 +2942,8 @@ function ResourcesWorkspace({
               ? 'Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.'
               : isEquipment
                 ? 'Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.'
+                : isQualifications
+                  ? 'Verify retained worker credentials, enforce role-specific job requirements, and resolve expiry or evidence gaps before site work.'
                 : isCrewDirectory
                   ? 'Maintain retained crew identity, availability, skills, cost, and assignment safeguards.'
                   : 'Coordinate retained crew, equipment, material, procurement, and loading records before work is committed.'}
@@ -2818,6 +3018,15 @@ function ResourcesWorkspace({
               <Users size={15} />
               Crew directory
             </button>
+            <button
+              role="tab"
+              aria-selected={workforceMode === 'qualifications'}
+              className={workforceMode === 'qualifications' ? 'resource-tab-active' : ''}
+              onClick={() => setWorkforceMode('qualifications')}
+            >
+              <ShieldCheck size={15} />
+              Qualifications
+            </button>
           </div>
         </div>
       ) : null}
@@ -2857,6 +3066,19 @@ function ResourcesWorkspace({
           onMaintain={onMaintainEquipment}
           onRetire={onRetireEquipment}
           onOpenApprovals={onOpenApprovals}
+        />
+      ) : isQualifications ? (
+        <QualificationWorkspace
+          register={qualificationRegister}
+          workers={workers}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          submitting={submitting}
+          onAddCredential={onAddCredential}
+          onCreateRequirement={onCreateQualificationRequirement}
+          onRetireRequirement={onRetireQualificationRequirement}
+          onOpenApprovals={onOpenApprovals}
+          onOpenJob={onOpen}
         />
       ) : isCrewDirectory ? (
         <WorkerDirectory
@@ -7086,6 +7308,12 @@ function App() {
   const [workerDraft, setWorkerDraft] = useState(emptyWorkerDraft)
   const [workerRetirement, setWorkerRetirement] = useState(null)
   const [workerRetirementReason, setWorkerRetirementReason] = useState('')
+  const [credentialEditor, setCredentialEditor] = useState(null)
+  const [credentialDraft, setCredentialDraft] = useState(() => emptyWorkerCredentialDraft())
+  const [qualificationRequirementEditor, setQualificationRequirementEditor] = useState(false)
+  const [qualificationRequirementDraft, setQualificationRequirementDraft] = useState(() => emptyQualificationRequirementDraft())
+  const [qualificationRequirementRetirement, setQualificationRequirementRetirement] = useState(null)
+  const [qualificationRequirementRetirementReason, setQualificationRequirementRetirementReason] = useState('')
   const [equipmentEditor, setEquipmentEditor] = useState(null)
   const [equipmentDraft, setEquipmentDraft] = useState(emptyEquipmentDraft)
   const [equipmentInspection, setEquipmentInspection] = useState(null)
@@ -7136,6 +7364,7 @@ function App() {
   const evidenceInputRef = useRef(null)
   const fieldCaptureRef = useRef(null)
   const workerDialogOpenerRef = useRef(null)
+  const qualificationDialogOpenerRef = useRef(null)
   const equipmentDialogOpenerRef = useRef(null)
   const equipmentInspectionOpenerRef = useRef(null)
   const equipmentMaintenanceOpenerRef = useRef(null)
@@ -7179,6 +7408,7 @@ function App() {
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
+          qualificationRegister: { catalog: { credentials: [], requirements: [] }, summary: {}, workers: [], requirements: [], jobs: [] },
           timesheets: { rows: [], exports: [], summary: {} },
           tools: [],
           toolSummary: {},
@@ -7217,6 +7447,7 @@ function App() {
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
+          qualificationRegister: { catalog: { credentials: [], requirements: [] }, summary: {}, workers: [], requirements: [], jobs: [] },
           timesheets: { rows: [], exports: [], summary: {} },
           tools: [],
           toolSummary: {},
@@ -10310,6 +10541,158 @@ function App() {
     }
   }
 
+  function openCredentialEditor(worker) {
+    qualificationDialogOpenerRef.current = document.activeElement
+    setCredentialEditor(worker)
+    setCredentialDraft(emptyWorkerCredentialDraft(worker))
+  }
+
+  function closeCredentialEditor() {
+    if (submitting) return
+    const opener = qualificationDialogOpenerRef.current
+    qualificationDialogOpenerRef.current = null
+    setCredentialEditor(null)
+    setCredentialDraft(emptyWorkerCredentialDraft())
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function submitWorkerCredential(event) {
+    event.preventDefault()
+    if (!credentialEditor || credentialDraft.evidenceReference.trim().length < 4) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/workers/${encodeURIComponent(credentialEditor.id)}/credentials`, {
+        method: 'POST',
+        body: JSON.stringify({
+          credentialType: credentialDraft.credentialType,
+          title: credentialDraft.title.trim() || null,
+          issuer: credentialDraft.issuer.trim() || null,
+          credentialNumber: credentialDraft.credentialNumber.trim() || null,
+          issuedOn: credentialDraft.issuedOn || null,
+          expiresOn: credentialDraft.expiresOn || null,
+          evidenceReference: credentialDraft.evidenceReference.trim(),
+          actor: 'office_operator',
+        }),
+      })
+      setCredentialEditor(null)
+      setCredentialDraft(emptyWorkerCredentialDraft())
+      setData((current) => current ? {
+        ...current,
+        workers: result.worker ? upsertById(current.workers, result.worker) : current.workers,
+        qualificationRegister: result.qualificationRegister || current.qualificationRegister,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(
+        result.replayed
+          ? `The existing ${result.credential.title} review was reopened. No certificate was issued or renewed.`
+          : `${result.credential.title} evidence was retained for approval. It does not satisfy job readiness until verified.`,
+      )
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openQualificationRequirementEditor() {
+    qualificationDialogOpenerRef.current = document.activeElement
+    const firstJob = (data?.jobs || EMPTY_LIST).find((job) => !['archived', 'cancelled', 'rejected'].includes(job.status)) || null
+    setQualificationRequirementDraft(emptyQualificationRequirementDraft(firstJob))
+    setQualificationRequirementEditor(true)
+  }
+
+  function closeQualificationRequirementEditor() {
+    if (submitting) return
+    const opener = qualificationDialogOpenerRef.current
+    qualificationDialogOpenerRef.current = null
+    setQualificationRequirementEditor(false)
+    setQualificationRequirementDraft(emptyQualificationRequirementDraft())
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function submitQualificationRequirement(event) {
+    event.preventDefault()
+    if (!qualificationRequirementDraft.jobId || !qualificationRequirementDraft.credentialType) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(qualificationRequirementDraft.jobId)}/qualification-requirements`, {
+        method: 'POST',
+        body: JSON.stringify({
+          credentialType: qualificationRequirementDraft.credentialType,
+          title: qualificationRequirementDraft.title.trim() || null,
+          role: qualificationRequirementDraft.role.trim() || null,
+          mandatory: qualificationRequirementDraft.mandatory,
+          actor: 'office_operator',
+        }),
+      })
+      setQualificationRequirementEditor(false)
+      setQualificationRequirementDraft(emptyQualificationRequirementDraft())
+      setData((current) => current ? {
+        ...reconcileJobCollections(current, result.job),
+        qualificationRegister: result.qualificationRegister || current.qualificationRegister,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(
+        result.replayed
+          ? `${result.requirement.title} is already enforced for this job and role.`
+          : `${result.requirement.title} is now enforced in assignment, dispatch, site-access, and attendance readiness.`,
+      )
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openQualificationRequirementRetirement(requirement) {
+    qualificationDialogOpenerRef.current = document.activeElement
+    setQualificationRequirementRetirement(requirement)
+    setQualificationRequirementRetirementReason('')
+  }
+
+  function closeQualificationRequirementRetirement() {
+    if (submitting) return
+    const opener = qualificationDialogOpenerRef.current
+    qualificationDialogOpenerRef.current = null
+    setQualificationRequirementRetirement(null)
+    setQualificationRequirementRetirementReason('')
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus()
+    })
+  }
+
+  async function requestQualificationRequirementRetirement(event) {
+    event.preventDefault()
+    if (!qualificationRequirementRetirement || qualificationRequirementRetirementReason.trim().length < 8) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const requirement = qualificationRequirementRetirement
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(requirement.jobId)}/qualification-requirements/${encodeURIComponent(requirement.id)}/retirement`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: qualificationRequirementRetirementReason.trim(), actor: 'office_operator' }),
+      })
+      setQualificationRequirementRetirement(null)
+      setQualificationRequirementRetirementReason('')
+      setData((current) => current ? {
+        ...reconcileJobCollections(current, result.job),
+        qualificationRegister: result.qualificationRegister || current.qualificationRegister,
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(`Removal approval requested for ${result.requirement.title}. The requirement remains enforced until approval.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function openEquipmentEditor(tool = null) {
     equipmentDialogOpenerRef.current = document.activeElement
     setEquipmentEditor(tool || { id: null })
@@ -12391,6 +12774,7 @@ function App() {
                 inventory={data.inventory}
                 workers={workers}
                 workerSummary={data.workerSummary}
+                qualificationRegister={data.qualificationRegister}
                 tools={tools}
                 toolSummary={data.toolSummary}
                 tradePartners={tradePartners}
@@ -12411,6 +12795,9 @@ function App() {
                 onCreateWorker={() => openWorkerEditor()}
                 onEditWorker={openWorkerEditor}
                 onRetireWorker={openWorkerRetirement}
+                onAddCredential={openCredentialEditor}
+                onCreateQualificationRequirement={openQualificationRequirementEditor}
+                onRetireQualificationRequirement={openQualificationRequirementRetirement}
                 onCreateEquipment={() => openEquipmentEditor()}
                 onEditEquipment={openEquipmentEditor}
                 onInspectEquipment={openEquipmentInspection}
@@ -13581,7 +13968,7 @@ function App() {
                   <input
                     value={workerDraft.skills}
                     onChange={(event) => setWorkerDraft({ ...workerDraft, skills: event.target.value })}
-                    placeholder="Carpentry, renovation, VCA"
+                    placeholder="Carpentry, renovation, electrical installation"
                   />
                 </label>
                 <label className="form-span">
@@ -13589,7 +13976,7 @@ function App() {
                   <textarea
                     value={workerDraft.notes}
                     onChange={(event) => setWorkerDraft({ ...workerDraft, notes: event.target.value })}
-                    placeholder="Record restrictions, qualifications, or resource planning context."
+                    placeholder="Record restrictions or resource planning context. Use Qualifications for certificate evidence."
                   />
                 </label>
                 <p className="workflow-note form-span">
@@ -13689,6 +14076,185 @@ function App() {
                 <button className="danger-button" disabled={submitting || workerRetirementReason.trim().length < 8}>
                   <Archive size={16} />
                   {submitting ? 'Submitting...' : 'Request retirement approval'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {credentialEditor ? (
+        <div className="modal-backdrop worker-backdrop" role="presentation">
+          <section
+            className="modal qualification-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="credential-editor-title"
+            data-testid="credential-editor"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeCredentialEditor()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Approval-backed qualification evidence</p>
+                <h2 id="credential-editor-title">Add credential for {credentialEditor.name}</h2>
+                <p>Retain the source identity and validity dates. Approval verifies this revision before readiness can rely on it.</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close credential editor" onClick={closeCredentialEditor}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitWorkerCredential}>
+              <div className="form-grid qualification-form">
+                <label>
+                  Credential type
+                  <select autoFocus value={credentialDraft.credentialType} onChange={(event) => setCredentialDraft({ ...credentialDraft, credentialType: event.target.value })}>
+                    {(data.qualificationRegister?.catalog?.credentials || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Retained title
+                  <input value={credentialDraft.title} onChange={(event) => setCredentialDraft({ ...credentialDraft, title: event.target.value })} placeholder="Uses the credential type when blank" />
+                </label>
+                <label>
+                  Issuer
+                  <input value={credentialDraft.issuer} onChange={(event) => setCredentialDraft({ ...credentialDraft, issuer: event.target.value })} placeholder="Training or examination authority" />
+                </label>
+                <label>
+                  Credential number
+                  <input value={credentialDraft.credentialNumber} onChange={(event) => setCredentialDraft({ ...credentialDraft, credentialNumber: event.target.value })} />
+                </label>
+                <label>
+                  Issued on
+                  <input type="date" max={new Date().toISOString().slice(0, 10)} value={credentialDraft.issuedOn} onChange={(event) => setCredentialDraft({ ...credentialDraft, issuedOn: event.target.value })} />
+                </label>
+                <label>
+                  Expires on
+                  <input type="date" min={credentialDraft.issuedOn || undefined} value={credentialDraft.expiresOn} onChange={(event) => setCredentialDraft({ ...credentialDraft, expiresOn: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Evidence reference
+                  <textarea required minLength="4" maxLength="500" value={credentialDraft.evidenceReference} onChange={(event) => setCredentialDraft({ ...credentialDraft, evidenceReference: event.target.value })} placeholder="Certificate file, provider register reference, or retained verification source" />
+                </label>
+                <p className="workflow-note form-span">Submitting creates an immutable pending revision. Contractor.AI does not issue, renew, or contact a certificate authority.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeCredentialEditor}>Cancel</button>
+                <button className="primary-button" disabled={submitting || credentialDraft.evidenceReference.trim().length < 4}>
+                  <ShieldCheck size={16} />
+                  {submitting ? 'Submitting...' : 'Request evidence verification'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {qualificationRequirementEditor ? (
+        <div className="modal-backdrop worker-backdrop" role="presentation">
+          <section
+            className="modal qualification-requirement-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="qualification-requirement-title"
+            data-testid="qualification-requirement-editor"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeQualificationRequirementEditor()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Job readiness control</p>
+                <h2 id="qualification-requirement-title">Add qualification requirement</h2>
+                <p>This immediately adds a retained readiness gate for matching assigned roles.</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close qualification requirement editor" onClick={closeQualificationRequirementEditor}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitQualificationRequirement}>
+              <div className="form-grid qualification-form">
+                <label className="form-span">
+                  Job
+                  <select autoFocus required value={qualificationRequirementDraft.jobId} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, jobId: event.target.value })}>
+                    <option value="">Select a retained job</option>
+                    {jobs.filter((job) => !['archived', 'cancelled', 'rejected'].includes(job.status)).map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Requirement type
+                  <select value={qualificationRequirementDraft.credentialType} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, credentialType: event.target.value })}>
+                    {(data.qualificationRegister?.catalog?.requirements || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Applies to role
+                  <input value={qualificationRequirementDraft.role} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, role: event.target.value })} placeholder="Blank means all assigned roles" />
+                </label>
+                <label className="form-span">
+                  Requirement title
+                  <input value={qualificationRequirementDraft.title} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, title: event.target.value })} placeholder="Uses the requirement type when blank" />
+                </label>
+                <label className="checkbox-control form-span">
+                  <input type="checkbox" checked={qualificationRequirementDraft.mandatory} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, mandatory: event.target.checked })} />
+                  <span>Block dispatch, site access, and attendance when evidence is missing or expired</span>
+                </label>
+                <p className="workflow-note form-span">Removing a retained requirement later needs an approval and does not delete credential history.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeQualificationRequirementEditor}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !qualificationRequirementDraft.jobId}>
+                  <LockKeyhole size={16} />
+                  {submitting ? 'Saving...' : 'Enforce requirement'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {qualificationRequirementRetirement ? (
+        <div className="modal-backdrop worker-backdrop" role="presentation">
+          <section
+            className="modal qualification-retirement-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="qualification-retirement-title"
+            data-testid="qualification-retirement-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeQualificationRequirementRetirement()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Approval-gated safety change</p>
+                <h2 id="qualification-retirement-title">Request requirement removal</h2>
+                <p>{qualificationRequirementRetirement.title} / {qualificationRequirementRetirement.jobTitle}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close qualification removal request" onClick={closeQualificationRequirementRetirement}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={requestQualificationRequirementRetirement}>
+              <div className="job-lifecycle-body">
+                <div className="job-lifecycle-effect">
+                  <TriangleAlert size={20} />
+                  <div>
+                    <strong>Stop enforcing this readiness gate after approval</strong>
+                    <p>The requirement remains active while the decision is pending. Rejection or cancellation restores its normal active state.</p>
+                  </div>
+                </div>
+                <label>
+                  Operational reason
+                  <textarea autoFocus required minLength="8" value={qualificationRequirementRetirementReason} onChange={(event) => setQualificationRequirementRetirementReason(event.target.value)} placeholder="Reference the accepted scope or safety-plan change." />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={closeQualificationRequirementRetirement}>Cancel</button>
+                <button className="danger-button" disabled={submitting || qualificationRequirementRetirementReason.trim().length < 8}>
+                  <Archive size={16} />
+                  {submitting ? 'Submitting...' : 'Request removal approval'}
                 </button>
               </div>
             </form>
