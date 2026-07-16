@@ -636,6 +636,31 @@ function emptyOpportunityActivityDraft() {
   }
 }
 
+function emptyBidPackageDraft() {
+  return {
+    opportunityId: '',
+    title: '',
+    trade: '',
+    scope: '',
+    dueAt: futureDateInput(10),
+    ownerName: '',
+    tradePartnerIds: [],
+  }
+}
+
+function emptyBidReturnDraft() {
+  return {
+    netAmount: '',
+    taxRate: '21',
+    receivedAt: futureDateInput(0),
+    validUntil: futureDateInput(30),
+    durationDays: '',
+    evidenceReference: '',
+    exclusions: '',
+    qualifications: '',
+  }
+}
+
 function emptyRfiDraft() {
   return {
     title: '',
@@ -801,8 +826,19 @@ function reconcileJobCollections(data, job) {
 
 async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false) {
   if (section === 'pipeline') {
-    const result = await api('/api/ledger/opportunities?includeClosed=true&limit=500')
-    return { opportunities: result.opportunities || [], opportunityForecast: result.forecast || null }
+    const [opportunities, bids, partners] = await Promise.all([
+      api('/api/ledger/opportunities?includeClosed=true&limit=500'),
+      api('/api/ledger/bid-packages?includeClosed=true&limit=500'),
+      api('/api/ledger/trade-partners?includeRetired=true&limit=500'),
+    ])
+    return {
+      opportunities: opportunities.opportunities || [],
+      opportunityForecast: opportunities.forecast || null,
+      bidPackages: bids.bidPackages || [],
+      bidPackageSummary: bids.summary || {},
+      tradePartners: partners.partners || [],
+      tradePartnerSummary: partners.summary || {},
+    }
   }
   if (section === 'jobs') {
     const [jobs, templates] = await Promise.all([
@@ -918,11 +954,175 @@ function Empty({ title, detail }) {
 
 const PIPELINE_STAGES = ['new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating', 'won', 'lost', 'archived']
 
+function BidPackageWorkspace({
+  bidPackages,
+  selectedBidPackage,
+  canCoordinate,
+  canApprove,
+  submitting,
+  onCreate,
+  onSelect,
+  onAddBidders,
+  onRecordReturn,
+  onRequestSelection,
+  onReviewApproval,
+}) {
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState('open')
+  const normalizedQuery = query.trim().toLowerCase()
+  useEffect(() => {
+    if (selectedBidPackage?.status === 'selected') setStatus('selected')
+  }, [selectedBidPackage?.id, selectedBidPackage?.status])
+  const rows = useMemo(
+    () =>
+      bidPackages.filter((bidPackage) => {
+        const statusMatches =
+          status === 'all' ||
+          (status === 'open'
+            ? !['selected', 'closed', 'cancelled'].includes(bidPackage.status)
+            : bidPackage.status === status)
+        return statusMatches && (!normalizedQuery || JSON.stringify(bidPackage).toLowerCase().includes(normalizedQuery))
+      }),
+    [bidPackages, normalizedQuery, status],
+  )
+
+  return (
+    <>
+      <section className="panel bid-register" data-testid="bid-package-workspace">
+        <div className="panel-heading pipeline-heading">
+          <div>
+            <h2>Bid package register</h2>
+            <p>Compare retained trade-partner returns before a preferred bidder enters approval.</p>
+          </div>
+          {canCoordinate ? (
+            <button className="primary-button" onClick={onCreate}>
+              <Plus size={16} />
+              New bid package
+            </button>
+          ) : null}
+        </div>
+        <div className="pipeline-toolbar">
+          <label className="search-control">
+            <Search size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search package, client, trade or bidder" />
+          </label>
+          <div className="pipeline-stage-tabs bid-status-tabs" role="group" aria-label="Filter bid packages by status">
+            {['open', 'under_review', 'pending_selection_approval', 'selected', 'all'].map((option) => (
+              <button key={option} className={status === option ? 'active' : ''} onClick={() => setStatus(option)}>
+                {formatStatus(option)}
+              </button>
+            ))}
+          </div>
+        </div>
+        {rows.length ? (
+          <div className="bid-package-list">
+            {rows.map((bidPackage) => (
+              <article className={`bid-package-row ${selectedBidPackage?.id === bidPackage.id ? 'bid-package-row-selected' : ''}`} key={bidPackage.id}>
+                <button className="bid-package-main" onClick={() => onSelect(bidPackage)} aria-label={`Open bid package ${bidPackage.packageNumber}`}>
+                  <span className="bid-package-icon"><ClipboardList size={17} /></span>
+                  <span>
+                    <span className="pipeline-title">
+                      <strong>{bidPackage.packageNumber} / {bidPackage.title}</strong>
+                      <span className={`status status-${bidPackage.status}`}>{formatStatus(bidPackage.status)}</span>
+                    </span>
+                    <small>{bidPackage.client?.name || 'Client pending'} / {bidPackage.trade} / {bidPackage.opportunity?.title || 'Opportunity pending'}</small>
+                  </span>
+                </button>
+                <dl className="bid-package-values">
+                  <div><dt>Due</dt><dd className={bidPackage.flags?.overdue ? 'pipeline-overdue' : ''}>{bidPackage.dueAt ? formatDate(bidPackage.dueAt) : 'Not set'}</dd></div>
+                  <div><dt>Returns</dt><dd>{bidPackage.comparison?.returned || 0} / {bidPackage.comparison?.invited || 0}</dd></div>
+                  <div><dt>Lowest</dt><dd>{bidPackage.comparison?.returned ? currency.format(bidPackage.comparison.lowestTotal || 0) : 'Pending'}</dd></div>
+                </dl>
+                <button className="icon-button table-action" aria-label={`Open bid package details for ${bidPackage.packageNumber}`} onClick={() => onSelect(bidPackage)}>
+                  <ArrowUpRight size={16} />
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <Empty title="No bid packages in this view" detail="Adjust the status filter or retain a new internal tender package." />
+        )}
+      </section>
+
+      {selectedBidPackage ? (
+        <section className="panel bid-package-detail" aria-live="polite">
+          <div className="panel-heading">
+            <div>
+              <h2>{selectedBidPackage.packageNumber} / {selectedBidPackage.title}</h2>
+              <p>{selectedBidPackage.trade} / {formatStatus(selectedBidPackage.status)} / {selectedBidPackage.comparison?.returned || 0} retained return(s)</p>
+            </div>
+            <div className="bid-package-heading-actions">
+              {canCoordinate && ['draft', 'open_for_returns', 'under_review'].includes(selectedBidPackage.status) ? (
+                <button className="secondary-button" onClick={() => onAddBidders(selectedBidPackage)}>
+                  <Users size={15} /> Add bidders
+                </button>
+              ) : null}
+              {selectedBidPackage.approvalId && selectedBidPackage.status === 'pending_selection_approval' && canApprove ? (
+                <button className="primary-button" onClick={() => onReviewApproval(selectedBidPackage)}>
+                  <ShieldCheck size={15} /> Review approval
+                </button>
+              ) : null}
+              <button className="icon-button" aria-label="Close bid package detail" onClick={() => onSelect(null)}><X size={17} /></button>
+            </div>
+          </div>
+          <div className="bid-package-summary">
+            <div><span>Scope</span><strong>{selectedBidPackage.scope}</strong></div>
+            <div><span>Comparison</span><strong>{selectedBidPackage.comparison?.returned ? `${currency.format(selectedBidPackage.comparison.lowestTotal)} to ${currency.format(selectedBidPackage.comparison.highestTotal)}` : 'No returns retained'}</strong></div>
+            <div><span>Control</span><strong>{selectedBidPackage.status === 'selected' ? 'Preferred bidder retained; no award sent' : 'Internal only; no invitations sent'}</strong></div>
+          </div>
+          <div className="bid-participant-list">
+            {selectedBidPackage.participants.map((participant) => {
+              const canEditReturn = canCoordinate && ['open_for_returns', 'under_review'].includes(selectedBidPackage.status)
+              const canSelect = canCoordinate && participant.status === 'returned' && ['open_for_returns', 'under_review'].includes(selectedBidPackage.status)
+              return (
+                <article className="bid-participant-row" key={participant.id}>
+                  <div className="bid-participant-copy">
+                    <span className="pipeline-title">
+                      <strong>{participant.partner?.name || 'Trade partner unavailable'}</strong>
+                      <span className={`status status-${participant.status}`}>{formatStatus(participant.status)}</span>
+                    </span>
+                    <small>{formatStatus(participant.partner?.compliance?.status || 'needs_review')} compliance / {participant.data?.deliveryStatus === 'not_sent' ? 'internal invite only' : 'retained record'}</small>
+                    {participant.evidenceReference ? <p>Evidence: {participant.evidenceReference}</p> : null}
+                  </div>
+                  <dl className="bid-participant-values">
+                    <div><dt>Total</dt><dd>{participant.status === 'internal_invite' ? 'Awaiting return' : currency.format(participant.total || 0)}</dd></div>
+                    <div><dt>Duration</dt><dd>{participant.durationDays === null ? 'Not retained' : `${participant.durationDays} days`}</dd></div>
+                    <div><dt>Valid until</dt><dd>{participant.validUntil ? formatDate(participant.validUntil) : 'Not retained'}</dd></div>
+                  </dl>
+                  <div className="bid-participant-actions">
+                    {canEditReturn && ['internal_invite', 'returned'].includes(participant.status) ? (
+                      <button className="secondary-button" disabled={submitting} onClick={() => onRecordReturn(selectedBidPackage, participant)}>
+                        <ReceiptEuro size={15} /> {participant.status === 'returned' ? 'Update return' : 'Record return'}
+                      </button>
+                    ) : null}
+                    {canSelect ? (
+                      <button className="primary-button" disabled={submitting || participant.partner?.compliance?.compliant !== true} onClick={() => onRequestSelection(selectedBidPackage, participant)}>
+                        <ShieldCheck size={15} /> Request selection approval
+                      </button>
+                    ) : null}
+                    {participant.status === 'selected' ? <span className="tag tag-green">Preferred / no award sent</span> : null}
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
+    </>
+  )
+}
+
 function PipelineWorkspace({
+  view,
+  onViewChange,
   opportunities,
   forecast,
+  bidPackages,
+  bidSummary,
+  selectedBidPackage,
   selectedOpportunity,
   canCoordinate,
+  canApprove,
   submitting,
   onCreate,
   onEdit,
@@ -931,6 +1131,12 @@ function PipelineWorkspace({
   onCompleteActivity,
   onConvert,
   onOpenJob,
+  onCreateBidPackage,
+  onSelectBidPackage,
+  onAddBidders,
+  onRecordBidReturn,
+  onRequestBidSelection,
+  onReviewBidApproval,
 }) {
   const [query, setQuery] = useState('')
   const [stage, setStage] = useState('open')
@@ -948,27 +1154,39 @@ function PipelineWorkspace({
     [normalizedQuery, opportunities, stage],
   )
   const summary = forecast?.summary || {}
+  const tenderSummary = bidSummary || {}
 
   return (
     <section className="page-grid pipeline-workspace" data-testid="pipeline-workspace">
       <div className="metrics-grid pipeline-metrics">
-        <Metric icon={Target} label="Open opportunities" value={summary.open || 0} hint={`${summary.total || 0} retained leads`} />
-        <Metric
-          icon={ReceiptEuro}
-          label="Weighted forecast"
-          value={currency.format(summary.weightedValue || 0)}
-          hint={`${currency.format(summary.estimatedValue || 0)} unweighted`}
-          tone="green"
-        />
-        <Metric
-          icon={Timer}
-          label="Follow-ups due"
-          value={summary.overdueFollowUps || 0}
-          hint="Internal action required"
-          tone={summary.overdueFollowUps ? 'amber' : 'green'}
-        />
-        <Metric icon={BriefcaseBusiness} label="Converted" value={summary.converted || 0} hint={`${summary.won || 0} verified wins`} tone="blue" />
+        {view === 'opportunities' ? (
+          <>
+            <Metric icon={Target} label="Open opportunities" value={summary.open || 0} hint={`${summary.total || 0} retained leads`} />
+            <Metric icon={ReceiptEuro} label="Weighted forecast" value={currency.format(summary.weightedValue || 0)} hint={`${currency.format(summary.estimatedValue || 0)} unweighted`} tone="green" />
+            <Metric icon={Timer} label="Follow-ups due" value={summary.overdueFollowUps || 0} hint="Internal action required" tone={summary.overdueFollowUps ? 'amber' : 'green'} />
+            <Metric icon={BriefcaseBusiness} label="Converted" value={summary.converted || 0} hint={`${summary.won || 0} verified wins`} tone="blue" />
+          </>
+        ) : (
+          <>
+            <Metric icon={ClipboardList} label="Bid packages" value={tenderSummary.total || 0} hint={`${tenderSummary.invited || 0} internal bidders`} />
+            <Metric icon={ReceiptEuro} label="Returns retained" value={tenderSummary.returns || 0} hint="Comparable evidence" tone="green" />
+            <Metric icon={Timer} label="Overdue" value={tenderSummary.overdue || 0} hint="Return deadline passed" tone={tenderSummary.overdue ? 'amber' : 'green'} />
+            <Metric icon={ShieldCheck} label="Selections" value={tenderSummary.selected || 0} hint={`${tenderSummary.pendingApproval || 0} awaiting approval`} tone="blue" />
+          </>
+        )}
       </div>
+
+      <div className="pipeline-view-tabs" role="tablist" aria-label="Preconstruction views">
+        <button role="tab" aria-selected={view === 'opportunities'} className={view === 'opportunities' ? 'active' : ''} onClick={() => onViewChange('opportunities')}>
+          <Target size={15} /> Opportunities
+        </button>
+        <button role="tab" aria-selected={view === 'bids'} className={view === 'bids' ? 'active' : ''} onClick={() => onViewChange('bids')}>
+          <ClipboardList size={15} /> Bid packages
+        </button>
+      </div>
+
+      {view === 'opportunities' ? (
+        <>
 
       <section className="panel pipeline-panel">
         <div className="panel-heading pipeline-heading">
@@ -1141,6 +1359,22 @@ function PipelineWorkspace({
           )}
         </section>
       ) : null}
+        </>
+      ) : (
+        <BidPackageWorkspace
+          bidPackages={bidPackages}
+          selectedBidPackage={selectedBidPackage}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          submitting={submitting}
+          onCreate={onCreateBidPackage}
+          onSelect={onSelectBidPackage}
+          onAddBidders={onAddBidders}
+          onRecordReturn={onRecordBidReturn}
+          onRequestSelection={onRequestBidSelection}
+          onReviewApproval={onReviewBidApproval}
+        />
+      )}
     </section>
   )
 }
@@ -5836,6 +6070,7 @@ function AuthenticationScreen({ checking, error, submitting, onLogin }) {
 
 function App() {
   const [section, setSection] = useState('today')
+  const [pipelineView, setPipelineView] = useState('opportunities')
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [data, setData] = useState(null)
   const [authState, setAuthState] = useState('checking')
@@ -5851,6 +6086,13 @@ function App() {
   const [selectedOpportunity, setSelectedOpportunity] = useState(null)
   const [opportunityActivity, setOpportunityActivity] = useState(null)
   const [opportunityActivityDraft, setOpportunityActivityDraft] = useState(() => emptyOpportunityActivityDraft())
+  const [bidPackageEditor, setBidPackageEditor] = useState(false)
+  const [bidPackageDraft, setBidPackageDraft] = useState(() => emptyBidPackageDraft())
+  const [selectedBidPackage, setSelectedBidPackage] = useState(null)
+  const [bidPackageAction, setBidPackageAction] = useState(null)
+  const [bidReturnDraft, setBidReturnDraft] = useState(() => emptyBidReturnDraft())
+  const [bidSelectionRationale, setBidSelectionRationale] = useState('')
+  const [bidAddPartnerIds, setBidAddPartnerIds] = useState([])
   const [approvalFocus, setApprovalFocus] = useState(null)
   const [approvalReview, setApprovalReview] = useState(null)
   const [approvalReason, setApprovalReason] = useState('')
@@ -5986,6 +6228,8 @@ function App() {
           organization: null,
           opportunities: [],
           opportunityForecast: null,
+          bidPackages: [],
+          bidPackageSummary: {},
         })
         return
       }
@@ -6020,6 +6264,8 @@ function App() {
           organization: null,
           opportunities: [],
           opportunityForecast: null,
+          bidPackages: [],
+          bidPackageSummary: {},
         })
       }
       const currentSection = sectionRef.current
@@ -6398,7 +6644,15 @@ function App() {
       })
       setApprovalReview(null)
       setApprovalReason('')
-      if (result.job) {
+      if (result.bidPackage) {
+        setSelectedBidPackage(result.bidPackage)
+        setData((current) => current ? {
+          ...current,
+          dashboard: result.dashboard || current.dashboard,
+          approvals: (current.approvals || EMPTY_LIST).filter((approval) => approval.id !== item.id),
+          bidPackages: upsertById(current.bidPackages, result.bidPackage),
+        } : current)
+      } else if (result.job) {
         setData((current) => reconcileJobCollections({
           ...current,
           dashboard: result.dashboard || current?.dashboard,
@@ -6587,6 +6841,168 @@ function App() {
     sectionRef.current = 'jobs'
     setSection('jobs')
     void openJobWorkspace(linkedJob)
+  }
+
+  function openBidPackageEditor() {
+    const preferredOpportunity = selectedOpportunity && !['won', 'lost', 'archived'].includes(selectedOpportunity.stage)
+      ? selectedOpportunity.id
+      : ''
+    setBidPackageDraft({ ...emptyBidPackageDraft(), opportunityId: preferredOpportunity })
+    setBidPackageEditor(true)
+  }
+
+  async function submitBidPackage(event) {
+    event.preventDefault()
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/bid-packages', {
+        method: 'POST',
+        body: JSON.stringify({ ...bidPackageDraft, dueAt: toIsoDateTime(bidPackageDraft.dueAt) }),
+      })
+      setBidPackageEditor(false)
+      setBidPackageDraft(emptyBidPackageDraft())
+      setSelectedBidPackage(result.bidPackage)
+      setData((current) => current ? { ...current, bidPackages: upsertById(current.bidPackages, result.bidPackage) } : current)
+      notify('Internal bid package retained. No invitation or message was sent.')
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function selectBidPackage(bidPackage) {
+    if (!bidPackage) {
+      setSelectedBidPackage(null)
+      return
+    }
+    setError('')
+    try {
+      const result = await api(`/api/ledger/bid-packages/${encodeURIComponent(bidPackage.id)}`)
+      setSelectedBidPackage(result.bidPackage)
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  function openBidReturn(bidPackage, participant) {
+    setBidReturnDraft({
+      ...emptyBidReturnDraft(),
+      netAmount: participant.status === 'returned' ? String(participant.netAmount || '') : '',
+      taxRate: String(participant.taxRate ?? 21),
+      receivedAt: participant.receivedAt ? toLocalDateTimeInput(participant.receivedAt).slice(0, 10) : futureDateInput(0),
+      validUntil: participant.validUntil ? toLocalDateTimeInput(participant.validUntil).slice(0, 10) : futureDateInput(30),
+      durationDays: participant.durationDays === null ? '' : String(participant.durationDays),
+      evidenceReference: participant.evidenceReference || '',
+      exclusions: (participant.exclusions || []).join('\n'),
+      qualifications: (participant.qualifications || []).join('\n'),
+    })
+    setBidPackageAction({ type: 'return', bidPackage, participant })
+  }
+
+  async function submitBidReturn(event) {
+    event.preventDefault()
+    if (bidPackageAction?.type !== 'return') return
+    setSubmitting(true)
+    setError('')
+    try {
+      const { bidPackage, participant } = bidPackageAction
+      const result = await api(
+        `/api/ledger/bid-packages/${encodeURIComponent(bidPackage.id)}/participants/${encodeURIComponent(participant.id)}/return`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...bidReturnDraft,
+            netAmount: Number(bidReturnDraft.netAmount),
+            taxRate: Number(bidReturnDraft.taxRate),
+            durationDays: bidReturnDraft.durationDays === '' ? null : Number(bidReturnDraft.durationDays),
+            receivedAt: toIsoDateTime(bidReturnDraft.receivedAt),
+            validUntil: toIsoDateTime(bidReturnDraft.validUntil),
+          }),
+        },
+      )
+      setBidPackageAction(null)
+      setBidReturnDraft(emptyBidReturnDraft())
+      setSelectedBidPackage(result.bidPackage)
+      setData((current) => current ? { ...current, bidPackages: upsertById(current.bidPackages, result.bidPackage) } : current)
+      notify('Bid return evidence retained for internal comparison. No bidder was contacted.')
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openBidSelection(bidPackage, participant) {
+    setBidSelectionRationale('')
+    setBidPackageAction({ type: 'selection', bidPackage, participant })
+  }
+
+  async function submitBidSelection(event) {
+    event.preventDefault()
+    if (bidPackageAction?.type !== 'selection') return
+    setSubmitting(true)
+    setError('')
+    try {
+      const { bidPackage, participant } = bidPackageAction
+      const result = await api(`/api/ledger/bid-packages/${encodeURIComponent(bidPackage.id)}/selection`, {
+        method: 'POST',
+        body: JSON.stringify({ participantId: participant.id, rationale: bidSelectionRationale }),
+      })
+      setBidPackageAction(null)
+      setBidSelectionRationale('')
+      setSelectedBidPackage(result.bidPackage)
+      setData((current) => current ? {
+        ...current,
+        bidPackages: upsertById(current.bidPackages, result.bidPackage),
+        approvals: upsertById(current.approvals, result.approval),
+      } : current)
+      notify('Preferred-bidder selection added to approvals. No award, order, or message was issued.')
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openAddBidParticipants(bidPackage) {
+    setBidAddPartnerIds([])
+    setBidPackageAction({ type: 'add_participants', bidPackage })
+  }
+
+  async function submitBidParticipants(event) {
+    event.preventDefault()
+    if (bidPackageAction?.type !== 'add_participants') return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/bid-packages/${encodeURIComponent(bidPackageAction.bidPackage.id)}/participants`, {
+        method: 'POST',
+        body: JSON.stringify({ tradePartnerIds: bidAddPartnerIds }),
+      })
+      setBidPackageAction(null)
+      setBidAddPartnerIds([])
+      setSelectedBidPackage(result.bidPackage)
+      setData((current) => current ? { ...current, bidPackages: upsertById(current.bidPackages, result.bidPackage) } : current)
+      notify(result.replayed ? 'All selected bidders were already retained.' : 'Bidders added internally. No invitation or message was sent.')
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function reviewBidApproval(bidPackage) {
+    openApprovals({
+      approvalId: bidPackage.approvalId,
+      jobId: bidPackage.jobId || null,
+      jobTitle: `${bidPackage.packageNumber} ${bidPackage.title}`,
+    })
   }
 
   async function runCycle() {
@@ -10088,10 +10504,16 @@ function App() {
 
             {section === 'pipeline' && capabilities.pipeline ? (
               <PipelineWorkspace
+                view={pipelineView}
+                onViewChange={setPipelineView}
                 opportunities={data.opportunities || EMPTY_LIST}
                 forecast={data.opportunityForecast}
+                bidPackages={data.bidPackages || EMPTY_LIST}
+                bidSummary={data.bidPackageSummary || {}}
+                selectedBidPackage={selectedBidPackage}
                 selectedOpportunity={selectedOpportunity}
                 canCoordinate={canCoordinate}
+                canApprove={capabilities.approvals === true}
                 submitting={submitting}
                 onCreate={() => openOpportunityEditor()}
                 onEdit={openOpportunityEditor}
@@ -10100,6 +10522,12 @@ function App() {
                 onCompleteActivity={completeOpportunityActivity}
                 onConvert={convertOpportunity}
                 onOpenJob={openOpportunityJob}
+                onCreateBidPackage={openBidPackageEditor}
+                onSelectBidPackage={selectBidPackage}
+                onAddBidders={openAddBidParticipants}
+                onRecordBidReturn={openBidReturn}
+                onRequestBidSelection={openBidSelection}
+                onReviewBidApproval={reviewBidApproval}
               />
             ) : null}
 
@@ -13524,6 +13952,209 @@ function App() {
                 <button className="primary-button" disabled={submitting || opportunityActivityDraft.summary.trim().length < 3}>
                   {submitting ? 'Saving...' : 'Retain activity'}
                 </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {bidPackageEditor ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section className="modal bid-package-modal" role="dialog" aria-modal="true" aria-labelledby="bid-package-modal-title" data-testid="bid-package-modal">
+            <div className="modal-heading">
+              <div>
+                <h2 id="bid-package-modal-title">New bid package</h2>
+                <p>Retain an internal tender comparison. No invitations are sent from this workflow.</p>
+              </div>
+              <button className="icon-button" aria-label="Close bid package" onClick={() => setBidPackageEditor(false)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidPackage}>
+              <div className="form-grid bid-package-form">
+                <label className="form-span">
+                  Opportunity
+                  <select required value={bidPackageDraft.opportunityId} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, opportunityId: event.target.value })}>
+                    <option value="">Select an open opportunity</option>
+                    {(data.opportunities || EMPTY_LIST).filter((opportunity) => !['won', 'lost', 'archived'].includes(opportunity.stage)).map((opportunity) => (
+                      <option key={opportunity.id} value={opportunity.id}>{opportunity.title} / {opportunity.client?.name || 'Client pending'}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Package title
+                  <input required minLength="2" value={bidPackageDraft.title} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, title: event.target.value })} placeholder="Electrical installation package" />
+                </label>
+                <label>
+                  Trade
+                  <input required minLength="2" value={bidPackageDraft.trade} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, trade: event.target.value })} placeholder="Electrical" />
+                </label>
+                <label>
+                  Return due
+                  <input required type="date" min={futureDateInput(1)} value={bidPackageDraft.dueAt} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, dueAt: event.target.value })} />
+                </label>
+                <label>
+                  Owner
+                  <input value={bidPackageDraft.ownerName} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, ownerName: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Scope
+                  <textarea required minLength="5" value={bidPackageDraft.scope} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, scope: event.target.value })} placeholder="Retained scope, interfaces, evidence, assumptions, and return requirements." />
+                </label>
+                <fieldset className="form-span bid-partner-picker">
+                  <legend>Internal bidder list</legend>
+                  {(data.tradePartners || EMPTY_LIST).filter((partner) => partner.status === 'active').length ? (
+                    <div>
+                      {(data.tradePartners || EMPTY_LIST).filter((partner) => partner.status === 'active').map((partner) => (
+                        <label key={partner.id}>
+                          <input
+                            type="checkbox"
+                            checked={bidPackageDraft.tradePartnerIds.includes(partner.id)}
+                            onChange={(event) => setBidPackageDraft({
+                              ...bidPackageDraft,
+                              tradePartnerIds: event.target.checked
+                                ? [...bidPackageDraft.tradePartnerIds, partner.id]
+                                : bidPackageDraft.tradePartnerIds.filter((id) => id !== partner.id),
+                            })}
+                          />
+                          <span><strong>{partner.name}</strong><small>{formatStatus(partner.partnerType)} / {formatStatus(partner.compliance?.status)}</small></span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>No active trade partners are retained. Add and verify partners in Resources first.</p>
+                  )}
+                </fieldset>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={() => setBidPackageEditor(false)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !bidPackageDraft.opportunityId || bidPackageDraft.title.trim().length < 2 || bidPackageDraft.trade.trim().length < 2 || bidPackageDraft.scope.trim().length < 5 || !bidPackageDraft.tradePartnerIds.length}>
+                  {submitting ? 'Saving...' : 'Retain bid package'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {bidPackageAction?.type === 'return' ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section className="modal bid-return-modal" role="dialog" aria-modal="true" aria-labelledby="bid-return-modal-title" data-testid="bid-return-modal">
+            <div className="modal-heading">
+              <div>
+                <h2 id="bid-return-modal-title">Record bid return</h2>
+                <p>{bidPackageAction.participant.partner?.name} / {bidPackageAction.bidPackage.packageNumber}</p>
+              </div>
+              <button className="icon-button" aria-label="Close bid return" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidReturn}>
+              <div className="form-grid bid-return-form">
+                <label>
+                  Net amount
+                  <input required type="number" min="0.01" step="0.01" value={bidReturnDraft.netAmount} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, netAmount: event.target.value })} />
+                </label>
+                <label>
+                  VAT rate
+                  <input required type="number" min="0" max="100" step="0.01" value={bidReturnDraft.taxRate} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, taxRate: event.target.value })} />
+                </label>
+                <label>
+                  Received date
+                  <input required type="date" max={futureDateInput(1)} value={bidReturnDraft.receivedAt} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, receivedAt: event.target.value })} />
+                </label>
+                <label>
+                  Valid until
+                  <input type="date" min={bidReturnDraft.receivedAt || futureDateInput(0)} value={bidReturnDraft.validUntil} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, validUntil: event.target.value })} />
+                </label>
+                <label>
+                  Duration days
+                  <input type="number" min="0" max="3650" step="1" value={bidReturnDraft.durationDays} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, durationDays: event.target.value })} />
+                </label>
+                <label>
+                  Evidence reference
+                  <input required minLength="3" value={bidReturnDraft.evidenceReference} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, evidenceReference: event.target.value })} placeholder="Email, document or receipt reference" />
+                </label>
+                <label className="form-span">
+                  Exclusions
+                  <textarea value={bidReturnDraft.exclusions} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, exclusions: event.target.value })} placeholder="One exclusion per line" />
+                </label>
+                <label className="form-span">
+                  Qualifications
+                  <textarea value={bidReturnDraft.qualifications} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, qualifications: event.target.value })} placeholder="One qualification per line" />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || Number(bidReturnDraft.netAmount) <= 0 || bidReturnDraft.evidenceReference.trim().length < 3}>
+                  {submitting ? 'Saving...' : 'Retain return evidence'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {bidPackageAction?.type === 'selection' ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section className="modal bid-selection-modal" role="dialog" aria-modal="true" aria-labelledby="bid-selection-modal-title" data-testid="bid-selection-modal">
+            <div className="modal-heading">
+              <div>
+                <h2 id="bid-selection-modal-title">Request preferred-bidder approval</h2>
+                <p>{bidPackageAction.participant.partner?.name} / {currency.format(bidPackageAction.participant.total || 0)}</p>
+              </div>
+              <button className="icon-button" aria-label="Close bid selection" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidSelection}>
+              <div className="bid-selection-review">
+                <div><span>Package</span><strong>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.title}</strong></div>
+                <div><span>Comparison</span><strong>{bidPackageAction.bidPackage.comparison.returned} return(s), {currency.format(bidPackageAction.bidPackage.comparison.spread || 0)} spread</strong></div>
+                <div><span>Safeguard</span><strong>Approval records preference only; it cannot award, order, spend, or send.</strong></div>
+              </div>
+              <div className="form-grid bid-selection-form">
+                <label className="form-span">
+                  Selection rationale
+                  <textarea required minLength="8" maxLength="1000" value={bidSelectionRationale} onChange={(event) => setBidSelectionRationale(event.target.value)} placeholder="Compare price, scope, exclusions, programme, quality, risk, and compliance." />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || bidSelectionRationale.trim().length < 8}>
+                  {submitting ? 'Requesting...' : 'Request selection approval'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {bidPackageAction?.type === 'add_participants' ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section className="modal bid-add-participants-modal" role="dialog" aria-modal="true" aria-labelledby="bid-add-participants-title" data-testid="bid-add-participants-modal">
+            <div className="modal-heading">
+              <div>
+                <h2 id="bid-add-participants-title">Add internal bidders</h2>
+                <p>{bidPackageAction.bidPackage.packageNumber} / no invitation or message will be sent</p>
+              </div>
+              <button className="icon-button" aria-label="Close add bidders" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidParticipants}>
+              <fieldset className="bid-partner-picker bid-add-partner-picker">
+                <legend>Available trade partners</legend>
+                <div>
+                  {(data.tradePartners || EMPTY_LIST)
+                    .filter((partner) => partner.status === 'active' && !bidPackageAction.bidPackage.participants.some((participant) => participant.tradePartnerId === partner.id))
+                    .map((partner) => (
+                      <label key={partner.id}>
+                        <input
+                          type="checkbox"
+                          checked={bidAddPartnerIds.includes(partner.id)}
+                          onChange={(event) => setBidAddPartnerIds((current) => event.target.checked ? [...current, partner.id] : current.filter((id) => id !== partner.id))}
+                        />
+                        <span><strong>{partner.name}</strong><small>{formatStatus(partner.partnerType)} / {formatStatus(partner.compliance?.status)}</small></span>
+                      </label>
+                    ))}
+                </div>
+              </fieldset>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !bidAddPartnerIds.length}>{submitting ? 'Adding...' : 'Add bidders internally'}</button>
               </div>
             </form>
           </section>

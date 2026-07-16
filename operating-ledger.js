@@ -10,7 +10,7 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'preconstruction',
     label: 'Preconstruction CRM and estimating',
     vendors: ['Buildr', 'Autodesk', 'Procore', 'Contractor Foreman', 'Sage'],
-    capabilities: ['opportunities', 'client pipeline', 'takeoff', 'estimating', 'quote control', 'resource planning', 'handover'],
+    capabilities: ['opportunities', 'client pipeline', 'bid/tender management', 'takeoff', 'estimating', 'quote control', 'resource planning', 'handover'],
     sourceEvidence: [
       'Buildr emphasizes preconstruction CRM, estimate tracking, workforce planning, forecasting and project handover.',
       'Autodesk and Procore both surface bid/tender management, document control, estimating and project data as core construction workflows.'
@@ -109,6 +109,7 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
 const LEDGER_CAPABILITY_REQUIREMENTS = {
   preconstruction: [
     { key: 'intake', label: 'Client intake', table: 'job_requests', detailKey: 'request' },
+    { key: 'bid_package', label: 'Bid / tender package', table: 'bid_packages', detailKey: 'bidPackages' },
     { key: 'quote', label: 'Quote or estimate', table: 'quotes', detailKey: 'quotes' },
     { key: 'site_visit', label: 'Site visit / survey', table: 'site_visits', detailKey: 'siteVisits' },
     { key: 'materials', label: 'Material scope', table: 'material_requirements', detailKey: 'materials' },
@@ -268,6 +269,7 @@ const LEDGER_CLOSED_STATUSES = new Set([
   'released',
   'resolved',
   'reviewed',
+  'selected',
   'sent',
   'settled',
   'stored',
@@ -328,6 +330,41 @@ const OPEN_OPPORTUNITY_STAGES = new Set([
   'negotiating'
 ]);
 
+const BID_PACKAGE_STATUSES = new Set([
+  'draft',
+  'open_for_returns',
+  'under_review',
+  'pending_selection_approval',
+  'selected',
+  'closed',
+  'cancelled'
+]);
+
+const BID_PARTICIPANT_STATUSES = new Set([
+  'internal_invite',
+  'returned',
+  'declined',
+  'withdrawn',
+  'selected',
+  'not_selected'
+]);
+
+function normalizeBidPackageStatus(value, fallback = 'draft') {
+  const status = normalizeStatus(value, fallback);
+  if (!BID_PACKAGE_STATUSES.has(status)) {
+    throw ledgerInputError('bid_package_status_invalid', `Bid package status must be one of: ${[...BID_PACKAGE_STATUSES].join(', ')}.`);
+  }
+  return status;
+}
+
+function normalizeBidParticipantStatus(value, fallback = 'internal_invite') {
+  const status = normalizeStatus(value, fallback);
+  if (!BID_PARTICIPANT_STATUSES.has(status)) {
+    throw ledgerInputError('bid_participant_status_invalid', `Bid participant status must be one of: ${[...BID_PARTICIPANT_STATUSES].join(', ')}.`);
+  }
+  return status;
+}
+
 const OPPORTUNITY_STAGE_PROBABILITY = {
   new: 10,
   qualifying: 20,
@@ -367,6 +404,7 @@ function normalizeProbability(value, stage) {
 function capabilityRequirementActionTarget(requirementKey) {
   const targets = {
     intake: 'job_update_form',
+    bid_package: 'bid_package_form',
     quote: 'quote_form',
     site_visit: 'site_visit_form',
     materials: 'material_form',
@@ -423,6 +461,7 @@ function capabilityRequirementActionTarget(requirementKey) {
 }
 
 const CAPABILITY_SAFE_SCAFFOLD_REQUIREMENTS = new Set([
+  'bid_package',
   'quote',
   'materials',
   'tasks',
@@ -1047,9 +1086,9 @@ function roundMoney(value) {
   return Math.round((normalizeNumber(value, 0) + Number.EPSILON) * 100) / 100;
 }
 
-function ledgerInputError(code, message, details = null) {
+function ledgerInputError(code, message, details = null, statusCode = 400) {
   const error = new Error(message);
-  error.statusCode = 400;
+  error.statusCode = statusCode;
   error.code = code;
   if (details) error.details = details;
   return error;
@@ -2214,6 +2253,71 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           template.updated_at
         );
       }
+    }
+  },
+  {
+    version: '026_preconstruction_bid_packages',
+    description: 'Retain internal tender packages, verified trade-partner returns, immutable comparisons, and approval-gated preferred-bidder selections.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bid_package_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS bid_packages (
+          id TEXT PRIMARY KEY,
+          opportunity_id TEXT NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+          job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+          package_number TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          trade TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          due_at TEXT,
+          owner_name TEXT,
+          approval_id TEXT,
+          selected_bid_participant_id TEXT,
+          comparison_hash TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bid_packages_opportunity
+          ON bid_packages(opportunity_id, status, due_at, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_bid_packages_portfolio
+          ON bid_packages(status, due_at, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_bid_packages_approval
+          ON bid_packages(approval_id, status);
+
+        CREATE TABLE IF NOT EXISTS bid_package_participants (
+          id TEXT PRIMARY KEY,
+          bid_package_id TEXT NOT NULL REFERENCES bid_packages(id) ON DELETE CASCADE,
+          trade_partner_id TEXT NOT NULL REFERENCES trade_partners(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL DEFAULT 'internal_invite',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          net_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+          tax_rate DOUBLE PRECISION NOT NULL DEFAULT 21,
+          tax_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+          total DOUBLE PRECISION NOT NULL DEFAULT 0,
+          received_at TEXT,
+          valid_until TEXT,
+          duration_days INTEGER,
+          evidence_reference TEXT,
+          exclusions_json TEXT NOT NULL DEFAULT '[]',
+          qualifications_json TEXT NOT NULL DEFAULT '[]',
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(bid_package_id, trade_partner_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bid_participants_package
+          ON bid_package_participants(bid_package_id, status, total, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_bid_participants_partner
+          ON bid_package_participants(trade_partner_id, status, updated_at DESC);
+      `);
     }
   }
 ];
@@ -4741,6 +4845,7 @@ class ContractorOperatingLedger {
     opportunity.convertedJob = opportunity.convertedJobId
       ? this.listJobs({ includeArchived: true, limit: 500 }).find(job => job.id === opportunity.convertedJobId) || null
       : null;
+    opportunity.bidPackages = this.listBidPackages({ opportunityId, includeClosed: true, limit: 100 });
     return opportunity;
   }
 
@@ -4948,6 +5053,8 @@ class ContractorOperatingLedger {
       };
       const timestamp = nowIso();
       this.db.prepare('UPDATE jobs SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson(jobData), timestamp, job.id);
+      this.db.prepare('UPDATE bid_packages SET job_id = ?, updated_at = ? WHERE opportunity_id = ? AND job_id IS NULL')
+        .run(job.id, timestamp, opportunityId);
       this.db.prepare(`
         UPDATE opportunities
         SET converted_job_id = ?, stage = CASE WHEN stage IN ('new', 'qualifying', 'site_visit', 'estimating') THEN 'proposal' ELSE stage END,
@@ -5007,6 +5114,542 @@ class ContractorOperatingLedger {
       before,
       after,
       metadata: { quoteId: evidence.quoteId || null, approvalId: evidence.approvalId || null, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  allocateBidPackageNumber(timestamp = nowIso()) {
+    const year = new Date(timestamp).getUTCFullYear();
+    this.db.prepare(`
+      INSERT INTO bid_package_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+      ON CONFLICT(period_year) DO NOTHING
+    `).run(year, timestamp);
+    this.db.prepare(`
+      UPDATE bid_package_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+    `).run(timestamp, year);
+    const row = this.db.prepare('SELECT last_value FROM bid_package_number_sequences WHERE period_year = ?').get(year);
+    return `BID-${year}-${String(Number(row?.last_value || 0)).padStart(4, '0')}`;
+  }
+
+  requireBidPackage(bidPackageId) {
+    const row = this.db.prepare(`
+      SELECT bid_packages.*, opportunities.title AS opportunity_title, opportunities.stage AS opportunity_stage,
+        opportunities.client_id, opportunities.converted_job_id,
+        clients.name AS client_name, clients.company AS client_company
+      FROM bid_packages
+      JOIN opportunities ON opportunities.id = bid_packages.opportunity_id
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE bid_packages.id = ?
+    `).get(bidPackageId);
+    if (!row) {
+      throw ledgerInputError('bid_package_not_found', 'Bid package not found.', { bidPackageId }, 404);
+    }
+    return row;
+  }
+
+  listBidPackageParticipants(filters = {}) {
+    const bidPackageId = normalizeText(filters.bidPackageId || filters.bid_package_id, '');
+    const tradePartnerId = normalizeText(filters.tradePartnerId || filters.trade_partner_id, '');
+    const requestedStatus = normalizeText(filters.status, '');
+    if (requestedStatus) normalizeBidParticipantStatus(requestedStatus);
+    const limit = safeLimit(filters.limit, 500, 5000);
+    const partners = new Map(this.listTradePartners({ includeRetired: true, limit: 500 }).map(partner => [partner.id, partner]));
+    return this.db.prepare(`
+      SELECT * FROM bid_package_participants
+      WHERE (? = '' OR bid_package_id = ?)
+        AND (? = '' OR trade_partner_id = ?)
+        AND (? = '' OR status = ?)
+      ORDER BY bid_package_id, CASE status WHEN 'selected' THEN 0 WHEN 'returned' THEN 1 ELSE 2 END,
+        total ASC, updated_at DESC
+      LIMIT ?
+    `).all(
+      bidPackageId, bidPackageId,
+      tradePartnerId, tradePartnerId,
+      requestedStatus, requestedStatus,
+      limit
+    ).map(row => this.mapBidPackageParticipant(row, partners.get(row.trade_partner_id) || null));
+  }
+
+  bidComparisonSnapshot(bidPackageId, selection = {}) {
+    const row = this.requireBidPackage(bidPackageId);
+    const participants = this.listBidPackageParticipants({ bidPackageId, limit: 500 })
+      .filter(participant => ['returned', 'selected', 'not_selected'].includes(participant.status))
+      .map(participant => ({
+        id: participant.id,
+        tradePartnerId: participant.tradePartnerId,
+        currency: participant.currency,
+        netAmount: participant.netAmount,
+        taxRate: participant.taxRate,
+        taxAmount: participant.taxAmount,
+        total: participant.total,
+        receivedAt: participant.receivedAt,
+        validUntil: participant.validUntil,
+        durationDays: participant.durationDays,
+        evidenceReference: participant.evidenceReference,
+        exclusions: participant.exclusions,
+        qualifications: participant.qualifications
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    return {
+      package: {
+        id: row.id,
+        packageNumber: row.package_number,
+        opportunityId: row.opportunity_id,
+        currency: row.currency,
+        dueAt: row.due_at,
+        trade: row.trade,
+        scope: row.scope
+      },
+      participants,
+      selection: {
+        bidParticipantId: selection.bidParticipantId || selection.selectedBidParticipantId || null,
+        rationale: normalizeText(selection.rationale, '') || null
+      }
+    };
+  }
+
+  enrichBidPackage(row, participants = []) {
+    const bidPackage = this.mapBidPackage(row);
+    const returned = participants.filter(participant => ['returned', 'selected', 'not_selected'].includes(participant.status));
+    const totals = returned.map(participant => participant.total).filter(total => Number.isFinite(total));
+    const lowestTotal = totals.length ? Math.min(...totals) : 0;
+    const highestTotal = totals.length ? Math.max(...totals) : 0;
+    const averageTotal = totals.length ? roundMoney(totals.reduce((sum, total) => sum + total, 0) / totals.length) : 0;
+    const openStatus = ['draft', 'open_for_returns', 'under_review', 'pending_selection_approval'].includes(bidPackage.status);
+    const overdue = Boolean(openStatus && bidPackage.dueAt && Date.parse(bidPackage.dueAt) < Date.now());
+    return {
+      ...bidPackage,
+      participants,
+      selectedParticipant: participants.find(participant => participant.id === bidPackage.selectedBidParticipantId) || null,
+      comparison: {
+        invited: participants.length,
+        returned: returned.length,
+        compliantReturns: returned.filter(participant => participant.partner?.compliance?.compliant === true).length,
+        lowestTotal,
+        highestTotal,
+        averageTotal,
+        spread: roundMoney(Math.max(0, highestTotal - lowestTotal))
+      },
+      flags: {
+        overdue,
+        noReturns: returned.length === 0,
+        singleSource: returned.length === 1,
+        approvalRequired: bidPackage.status === 'pending_selection_approval',
+        selected: bidPackage.status === 'selected'
+      }
+    };
+  }
+
+  listBidPackages(filters = {}) {
+    const requestedStatus = normalizeText(filters.status, '');
+    if (requestedStatus && requestedStatus !== 'open') normalizeBidPackageStatus(requestedStatus);
+    const opportunityId = normalizeText(filters.opportunityId || filters.opportunity_id, '');
+    const search = normalizeText(filters.search || filters.q, '').toLowerCase();
+    const includeClosed = normalizeBoolean(filters.includeClosed ?? filters.include_closed, true);
+    const limit = safeLimit(filters.limit, 100, 500);
+    const participants = this.listBidPackageParticipants({ limit: 5000 });
+    const participantsByPackage = new Map();
+    for (const participant of participants) {
+      if (!participantsByPackage.has(participant.bidPackageId)) participantsByPackage.set(participant.bidPackageId, []);
+      participantsByPackage.get(participant.bidPackageId).push(participant);
+    }
+    const rows = this.db.prepare(`
+      SELECT bid_packages.*, opportunities.title AS opportunity_title, opportunities.stage AS opportunity_stage,
+        opportunities.client_id, opportunities.converted_job_id,
+        clients.name AS client_name, clients.company AS client_company
+      FROM bid_packages
+      JOIN opportunities ON opportunities.id = bid_packages.opportunity_id
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE (? = '' OR bid_packages.opportunity_id = ?)
+      ORDER BY CASE bid_packages.status
+        WHEN 'pending_selection_approval' THEN 0
+        WHEN 'under_review' THEN 1
+        WHEN 'open_for_returns' THEN 2
+        WHEN 'draft' THEN 3
+        ELSE 4 END,
+        CASE WHEN bid_packages.due_at IS NULL THEN 1 ELSE 0 END,
+        bid_packages.due_at ASC, bid_packages.updated_at DESC
+      LIMIT 500
+    `).all(opportunityId, opportunityId);
+    const closed = new Set(['selected', 'closed', 'cancelled']);
+    return rows
+      .map(row => this.enrichBidPackage(row, participantsByPackage.get(row.id) || []))
+      .filter(bidPackage => {
+        if (!includeClosed && closed.has(bidPackage.status)) return false;
+        if (requestedStatus === 'open' && closed.has(bidPackage.status)) return false;
+        if (requestedStatus && requestedStatus !== 'open' && bidPackage.status !== requestedStatus) return false;
+        return !search || JSON.stringify(bidPackage).toLowerCase().includes(search);
+      })
+      .slice(0, limit);
+  }
+
+  summarizeBidPackages(bidPackages = this.listBidPackages({ includeClosed: true, limit: 500 })) {
+    return bidPackages.reduce((summary, bidPackage) => {
+      summary.total += 1;
+      summary.invited += bidPackage.comparison.invited;
+      summary.returns += bidPackage.comparison.returned;
+      if (bidPackage.flags.overdue) summary.overdue += 1;
+      if (bidPackage.status === 'pending_selection_approval') summary.pendingApproval += 1;
+      if (bidPackage.status === 'selected') {
+        summary.selected += 1;
+        summary.selectedValue = roundMoney(summary.selectedValue + normalizeNumber(bidPackage.selectedParticipant?.total, 0));
+      }
+      return summary;
+    }, { total: 0, invited: 0, returns: 0, overdue: 0, pendingApproval: 0, selected: 0, selectedValue: 0 });
+  }
+
+  getBidPackage(bidPackageId) {
+    const row = this.requireBidPackage(bidPackageId);
+    return this.enrichBidPackage(row, this.listBidPackageParticipants({ bidPackageId, limit: 500 }));
+  }
+
+  createBidPackage(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const opportunity = this.getOpportunity(opportunityId);
+      if (!OPEN_OPPORTUNITY_STAGES.has(opportunity.stage)) {
+        throw ledgerInputError('bid_package_opportunity_closed', 'Bid packages can only be created for an open opportunity.', { opportunityId }, 409);
+      }
+      const title = normalizeText(payload.title, '');
+      const trade = normalizeText(payload.trade || payload.discipline, '');
+      const scope = normalizeText(payload.scope || payload.description, '');
+      if (title.length < 2) throw ledgerInputError('bid_package_title_required', 'Bid package title must contain at least 2 characters.');
+      if (trade.length < 2) throw ledgerInputError('bid_package_trade_required', 'Bid package trade must contain at least 2 characters.');
+      if (scope.length < 5) throw ledgerInputError('bid_package_scope_required', 'Bid package scope must contain at least 5 characters.');
+      const dueAtInput = normalizeText(payload.dueAt || payload.due_at, '');
+      const dueAt = dueAtInput ? new Date(dueAtInput) : null;
+      if (dueAt && (Number.isNaN(dueAt.getTime()) || dueAt.getTime() <= Date.now())) {
+        throw ledgerInputError('bid_package_due_at_invalid', 'Bid package due date must be a valid future date.');
+      }
+      const partnerIds = [...new Set(normalizeList(payload.tradePartnerIds || payload.trade_partner_ids || payload.partnerIds).map(String))];
+      if (!partnerIds.length || partnerIds.length > 25) {
+        throw ledgerInputError('bid_package_partners_required', 'Bid packages require between 1 and 25 retained trade partners.');
+      }
+      const partners = partnerIds.map(partnerId => this.getTradePartner(partnerId));
+      const blockedPartner = partners.find(partner => partner.status !== 'active');
+      if (blockedPartner) {
+        throw ledgerInputError('bid_package_partner_inactive', `${blockedPartner.name} is not active and cannot be included in a new bid package.`, { tradePartnerId: blockedPartner.id }, 409);
+      }
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const id = makeId('bidpkg');
+      const packageNumber = this.allocateBidPackageNumber(timestamp);
+      const currency = normalizeCommercialCurrency(payload.currency || 'EUR');
+      this.db.prepare(`
+        INSERT INTO bid_packages (
+          id, opportunity_id, job_id, package_number, title, trade, scope, status, currency,
+          due_at, owner_name, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open_for_returns', ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, opportunityId, opportunity.convertedJobId || null, packageNumber, title, trade, scope, currency,
+        dueAt?.toISOString() || null, normalizeText(payload.ownerName || payload.owner_name || opportunity.ownerName, '') || null,
+        toJson({ internalOnly: true, deliveryStatus: 'not_sent', externalCommitments: 0 }), timestamp, timestamp
+      );
+      const insertParticipant = this.db.prepare(`
+        INSERT INTO bid_package_participants (
+          id, bid_package_id, trade_partner_id, status, currency, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'internal_invite', ?, ?, ?, ?)
+      `);
+      for (const partner of partners) {
+        insertParticipant.run(
+          makeId('bidder'), id, partner.id, currency,
+          toJson({ internalOnly: true, deliveryStatus: 'not_sent', externalCommitments: 0 }), timestamp, timestamp
+        );
+      }
+      const bidPackage = this.getBidPackage(id);
+      this.audit({
+        entityType: 'bid_package',
+        entityId: id,
+        jobId: opportunity.convertedJobId || null,
+        action: 'create_bid_package',
+        actor,
+        after: bidPackage,
+        metadata: { opportunityId, packageNumber, participantCount: partners.length, deliveryStatus: 'not_sent', externalCommitments: 0 }
+      });
+      return bidPackage;
+    });
+  }
+
+  addBidPackageParticipants(bidPackageId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getBidPackage(bidPackageId);
+      if (!['draft', 'open_for_returns', 'under_review'].includes(before.status)) {
+        throw ledgerInputError('bid_package_participants_locked', 'Bidders cannot be changed while selection approval is pending or after selection.', { bidPackageId }, 409);
+      }
+      const partnerIds = [...new Set(normalizeList(payload.tradePartnerIds || payload.trade_partner_ids || payload.partnerIds).map(String))];
+      if (!partnerIds.length || before.participants.length + partnerIds.length > 25) {
+        throw ledgerInputError('bid_package_partners_invalid', 'Add at least one bidder and retain no more than 25 bidders per package.');
+      }
+      const existing = new Set(before.participants.map(participant => participant.tradePartnerId));
+      const timestamp = nowIso();
+      const added = [];
+      for (const partnerId of partnerIds) {
+        if (existing.has(partnerId)) continue;
+        const partner = this.getTradePartner(partnerId);
+        if (partner.status !== 'active') {
+          throw ledgerInputError('bid_package_partner_inactive', `${partner.name} is not active and cannot be added to the bid package.`, { tradePartnerId: partner.id }, 409);
+        }
+        const id = makeId('bidder');
+        this.db.prepare(`
+          INSERT INTO bid_package_participants (
+            id, bid_package_id, trade_partner_id, status, currency, data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, 'internal_invite', ?, ?, ?, ?)
+        `).run(id, bidPackageId, partner.id, before.currency, toJson({ internalOnly: true, deliveryStatus: 'not_sent', externalCommitments: 0 }), timestamp, timestamp);
+        added.push(id);
+      }
+      const after = this.getBidPackage(bidPackageId);
+      if (added.length) {
+        this.audit({
+          entityType: 'bid_package', entityId: bidPackageId, jobId: before.jobId,
+          action: 'add_bid_package_participants', actor: options.actor || payload.actor || 'Contractor.AI',
+          before, after, metadata: { addedParticipantIds: added, deliveryStatus: 'not_sent', externalCommitments: 0 }
+        });
+      }
+      return { bidPackage: after, addedParticipantIds: added, replayed: added.length === 0 };
+    });
+  }
+
+  recordBidReturn(bidPackageId, participantId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const bidPackage = this.getBidPackage(bidPackageId);
+      if (!['open_for_returns', 'under_review'].includes(bidPackage.status)) {
+        throw ledgerInputError('bid_package_returns_locked', 'Bid returns are locked while selection approval is pending or after selection.', { bidPackageId }, 409);
+      }
+      const row = this.db.prepare('SELECT * FROM bid_package_participants WHERE id = ? AND bid_package_id = ?').get(participantId, bidPackageId);
+      if (!row) throw ledgerInputError('bid_participant_not_found', 'Bid participant not found.', { participantId }, 404);
+      const before = this.mapBidPackageParticipant(row, this.getTradePartner(row.trade_partner_id));
+      if (!['internal_invite', 'returned'].includes(before.status)) {
+        throw ledgerInputError('bid_participant_return_invalid', 'Only an internal invite or retained return can receive bid-return evidence.', { participantId }, 409);
+      }
+      const netAmount = roundMoney(normalizeNumber(payload.netAmount ?? payload.net_amount ?? payload.amount, NaN));
+      if (!Number.isFinite(netAmount) || netAmount <= 0) throw ledgerInputError('bid_return_amount_invalid', 'Bid return net amount must be greater than zero.');
+      const taxRate = normalizeCommercialTaxRate(payload.taxRate ?? payload.tax_rate, 21);
+      const taxAmount = roundMoney(netAmount * taxRate / 100);
+      const total = roundMoney(netAmount + taxAmount);
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) {
+        throw ledgerInputError('bid_return_evidence_required', 'Bid return evidence reference must contain between 3 and 240 characters.');
+      }
+      const receivedAtInput = normalizeText(payload.receivedAt || payload.received_at, '') || nowIso();
+      const receivedAt = new Date(receivedAtInput);
+      if (Number.isNaN(receivedAt.getTime()) || receivedAt.getTime() > Date.now() + 86_400_000) {
+        throw ledgerInputError('bid_return_received_at_invalid', 'Bid return received date is invalid or in the future.');
+      }
+      const validUntilInput = normalizeText(payload.validUntil || payload.valid_until, '');
+      const validUntil = validUntilInput ? new Date(validUntilInput) : null;
+      if (validUntil && (Number.isNaN(validUntil.getTime()) || validUntil.getTime() < receivedAt.getTime())) {
+        throw ledgerInputError('bid_return_valid_until_invalid', 'Bid validity must end on or after the retained return date.');
+      }
+      const durationDaysInput = payload.durationDays ?? payload.duration_days;
+      const durationDays = durationDaysInput === undefined || durationDaysInput === null || durationDaysInput === ''
+        ? null
+        : Number(durationDaysInput);
+      if (durationDays !== null && (!Number.isInteger(durationDays) || durationDays < 0 || durationDays > 3650)) {
+        throw ledgerInputError('bid_return_duration_invalid', 'Bid duration must be a whole number from 0 to 3650 days.');
+      }
+      const exclusions = normalizeList(payload.exclusions).map(item => normalizeText(item, '')).filter(Boolean).slice(0, 50);
+      const qualifications = normalizeList(payload.qualifications).map(item => normalizeText(item, '')).filter(Boolean).slice(0, 50);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE bid_package_participants
+        SET status = 'returned', currency = ?, net_amount = ?, tax_rate = ?, tax_amount = ?, total = ?,
+          received_at = ?, valid_until = ?, duration_days = ?, evidence_reference = ?,
+          exclusions_json = ?, qualifications_json = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND bid_package_id = ?
+      `).run(
+        bidPackage.currency, netAmount, taxRate, taxAmount, total, receivedAt.toISOString(), validUntil?.toISOString() || null,
+        durationDays, evidenceReference, toJson(exclusions), toJson(qualifications),
+        toJson({ ...before.data, retainedByOperator: true, externalCommitments: 0 }), timestamp, participantId, bidPackageId
+      );
+      this.db.prepare(`
+        UPDATE bid_packages
+        SET status = 'under_review', comparison_hash = NULL, updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, bidPackageId);
+      const after = this.getBidPackage(bidPackageId);
+      const afterParticipant = after.participants.find(participant => participant.id === participantId);
+      this.audit({
+        entityType: 'bid_package_participant', entityId: participantId, jobId: bidPackage.jobId,
+        action: before.status === 'returned' ? 'update_bid_return' : 'record_bid_return',
+        actor: options.actor || payload.actor || 'Contractor.AI', before, after: afterParticipant,
+        metadata: { bidPackageId, opportunityId: bidPackage.opportunityId, evidenceReference, externalCommitments: 0 }
+      });
+      return { bidPackage: after, participant: afterParticipant };
+    });
+  }
+
+  requestBidPackageSelection(bidPackageId, participantId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getBidPackage(bidPackageId);
+      if (!['open_for_returns', 'under_review'].includes(before.status)) {
+        throw ledgerInputError('bid_selection_locked', 'This bid package is not available for a new selection request.', { bidPackageId }, 409);
+      }
+      const participant = before.participants.find(item => item.id === participantId);
+      if (!participant || participant.status !== 'returned') {
+        throw ledgerInputError('bid_selection_return_required', 'Preferred-bidder selection requires a retained bid return.', { participantId }, 409);
+      }
+      if (!participant.partner?.compliance?.compliant) {
+        throw ledgerInputError(
+          'bid_selection_partner_compliance_required',
+          `${participant.partner?.name || 'The selected trade partner'} requires current compliance evidence before selection approval.`,
+          { participantId, compliance: participant.partner?.compliance || null },
+          409
+        );
+      }
+      const rationale = normalizeText(payload.rationale || payload.reason || payload.notes, '');
+      if (rationale.length < 8 || rationale.length > 1000) {
+        throw ledgerInputError('bid_selection_rationale_required', 'Preferred-bidder selection requires a rationale between 8 and 1000 characters.');
+      }
+      const snapshot = this.bidComparisonSnapshot(bidPackageId, { bidParticipantId: participantId, rationale });
+      const comparisonHash = sha256Json(snapshot);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const approval = this.createApproval({
+        targetType: 'bid_package_selection',
+        targetId: bidPackageId,
+        jobId: before.jobId,
+        approvalType: 'preferred_bidder_selection',
+        summary: `Preferred bidder selection: ${before.packageNumber} ${before.title}`,
+        reason: rationale,
+        requestedBy: actor,
+        data: {
+          bidPackageId,
+          packageNumber: before.packageNumber,
+          selectedBidParticipantId: participantId,
+          tradePartnerId: participant.tradePartnerId,
+          partnerName: participant.partner.name,
+          total: participant.total,
+          currency: participant.currency,
+          rationale,
+          comparisonHash,
+          comparison: snapshot,
+          externalCommitments: 0,
+          spendAuthorized: false
+        }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE bid_packages
+        SET status = 'pending_selection_approval', approval_id = ?, selected_bid_participant_id = ?,
+          comparison_hash = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        approval.id, participantId, comparisonHash,
+        toJson({
+          ...before.data,
+          selectionRequest: { approvalId: approval.id, participantId, rationale, requestedAt: timestamp, requestedBy: actor },
+          externalCommitments: 0,
+          spendAuthorized: false
+        }), timestamp, bidPackageId
+      );
+      const after = this.getBidPackage(bidPackageId);
+      this.audit({
+        entityType: 'bid_package', entityId: bidPackageId, jobId: before.jobId,
+        action: 'request_bid_package_selection', actor, before, after,
+        metadata: { approvalId: approval.id, participantId, comparisonHash, externalCommitments: 0, spendAuthorized: false }
+      });
+      return { bidPackage: after, approval };
+    });
+  }
+
+  applyBidPackageSelection(bidPackageId, timestamp = nowIso()) {
+    const before = this.getBidPackage(bidPackageId);
+    const approvalRow = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE target_type = 'bid_package_selection' AND target_id = ? AND status = 'approved'
+      ORDER BY resolved_at DESC, updated_at DESC
+      LIMIT 1
+    `).get(bidPackageId);
+    const approvalData = fromJson(approvalRow?.data_json, {});
+    if (!approvalRow || before.status !== 'pending_selection_approval' || before.approvalId !== approvalRow.id) {
+      throw ledgerInputError('bid_selection_state_invalid', 'The retained bid selection is no longer pending against this approval.', { bidPackageId }, 409);
+    }
+    const participant = before.participants.find(item => item.id === approvalData.selectedBidParticipantId);
+    if (!participant || participant.status !== 'returned') {
+      throw ledgerInputError('bid_selection_return_changed', 'The selected bid return is no longer available.', { bidPackageId }, 409);
+    }
+    const snapshot = this.bidComparisonSnapshot(bidPackageId, {
+      bidParticipantId: participant.id,
+      rationale: approvalData.rationale
+    });
+    const comparisonHash = sha256Json(snapshot);
+    if (comparisonHash !== before.comparisonHash || comparisonHash !== approvalData.comparisonHash) {
+      throw ledgerInputError('bid_selection_comparison_changed', 'The bid comparison changed after approval was requested. Request a new selection approval.', { bidPackageId }, 409);
+    }
+    const partner = this.getTradePartner(participant.tradePartnerId);
+    if (!partner.compliance.compliant) {
+      throw ledgerInputError('bid_selection_partner_compliance_required', 'Trade-partner compliance changed before approval could be applied.', { tradePartnerId: partner.id, compliance: partner.compliance }, 409);
+    }
+    this.db.prepare(`
+      UPDATE bid_package_participants
+      SET status = CASE WHEN id = ? THEN 'selected' WHEN status = 'returned' THEN 'not_selected' ELSE status END,
+        updated_at = ?
+      WHERE bid_package_id = ?
+    `).run(participant.id, timestamp, bidPackageId);
+    this.db.prepare(`
+      UPDATE bid_packages
+      SET status = 'selected', selected_bid_participant_id = ?, data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      participant.id,
+      toJson({
+        ...before.data,
+        selection: {
+          approvalId: approvalRow.id,
+          participantId: participant.id,
+          tradePartnerId: partner.id,
+          partnerName: partner.name,
+          total: participant.total,
+          currency: participant.currency,
+          rationale: approvalData.rationale,
+          comparisonHash,
+          approvedAt: timestamp,
+          approvedBy: approvalRow.resolved_by
+        },
+        externalCommitments: 0,
+        spendAuthorized: false
+      }), timestamp, bidPackageId
+    );
+    const after = this.getBidPackage(bidPackageId);
+    this.audit({
+      entityType: 'bid_package', entityId: bidPackageId, jobId: before.jobId,
+      action: 'approve_preferred_bidder_selection', actor: approvalRow.resolved_by || 'approval',
+      before, after,
+      metadata: { approvalId: approvalRow.id, participantId: participant.id, tradePartnerId: partner.id, externalCommitments: 0, spendAuthorized: false }
+    });
+    return after;
+  }
+
+  restoreRejectedBidPackageSelection(approvalRow, status, options = {}) {
+    if (normalizeStatus(approvalRow?.target_type, '') !== 'bid_package_selection') return null;
+    const row = this.db.prepare('SELECT * FROM bid_packages WHERE id = ?').get(approvalRow.target_id);
+    if (!row || row.status !== 'pending_selection_approval' || row.approval_id !== approvalRow.id) return null;
+    const timestamp = options.timestamp || nowIso();
+    const before = this.getBidPackage(row.id);
+    const data = fromJson(row.data_json, {});
+    this.db.prepare(`
+      UPDATE bid_packages
+      SET status = 'under_review', approval_id = NULL, selected_bid_participant_id = NULL,
+        comparison_hash = NULL, data_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(toJson({
+      ...data,
+      selectionDecision: {
+        approvalId: approvalRow.id,
+        status,
+        resolvedAt: timestamp,
+        resolvedBy: options.actor || 'approval',
+        reason: options.reason || null
+      },
+      externalCommitments: 0,
+      spendAuthorized: false
+    }), timestamp, row.id);
+    const after = this.getBidPackage(row.id);
+    this.audit({
+      entityType: 'bid_package', entityId: row.id, jobId: row.job_id,
+      action: `restore_${status}_bid_selection`, actor: options.actor || 'approval',
+      before, after, metadata: { approvalId: approvalRow.id, externalCommitments: 0, spendAuthorized: false }
     });
     return after;
   }
@@ -21186,6 +21829,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = 'cancelled', updated_at = ?
           WHERE meeting_id = ? AND status = 'proposed'
         `).run(timestamp, before.target_id);
+      } else if (before.target_type === 'bid_package_selection') {
+        this.restoreRejectedBidPackageSelection(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'payment') {
         const payment = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(before.target_id);
         if (payment && normalizeStatus(payment.status, '') === 'pending_confirmation') {
@@ -21465,7 +22114,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   applyApprovalTarget(targetType, targetId) {
     const timestamp = nowIso();
-    if (targetType === 'quote') {
+    if (targetType === 'bid_package_selection') {
+      this.applyBidPackageSelection(targetId, timestamp);
+    } else if (targetType === 'quote') {
       this.db.prepare("UPDATE quotes SET status = 'approved', updated_at = ? WHERE id = ? AND status IN ('draft', 'pending_approval')").run(timestamp, targetId);
       this.db.prepare("UPDATE jobs SET approval_state = 'quote_approved', phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM quotes WHERE id = ?)")
         .run(timestamp, targetId);
@@ -25218,6 +25869,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       punchItems: this.db.prepare('SELECT * FROM punch_items WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapPunchItem(row)),
       warrantyClaims: this.db.prepare('SELECT * FROM warranty_claims WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapWarrantyClaim(row)),
       recurringPlans: this.db.prepare('SELECT * FROM recurring_plans WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRecurringPlan(row)),
+      bidPackages: this.listBidPackages({ includeClosed: true, limit: 500 }).filter(bidPackage => bidPackage.jobId === jobId),
       routePlans: this.db.prepare('SELECT * FROM route_plans WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRoutePlan(row)),
       loadingPlans: this.db.prepare('SELECT * FROM loading_plans WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapLoadingPlan(row)),
       procurementOrders: this.db.prepare('SELECT * FROM procurement_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapProcurementOrder(row)),
@@ -25276,6 +25928,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (!requirement.table) return 0;
     const statusColumn = {
       job_requests: 'status',
+      bid_packages: 'status',
       quotes: 'status',
       site_visits: 'status',
       material_requirements: 'status',
@@ -29077,6 +29730,38 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       WHERE opportunities.stage <> 'won'
     `).get().count || 0);
     if (acceptedQuotesWithoutWonOpportunity) issues.push({ severity: 'error', message: `${acceptedQuotesWithoutWonOpportunity} linked opportunity record(s) were not synchronized after verified quote acceptance.` });
+    const selectedBidPackagesWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM bid_packages packages
+      LEFT JOIN approvals ON approvals.id = packages.approval_id
+      LEFT JOIN bid_package_participants participants ON participants.id = packages.selected_bid_participant_id
+      WHERE packages.status = 'selected'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'bid_package_selection' OR approvals.target_id <> packages.id
+          OR participants.id IS NULL OR participants.bid_package_id <> packages.id OR participants.status <> 'selected'
+        )
+    `).get().count || 0);
+    if (selectedBidPackagesWithoutApproval) issues.push({ severity: 'error', message: `${selectedBidPackagesWithoutApproval} selected bid package(s) lack a matching approval and selected return.` });
+    const pendingBidPackages = this.db.prepare("SELECT * FROM bid_packages WHERE status = 'pending_selection_approval'").all();
+    for (const pendingBidPackage of pendingBidPackages) {
+      const approval = pendingBidPackage.approval_id
+        ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'bid_package_selection' AND status = 'pending'").get(pendingBidPackage.approval_id)
+        : null;
+      const data = fromJson(approval?.data_json, {});
+      let comparisonHash = null;
+      try {
+        comparisonHash = sha256Json(this.bidComparisonSnapshot(pendingBidPackage.id, {
+          bidParticipantId: data.selectedBidParticipantId,
+          rationale: data.rationale
+        }));
+      } catch {
+        comparisonHash = null;
+      }
+      if (!approval || !comparisonHash || comparisonHash !== pendingBidPackage.comparison_hash || comparisonHash !== data.comparisonHash) {
+        issues.push({ severity: 'error', message: `Pending bid package ${pendingBidPackage.package_number} has an invalid approval or comparison snapshot.` });
+      }
+    }
     const quotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'draft' AND approval_id IS NULL").get().count || 0);
     if (quotesWithoutApproval) issues.push({ severity: 'warning', message: `${quotesWithoutApproval} draft quote(s) have no approval gate.` });
     const siteVisitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_visits WHERE status IN ('confirmed', 'client_confirmed', 'committed', 'approved') AND approval_id IS NULL").get().count || 0);
@@ -29383,6 +30068,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         clients: this.count('clients'),
         opportunities: this.count('opportunities'),
         opportunityActivities: this.count('opportunity_activities'),
+        bidPackages: this.count('bid_packages'),
+        bidPackageParticipants: this.count('bid_package_participants'),
         tradePartners: this.count('trade_partners'),
         organizationProfiles: this.count('organization_profile'),
         jobs: this.count('jobs'),
@@ -29506,6 +30193,66 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary: row.summary,
       notes: row.notes,
       idempotencyKey: row.idempotency_key,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapBidPackage(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      opportunityId: row.opportunity_id,
+      jobId: row.job_id,
+      packageNumber: row.package_number,
+      title: row.title,
+      trade: row.trade,
+      scope: row.scope,
+      status: normalizeBidPackageStatus(row.status),
+      currency: row.currency,
+      dueAt: row.due_at,
+      ownerName: row.owner_name,
+      approvalId: row.approval_id,
+      selectedBidParticipantId: row.selected_bid_participant_id,
+      comparisonHash: row.comparison_hash,
+      opportunity: {
+        id: row.opportunity_id,
+        title: row.opportunity_title || null,
+        stage: row.opportunity_stage || null,
+        clientId: row.client_id || null,
+        convertedJobId: row.converted_job_id || row.job_id || null
+      },
+      client: {
+        id: row.client_id || null,
+        name: row.client_name || null,
+        company: row.client_company || null
+      },
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapBidPackageParticipant(row, partner = null) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      bidPackageId: row.bid_package_id,
+      tradePartnerId: row.trade_partner_id,
+      status: normalizeBidParticipantStatus(row.status),
+      currency: row.currency,
+      netAmount: roundMoney(row.net_amount),
+      taxRate: roundMoney(row.tax_rate),
+      taxAmount: roundMoney(row.tax_amount),
+      total: roundMoney(row.total),
+      receivedAt: row.received_at,
+      validUntil: row.valid_until,
+      durationDays: row.duration_days === null || row.duration_days === undefined ? null : Number(row.duration_days),
+      evidenceReference: row.evidence_reference,
+      exclusions: fromJson(row.exclusions_json, []),
+      qualifications: fromJson(row.qualifications_json, []),
+      partner,
       data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -30852,6 +31599,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       riskLevel = 'high';
       preview.expiresAt = mapped?.expiresAt || data.expiresAt || null;
       preview.label = mapped?.data?.label || data.label || null;
+    } else if (targetType === 'bid_package_selection') {
+      const bidPackage = this.getBidPackage(approval.targetId || approval.target_id);
+      const participant = bidPackage.participants.find(item => item.id === data.selectedBidParticipantId) || null;
+      primaryEffect = `Approve ${data.partnerName || participant?.partner?.name || 'the retained trade partner'} as preferred bidder for ${bidPackage.packageNumber}.`;
+      addEffect(`Mark the retained ${participant?.total?.toFixed(2) || Number(data.total || 0).toFixed(2)} ${participant?.currency || data.currency || 'EUR'} bid as the internal preferred return.`);
+      addEffect('Mark other retained returns as not selected while preserving the complete comparison history.');
+      addSafeguard('Does not send an award, issue a purchase order, authorize spend, sign a subcontract, or notify any bidder.');
+      addSafeguard('The comparison snapshot and current trade-partner compliance are rechecked when approval is applied.');
+      riskLevel = 'high';
+      preview.packageNumber = bidPackage.packageNumber;
+      preview.title = bidPackage.title;
+      preview.trade = bidPackage.trade;
+      preview.partnerName = data.partnerName || participant?.partner?.name || null;
+      preview.total = participant?.total ?? data.total ?? null;
+      preview.currency = participant?.currency || data.currency || 'EUR';
+      preview.rationale = data.rationale || approval.reason || null;
+      preview.returnCount = bidPackage.comparison.returned;
+      preview.comparisonHash = data.comparisonHash || null;
     } else if (targetType === 'quote_acceptance') {
       const quote = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = quote ? this.mapQuote(quote) : null;

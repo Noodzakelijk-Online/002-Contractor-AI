@@ -105,6 +105,7 @@ test('browser operator session preserves role authorization without storing the 
     assert.equal(authenticatedSession.body.authentication.method, 'session');
     assert.equal(authenticatedSession.body.operator.role, 'office_operator');
     assert.equal(authenticatedSession.body.operator.capabilities.intake, true);
+    assert.equal(authenticatedSession.body.operator.capabilities.tenders, true);
     assert.equal(authenticatedSession.body.operator.capabilities.approvals, false);
 
     const permittedRead = await request(baseUrl, '/api/ledger/jobs', { headers: { Cookie: issued.cookie } });

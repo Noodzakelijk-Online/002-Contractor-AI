@@ -266,6 +266,37 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup inspection-checklist constraints are incomplete: ${missingChecklistIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('026_preconstruction_bid_packages')) {
+        const bidTables = ['bid_package_number_sequences', 'bid_packages', 'bid_package_participants'];
+        const missingBidTables = bidTables.filter(table => !retainedTables.has(table));
+        if (missingBidTables.length) {
+          throw new Error(`Backup preconstruction-bid schema is incomplete: ${missingBidTables.join(', ')}.`);
+        }
+        const packageColumns = new Set(database.prepare('PRAGMA table_info(bid_packages)').all().map(row => row.name));
+        const missingPackageColumns = ['opportunity_id', 'package_number', 'status', 'approval_id', 'selected_bid_participant_id', 'comparison_hash']
+          .filter(column => !packageColumns.has(column));
+        if (missingPackageColumns.length) {
+          throw new Error(`Backup bid-package columns are incomplete: ${missingPackageColumns.join(', ')}.`);
+        }
+        const participantColumns = new Set(database.prepare('PRAGMA table_info(bid_package_participants)').all().map(row => row.name));
+        const missingParticipantColumns = ['bid_package_id', 'trade_partner_id', 'status', 'total', 'evidence_reference']
+          .filter(column => !participantColumns.has(column));
+        if (missingParticipantColumns.length) {
+          throw new Error(`Backup bid-participant columns are incomplete: ${missingParticipantColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const bidIndexes = [
+          'idx_bid_packages_opportunity',
+          'idx_bid_packages_portfolio',
+          'idx_bid_packages_approval',
+          'idx_bid_participants_package',
+          'idx_bid_participants_partner'
+        ];
+        const missingBidIndexes = bidIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingBidIndexes.length) {
+          throw new Error(`Backup preconstruction-bid constraints are incomplete: ${missingBidIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

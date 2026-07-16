@@ -1540,6 +1540,7 @@ app.get('/api/session', (req, res) => {
         dashboard: !fieldWorker,
         intake: role === 'owner' || role === 'office_operator',
         pipeline: !fieldWorker,
+        tenders: !fieldWorker,
         schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
@@ -2039,6 +2040,70 @@ app.post('/api/ledger/opportunities/:id/convert', (req, res) => {
       actor: actorFromRequest(req, 'pipeline')
     }),
     forecast: operatingLedger.opportunityForecast()
+  }), 201);
+});
+
+app.get('/api/ledger/bid-packages', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const bidPackages = operatingLedger.listBidPackages(req.query || {});
+    return {
+      success: true,
+      bidPackages,
+      summary: operatingLedger.summarizeBidPackages(
+        operatingLedger.listBidPackages({ includeClosed: true, limit: 500 })
+      )
+    };
+  });
+});
+
+app.post('/api/ledger/bid-packages', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = req.body || {};
+    return {
+      success: true,
+      bidPackage: operatingLedger.createBidPackage(
+        payload.opportunityId || payload.opportunity_id,
+        payload,
+        { actor: actorFromRequest(req, 'pipeline') }
+      )
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/bid-packages/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    bidPackage: operatingLedger.getBidPackage(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/bid-packages/:id/participants', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.addBidPackageParticipants(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    })
+  }), 201);
+});
+
+app.put('/api/ledger/bid-packages/:id/participants/:participantId/return', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.recordBidReturn(req.params.id, req.params.participantId, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    })
+  }));
+});
+
+app.post('/api/ledger/bid-packages/:id/selection', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestBidPackageSelection(
+      req.params.id,
+      req.body?.participantId || req.body?.participant_id,
+      req.body || {},
+      { actor: actorFromRequest(req, 'pipeline') }
+    )
   }), 201);
 });
 
@@ -3228,6 +3293,9 @@ app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
       success: true,
       approval,
       job: approval.jobId ? operatingLedger.getJobDetail(approval.jobId) : null,
+      bidPackage: approval.targetType === 'bid_package_selection'
+        ? operatingLedger.getBidPackage(approval.targetId)
+        : null,
       dashboard: operatingLedger.dashboardSummary()
     };
   });
@@ -3983,6 +4051,8 @@ function operationalExport() {
     organization: operatingLedger.getOrganizationProfile(),
     opportunities: operatingLedger.listOpportunities({ includeClosed: true, limit: 500 }),
     opportunityActivities: operatingLedger.listOpportunityActivities({ limit: 1_000 }),
+    bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
+    bidPackageParticipants: operatingLedger.listBidPackageParticipants({ limit: 5_000 }),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
@@ -4036,7 +4106,14 @@ function validateOperationalExport(snapshot) {
   ]) {
     if (!Array.isArray(snapshot[key])) problems.push(`Export is missing the ${key} collection.`);
   }
-  for (const key of ['opportunities', 'opportunityActivities', 'inspectionTemplates', 'inspectionChecklistSubmissions']) {
+  for (const key of [
+    'opportunities',
+    'opportunityActivities',
+    'bidPackages',
+    'bidPackageParticipants',
+    'inspectionTemplates',
+    'inspectionChecklistSubmissions'
+  ]) {
     if (snapshot[key] !== undefined && !Array.isArray(snapshot[key])) {
       problems.push(`Export ${key} must be a collection when present.`);
     }
@@ -4083,6 +4160,8 @@ function validateOperationalExport(snapshot) {
       jobs: snapshot.jobs.length,
       opportunities: Array.isArray(snapshot.opportunities) ? snapshot.opportunities.length : 0,
       opportunityActivities: Array.isArray(snapshot.opportunityActivities) ? snapshot.opportunityActivities.length : 0,
+      bidPackages: Array.isArray(snapshot.bidPackages) ? snapshot.bidPackages.length : 0,
+      bidPackageParticipants: Array.isArray(snapshot.bidPackageParticipants) ? snapshot.bidPackageParticipants.length : 0,
       tradePartners: snapshot.tradePartners.length,
       supplierInvoices: snapshot.supplierInvoices.length,
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,

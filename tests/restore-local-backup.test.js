@@ -74,6 +74,20 @@ test('backup verification rejects a migration 025 ledger with missing inspection
   );
 });
 
+test('backup verification rejects a migration 026 ledger with missing bid-package constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-bid-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Bid package schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_bid_packages_approval');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /preconstruction-bid constraints are incomplete: idx_bid_packages_approval/i
+  );
+});
+
 test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-restore safety copy', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));

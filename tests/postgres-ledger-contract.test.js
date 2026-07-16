@@ -1046,7 +1046,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '025_inspection_checklists');
+    assert.equal(migrations.currentVersion, '026_preconstruction_bid_packages');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1127,7 +1127,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('025_inspection_checklists'));
+  assert.deepEqual(versions, Array(4).fill('026_preconstruction_bid_packages'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -1494,6 +1494,55 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     assert.equal(ledger.prepareHandoverIssuePackage(handoverJob.id).replayed, true);
     assert.equal(ledger.assessHandoverReadiness(handoverJob.id).currentPackageId, handoverPackage.document.id);
     assert.match(ledger.getHandoverIssuePackage(handoverPackage.document.id, { audit: false }).content, /PostgreSQL handover/);
+    assert.equal(ledger.verifyAuditIntegrity().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL bid packages preserve comparison and approval parity', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const key = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const partner = ledger.upsertTradePartner({
+      name: `PostgreSQL tender partner ${key}`,
+      partnerType: 'supplier',
+      registrationNumber: `PG-${key}`,
+      vatNumber: 'NL123456789B01',
+      verificationReference: `PG-BID-VERIFY-${key}`,
+      verifiedAt: new Date(Date.now() - 86_400_000).toISOString()
+    }, { actor: 'postgres_bid_test' });
+    const opportunity = ledger.createOpportunity({
+      clientName: `PostgreSQL tender client ${key}`,
+      title: `PostgreSQL tender ${key}`,
+      stage: 'estimating'
+    }, { actor: 'postgres_bid_test' });
+    const bidPackage = ledger.createBidPackage(opportunity.id, {
+      title: `Hosted bid package ${key}`,
+      trade: 'Mechanical',
+      scope: 'Retain and compare the complete hosted mechanical tender return.',
+      dueAt: new Date(Date.now() + 10 * 86_400_000).toISOString(),
+      tradePartnerIds: [partner.id]
+    }, { actor: 'postgres_bid_test' });
+    const returned = ledger.recordBidReturn(bidPackage.id, bidPackage.participants[0].id, {
+      amount: 125000.55,
+      evidenceReference: `PG-BID-RETURN-${key}`,
+      durationDays: 60
+    }, { actor: 'postgres_bid_test' });
+    assert.equal(returned.participant.total, 151250.67);
+    const selection = ledger.requestBidPackageSelection(bidPackage.id, returned.participant.id, {
+      rationale: 'Hosted comparison and current trade-partner evidence verified.'
+    }, { actor: 'postgres_bid_test' });
+    ledger.resolveApproval(selection.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_bid_approver',
+      reason: 'Hosted bid comparison and compliance snapshot reviewed.'
+    });
+    const selected = ledger.getBidPackage(bidPackage.id);
+    assert.equal(selected.status, 'selected');
+    assert.equal(selected.selectedParticipant.id, returned.participant.id);
+    assert.equal(selected.data.spendAuthorized, false);
+    assert.equal(ledger.migrationStatus().currentVersion, '026_preconstruction_bid_packages');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
