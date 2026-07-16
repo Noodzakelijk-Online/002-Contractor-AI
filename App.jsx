@@ -191,9 +191,11 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
           ? 'observations'
           : type === 'incident'
             ? 'incidents'
-            : type === 'inspection_checklist' && inspectionId
-              ? `inspections/${encodeURIComponent(inspectionId)}/checklist-submissions`
-              : null
+            : type === 'punch_item'
+              ? 'punch-items'
+              : type === 'inspection_checklist' && inspectionId
+                ? `inspections/${encodeURIComponent(inspectionId)}/checklist-submissions`
+                : null
   if (!route) throw new Error('This queued field operation is not supported.')
   const requestPayload = { ...payload, entryKey: id }
   delete requestPayload.inspectionId
@@ -317,6 +319,39 @@ function emptyFieldRiskDraft(type = 'observation') {
     notes: '',
     correctiveAction: '',
     evidenceDocumentId: '',
+  }
+}
+
+function emptyCloseoutDraft(type = 'punch_item') {
+  if (type === 'warranty_claim') {
+    return {
+      warrantyType: 'workmanship',
+      title: '',
+      severity: 'medium',
+      dueAt: futureDateInput(7),
+      issue: '',
+    }
+  }
+  if (type === 'aftercare') {
+    return {
+      type: 'client_follow_up',
+      title: '',
+      owner: '',
+      dueAt: futureDateInput(7),
+      channel: 'portal',
+      notes: '',
+    }
+  }
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    title: '',
+    severity: 'medium',
+    assignee: '',
+    dueAt: futureDateInput(3),
+    location: '',
+    description: '',
+    evidenceDocumentId: '',
+    clientVisible: false,
   }
 }
 
@@ -3743,6 +3778,184 @@ function FieldRiskControl({
   )
 }
 
+function CloseoutRegister({
+  job,
+  canReportPunch,
+  canCoordinate,
+  canApprove,
+  fieldScoped,
+  operator,
+  submitting,
+  onCreate,
+  onLifecycle,
+  onOpenApprovals,
+}) {
+  const [view, setView] = useState('punch_item')
+  const [creating, setCreating] = useState(false)
+  const [draft, setDraft] = useState(() => emptyCloseoutDraft('punch_item'))
+  const [online, setOnline] = useState(() => navigator.onLine !== false)
+  const punchItems = job.punchItems || EMPTY_LIST
+  const warrantyClaims = job.warrantyClaims || EMPTY_LIST
+  const aftercare = job.aftercare || EMPTY_LIST
+  const visibleViews = fieldScoped
+    ? [{ key: 'punch_item', label: 'Punch', count: punchItems.length }]
+    : [
+        { key: 'punch_item', label: 'Punch', count: punchItems.length },
+        { key: 'warranty_claim', label: 'Warranty', count: warrantyClaims.length },
+        { key: 'aftercare', label: 'Aftercare', count: aftercare.length },
+      ]
+  const records = view === 'warranty_claim' ? warrantyClaims : view === 'aftercare' ? aftercare : punchItems
+  const canCreate = view === 'punch_item' ? canReportPunch : canCoordinate
+  const activeStatuses = view === 'punch_item'
+    ? new Set(['open', 'in_progress', 'pending_approval'])
+    : view === 'warranty_claim'
+      ? new Set(['open', 'under_review', 'pending_approval'])
+      : new Set(['open', 'planned', 'due'])
+  const openPunch = punchItems.filter((record) => !['closed', 'resolved', 'accepted', 'verified'].includes(record.status)).length
+  const openWarranty = warrantyClaims.filter((record) => !['closed', 'resolved', 'accepted', 'rejected'].includes(record.status)).length
+  const openAftercare = aftercare.filter((record) => !['completed', 'closed', 'cancelled'].includes(record.status)).length
+  const pendingReview = (job.approvals || EMPTY_LIST).filter((approval) =>
+    approval.status === 'pending' && ['punch_item', 'warranty_claim'].includes(approval.targetType),
+  ).length
+
+  useEffect(() => {
+    setView('punch_item')
+    setCreating(false)
+    setDraft(emptyCloseoutDraft('punch_item'))
+  }, [job.id])
+
+  useEffect(() => {
+    const handleOnline = () => setOnline(true)
+    const handleOffline = () => setOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
+
+  const selectView = (nextView) => {
+    setView(nextView)
+    setCreating(false)
+    setDraft(emptyCloseoutDraft(nextView))
+  }
+
+  const beginCreate = () => {
+    setDraft({
+      ...emptyCloseoutDraft(view),
+      ...(view === 'punch_item'
+        ? { assignee: operator?.name || '' }
+        : view === 'aftercare'
+          ? { owner: operator?.name || '' }
+          : {}),
+    })
+    setCreating(true)
+  }
+
+  async function submitRecord(event) {
+    event.preventDefault()
+    const result = await onCreate(view, draft)
+    if (result) {
+      setCreating(false)
+      setDraft(emptyCloseoutDraft(view))
+    }
+  }
+
+  const invalidDraft = draft.title.trim().length < 3
+    || (view === 'punch_item' && (draft.description.trim().length < 4 || draft.assignee.trim().length < 2))
+    || (view === 'warranty_claim' && draft.issue.trim().length < 4)
+    || (view === 'aftercare' && (draft.notes.trim().length < 4 || draft.owner.trim().length < 2))
+
+  return (
+    <section className="job-workspace-section closeout-register" data-testid="closeout-register">
+      <div className="section-heading closeout-register-heading">
+        <PackageCheck size={18} />
+        <div>
+          <h3>Closeout and aftercare</h3>
+          <p>Retain defects, warranty issues, and follow-up work without asserting acceptance or contacting the client.</p>
+        </div>
+        {canCreate ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'punch_item' ? 'New punch item' : view === 'warranty_claim' ? 'New warranty claim' : 'New follow-up'}</button> : null}
+      </div>
+
+      <div className="closeout-summary" aria-label="Closeout summary">
+        <div><span>Open punch</span><strong>{openPunch}</strong></div>
+        <div><span>Warranty</span><strong>{openWarranty}</strong></div>
+        <div><span>Aftercare</span><strong>{openAftercare}</strong></div>
+        <div><span>Pending review</span><strong>{pendingReview}</strong></div>
+      </div>
+
+      <div className={`closeout-tabs ${visibleViews.length === 1 ? 'single-tab' : ''}`} role="tablist" aria-label="Closeout record type">
+        {visibleViews.map((option) => (
+          <button type="button" role="tab" aria-selected={view === option.key} className={view === option.key ? 'active' : ''} key={option.key} onClick={() => selectView(option.key)}>{option.label} <span>{option.count}</span></button>
+        ))}
+      </div>
+
+      {creating ? (
+        <form className="closeout-form form-grid compact-form" data-testid={`closeout-${view}-form`} onSubmit={submitRecord}>
+          {view === 'punch_item' ? (
+            <>
+              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+              <label>Corrective due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">Punch title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Incomplete, defective, or unverified work" /></label>
+              <label>Assigned to<input required minLength="2" maxLength="160" value={draft.assignee} onChange={(event) => setDraft({ ...draft, assignee: event.target.value })} /></label>
+              <label>Location<input maxLength="240" value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} placeholder="Room, elevation, grid, or asset" /></label>
+              <label className="form-span">Observed condition<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Record the condition and completion criteria without assuming correction." /></label>
+              <label className="form-span">Linked evidence<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+              {canCoordinate ? <label className="checkbox-label form-span"><input type="checkbox" checked={draft.clientVisible} onChange={(event) => setDraft({ ...draft, clientVisible: event.target.checked })} />Prepare for client-visible review; approval remains required</label> : null}
+            </>
+          ) : view === 'warranty_claim' ? (
+            <>
+              <label>Warranty type<select value={draft.warrantyType} onChange={(event) => setDraft({ ...draft, warrantyType: event.target.value })}><option value="workmanship">Workmanship</option><option value="material">Material</option><option value="manufacturer">Manufacturer</option><option value="service">Service</option><option value="other">Other</option></select></label>
+              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+              <label className="form-span">Claim title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Reported post-completion issue" /></label>
+              <label>Review due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">Reported issue<textarea required minLength="4" maxLength="4000" value={draft.issue} onChange={(event) => setDraft({ ...draft, issue: event.target.value })} placeholder="Retain the reported facts without admitting liability or promising a remedy." /></label>
+            </>
+          ) : (
+            <>
+              <label>Follow-up type<select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value })}><option value="client_follow_up">Client follow-up</option><option value="warranty_review">Warranty review</option><option value="maintenance_review">Maintenance review</option><option value="quality_check">Quality check</option></select></label>
+              <label>Channel<select value={draft.channel} onChange={(event) => setDraft({ ...draft, channel: event.target.value })}><option value="portal">Portal</option><option value="phone">Phone</option><option value="email">Email</option><option value="site_visit">Site visit</option></select></label>
+              <label className="form-span">Follow-up title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Internal follow-up action" /></label>
+              <label>Owner<input required minLength="2" maxLength="160" value={draft.owner} onChange={(event) => setDraft({ ...draft, owner: event.target.value })} /></label>
+              <label>Due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">Follow-up purpose<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="What should be checked and what evidence should be retained?" /></label>
+            </>
+          )}
+          <p className="workflow-note form-span">This retains an internal record only. It does not certify completion, accept liability, authorize cost, book work, or contact the client.</p>
+          <div className="form-actions form-span">
+            <button className="primary-button" disabled={submitting || invalidDraft || (view !== 'punch_item' && !online)}><ClipboardCheck size={15} />{view === 'punch_item' && !online ? 'Save punch item offline' : view !== 'punch_item' && !online ? 'Reconnect to retain' : view === 'punch_item' ? 'Retain punch item' : view === 'warranty_claim' ? 'Retain warranty claim' : 'Retain follow-up'}</button>
+            <button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button>
+          </div>
+        </form>
+      ) : null}
+
+      <div className="closeout-records">
+        {records.length ? records.map((record) => {
+          const pending = (job.approvals || EMPTY_LIST).find((approval) => approval.id === record.approvalId && approval.status === 'pending')
+          const detail = view === 'punch_item' ? record.data?.description : view === 'warranty_claim' ? record.data?.issue : record.notes
+          const meta = view === 'punch_item'
+            ? `${formatStatus(record.severity)} / ${record.assignee || 'Unassigned'} / due ${formatDate(record.dueAt)}`
+            : view === 'warranty_claim'
+              ? `${formatStatus(record.data?.warrantyType || 'workmanship')} / ${formatStatus(record.severity)} / due ${formatDate(record.dueAt)}`
+              : `${formatStatus(record.type)} / ${record.owner || 'Unassigned'} / due ${formatDate(record.dueAt)}`
+          return (
+            <article className={`closeout-row ${view !== 'aftercare' ? `closeout-${record.severity}` : ''}`} key={record.id} data-testid={`closeout-${record.id}`}>
+              <div className="closeout-row-copy"><div><strong>{record.title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div><small>{meta}</small>{detail ? <p>{detail}</p> : null}</div>
+              <div className="closeout-row-actions">
+                {pending ? <span className="tag tag-amber">Approval pending</span> : null}
+                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}
+                {!pending && canCoordinate && activeStatuses.has(record.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onLifecycle(view, record)}><ClipboardCheck size={14} />{view === 'punch_item' ? 'Resolve punch' : view === 'warranty_claim' ? 'Resolve claim' : 'Complete follow-up'}</button> : null}
+              </div>
+            </article>
+          )
+        }) : <p className="workflow-note">No {view === 'punch_item' ? 'punch items' : view === 'warranty_claim' ? 'warranty claims' : 'aftercare follow-ups'} are retained for this job.</p>}
+      </div>
+      {fieldScoped ? <p className="workflow-note">Assigned field workers can capture punch evidence. Resolution, acceptance, and client visibility remain office-controlled.</p> : null}
+    </section>
+  )
+}
+
 function FieldAssuranceWorkspace({
   field,
   jobs,
@@ -7055,6 +7268,87 @@ function App() {
     }
   }
 
+  async function createCloseoutRecord(recordType, values) {
+    if (!selectedJobId || !['punch_item', 'warranty_claim', 'aftercare'].includes(recordType)) return null
+    if (recordType !== 'punch_item' && (!canCoordinate || navigator.onLine === false)) {
+      setError('Reconnect before retaining warranty or aftercare records. Offline exact retry is limited to field punch capture.')
+      return null
+    }
+
+    if (recordType === 'punch_item') {
+      const { entryKey, evidenceDocumentId, ...fields } = values
+      const draft = {
+        id: entryKey,
+        type: recordType,
+        jobId: selectedJobId,
+        payload: {
+          ...fields,
+          evidenceDocumentIds: evidenceDocumentId ? [evidenceDocumentId] : [],
+          status: 'open',
+          source: 'closeout_register',
+        },
+        operatorScope: outboxScope,
+      }
+      setSubmitting(true)
+      setError('')
+      try {
+        if (navigator.onLine === false) {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          notify('Punch item saved locally for this operator and scheduled for exact retry after reconnection.')
+          return { queued: true }
+        }
+        const result = await recordFieldOperation(draft)
+        setSelectedJob(result.job)
+        setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
+        notify(result.replayed ? 'This punch item was already retained; no duplicate record or approval was created.' : 'Punch item retained. Resolution and client visibility remain approval-gated.')
+        await refresh()
+        return result
+      } catch (requestError) {
+        if (shouldQueueFieldMutation(requestError)) {
+          try {
+            await enqueueFieldOperationDraft(draft)
+            await refreshOutboxState()
+            notify('Connection interrupted. The punch item was saved locally for an exact retry.')
+            return { queued: true }
+          } catch (outboxError) {
+            setError(outboxError.message)
+            return null
+          }
+        }
+        setError(requestError.message)
+        return null
+      } finally {
+        setSubmitting(false)
+      }
+    }
+
+    const route = recordType === 'warranty_claim' ? 'warranty-claims' : 'aftercare'
+    const payload = recordType === 'warranty_claim'
+      ? { ...values, status: 'open', source: 'closeout_register' }
+      : { ...values, status: 'open' }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/${route}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
+      notify(recordType === 'warranty_claim'
+        ? 'Warranty claim retained for internal review. No liability, visit, remedy, or client commitment was accepted.'
+        : 'Aftercare follow-up retained internally. No message was delivered and no work was booked.')
+      await refresh()
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function transitionJobTask(task, status, note = '') {
     if (!selectedJobId || !task?.id) return
     setSubmitting(true)
@@ -8766,6 +9060,23 @@ function App() {
     setClientActionReference('')
   }
 
+  function openJobCloseoutLifecycle(type, record) {
+    if (!selectedJob?.id || !record?.id || !['punch_item', 'warranty_claim', 'aftercare'].includes(type)) {
+      setError('The closeout action is not linked to a retained job record.')
+      return
+    }
+    openClientLifecycle({
+      jobId: selectedJob.id,
+      jobTitle: selectedJob.title,
+      clientName: selectedJob.clientName,
+      latest: {
+        punchItem: type === 'punch_item' ? record : null,
+        warrantyClaim: type === 'warranty_claim' ? record : null,
+        aftercare: type === 'aftercare' ? record : null,
+      },
+    }, type, record.id)
+  }
+
   function closeClientLifecycle() {
     setClientAction(null)
     setClientActionNotes('')
@@ -8802,6 +9113,10 @@ function App() {
           body: JSON.stringify(payload),
         },
       )
+      if (result.job?.id === selectedJobId) {
+        setSelectedJob(result.job)
+        setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
+      }
       notify(
         result.approvalRequired
           ? `${clientAction.label} retained as a pending approval; the client-facing outcome has not been committed.`
@@ -11605,6 +11920,18 @@ function App() {
                   submitting={submitting}
                   onCreate={createFieldRisk}
                   onReview={openFieldReview}
+                  onOpenApprovals={openApprovals}
+                />
+                <CloseoutRegister
+                  job={selectedJob}
+                  canReportPunch={canCoordinate || capabilities.fieldEvidence === true}
+                  canCoordinate={canCoordinate}
+                  canApprove={capabilities.approvals === true}
+                  fieldScoped={fieldScoped}
+                  operator={operator}
+                  submitting={submitting}
+                  onCreate={createCloseoutRecord}
+                  onLifecycle={openJobCloseoutLifecycle}
                   onOpenApprovals={openApprovals}
                 />
                 {canCoordinate ? (

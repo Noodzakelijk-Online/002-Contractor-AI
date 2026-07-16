@@ -1193,7 +1193,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && pathName === '/api/ledger/upload') return true;
     if (req.method === 'PATCH' && /^\/api\/ledger\/jobs\/[^/]+\/lifecycle\/task\/[^/]+$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
-    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|field-reports|observations|incidents|safety-checks|time-logs|daily-logs)$/.test(pathName);
+    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs)$/.test(pathName);
   }
 
   return false;
@@ -3124,29 +3124,35 @@ app.post('/api/ledger/jobs/:id/finance-handoffs/prepare', (req, res) => {
 });
 
 app.post('/api/ledger/jobs/:id/punch-items', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    punchItem: operatingLedger.createPunchItem(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
-  }), 201);
+  return handleLedgerRequest(req, res, () => {
+    const punchItem = operatingLedger.createPunchItem(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      punchItem: recordForOperator(req, punchItem),
+      replayed: punchItem.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/warranty-claims', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    warrantyClaim: operatingLedger.createWarrantyClaim(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    warrantyClaim: operatingLedger.createWarrantyClaim(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
 app.post('/api/ledger/jobs/:id/aftercare', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    aftercare: operatingLedger.addAftercareItem(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    aftercare: operatingLedger.addAftercareItem(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
@@ -3158,12 +3164,12 @@ app.patch('/api/ledger/jobs/:id/lifecycle/:recordType/:recordId', (req, res) => 
       req.params.recordType,
       req.params.recordId,
       payload,
-      { actor: req.body?.actor || 'dashboard' }
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
     );
     return {
       success: true,
       record: recordForOperator(req, result.record),
-      approval: result.approval,
+      approval: req.operator?.role === 'field_worker' ? null : result.approval,
       approvalRequired: result.approvalRequired,
       job: jobForOperator(req, req.params.id, { includeAudit: true }),
       dashboard: dashboardForOperator(req)

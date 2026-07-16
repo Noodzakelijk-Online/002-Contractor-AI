@@ -742,3 +742,52 @@
   .field-risk-row-actions { justify-content: flex-start; }
   .field-risk-row-actions .secondary-button { flex: 1 1 120px; }
 }
+
+.closeout-register { display: grid; gap: 14px; min-width: 0; }
+.closeout-register-heading { align-items: center; }
+.closeout-register-heading > .secondary-button { margin-left: auto; white-space: nowrap; }
+.closeout-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dfe7e3; }
+.closeout-summary div { display: grid; gap: 4px; min-width: 0; padding: 11px 12px; border-right: 1px solid #dfe7e3; }
+.closeout-summary div:last-child { border-right: 0; }
+.closeout-summary span { overflow-wrap: anywhere; color: #6a7973; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.closeout-summary strong { color: #263b32; font-size: 17px; }
+.closeout-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid #cedbd5; border-radius: 6px; }
+.closeout-tabs.single-tab { grid-template-columns: minmax(0, 1fr); }
+.closeout-tabs button { display: inline-flex; min-width: 0; min-height: 36px; align-items: center; justify-content: center; gap: 7px; color: #53675e; font: inherit; font-size: 11px; font-weight: 750; background: #fff; border: 0; border-right: 1px solid #d7e1dc; cursor: pointer; }
+.closeout-tabs button:last-child { border-right: 0; }
+.closeout-tabs button:hover { background: #f2f7f5; }
+.closeout-tabs button:focus-visible { position: relative; z-index: 1; outline: 3px solid #96c9bc; outline-offset: -3px; }
+.closeout-tabs button.active { color: #fff; background: #315f53; }
+.closeout-tabs button span { min-width: 20px; padding: 2px 6px; color: inherit; background: rgb(255 255 255 / .16); border-radius: 999px; font-size: 9px; }
+.closeout-form { gap: 12px; margin: 0; padding: 14px; background: #f7f9f8; border: 1px solid #dce5e1; }
+.closeout-form .form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.closeout-records { display: grid; border-top: 1px solid #dfe7e3; }
+.closeout-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; padding: 12px 0 12px 10px; border-bottom: 1px solid #e3eae7; border-left: 3px solid #8fa29a; }
+.closeout-low { border-left-color: #5d8c7d; }
+.closeout-medium { border-left-color: #c08a2f; }
+.closeout-high, .closeout-critical { background: #fff9f7; border-left-color: #b94238; }
+.closeout-row-copy { display: grid; gap: 4px; min-width: 0; }
+.closeout-row-copy > div { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+.closeout-row-copy strong { min-width: 0; overflow-wrap: anywhere; color: #2a4037; font-size: 12px; }
+.closeout-row-copy small { overflow-wrap: anywhere; color: #6c7c75; font-size: 10px; }
+.closeout-row-copy p { margin: 0; overflow-wrap: anywhere; color: #526a61; font-size: 11px; line-height: 1.45; }
+.closeout-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
+.closeout-row-actions .secondary-button { min-height: 31px; padding: 0 8px; font-size: 10px; }
+
+@media (max-width: 760px) {
+  .closeout-register-heading { align-items: flex-start; flex-wrap: wrap; }
+  .closeout-register-heading > .secondary-button { width: calc(100% - 28px); margin-left: 28px; }
+  .closeout-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .closeout-summary div:nth-child(2n) { border-right: 0; }
+  .closeout-summary div:nth-child(-n + 2) { border-bottom: 1px solid #dfe7e3; }
+  .closeout-tabs { grid-template-columns: 1fr; }
+  .closeout-tabs button { border-right: 0; border-bottom: 1px solid #d7e1dc; }
+  .closeout-tabs button:last-child { border-bottom: 0; }
+  .closeout-form { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .closeout-form .form-span { grid-column: auto; }
+  .closeout-form .form-actions { align-items: stretch; flex-direction: column; }
+  .closeout-form .form-actions button { width: 100%; }
+  .closeout-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .closeout-row-actions { justify-content: flex-start; }
+  .closeout-row-actions .secondary-button { flex: 1 1 120px; }
+}

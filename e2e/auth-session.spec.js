@@ -95,6 +95,20 @@ test('field worker opens an assigned job and completes only the scoped task', as
   await taskModal.getByRole('button', { name: 'Mark completed' }).click();
   await expect(taskRow.getByText('completed', { exact: true })).toBeVisible();
 
+  const closeout = workspace.getByTestId('closeout-register');
+  await expect(closeout.getByRole('heading', { name: 'Closeout and aftercare' })).toBeVisible();
+  await expect(closeout.getByRole('tab', { name: /Warranty/ })).toHaveCount(0);
+  await expect(closeout.getByRole('tab', { name: /Aftercare/ })).toHaveCount(0);
+  await closeout.getByRole('button', { name: 'New punch item' }).click();
+  const punchForm = closeout.getByTestId('closeout-punch_item-form');
+  await punchForm.getByLabel('Punch title').fill('Field-scoped trim correction');
+  await punchForm.getByLabel('Assigned to').fill('Browser Field Task Worker');
+  await punchForm.getByLabel('Location').fill('Assigned work area');
+  await punchForm.getByLabel('Observed condition').fill('Trim edge remains incomplete in the assigned field work area.');
+  await punchForm.getByRole('button', { name: 'Retain punch item' }).click();
+  await expect(closeout.getByText('Field-scoped trim correction')).toBeVisible();
+  await expect(closeout.getByRole('button', { name: 'Resolve punch' })).toHaveCount(0);
+
   const fieldDetail = await page.request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(fieldDetail.ok()).toBeTruthy();
   const projected = await fieldDetail.json();
@@ -103,4 +117,8 @@ test('field worker opens an assigned job and completes only the scoped task', as
   expect(projected.job.tasks).toEqual(expect.arrayContaining([
     expect.objectContaining({ title: 'Install scoped field blocking', status: 'completed' })
   ]));
+  expect(projected.job.punchItems).toEqual(expect.arrayContaining([
+    expect.objectContaining({ title: 'Field-scoped trim correction', status: 'open' })
+  ]));
+  expect(projected.job.punchItems[0].data).toBeUndefined();
 });

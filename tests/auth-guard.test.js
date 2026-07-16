@@ -864,6 +864,37 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(Object.hasOwn(fieldIncident.body.incident, 'data'), false);
     assert.equal(Object.hasOwn(fieldIncident.body.incident, 'approval'), false);
 
+    const fieldPunchPayload = {
+      entryKey: 'field-punch-role-0001',
+      title: 'Door frame finish requires correction',
+      severity: 'medium',
+      assignee: 'Role Field Worker',
+      dueAt: '2026-07-22',
+      location: 'Level 2 room 2.14',
+      description: 'Paint edge is incomplete at the retained frame location.',
+      evidenceDocumentIds: [fieldUploadBody.ledgerDocument.id],
+      actor: 'spoofed-owner'
+    };
+    const fieldPunch = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/punch-items`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify(fieldPunchPayload)
+    });
+    assert.equal(fieldPunch.response.status, 201);
+    assert.equal(fieldPunch.body.replayed, false);
+    assert.equal(fieldPunch.body.punchItem.replayed, false);
+    assert.equal(Object.hasOwn(fieldPunch.body.punchItem, 'data'), false);
+    assert.equal(Object.hasOwn(fieldPunch.body.punchItem, 'approvalId'), false);
+
+    const fieldPunchReplay = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/punch-items`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify(fieldPunchPayload)
+    });
+    assert.equal(fieldPunchReplay.response.status, 201);
+    assert.equal(fieldPunchReplay.body.replayed, true);
+    assert.equal(fieldPunchReplay.body.punchItem.id, fieldPunch.body.punchItem.id);
+
     const deniedOtherIncident = await request(baseUrl, `/api/ledger/jobs/${unassigned.body.job.id}/incidents`, {
       method: 'POST',
       headers: fieldHeaders,
@@ -871,6 +902,14 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     });
     assert.equal(deniedOtherIncident.response.status, 403);
     assert.equal(deniedOtherIncident.body.error.code, 'field_job_scope_forbidden');
+
+    const deniedOtherPunch = await request(baseUrl, `/api/ledger/jobs/${unassigned.body.job.id}/punch-items`, {
+      method: 'POST',
+      headers: fieldHeaders,
+      body: JSON.stringify({ ...fieldPunchPayload, entryKey: 'field-punch-denied-0001' })
+    });
+    assert.equal(deniedOtherPunch.response.status, 403);
+    assert.equal(deniedOtherPunch.body.error.code, 'field_job_scope_forbidden');
 
     const scopedFieldList = await request(baseUrl, '/api/ledger/jobs?limit=100', { headers: fieldHeaders });
     const scopedFieldJob = scopedFieldList.body.jobs.find(job => job.id === intake.body.job.id);
@@ -898,11 +937,14 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(ownerDailyDetail.body.job.progress.filter(update => update.data?.entryKey === 'field-progress-role-0001').length, 1);
     assert.equal(ownerDailyDetail.body.job.observations.filter(record => record.data?.entryKey === 'field-observation-role-0001').length, 1);
     assert.equal(ownerDailyDetail.body.job.incidents.filter(record => record.data?.entryKey === 'field-incident-role-0001').length, 1);
+    assert.equal(ownerDailyDetail.body.job.punchItems.filter(record => record.data?.entryKey === 'field-punch-role-0001').length, 1);
     assert.deepEqual(ownerDailyDetail.body.job.incidents.find(record => record.id === fieldIncident.body.incident.id).data.evidenceDocumentIds, [fieldUploadBody.ledgerDocument.id]);
+    assert.deepEqual(ownerDailyDetail.body.job.punchItems.find(record => record.id === fieldPunch.body.punchItem.id).data.evidenceDocumentIds, [fieldUploadBody.ledgerDocument.id]);
     assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_progress' && event.entityId === fieldProgress.body.progress.id && event.actor === 'role:field_worker'));
     assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_field_daily_log' && event.actor === 'role:field_worker'));
     assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_observation' && event.entityId === fieldObservation.body.observation.id && event.actor === 'role:field_worker'));
     assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'record_incident' && event.entityId === fieldIncident.body.incident.id && event.actor === 'role:field_worker'));
+    assert.ok(ownerDailyDetail.body.job.audit.some(event => event.action === 'create_punch_item' && event.entityId === fieldPunch.body.punchItem.id && event.actor === 'role:field_worker'));
 
     const deniedCompletion = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/progress`, {
       method: 'POST',

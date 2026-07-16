@@ -17603,13 +17603,64 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.transaction(() => {
       this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const id = makeId('punch');
       const timestamp = nowIso();
       const requestedStatus = normalizeStatus(payload.status, 'open');
       const severity = normalizePriority(payload.severity || payload.priority);
+      const title = normalizeText(payload.title, 'Punch item');
+      const assignee = normalizeText(payload.assignee || payload.owner, actor);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (entryKey && !/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('punch_entry_key_invalid', 'Punch retry key must contain 8 to 200 safe characters.');
+      }
+      const id = entryKey
+        ? `punch_${sha256Text(`${jobId}\0${entryKey}`).slice(0, 24)}`
+        : makeId('punch');
+      const existingRow = entryKey ? this.db.prepare('SELECT * FROM punch_items WHERE id = ?').get(id) : null;
+      const dueAt = payload.dueAt || payload.due_at || existingRow?.due_at || futureIsoDate(3);
+      const closedAt = payload.closedAt || payload.closed_at || existingRow?.closed_at || null;
+      const description = normalizeText(payload.description || payload.notes, '') || null;
+      const location = normalizeText(payload.location, '') || null;
+      const photos = normalizeList(payload.photos);
+      const evidenceDocumentIds = [...new Set(normalizeList(payload.evidenceDocumentIds || payload.evidence_document_ids).map(String))];
+      const clientVisible = normalizeBoolean(payload.clientVisible, false);
+      for (const documentId of evidenceDocumentIds) {
+        const document = this.db.prepare('SELECT id FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+        if (!document) {
+          throw ledgerInputError('punch_evidence_not_found', `Evidence document ${documentId} does not belong to this job.`);
+        }
+      }
       const approvalStatuses = ['closed', 'resolved', 'accepted', 'verified', 'client_visible'];
-      const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus) || normalizeBoolean(payload.clientVisible, false));
+      const needsApproval = payload.requiresApproval === true || approvalStatuses.includes(requestedStatus) || clientVisible;
       const status = needsApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+      const requestHash = entryKey ? sha256Json({
+        requestedStatus,
+        status,
+        severity,
+        title,
+        assignee,
+        dueAt,
+        closedAt,
+        description,
+        location,
+        photos,
+        evidenceDocumentIds,
+        clientVisible,
+        needsApproval
+      }) : null;
+      if (existingRow) {
+        const existingData = fromJson(existingRow.data_json, {});
+        if (existingRow.job_id !== jobId || existingData.entryKey !== entryKey || existingData.requestHash !== requestHash) {
+          const error = new Error('Punch retry key was already used for different content');
+          error.statusCode = 409;
+          error.code = 'punch_entry_key_reused';
+          throw error;
+        }
+        const existing = this.mapPunchItem(existingRow);
+        const approval = existingRow.approval_id
+          ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existingRow.approval_id))
+          : null;
+        return { ...existing, approval, replayed: true };
+      }
 
       this.db.prepare(`
         INSERT INTO punch_items (id, job_id, title, status, severity, assignee, due_at, closed_at, approval_id, data_json, created_at, updated_at)
@@ -17617,19 +17668,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       `).run(
         id,
         jobId,
-        normalizeText(payload.title, 'Punch item'),
+        title,
         status,
         severity,
-        payload.assignee || payload.owner || actor,
-        payload.dueAt || payload.due_at || futureIsoDate(3),
-        payload.closedAt || payload.closed_at || null,
+        assignee,
+        dueAt,
+        closedAt,
         null,
         toJson({
           requestedStatus,
-          description: payload.description || payload.notes || null,
-          location: payload.location || null,
-          photos: normalizeList(payload.photos),
-          clientVisible: normalizeBoolean(payload.clientVisible, false)
+          description,
+          location,
+          photos,
+          evidenceDocumentIds,
+          clientVisible,
+          entryKey: entryKey || null,
+          requestHash
         }),
         timestamp,
         timestamp
@@ -17642,7 +17696,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           targetId: id,
           jobId,
           approvalType: 'punch_item_closeout',
-          summary: `Approve punch item ${normalizeText(payload.title, 'closeout')}`,
+          summary: `Approve punch item ${title}`,
           reason: 'Closing or client-publishing punch items can affect final acceptance and requires human review.',
           data: { requestedStatus, severity }
         }, { actor, audit: false });
@@ -17651,9 +17705,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
       const punchItem = this.mapPunchItem(this.db.prepare('SELECT * FROM punch_items WHERE id = ?').get(id));
       if (options.audit !== false) {
-        this.audit({ entityType: 'punch_item', entityId: id, jobId, action: 'create_punch_item', actor, after: punchItem });
+        this.audit({
+          entityType: 'punch_item',
+          entityId: id,
+          jobId,
+          action: 'create_punch_item',
+          actor,
+          after: punchItem,
+          metadata: { entryKey: entryKey || null, externalCommitments: 0 }
+        });
       }
-      return { ...punchItem, approval };
+      return { ...punchItem, approval, replayed: false };
     });
   }
 
@@ -17666,7 +17728,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const requestedStatus = normalizeStatus(payload.status, 'open');
       const severity = normalizePriority(payload.severity || payload.priority);
       const approvalStatuses = ['closed', 'resolved', 'accepted', 'rejected', 'client_visible'];
-      const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
+      const needsApproval = payload.requiresApproval === true || approvalStatuses.includes(requestedStatus);
       const status = needsApproval && approvalStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
 
       this.db.prepare(`
@@ -18436,10 +18498,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvalStatuses: new Set(['resolved', 'verified', 'closed']),
         terminalStatuses: new Set(['resolved', 'verified', 'closed']),
         update(row, next) {
+          const existingData = fromJson(row.data_json, {});
           return {
             status: next.status,
             approvalId: next.approvalId,
-            data: next.data,
+            data: {
+              ...next.data,
+              resolution: normalizeText(payload.resolution || payload.correctionEvidence || payload.correction_evidence, existingData.resolution || '') || null
+            },
             title: normalizeText(payload.title, row.title),
             assignee: payload.assignee || payload.owner || row.assignee,
             dueAt: payload.dueAt || payload.due_at || row.due_at,
@@ -18463,10 +18529,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvalStatuses: new Set(['resolved', 'rejected', 'closed']),
         terminalStatuses: new Set(['resolved', 'rejected', 'closed']),
         update(row, next) {
+          const existingData = fromJson(row.data_json, {});
           return {
             status: next.status,
             approvalId: next.approvalId,
-            data: next.data,
+            data: {
+              ...next.data,
+              resolution: normalizeText(payload.resolution, existingData.resolution || '') || null
+            },
             title: normalizeText(payload.title, row.title),
             dueAt: payload.dueAt || payload.due_at || row.due_at,
             resolvedAt: next.closedAt
@@ -18607,6 +18677,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       config.save.call(this, recordId, values, timestamp);
       const afterRow = this.db.prepare(`SELECT * FROM ${config.table} WHERE id = ?`).get(recordId);
       const record = config.map(afterRow);
+      if (approval?.id) {
+        approval = this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approval.id));
+      }
       this.audit({
         entityType: config.entityType || config.targetType || 'aftercare_item',
         entityId: recordId,
@@ -30407,6 +30480,47 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.notes = retained.notes || null;
       preview.correctiveAction = retained.correctiveAction || null;
       preview.evidenceDocumentIds = retained.evidenceDocumentIds || [];
+    } else if (targetType === 'punch_item') {
+      const row = this.db.prepare('SELECT * FROM punch_items WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapPunchItem(row) : null;
+      const retained = mapped?.data || {};
+      const requestedStatus = retained.requestedStatus || data.requestedStatus || mapped?.status || 'open';
+      primaryEffect = `Review ${mapped?.severity || data.severity || 'field'} punch item ${mapped?.title || approval.summary || ''}.`;
+      addEffect(`Accept the retained correction evidence and move the punch item to ${ledgerApprovalHumanTarget(requestedStatus).toLowerCase()} where the lifecycle permits it.`);
+      addSafeguard('Does not notify the client, certify final acceptance, release retention, or close the job automatically.');
+      addSafeguard('Does not clear related safety, quality, warranty, or handover blockers without their own retained evidence.');
+      riskLevel = ['high', 'critical'].includes(mapped?.severity || data.severity) ? 'high' : 'medium';
+      preview.title = mapped?.title || null;
+      preview.severity = mapped?.severity || data.severity || null;
+      preview.status = mapped?.status || null;
+      preview.requestedStatus = requestedStatus;
+      preview.assignee = mapped?.assignee || null;
+      preview.dueAt = mapped?.dueAt || null;
+      preview.location = retained.location || null;
+      preview.description = retained.description || null;
+      preview.resolution = retained.resolution || retained.lifecycleTransition?.note || null;
+      preview.evidenceDocumentIds = retained.evidenceDocumentIds || [];
+      preview.clientVisible = retained.clientVisible === true;
+    } else if (targetType === 'warranty_claim') {
+      const row = this.db.prepare('SELECT * FROM warranty_claims WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapWarrantyClaim(row) : null;
+      const retained = mapped?.data || {};
+      const requestedStatus = retained.requestedStatus || data.requestedStatus || mapped?.status || 'open';
+      primaryEffect = `Review ${mapped?.severity || data.severity || 'reported'} warranty claim ${mapped?.title || approval.summary || ''}.`;
+      addEffect(`Accept the retained resolution evidence and move the warranty claim to ${ledgerApprovalHumanTarget(requestedStatus).toLowerCase()} where the lifecycle permits it.`);
+      addSafeguard('Does not contact the client, admit liability, authorize spend, schedule a visit, or extend warranty terms automatically.');
+      addSafeguard('Does not close related punch, finance, safety, or contract records.');
+      riskLevel = 'high';
+      preview.title = mapped?.title || null;
+      preview.severity = mapped?.severity || data.severity || null;
+      preview.status = mapped?.status || null;
+      preview.requestedStatus = requestedStatus;
+      preview.clientName = mapped?.clientName || null;
+      preview.dueAt = mapped?.dueAt || null;
+      preview.issue = retained.issue || null;
+      preview.resolution = retained.resolution || null;
+      preview.warrantyType = retained.warrantyType || data.warrantyType || null;
+      preview.photos = retained.photos || [];
     } else if (['quality_check', 'safety_check', 'inspection_record', 'safety_meeting', 'worker_orientation', 'jha_record', 'sds_sheet', 'site_access_log'].includes(targetType)) {
       primaryEffect = `Approve ${ledgerApprovalHumanTarget(targetType)} evidence.`;
       addEffect('Move the field, safety, access, or quality record to its approved/completed state.');
