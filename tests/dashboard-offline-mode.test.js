@@ -244,7 +244,7 @@ test('job workspace exposes approval-safe commercial drafting and acceptance evi
 
 test('job archive and restore controls use retained approval-gated ledger routes', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/jobs\?archiveOnly=true&limit=100'\)/);
-  assert.match(dashboardSource, /`\/api\/ledger\/jobs\/\$\{encodeURIComponent\(job\.id\)\}\/\$\{mode\}`/);
+  assert.match(dashboardSource, /`\/api\/ledger\/jobs\/\$\{encodeURIComponent\(job\.id\)\}\/\$\{mode\}\?includeDashboard=false`/);
   assert.match(dashboardSource, /data-testid="job-archive-control"/);
   assert.match(dashboardSource, /data-testid="job-archive-registry"/);
   assert.match(dashboardSource, /data-testid="job-lifecycle-modal"/);
