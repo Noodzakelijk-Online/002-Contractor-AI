@@ -136,6 +136,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'production_output', label: 'Installed production output', table: 'production_entries', detailKey: 'productionEntries', readyStatuses: ['recorded'] },
     { key: 'field_report', label: 'Daily report', table: 'field_reports', detailKey: 'fieldReports' },
     { key: 'time', label: 'Time tracking', table: 'time_logs', detailKey: 'timeLogs' },
+    { key: 'timesheet', label: 'Approved weekly timesheet', table: 'weekly_timesheets', readyStatuses: ['approved'], ledgerOnly: true },
     { key: 'attendance', label: 'Site attendance and labor map', table: 'attendance_sessions', detailKey: 'attendanceSessions', readyStatuses: ['checked_in', 'checked_out'] },
     { key: 'materials', label: 'Material tracking', table: 'material_requirements', detailKey: 'materials' },
     { key: 'equipment', label: 'Tool/equipment tracking', table: 'tool_reservations', detailKey: 'tools' },
@@ -524,6 +525,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     production_baseline: 'production_control',
     production_output: 'production_control',
     time: 'time_log_form',
+    timesheet: 'timesheet_control',
     attendance: 'attendance_control',
     evidence: 'document_form',
     instructions: 'worker_instruction_form',
@@ -594,6 +596,7 @@ const CAPABILITY_MANUAL_COMMITMENT_REQUIREMENTS = new Set([
   'orientation',
   'site_access',
   'attendance',
+  'timesheet',
   'inspection',
   'change_order',
   'rfi',
@@ -877,6 +880,8 @@ const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
 const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
 const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
+const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
+const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -2672,6 +2677,63 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON attendance_adjustments(session_id) WHERE status = 'pending_approval';
       `);
     }
+  },
+  {
+    version: '034_weekly_timesheets',
+    description: 'Freeze source-current weekly worker timesheets and checksum-protected payroll handoff packages behind approval.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS weekly_timesheets (
+          id TEXT PRIMARY KEY,
+          worker_id TEXT NOT NULL,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          total_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+          billable_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+          labor_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT,
+          supersedes_timesheet_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(worker_id) REFERENCES workers(id),
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          FOREIGN KEY(supersedes_timesheet_id) REFERENCES weekly_timesheets(id),
+          UNIQUE(worker_id, period_start, version_number)
+        );
+        CREATE TABLE IF NOT EXISTS timesheet_exports (
+          id TEXT PRIMARY KEY,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'prepared',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          csv_checksum TEXT NOT NULL,
+          csv_content TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(period_start, period_end, source_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_weekly_timesheets_worker_period
+          ON weekly_timesheets(worker_id, period_start DESC, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_weekly_timesheets_period_status
+          ON weekly_timesheets(period_start DESC, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_timesheets_pending
+          ON weekly_timesheets(worker_id, period_start) WHERE status = 'pending_approval';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_timesheets_approved
+          ON weekly_timesheets(worker_id, period_start) WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_timesheet_exports_period
+          ON timesheet_exports(period_start DESC, created_at DESC);
+      `);
+    }
   }
 ];
 
@@ -4323,6 +4385,9 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
+    if (table === 'weekly_timesheets' || table === 'timesheet_exports') {
+      return { from: `${table} AS records`, condition: '1 = 1' };
+    }
     if (table === 'jobs') {
       return {
         from: 'jobs AS records',
@@ -18963,6 +19028,470 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return after;
   }
 
+  normalizeTimesheetPeriod(value) {
+    const requested = normalizeText(value, '');
+    let periodStart;
+    if (!requested) {
+      const current = new Date();
+      current.setUTCHours(0, 0, 0, 0);
+      const day = current.getUTCDay() || 7;
+      current.setUTCDate(current.getUTCDate() - day + 1);
+      periodStart = current.toISOString().slice(0, 10);
+    } else {
+      const parsed = new Date(`${requested}T00:00:00.000Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(requested) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== requested) {
+        throw ledgerInputError('timesheet_period_invalid', 'Timesheet period start must be a valid calendar date.');
+      }
+      if (parsed.getUTCDay() !== 1) {
+        throw ledgerInputError('timesheet_period_not_monday', 'Weekly timesheet periods must start on Monday.');
+      }
+      periodStart = requested;
+    }
+    const end = new Date(`${periodStart}T00:00:00.000Z`);
+    end.setUTCDate(end.getUTCDate() + 6);
+    return { periodStart, periodEnd: end.toISOString().slice(0, 10) };
+  }
+
+  calculateWorkerTimesheet(workerId, filters = {}) {
+    const workerRow = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(String(workerId || ''));
+    if (!workerRow) throw ledgerInputError('timesheet_worker_not_found', 'Timesheet worker not found.', { workerId }, 404);
+    const worker = this.mapWorker(workerRow);
+    const { periodStart, periodEnd } = this.normalizeTimesheetPeriod(filters.periodStart || filters.period_start);
+    const timeRows = this.db.prepare(`
+      SELECT time_logs.*, jobs.title AS job_title
+      FROM time_logs
+      JOIN jobs ON jobs.id = time_logs.job_id
+      WHERE time_logs.worker_id = ?
+        AND time_logs.work_date >= ? AND time_logs.work_date <= ?
+        AND time_logs.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+      ORDER BY time_logs.work_date ASC, time_logs.created_at ASC, time_logs.id ASC
+    `).all(worker.id, periodStart, periodEnd);
+    const lines = timeRows.map(row => {
+      const data = fromJson(row.data_json, {});
+      return {
+        id: row.id,
+        jobId: row.job_id,
+        jobTitle: row.job_title,
+        workDate: row.work_date,
+        hours: roundQuantity(row.hours),
+        billable: Boolean(row.billable),
+        rate: roundMoney(row.rate),
+        laborCost: roundMoney(normalizeNumber(row.hours, 0) * normalizeNumber(row.rate, 0)),
+        costCode: data.costCode || null,
+        source: data.source || null,
+        verificationReference: data.verificationReference || null,
+        entryKey: data.entryKey || null,
+        entryFingerprint: data.entryFingerprint || null,
+        status: row.status,
+        notes: row.notes || null
+      };
+    });
+    const attendanceRows = this.db.prepare(`
+      SELECT id FROM attendance_sessions
+      WHERE worker_id = ? AND substr(check_in_at, 1, 10) <= ?
+        AND (check_out_at IS NULL OR substr(check_out_at, 1, 10) >= ?)
+      ORDER BY check_in_at ASC
+    `).all(worker.id, periodEnd, periodStart).map(row => this.getAttendanceSession(row.id));
+    const attendance = attendanceRows.map(session => {
+      const startMs = Date.parse(session.effectiveCheckInAt);
+      const endMs = session.effectiveCheckOutAt ? Date.parse(session.effectiveCheckOutAt) : null;
+      return {
+        id: session.id,
+        jobId: session.jobId,
+        workDate: session.effectiveCheckInAt.slice(0, 10),
+        status: session.status,
+        checkInAt: session.effectiveCheckInAt,
+        checkOutAt: session.effectiveCheckOutAt,
+        hours: Number.isFinite(endMs) ? roundQuantity(Math.max(0, endMs - startMs) / (60 * 60 * 1000)) : 0,
+        adjusted: Boolean(session.adjustment)
+      };
+    }).filter(session => session.workDate >= periodStart && session.workDate <= periodEnd);
+    const dates = new Set([...lines.map(line => line.workDate), ...attendance.map(session => session.workDate)]);
+    const daily = [...dates].sort().map(workDate => {
+      const dayLines = lines.filter(line => line.workDate === workDate);
+      const dayAttendance = attendance.filter(session => session.workDate === workDate);
+      const loggedHours = roundQuantity(dayLines.reduce((sum, line) => sum + line.hours, 0));
+      const attendanceHours = roundQuantity(dayAttendance.reduce((sum, session) => sum + session.hours, 0));
+      return {
+        workDate,
+        loggedHours,
+        billableHours: roundQuantity(dayLines.filter(line => line.billable).reduce((sum, line) => sum + line.hours, 0)),
+        attendanceHours,
+        varianceHours: attendanceHours > 0 ? roundQuantity(loggedHours - attendanceHours) : null,
+        timeLogCount: dayLines.length,
+        attendanceSessionCount: dayAttendance.length,
+        openAttendance: dayAttendance.some(session => session.status === 'checked_in')
+      };
+    });
+    const exceptions = [];
+    for (const day of daily) {
+      if (day.loggedHours > 16) exceptions.push({ code: 'timesheet_long_day', workDate: day.workDate, severity: day.loggedHours > 24 ? 'blocking' : 'review', message: `${day.loggedHours.toFixed(2)} logged hours require review.` });
+      if (day.varianceHours !== null && Math.abs(day.varianceHours) >= 2) exceptions.push({ code: 'timesheet_attendance_variance', workDate: day.workDate, severity: 'review', message: `Logged time differs from operational attendance by ${Math.abs(day.varianceHours).toFixed(2)} hours.` });
+      if (day.openAttendance) exceptions.push({ code: 'timesheet_open_attendance', workDate: day.workDate, severity: 'review', message: 'An attendance session remains open for this date.' });
+    }
+    const unverifiedLines = lines.filter(line => !line.source && !line.verificationReference);
+    if (unverifiedLines.length) exceptions.push({ code: 'timesheet_source_reference_missing', severity: 'review', count: unverifiedLines.length, message: `${unverifiedLines.length} time log(s) have no retained source or verification reference.` });
+    const blockers = [];
+    if (!lines.length) blockers.push({ code: 'timesheet_time_logs_required', message: 'At least one retained worker time log is required for this week.' });
+    if (daily.some(day => day.loggedHours > 24)) blockers.push({ code: 'timesheet_daily_hours_impossible', message: 'One or more dates exceed 24 total logged hours across jobs.' });
+    if (periodStart > nowIso().slice(0, 10)) blockers.push({ code: 'timesheet_future_period', message: 'A future weekly period cannot be submitted for review.' });
+    if (lines.some(line => line.workDate > nowIso().slice(0, 10))) blockers.push({ code: 'timesheet_future_time_log', message: 'Future-dated worker time logs cannot be submitted for review.' });
+    const totalHours = roundQuantity(lines.reduce((sum, line) => sum + line.hours, 0));
+    const billableHours = roundQuantity(lines.filter(line => line.billable).reduce((sum, line) => sum + line.hours, 0));
+    const laborCost = roundMoney(lines.reduce((sum, line) => sum + line.laborCost, 0));
+    const source = {
+      worker: {
+        id: worker.id,
+        name: worker.name,
+        role: worker.role || null,
+        status: worker.status,
+        hourlyRate: roundMoney(worker.hourlyRate || 0)
+      },
+      periodStart,
+      periodEnd,
+      timeLogs: lines.map(line => ({
+        id: line.id, jobId: line.jobId, jobTitle: line.jobTitle, workDate: line.workDate,
+        hours: line.hours, billable: line.billable, rate: line.rate, laborCost: line.laborCost,
+        costCode: line.costCode, status: line.status, source: line.source,
+        verificationReference: line.verificationReference, entryKey: line.entryKey,
+        entryFingerprint: line.entryFingerprint, notes: line.notes
+      })),
+      attendance: attendance.map(session => ({
+        id: session.id, jobId: session.jobId, workDate: session.workDate, status: session.status,
+        checkInAt: session.checkInAt, checkOutAt: session.checkOutAt, hours: session.hours, adjusted: session.adjusted
+      }))
+    };
+    const sourceHash = sha256Json(source);
+    return {
+      format: WEEKLY_TIMESHEET_FORMAT,
+      generatedAt: nowIso(),
+      worker: { id: worker.id, name: worker.name, role: worker.role || null, status: worker.status },
+      periodStart,
+      periodEnd,
+      ready: blockers.length === 0,
+      status: blockers.length ? 'blocked' : exceptions.length ? 'review_required' : 'ready',
+      lines,
+      attendance,
+      daily,
+      summary: {
+        timeLogCount: lines.length,
+        jobCount: new Set(lines.map(line => line.jobId)).size,
+        totalHours,
+        billableHours,
+        nonBillableHours: roundQuantity(totalHours - billableHours),
+        laborCost,
+        attendanceHours: roundQuantity(attendance.reduce((sum, session) => sum + session.hours, 0)),
+        exceptionCount: exceptions.length,
+        blockingExceptionCount: exceptions.filter(item => item.severity === 'blocking').length
+      },
+      exceptions,
+      blockers,
+      sourceHash,
+      policy: {
+        payableHoursSource: 'retained_worker_time_logs',
+        attendanceUse: 'advisory_exception_signal_only',
+        payrollExecuted: false,
+        externalCommitments: 0
+      }
+    };
+  }
+
+  getWeeklyTimesheet(timesheetId) {
+    const row = this.db.prepare('SELECT * FROM weekly_timesheets WHERE id = ?').get(String(timesheetId || ''));
+    if (!row) throw ledgerInputError('timesheet_not_found', 'Weekly timesheet not found.', { timesheetId }, 404);
+    const timesheet = this.mapWeeklyTimesheet(row);
+    if (!timesheet.integrityValid) throw ledgerInputError('timesheet_integrity_failed', 'Weekly timesheet snapshot failed integrity verification.', { timesheetId }, 409);
+    return timesheet;
+  }
+
+  listWeeklyTimesheets(filters = {}) {
+    const limit = safeLimit(filters.limit, 500, 5_000);
+    const clauses = [];
+    const params = [];
+    if (filters.workerId || filters.worker_id) { clauses.push('worker_id = ?'); params.push(filters.workerId || filters.worker_id); }
+    if (filters.periodStart || filters.period_start) { clauses.push('period_start = ?'); params.push(this.normalizeTimesheetPeriod(filters.periodStart || filters.period_start).periodStart); }
+    if (filters.status && filters.status !== 'all') { clauses.push('status = ?'); params.push(normalizeStatus(filters.status, 'pending_approval')); }
+    return this.db.prepare(`
+      SELECT * FROM weekly_timesheets
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY period_start DESC, worker_id ASC, version_number DESC LIMIT ?
+    `).all(...params, limit).map(row => this.mapWeeklyTimesheet(row));
+  }
+
+  listTimesheetExports(filters = {}) {
+    const limit = safeLimit(filters.limit, 100, 1_000);
+    const clauses = [];
+    const params = [];
+    if (filters.periodStart || filters.period_start) { clauses.push('period_start = ?'); params.push(this.normalizeTimesheetPeriod(filters.periodStart || filters.period_start).periodStart); }
+    return this.db.prepare(`
+      SELECT * FROM timesheet_exports ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY period_start DESC, created_at DESC LIMIT ?
+    `).all(...params, limit).map(row => this.mapTimesheetExport(row));
+  }
+
+  listTimesheetBoard(filters = {}) {
+    const { periodStart, periodEnd } = this.normalizeTimesheetPeriod(filters.periodStart || filters.period_start);
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const workerRows = workerId
+      ? this.db.prepare('SELECT * FROM workers WHERE id = ?').all(workerId)
+      : this.db.prepare(`
+          SELECT DISTINCT workers.* FROM workers
+          LEFT JOIN time_logs ON time_logs.worker_id = workers.id AND time_logs.work_date >= ? AND time_logs.work_date <= ?
+          LEFT JOIN weekly_timesheets ON weekly_timesheets.worker_id = workers.id AND weekly_timesheets.period_start = ?
+          WHERE workers.status NOT IN ('retired', 'inactive') OR time_logs.id IS NOT NULL OR weekly_timesheets.id IS NOT NULL
+          ORDER BY workers.name ASC LIMIT 500
+        `).all(periodStart, periodEnd, periodStart);
+    const rows = workerRows.map(row => {
+      const preview = this.calculateWorkerTimesheet(row.id, { periodStart });
+      const versions = this.listWeeklyTimesheets({ workerId: row.id, periodStart, limit: 100 });
+      const current = versions.find(item => item.status === 'pending_approval')
+        || versions.find(item => item.status === 'approved')
+        || versions[0]
+        || null;
+      return {
+        worker: preview.worker,
+        periodStart,
+        periodEnd,
+        ready: preview.ready,
+        status: current?.status || preview.status,
+        preview,
+        current,
+        versions,
+        sourceCurrent: !current || current.sourceHash === preview.sourceHash
+      };
+    });
+    const exports = this.listTimesheetExports({ periodStart, limit: 50 });
+    const submittedRows = rows.filter(row => row.preview.summary.timeLogCount > 0);
+    const approvedRows = submittedRows.filter(row => row.current?.status === 'approved' && row.sourceCurrent);
+    return {
+      generatedAt: nowIso(), periodStart, periodEnd, rows, exports,
+      summary: {
+        workers: rows.length,
+        submittedWorkers: submittedRows.length,
+        submittedHours: roundQuantity(rows.reduce((sum, row) => sum + row.preview.summary.totalHours, 0)),
+        pendingApproval: rows.filter(row => row.current?.status === 'pending_approval').length,
+        approved: approvedRows.length,
+        staleApproved: rows.filter(row => row.current?.status === 'approved' && !row.sourceCurrent).length,
+        reviewRequired: submittedRows.length - approvedRows.length,
+        handoffReady: submittedRows.length > 0 && submittedRows.length === approvedRows.length,
+        exceptions: rows.reduce((sum, row) => sum + row.preview.summary.exceptionCount, 0),
+        blocked: rows.filter(row => !row.ready).length
+      },
+      policy: {
+        attendanceUse: 'advisory_exception_signal_only',
+        payrollExecuted: false,
+        exportMode: 'checksum_protected_operator_handoff',
+        externalCommitments: 0
+      }
+    };
+  }
+
+  requestWeeklyTimesheet(workerId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const preview = this.calculateWorkerTimesheet(workerId, payload);
+      if (!preview.ready) {
+        throw ledgerInputError('timesheet_not_ready', 'Weekly timesheet cannot be submitted until its blocking source issues are resolved.', { workerId, blockers: preview.blockers }, 409);
+      }
+      const pending = this.db.prepare("SELECT * FROM weekly_timesheets WHERE worker_id = ? AND period_start = ? AND status = 'pending_approval'").get(workerId, preview.periodStart);
+      if (pending) {
+        if (pending.source_hash !== preview.sourceHash) {
+          throw ledgerInputError('timesheet_pending_source_changed', 'Time or attendance evidence changed while this week is pending. Resolve the existing decision before requesting a revision.', { timesheetId: pending.id }, 409);
+        }
+        return { timesheet: this.getWeeklyTimesheet(pending.id), approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)), preview, replayed: true };
+      }
+      const approved = this.db.prepare("SELECT * FROM weekly_timesheets WHERE worker_id = ? AND period_start = ? AND status = 'approved'").get(workerId, preview.periodStart);
+      if (approved?.source_hash === preview.sourceHash) {
+        return { timesheet: this.getWeeklyTimesheet(approved.id), approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approved.approval_id)), preview, replayed: true };
+      }
+      const latest = this.db.prepare('SELECT * FROM weekly_timesheets WHERE worker_id = ? AND period_start = ? ORDER BY version_number DESC LIMIT 1').get(workerId, preview.periodStart);
+      const versionNumber = normalizeNumber(latest?.version_number, 0) + 1;
+      const snapshot = {
+        format: WEEKLY_TIMESHEET_FORMAT,
+        worker: preview.worker,
+        periodStart: preview.periodStart,
+        periodEnd: preview.periodEnd,
+        versionNumber,
+        currency: 'EUR',
+        sourceHash: preview.sourceHash,
+        lines: preview.lines,
+        attendance: preview.attendance,
+        daily: preview.daily,
+        summary: preview.summary,
+        exceptions: preview.exceptions,
+        policy: preview.policy
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('timesheet');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO weekly_timesheets (
+          id, worker_id, period_start, period_end, version_number, status, total_hours, billable_hours,
+          labor_cost, currency, source_hash, snapshot_hash, snapshot_json, approval_id,
+          supersedes_timesheet_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, 'EUR', ?, ?, ?, NULL, ?, ?, ?, ?)
+      `).run(
+        id, workerId, preview.periodStart, preview.periodEnd, versionNumber, preview.summary.totalHours,
+        preview.summary.billableHours, preview.summary.laborCost, preview.sourceHash, snapshotHash, snapshotJson,
+        approved?.id || null, toJson({ requestedBy: actor, exceptionCount: preview.exceptions.length, payrollExecuted: false }), timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'weekly_timesheet', targetId: id, approvalType: 'weekly_timesheet_review',
+        summary: `Review ${preview.worker.name}'s timesheet for ${preview.periodStart} to ${preview.periodEnd}`,
+        reason: 'Approval freezes the submitted worker time-log sources for operator handoff. Attendance is advisory only and no payroll transaction is executed.',
+        data: {
+          workerId, workerName: preview.worker.name, periodStart: preview.periodStart, periodEnd: preview.periodEnd,
+          versionNumber, totalHours: preview.summary.totalHours, billableHours: preview.summary.billableHours,
+          laborCost: preview.summary.laborCost, exceptionCount: preview.exceptions.length,
+          sourceHash: preview.sourceHash, snapshotHash, payrollExecuted: false, externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE weekly_timesheets SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const timesheet = this.getWeeklyTimesheet(id);
+      this.audit({
+        entityType: 'weekly_timesheet', entityId: id, action: 'request_weekly_timesheet_approval', actor, after: timesheet,
+        metadata: { workerId, periodStart: preview.periodStart, versionNumber, approvalId: approval.id, sourceHash: preview.sourceHash, externalCommitments: 0 }
+      });
+      return { timesheet, approval, preview, replayed: false };
+    });
+  }
+
+  applyWeeklyTimesheetApproval(timesheetId) {
+    const row = this.db.prepare('SELECT * FROM weekly_timesheets WHERE id = ?').get(timesheetId);
+    if (!row) throw ledgerInputError('timesheet_not_found', 'Weekly timesheet not found.', { timesheetId }, 404);
+    if (row.status === 'approved') return this.getWeeklyTimesheet(timesheetId);
+    if (row.status !== 'pending_approval') throw ledgerInputError('timesheet_state_conflict', `Weekly timesheet cannot be approved from ${row.status}.`, { timesheetId, status: row.status }, 409);
+    const timesheet = this.getWeeklyTimesheet(timesheetId);
+    const current = this.calculateWorkerTimesheet(row.worker_id, { periodStart: row.period_start });
+    if (current.sourceHash !== row.source_hash) {
+      throw ledgerInputError('timesheet_source_stale', 'Worker time or attendance evidence changed after this timesheet was requested. Reject it and request a current revision.', { timesheetId, retainedSourceHash: row.source_hash, currentSourceHash: current.sourceHash }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'weekly_timesheet' || approval.target_id !== timesheetId) {
+      throw ledgerInputError('timesheet_approval_required', 'A matching approved decision is required before a weekly timesheet can become current.', { timesheetId }, 409);
+    }
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE weekly_timesheets SET status = 'superseded', updated_at = ? WHERE worker_id = ? AND period_start = ? AND status = 'approved' AND id <> ?")
+      .run(timestamp, row.worker_id, row.period_start, timesheetId);
+    this.db.prepare("UPDATE weekly_timesheets SET status = 'approved', data_json = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'").run(
+      toJson({ ...fromJson(row.data_json, {}), approval: { approvalId: approval.id, approvedAt: timestamp, approvedBy: approval.resolved_by || 'approval' } }),
+      timestamp,
+      timesheetId
+    );
+    const after = this.getWeeklyTimesheet(timesheetId);
+    this.audit({
+      entityType: 'weekly_timesheet', entityId: timesheetId, action: 'approve_weekly_timesheet', actor: approval.resolved_by || 'approval',
+      before: timesheet, after,
+      metadata: { workerId: row.worker_id, periodStart: row.period_start, versionNumber: row.version_number, approvalId: approval.id, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  prepareTimesheetExport(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const { periodStart, periodEnd } = this.normalizeTimesheetPeriod(payload.periodStart || payload.period_start);
+      const board = this.listTimesheetBoard({ periodStart });
+      const submittedRows = board.rows.filter(row => row.preview.summary.timeLogCount > 0);
+      const staleRows = submittedRows.filter(row => row.current?.status === 'approved' && !row.sourceCurrent);
+      if (staleRows.length) {
+        throw ledgerInputError(
+          'timesheet_export_stale_source',
+          'One or more approved timesheets are stale and require reviewed revisions before export.',
+          { periodStart, workerIds: staleRows.map(row => row.worker.id), timesheetIds: staleRows.map(row => row.current.id) },
+          409
+        );
+      }
+      const incompleteRows = submittedRows.filter(row => row.current?.status !== 'approved' || !row.sourceCurrent);
+      if (incompleteRows.length) {
+        throw ledgerInputError(
+          'timesheet_export_incomplete',
+          'Every worker with submitted time must have a current approved weekly timesheet before handoff.',
+          {
+            periodStart,
+            workers: incompleteRows.map(row => ({
+              workerId: row.worker.id,
+              workerName: row.worker.name,
+              status: row.current?.status || row.preview.status
+            }))
+          },
+          409
+        );
+      }
+      const rows = this.db.prepare(`
+        SELECT weekly_timesheets.*, workers.name AS worker_name
+        FROM weekly_timesheets JOIN workers ON workers.id = weekly_timesheets.worker_id
+        WHERE weekly_timesheets.period_start = ? AND weekly_timesheets.status = 'approved'
+        ORDER BY workers.name ASC, weekly_timesheets.worker_id ASC
+      `).all(periodStart);
+      if (!rows.length) throw ledgerInputError('timesheet_export_empty', 'Approve at least one current weekly timesheet before preparing a handoff package.', { periodStart }, 409);
+      const timesheets = rows.map(row => {
+        const mapped = this.getWeeklyTimesheet(row.id);
+        const current = this.calculateWorkerTimesheet(row.worker_id, { periodStart });
+        if (current.sourceHash !== row.source_hash) {
+          throw ledgerInputError('timesheet_export_stale_source', `${row.worker_name}'s approved timesheet is stale and requires a reviewed revision before export.`, { timesheetId: row.id, workerId: row.worker_id }, 409);
+        }
+        return { ...mapped, workerName: row.worker_name };
+      });
+      const sourceHash = sha256Json(timesheets.map(item => ({ id: item.id, snapshotHash: item.snapshotHash, versionNumber: item.versionNumber })));
+      const existing = this.db.prepare('SELECT * FROM timesheet_exports WHERE period_start = ? AND period_end = ? AND source_hash = ?').get(periodStart, periodEnd, sourceHash);
+      if (existing) {
+        const retained = this.mapTimesheetExport(existing);
+        if (!retained.integrityValid) {
+          throw ledgerInputError('timesheet_export_integrity_failed', 'The retained timesheet handoff failed checksum verification and cannot be replayed.', { exportId: retained.id }, 409);
+        }
+        return { export: retained, replayed: true, externalDeliveryInitiated: false };
+      }
+      const csvCell = value => {
+        const raw = String(value ?? '');
+        const protectedValue = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
+        return `"${protectedValue.replace(/"/g, '""')}"`;
+      };
+      const columns = ['Worker ID', 'Worker name', 'Period start', 'Period end', 'Total hours', 'Billable hours', 'Non-billable hours', 'Labor cost', 'Currency', 'Timesheet ID', 'Version', 'Source hash'];
+      const csvRows = [columns, ...timesheets.map(item => [
+        item.workerId, item.workerName, item.periodStart, item.periodEnd, item.totalHours.toFixed(2), item.billableHours.toFixed(2),
+        roundQuantity(item.totalHours - item.billableHours).toFixed(2), item.laborCost.toFixed(2), item.currency,
+        item.id, item.versionNumber, item.sourceHash
+      ])];
+      const csvContent = `\uFEFF${csvRows.map(csvRow => csvRow.map(csvCell).join(',')).join('\r\n')}\r\n`;
+      const csvChecksum = sha256Text(csvContent);
+      const snapshot = {
+        format: TIMESHEET_EXPORT_FORMAT, periodStart, periodEnd, sourceHash, csvChecksum,
+        timesheets: timesheets.map(item => ({
+          id: item.id, workerId: item.workerId, workerName: item.workerName, versionNumber: item.versionNumber,
+          totalHours: item.totalHours, billableHours: item.billableHours, laborCost: item.laborCost,
+          currency: item.currency, sourceHash: item.sourceHash, snapshotHash: item.snapshotHash
+        })),
+        policy: { payrollExecuted: false, externalDeliveryInitiated: false, purpose: 'operator_payroll_handoff' }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('timesheet_export');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO timesheet_exports (
+          id, period_start, period_end, status, source_hash, snapshot_hash, snapshot_json,
+          csv_checksum, csv_content, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'prepared', ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, periodStart, periodEnd, sourceHash, snapshotHash, snapshotJson, csvChecksum, csvContent, toJson({ preparedBy: actor, payrollExecuted: false, externalDeliveryInitiated: false }), timestamp, timestamp);
+      const prepared = this.mapTimesheetExport(this.db.prepare('SELECT * FROM timesheet_exports WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'timesheet_export', entityId: id, action: 'prepare_timesheet_export', actor, after: prepared,
+        metadata: { periodStart, periodEnd, timesheetCount: timesheets.length, sourceHash, csvChecksum, payrollExecuted: false, externalCommitments: 0 }
+      });
+      return { export: prepared, replayed: false, externalDeliveryInitiated: false };
+    });
+  }
+
+  getTimesheetExportContent(exportId) {
+    const row = this.db.prepare('SELECT * FROM timesheet_exports WHERE id = ?').get(String(exportId || ''));
+    if (!row) throw ledgerInputError('timesheet_export_not_found', 'Timesheet export not found.', { exportId }, 404);
+    const mapped = this.mapTimesheetExport(row);
+    if (!mapped.integrityValid) throw ledgerInputError('timesheet_export_integrity_failed', 'Timesheet export failed checksum verification.', { exportId }, 409);
+    return { export: mapped, content: row.csv_content };
+  }
+
   organizationElectronicAddress(organization = {}) {
     const configuredScheme = normalizeText(organization.data?.electronicAddressScheme, '');
     const configuredAddress = normalizeText(organization.data?.electronicAddress, '');
@@ -25600,6 +26129,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'weekly_timesheet') {
+        this.db.prepare(`
+          UPDATE weekly_timesheets
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM weekly_timesheets WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'change_order') {
         this.db.prepare(`
           UPDATE change_orders
@@ -25872,6 +26421,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyProductionEntryReversal(targetId);
     } else if (targetType === 'attendance_adjustment') {
       this.applyAttendanceAdjustment(targetId);
+    } else if (targetType === 'weekly_timesheet') {
+      this.applyWeeklyTimesheetApproval(targetId);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -29858,6 +30409,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       punch_items: 'status',
       progress_updates: 'status',
       time_logs: 'status',
+      weekly_timesheets: 'status',
       worker_instructions: 'status',
       worker_orientations: 'status',
       jha_records: 'status',
@@ -29907,6 +30459,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   describeCapabilityRequirement(requirement = {}, jobDetail = null) {
     const automation = capabilityRequirementAutomation(requirement.key);
+    if (jobDetail && requirement.ledgerOnly) return this.describeCapabilityRequirement(requirement, null);
     if (jobDetail) {
       const value = jobDetail[requirement.detailKey];
       const allRecords = Array.isArray(value)
@@ -29975,7 +30528,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           requirementKey: requirement.key,
           actionTarget: capabilityRequirementActionTarget(requirement.key),
           label: `Add ${requirement.label}`,
-          requiresApproval: ['quote', 'assignment', 'tools', 'change_order', 'billing_milestone', 'invoice', 'payment', 'draw', 'waiver', 'handoff', 'approval_audit'].includes(requirement.key),
+          requiresApproval: ['quote', 'assignment', 'tools', 'timesheet', 'change_order', 'billing_milestone', 'invoice', 'payment', 'draw', 'waiver', 'handoff', 'approval_audit'].includes(requirement.key),
           reason: `${capability.label} is missing ${requirement.label}.`,
           automationPolicy: requirement.automationPolicy,
           safeDraftable: requirement.safeDraftable,
@@ -31177,6 +31730,73 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const currentWeek = this.normalizeTimesheetPeriod().periodStart;
+    const previousWeekStartDate = new Date(`${currentWeek}T00:00:00.000Z`);
+    previousWeekStartDate.setUTCDate(previousWeekStartDate.getUTCDate() - 7);
+    const previousWeekStart = previousWeekStartDate.toISOString().slice(0, 10);
+    const previousWeekEndDate = new Date(previousWeekStartDate);
+    previousWeekEndDate.setUTCDate(previousWeekEndDate.getUTCDate() + 6);
+    const previousWeekEnd = previousWeekEndDate.toISOString().slice(0, 10);
+    const missingTimesheets = this.db.prepare(`
+      SELECT time_logs.worker_id, workers.name AS worker_name, MIN(time_logs.job_id) AS primary_job_id,
+        SUM(time_logs.hours) AS total_hours, COUNT(time_logs.id) AS time_log_count
+      FROM time_logs
+      JOIN workers ON workers.id = time_logs.worker_id
+      LEFT JOIN weekly_timesheets ON weekly_timesheets.worker_id = time_logs.worker_id
+        AND weekly_timesheets.period_start = ? AND weekly_timesheets.status IN ('pending_approval', 'approved')
+      WHERE time_logs.work_date >= ? AND time_logs.work_date <= ?
+        AND time_logs.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+      GROUP BY time_logs.worker_id, workers.name
+      HAVING COUNT(weekly_timesheets.id) = 0
+      ORDER BY workers.name ASC LIMIT 20
+    `).all(previousWeekStart, previousWeekStart, previousWeekEnd);
+    for (const row of missingTimesheets) {
+      const taskId = `task_${sha256Text(`timesheet-review:${row.worker_id}:${previousWeekStart}`).slice(0, 24)}`;
+      const existingTask = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (existingTask) continue;
+      actions.push({
+        type: 'review_missing_timesheet',
+        jobId: row.primary_job_id,
+        workerId: row.worker_id,
+        workerName: row.worker_name,
+        periodStart: previousWeekStart,
+        periodEnd: previousWeekEnd,
+        totalHours: roundQuantity(row.total_hours),
+        timeLogCount: normalizeNumber(row.time_log_count, 0),
+        taskId,
+        severity: 'medium',
+        message: `${row.worker_name} has ${roundQuantity(row.total_hours).toFixed(2)} submitted hours for ${previousWeekStart} without a pending or approved weekly timesheet.`
+      });
+    }
+    const approvedPriorTimesheets = this.db.prepare(`
+      SELECT weekly_timesheets.*, workers.name AS worker_name
+      FROM weekly_timesheets JOIN workers ON workers.id = weekly_timesheets.worker_id
+      WHERE weekly_timesheets.period_start = ? AND weekly_timesheets.status = 'approved'
+      ORDER BY workers.name ASC LIMIT 20
+    `).all(previousWeekStart);
+    for (const retained of approvedPriorTimesheets) {
+      const current = this.calculateWorkerTimesheet(retained.worker_id, { periodStart: retained.period_start });
+      if (current.sourceHash === retained.source_hash || !current.lines.length) continue;
+      const taskId = `task_${sha256Text(`timesheet-revision:${retained.worker_id}:${retained.period_start}:${current.sourceHash}`).slice(0, 24)}`;
+      const existingTask = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (existingTask) continue;
+      actions.push({
+        type: 'review_stale_timesheet',
+        jobId: current.lines[0].jobId,
+        workerId: retained.worker_id,
+        workerName: retained.worker_name,
+        timesheetId: retained.id,
+        periodStart: retained.period_start,
+        periodEnd: retained.period_end,
+        retainedSourceHash: retained.source_hash,
+        sourceHash: current.sourceHash,
+        totalHours: current.summary.totalHours,
+        taskId,
+        severity: 'high',
+        message: `${retained.worker_name}'s approved timesheet for ${retained.period_start} is stale because retained time or advisory attendance evidence changed.`
+      });
+    }
+
     const clientReplyCandidates = this.db.prepare(`
       SELECT communication_records.*, jobs.title AS job_title
       FROM communication_records
@@ -32274,7 +32894,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -32320,6 +32940,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'safety_review',
       'review_productivity_variance',
       'review_stale_attendance',
+      'review_missing_timesheet',
+      'review_stale_timesheet',
       'aftercare_follow_up',
       'recurring_job_due',
       'refresh_learning_profile'
@@ -33578,6 +34200,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const timesheetReviews = preview.filter(action => ['review_missing_timesheet', 'review_stale_timesheet'].includes(action.type)).slice(0, 10);
+        for (const action of timesheetReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`timesheet-review:${action.workerId}:${action.periodStart}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review weekly timesheet: ${action.workerName || 'crew member'}`,
+            description: `${action.message} Review retained time-log sources and advisory attendance exceptions, then request a weekly approval. Do not infer payable hours from attendance or execute payroll.`,
+            priority: 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'timesheet_monitor',
+            data: {
+              workerId: action.workerId,
+              periodStart: action.periodStart,
+              periodEnd: action.periodEnd,
+              timesheetId: action.timesheetId || null,
+              sourceHash: action.sourceHash || null,
+              internalOnly: true,
+              payrollExecuted: false,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_timesheet_review_task', actor, after: task,
+            metadata: { workerId: action.workerId, periodStart: action.periodStart, timesheetId: action.timesheetId || null, sourceHash: action.sourceHash || null, payrollExecuted: false, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -33919,6 +34574,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const data = fromJson(adjustment.data_json, {});
       if (!data.snapshot || sha256Json(data.snapshot) !== adjustment.snapshot_hash) {
         issues.push({ severity: 'error', message: `Attendance adjustment ${adjustment.id} failed retained snapshot verification.` });
+      }
+    }
+    const invalidWeeklyTimesheets = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM weekly_timesheets timesheets
+      LEFT JOIN workers ON workers.id = timesheets.worker_id
+      WHERE workers.id IS NULL OR timesheets.version_number < 1
+        OR timesheets.period_end < timesheets.period_start
+        OR timesheets.total_hours < 0 OR timesheets.billable_hours < 0
+        OR timesheets.billable_hours > timesheets.total_hours OR timesheets.labor_cost < 0
+    `).get().count || 0);
+    if (invalidWeeklyTimesheets) issues.push({ severity: 'error', message: `${invalidWeeklyTimesheets} weekly timesheet record(s) violate worker, period, version, or total invariants.` });
+    const approvedTimesheetsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM weekly_timesheets timesheets
+      LEFT JOIN approvals ON approvals.id = timesheets.approval_id
+      WHERE timesheets.status = 'approved' AND (
+        approvals.id IS NULL OR approvals.status <> 'approved'
+        OR approvals.target_type <> 'weekly_timesheet' OR approvals.target_id <> timesheets.id
+      )
+    `).get().count || 0);
+    if (approvedTimesheetsWithoutApproval) issues.push({ severity: 'error', message: `${approvedTimesheetsWithoutApproval} approved weekly timesheet(s) lack a matching approval decision.` });
+    for (const timesheet of this.db.prepare("SELECT * FROM weekly_timesheets WHERE status IN ('pending_approval', 'approved', 'superseded')").all()) {
+      if (!this.mapWeeklyTimesheet(timesheet).integrityValid) {
+        issues.push({ severity: 'error', message: `Weekly timesheet ${timesheet.id} failed retained snapshot verification.` });
+      }
+    }
+    for (const timesheetExport of this.db.prepare("SELECT * FROM timesheet_exports WHERE status = 'prepared'").all()) {
+      if (!this.mapTimesheetExport(timesheetExport).integrityValid) {
+        issues.push({ severity: 'error', message: `Timesheet export ${timesheetExport.id} failed retained snapshot or CSV checksum verification.` });
       }
     }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
@@ -34487,6 +35172,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         productionEntries: this.count('production_entries'),
         attendanceSessions: this.count('attendance_sessions'),
         attendanceAdjustments: this.count('attendance_adjustments'),
+        weeklyTimesheets: this.count('weekly_timesheets'),
+        timesheetExports: this.count('timesheet_exports'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -35570,6 +36257,84 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapWeeklyTimesheet(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const versionNumber = normalizeNumber(row.version_number, 0);
+    const totalHours = roundQuantity(row.total_hours);
+    const billableHours = roundQuantity(row.billable_hours);
+    const laborCost = roundMoney(row.labor_cost);
+    const snapshotValid = Boolean(
+      snapshot
+      && snapshot.format === WEEKLY_TIMESHEET_FORMAT
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.worker?.id === row.worker_id
+      && snapshot.periodStart === row.period_start
+      && snapshot.periodEnd === row.period_end
+      && normalizeNumber(snapshot.versionNumber, 0) === versionNumber
+      && snapshot.currency === row.currency
+      && roundQuantity(snapshot.summary?.totalHours) === totalHours
+      && roundQuantity(snapshot.summary?.billableHours) === billableHours
+      && roundMoney(snapshot.summary?.laborCost) === laborCost
+    );
+    return {
+      id: row.id,
+      workerId: row.worker_id,
+      periodStart: row.period_start,
+      periodEnd: row.period_end,
+      versionNumber,
+      status: row.status,
+      totalHours,
+      billableHours,
+      laborCost,
+      currency: row.currency,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: snapshotValid,
+      approvalId: row.approval_id,
+      supersedesTimesheetId: row.supersedes_timesheet_id,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapTimesheetExport(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const csvChecksumValid = sha256Text(String(row.csv_content ?? '')) === row.csv_checksum;
+    const snapshotValid = Boolean(
+      snapshot
+      && snapshot.format === TIMESHEET_EXPORT_FORMAT
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.csvChecksum === row.csv_checksum
+      && snapshot.periodStart === row.period_start
+      && snapshot.periodEnd === row.period_end
+      && Array.isArray(snapshot.timesheets)
+    );
+    return {
+      id: row.id,
+      periodStart: row.period_start,
+      periodEnd: row.period_end,
+      status: row.status,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      csvChecksum: row.csv_checksum,
+      snapshot,
+      timesheetCount: Array.isArray(snapshot?.timesheets) ? snapshot.timesheets.length : 0,
+      integrityValid: snapshotValid && csvChecksumValid,
+      downloadPath: `/api/ledger/timesheet-exports/${encodeURIComponent(row.id)}/content`,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapExpense(row) {
     return {
       id: row.id,
@@ -36578,6 +37343,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.original = data.original || null;
       preview.requested = data.requested || null;
       preview.reason = mapped?.reason || data.reason || null;
+    } else if (targetType === 'weekly_timesheet') {
+      const row = this.db.prepare('SELECT * FROM weekly_timesheets WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapWeeklyTimesheet(row) : null;
+      primaryEffect = `Approve ${data.workerName || mapped?.snapshot?.worker?.name || 'worker'} timesheet v${mapped?.versionNumber || data.versionNumber || ''} for ${mapped?.periodStart || data.periodStart || ''}.`;
+      addEffect(`Freeze ${normalizeNumber(mapped?.totalHours ?? data.totalHours, 0).toFixed(2)} submitted hours and ${normalizeNumber(mapped?.billableHours ?? data.billableHours, 0).toFixed(2)} billable hours against the retained source hash.`);
+      addEffect(`Make the approved version eligible for a checksum-protected operator payroll handoff package.`);
+      addSafeguard('Approval is refused if worker time logs or advisory attendance evidence changed after the snapshot request.');
+      addSafeguard('Attendance never creates payable hours. Approval does not run payroll, transfer funds, contact a provider, edit source time logs, or create an external commitment.');
+      riskLevel = 'high';
+      preview.workerId = mapped?.workerId || data.workerId || null;
+      preview.periodStart = mapped?.periodStart || data.periodStart || null;
+      preview.periodEnd = mapped?.periodEnd || data.periodEnd || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.totalHours = mapped?.totalHours ?? data.totalHours ?? null;
+      preview.billableHours = mapped?.billableHours ?? data.billableHours ?? null;
+      preview.exceptionCount = data.exceptionCount ?? mapped?.snapshot?.exceptions?.length ?? 0;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'cost_forecast') {
       const row = this.db.prepare('SELECT * FROM cost_forecast_snapshots WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapCostForecastSnapshot(row) : null;

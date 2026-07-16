@@ -593,6 +593,31 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(hostedAttendance.checkInAt, attendanceCheckInAt);
     assert.notEqual(hostedAttendance.effectiveCheckInAt, hostedAttendance.checkInAt);
 
+    const timesheetWeek = new Date();
+    timesheetWeek.setUTCHours(0, 0, 0, 0);
+    timesheetWeek.setUTCDate(timesheetWeek.getUTCDate() - (timesheetWeek.getUTCDay() || 7) - 6);
+    const timesheetPeriodStart = timesheetWeek.toISOString().slice(0, 10);
+    ledger.addTimeLog(job.id, {
+      workerId: attendanceWorker.id,
+      workDate: timesheetPeriodStart,
+      hours: 8,
+      rate: 45,
+      source: 'postgres_verified_timecard',
+      verificationReference: 'POSTGRES-TIME-001'
+    }, { actor: 'postgres_contract_test' });
+    const timesheetRequest = ledger.requestWeeklyTimesheet(attendanceWorker.id, { periodStart: timesheetPeriodStart }, { actor: 'postgres_contract_test' });
+    assert.equal(timesheetRequest.timesheet.integrityValid, true);
+    assert.equal(timesheetRequest.approval.targetType, 'weekly_timesheet');
+    ledger.resolveApproval(timesheetRequest.approval.id, {
+      status: 'approved', resolvedBy: 'postgres_contract_approver', reason: 'Hosted worker time sources were reviewed.'
+    });
+    const hostedTimesheet = ledger.getWeeklyTimesheet(timesheetRequest.timesheet.id);
+    assert.equal(hostedTimesheet.status, 'approved');
+    assert.equal(hostedTimesheet.totalHours, 8);
+    const hostedTimesheetExport = ledger.prepareTimesheetExport({ periodStart: timesheetPeriodStart }, { actor: 'postgres_contract_test' }).export;
+    assert.equal(hostedTimesheetExport.integrityValid, true);
+    assert.match(ledger.getTimesheetExportContent(hostedTimesheetExport.id).content, /PostgreSQL attendance crew/);
+
     const tradePartner = ledger.upsertTradePartner({
       name: `PostgreSQL supplier ${Date.now()}`,
       partnerType: 'supplier'
@@ -1155,7 +1180,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '033_site_attendance');
+    assert.equal(migrations.currentVersion, '034_weekly_timesheets');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1236,12 +1261,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('033_site_attendance'));
+  assert.deepEqual(versions, Array(4).fill('034_weekly_timesheets'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 33);
+    assert.equal(Number(migrationCount.count), 34);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1742,7 +1767,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '033_site_attendance');
+    assert.equal(ledger.migrationStatus().currentVersion, '034_weekly_timesheets');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

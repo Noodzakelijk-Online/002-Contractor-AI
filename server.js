@@ -2736,6 +2736,66 @@ app.post('/api/ledger/jobs/:id/attendance/:sessionId/adjustments', (req, res) =>
   }), 201);
 });
 
+app.get('/api/ledger/timesheets', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    timesheets: operatingLedger.listTimesheetBoard({
+      periodStart: req.query.periodStart || req.query.period_start,
+      workerId: req.query.workerId || req.query.worker_id
+    })
+  }));
+});
+
+app.get('/api/ledger/timesheets/:id', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    timesheet: operatingLedger.getWeeklyTimesheet(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/workers/:id/timesheets', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestWeeklyTimesheet(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    timesheets: operatingLedger.listTimesheetBoard({ periodStart: req.body?.periodStart || req.body?.period_start })
+  }), 201);
+});
+
+app.post('/api/ledger/timesheet-exports', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.prepareTimesheetExport(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    timesheets: operatingLedger.listTimesheetBoard({ periodStart: req.body?.periodStart || req.body?.period_start })
+  }), 201);
+});
+
+app.get('/api/ledger/timesheet-exports/:id/content', (req, res) => {
+  try {
+    const result = operatingLedger.getTimesheetExportContent(req.params.id);
+    operatingLedger.audit({
+      entityType: 'timesheet_export',
+      entityId: result.export.id,
+      action: 'download_timesheet_export',
+      actor: actorFromRequest(req, 'authenticated_operator'),
+      after: { csvChecksum: result.export.csvChecksum, periodStart: result.export.periodStart, payrollExecuted: false }
+    });
+    const filename = `contractor-ai-timesheets-${result.export.periodStart}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Length', String(Buffer.byteLength(result.content, 'utf8')));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Contractor-AI-SHA256', result.export.csvChecksum);
+    return res.end(result.content);
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'timesheet_export_download_failed', error.statusCode ? error.message : 'Unable to retrieve the retained timesheet handoff package.', serializeError(error));
+  }
+});
+
 app.post('/api/ledger/jobs/:id/assignments', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -4398,6 +4458,8 @@ function operationalExport() {
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     attendanceSessions: operatingLedger.listAttendanceSessions({ limit: 10_000 }),
     attendanceAdjustments: operatingLedger.listAttendanceAdjustments({ limit: 10_000 }),
+    weeklyTimesheets: operatingLedger.listWeeklyTimesheets({ status: 'all', limit: 10_000 }),
+    timesheetExports: operatingLedger.listTimesheetExports({ limit: 5_000 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
@@ -4459,6 +4521,8 @@ function validateOperationalExport(snapshot) {
     'costForecastSnapshots',
     'attendanceSessions',
     'attendanceAdjustments',
+    'weeklyTimesheets',
+    'timesheetExports',
     'inspectionTemplates',
     'inspectionChecklistSubmissions'
   ]) {
@@ -4522,6 +4586,8 @@ function validateOperationalExport(snapshot) {
       productionEntries: snapshot.productionEntries.length,
       attendanceSessions: Array.isArray(snapshot.attendanceSessions) ? snapshot.attendanceSessions.length : 0,
       attendanceAdjustments: Array.isArray(snapshot.attendanceAdjustments) ? snapshot.attendanceAdjustments.length : 0,
+      weeklyTimesheets: Array.isArray(snapshot.weeklyTimesheets) ? snapshot.weeklyTimesheets.length : 0,
+      timesheetExports: Array.isArray(snapshot.timesheetExports) ? snapshot.timesheetExports.length : 0,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
@@ -5135,6 +5201,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         productionEntryReversal: 'approval_gated_compensating_record',
         attendanceEntryKey: 'durable',
         attendanceAdjustment: 'approval_gated_compensating_record',
+        weeklyTimesheetSnapshot: 'source_current_approval_gated',
+        timesheetExportIntegrity: 'sha256',
         dailyLogEntryKey: 'durable',
         taskLifecycle: 'retained',
         taskCompletionEvidenceRequired: true,
@@ -5220,6 +5288,23 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         payrollDerived: false,
         geolocationCaptured: false,
         statutoryAttendanceRegister: false,
+        externalCommitments: 0
+      },
+      timesheetControl: {
+        weeklyPeriods: true,
+        immutableVersions: true,
+        sourceCurrentApprovalRequired: true,
+        timeLogSource: 'retained_worker_submissions',
+        attendanceUse: 'advisory_exception_signal_only',
+        impossibleDailyHoursBlocked: true,
+        completeSubmittedWorkerCoverageRequired: true,
+        retainedSnapshotScalarReconciliation: true,
+        checksumProtectedCsvHandoff: true,
+        autonomousMissingWeekReview: 'internal_task_only',
+        autonomousStaleApprovalReview: 'internal_task_only',
+        tamperedHandoffReplayBlocked: true,
+        payrollExecuted: false,
+        providerDeliveryInitiated: false,
         externalCommitments: 0
       },
       invoicing: {

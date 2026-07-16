@@ -277,6 +277,17 @@ function futureDateInput(days) {
   return future.toISOString().slice(0, 10)
 }
 
+function mondayDateInput(value = new Date()) {
+  const date = value instanceof Date ? new Date(value) : new Date(`${value}T12:00:00`)
+  if (Number.isNaN(date.getTime())) return ''
+  const day = date.getDay() || 7
+  date.setDate(date.getDate() - day + 1)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const calendarDay = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${calendarDay}`
+}
+
 function emptyFieldDailyLog() {
   return {
     entryKey: createFieldEvidenceDraftId(),
@@ -983,6 +994,10 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'resources') {
+    if (resourceView === 'timesheets') {
+      const result = await api(`/api/ledger/timesheets?periodStart=${encodeURIComponent(mondayDateInput())}`)
+      return { timesheets: result.timesheets || { rows: [], exports: [], summary: {} } }
+    }
     if (resourceView === 'inventory') return { inventory: await api('/api/ledger/inventory?limit=100') }
     if (resourceView === 'equipment') {
       const result = await api('/api/ledger/tools?limit=500')
@@ -2546,6 +2561,127 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
   )
 }
 
+function TimesheetWorkspace({
+  timesheets,
+  canCoordinate,
+  canApprove,
+  submitting,
+  onPeriodChange,
+  onRequest,
+  onPrepareExport,
+  onOpenApprovals,
+}) {
+  const board = timesheets || { rows: [], exports: [], summary: {} }
+  const [periodStart, setPeriodStart] = useState(board.periodStart || mondayDateInput())
+  useEffect(() => {
+    if (board.periodStart) setPeriodStart(board.periodStart)
+  }, [board.periodStart])
+  const summary = board.summary || {}
+  const latestExport = board.exports?.[0] || null
+
+  const changePeriod = (value) => {
+    const monday = mondayDateInput(value)
+    setPeriodStart(monday)
+    if (monday) onPeriodChange(monday)
+  }
+
+  return (
+    <div className="timesheet-workspace" data-testid="timesheet-workspace">
+      <div className="timesheet-toolbar">
+        <label>
+          Week starting
+          <input type="date" value={periodStart} onChange={(event) => changePeriod(event.target.value)} />
+        </label>
+        <div className="timesheet-toolbar-actions">
+          {latestExport?.integrityValid ? (
+            <a className="secondary-button" href={latestExport.downloadPath} download>
+              <FileDown size={15} />
+              Download latest
+            </a>
+          ) : null}
+          {canCoordinate ? (
+            <button
+              type="button"
+              className="primary-button"
+              data-testid="prepare-timesheet-export"
+              disabled={submitting || !summary.handoffReady}
+              title={summary.handoffReady ? 'Prepare a checksum-protected CSV handoff' : 'Approve every submitted worker week before preparing a handoff'}
+              onClick={() => onPrepareExport(periodStart)}
+            >
+              <FileDown size={15} />
+              Prepare handoff
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div className="timesheet-summary" aria-label="Weekly timesheet summary">
+        <div><span>Submitted hours</span><strong>{roundDisplay(summary.submittedHours || 0)}</strong></div>
+        <div><span>Review required</span><strong>{summary.reviewRequired || 0}</strong></div>
+        <div><span>Approved</span><strong>{summary.approved || 0}</strong></div>
+        <div><span>Exceptions</span><strong>{summary.exceptions || 0}</strong></div>
+      </div>
+      <div className="timesheet-list">
+        {(board.rows || []).map((row) => {
+          const preview = row.preview || { summary: {}, exceptions: [], blockers: [] }
+          const current = row.current
+          const pending = current?.status === 'pending_approval'
+          const approved = current?.status === 'approved' && row.sourceCurrent
+          const canSubmit = canCoordinate && preview.ready && !pending && !approved
+          return (
+            <article className="timesheet-row" key={row.worker.id} data-testid={`timesheet-row-${row.worker.id}`}>
+              <div className="timesheet-row-heading">
+                <span className="timesheet-worker-icon"><Users size={17} /></span>
+                <div>
+                  <strong>{row.worker.name}</strong>
+                  <small>{row.worker.role || 'Crew member'} / {formatDate(board.periodStart)} to {formatDate(board.periodEnd)}</small>
+                </div>
+                <span className={`status status-${row.sourceCurrent ? row.status : 'attention'}`}>
+                  {row.sourceCurrent ? formatStatus(row.status) : 'revision needed'}
+                </span>
+              </div>
+              <div className="timesheet-values">
+                <span><strong>{roundDisplay(preview.summary.totalHours || 0)}</strong> logged</span>
+                <span><strong>{roundDisplay(preview.summary.billableHours || 0)}</strong> billable</span>
+                <span><strong>{roundDisplay(preview.summary.attendanceHours || 0)}</strong> attendance</span>
+                <span><strong>{preview.summary.jobCount || 0}</strong> jobs</span>
+              </div>
+              {preview.exceptions?.length ? (
+                <div className="timesheet-exceptions">
+                  <TriangleAlert size={15} />
+                  <span>{preview.exceptions.slice(0, 2).map((item) => item.message).join(' ')}</span>
+                </div>
+              ) : null}
+              {!preview.ready ? (
+                <div className="timesheet-exceptions timesheet-blocker">
+                  <Ban size={15} />
+                  <span>{preview.blockers?.map((item) => item.message).join(' ') || 'Source evidence is not ready for review.'}</span>
+                </div>
+              ) : null}
+              <div className="timesheet-row-actions">
+                {current ? <span className="timesheet-version">v{current.versionNumber} / {shortHash(current.sourceHash)}</span> : <span className="timesheet-version">No retained review</span>}
+                {pending && canApprove ? (
+                  <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: current.approvalId })}>
+                    <ShieldCheck size={15} />
+                    Review approval
+                  </button>
+                ) : null}
+                {canSubmit ? (
+                  <button type="button" className="secondary-button" disabled={submitting} onClick={() => onRequest(row.worker.id, periodStart)}>
+                    <ClipboardCheck size={15} />
+                    {current?.status === 'approved' ? 'Request revision' : 'Request review'}
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          )
+        })}
+        {!board.rows?.length ? <Empty title="No workers in this period" detail="Workers and retained time evidence for the selected week will appear here." /> : null}
+      </div>
+      <p className="timesheet-policy">Approved worker time logs remain the payable-hours source. Attendance is shown only for exception review; preparing a handoff does not execute payroll or contact a provider.</p>
+    </div>
+  )
+}
+
 function ResourcesWorkspace({
   workforce,
   inventory,
@@ -2555,6 +2691,7 @@ function ResourcesWorkspace({
   toolSummary,
   tradePartners,
   tradePartnerSummary,
+  timesheets,
   jobs,
   view,
   onViewChange,
@@ -2578,6 +2715,9 @@ function ResourcesWorkspace({
   onCreatePartner,
   onEditPartner,
   onRetirePartner,
+  onTimesheetPeriodChange,
+  onRequestTimesheet,
+  onPrepareTimesheetExport,
   onOpenApprovals,
   onOpen,
 }) {
@@ -2586,6 +2726,7 @@ function ResourcesWorkspace({
   const isInventory = view === 'inventory'
   const isEquipment = view === 'equipment'
   const isPartners = view === 'partners'
+  const isTimesheets = view === 'timesheets'
   const isCrewDirectory = isWorkforce && workforceMode === 'crew'
   const stream = isWorkforce ? workforce : inventory
   const rows = stream?.jobs || EMPTY_LIST
@@ -2595,9 +2736,11 @@ function ResourcesWorkspace({
     <section className="panel page-panel resources-workspace" data-testid="resources-workspace">
       <div className="panel-heading resources-heading">
         <div>
-          <h2>Resource readiness</h2>
+          <h2>{isTimesheets ? 'Weekly labor review' : 'Resource readiness'}</h2>
           <p>
-            {isPartners
+            {isTimesheets
+              ? 'Review submitted worker time by week, resolve exceptions, approve immutable revisions, and prepare a controlled payroll handoff.'
+              : isPartners
               ? 'Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.'
               : isEquipment
                 ? 'Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.'
@@ -2643,6 +2786,15 @@ function ResourcesWorkspace({
             <Building2 size={15} />
             Trade partners
           </button>
+          <button
+            role="tab"
+            aria-selected={isTimesheets}
+            className={isTimesheets ? 'resource-tab-active' : ''}
+            onClick={() => onViewChange('timesheets')}
+          >
+            <Timer size={15} />
+            Timesheets
+          </button>
         </div>
       </div>
       {isWorkforce ? (
@@ -2669,7 +2821,18 @@ function ResourcesWorkspace({
           </div>
         </div>
       ) : null}
-      {isPartners ? (
+      {isTimesheets ? (
+        <TimesheetWorkspace
+          timesheets={timesheets}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          submitting={submitting}
+          onPeriodChange={onTimesheetPeriodChange}
+          onRequest={onRequestTimesheet}
+          onPrepareExport={onPrepareTimesheetExport}
+          onOpenApprovals={onOpenApprovals}
+        />
+      ) : isPartners ? (
         <TradePartnerDirectory
           partners={tradePartners}
           summary={tradePartnerSummary}
@@ -7016,6 +7179,7 @@ function App() {
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
+          timesheets: { rows: [], exports: [], summary: {} },
           tools: [],
           toolSummary: {},
           inventory: { jobs: [], summary: {} },
@@ -7053,6 +7217,7 @@ function App() {
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
+          timesheets: { rows: [], exports: [], summary: {} },
           tools: [],
           toolSummary: {},
           inventory: { jobs: [], summary: {} },
@@ -7284,6 +7449,57 @@ function App() {
     resourceViewRef.current = next
     setResourceView(next)
     if (sectionRef.current === 'resources') void refreshSection('resources', next)
+  }
+
+  async function loadTimesheetPeriod(periodStart) {
+    setSectionLoading(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/timesheets?periodStart=${encodeURIComponent(periodStart)}`)
+      setData((current) => current ? { ...current, timesheets: result.timesheets || { rows: [], exports: [], summary: {} } } : current)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSectionLoading(false)
+    }
+  }
+
+  async function requestWorkerTimesheet(workerId, periodStart) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/workers/${encodeURIComponent(workerId)}/timesheets`, {
+        method: 'POST',
+        body: JSON.stringify({ periodStart }),
+      })
+      setData((current) => current ? {
+        ...current,
+        timesheets: result.timesheets || current.timesheets,
+        approvals: result.approval ? upsertById(current.approvals, result.approval) : current.approvals,
+      } : current)
+      notify(result.replayed ? 'The current weekly timesheet review already exists.' : 'Weekly timesheet frozen and sent to the internal approval queue.')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function prepareTimesheetHandoff(periodStart) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/timesheet-exports', {
+        method: 'POST',
+        body: JSON.stringify({ periodStart }),
+      })
+      setData((current) => current ? { ...current, timesheets: result.timesheets || current.timesheets } : current)
+      notify(result.replayed ? 'The current checksum-protected handoff already exists.' : 'Checksum-protected timesheet handoff prepared. No payroll or provider action was performed.')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
   }
   const openApprovals = (focus = null) => {
     if (selectedJobId) closeJobWorkspace()
@@ -11694,12 +11910,26 @@ function App() {
 
   return (
     <div className="app-shell">
-      <aside className={`side-nav ${mobileNavOpen ? 'side-nav-open' : ''}`} aria-label="Primary navigation">
+      <aside
+        className={`side-nav ${mobileNavOpen ? 'side-nav-open' : ''}`}
+        aria-label="Primary navigation"
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') setMobileNavOpen(false)
+        }}
+      >
         <div className="brand">
           <span className="brand-mark">
             <HardHat size={18} />
           </span>
           <span>Contractor.AI</span>
+          <button
+            type="button"
+            className="nav-close mobile-only"
+            aria-label="Close navigation"
+            onClick={() => setMobileNavOpen(false)}
+          >
+            <X size={19} />
+          </button>
         </div>
         <div className="nav-list">
           {visibleNavItems.map(([key, label, icon]) => (
@@ -12165,6 +12395,7 @@ function App() {
                 toolSummary={data.toolSummary}
                 tradePartners={tradePartners}
                 tradePartnerSummary={data.tradePartnerSummary}
+                timesheets={data.timesheets}
                 jobs={jobs}
                 view={resourceView}
                 onViewChange={selectResourceView}
@@ -12188,6 +12419,9 @@ function App() {
                 onCreatePartner={() => openTradePartnerEditor()}
                 onEditPartner={openTradePartnerEditor}
                 onRetirePartner={openTradePartnerRetirement}
+                onTimesheetPeriodChange={loadTimesheetPeriod}
+                onRequestTimesheet={requestWorkerTimesheet}
+                onPrepareTimesheetExport={prepareTimesheetHandoff}
                 onOpenApprovals={openApprovals}
                 onOpen={openJobWorkspace}
               />
@@ -18080,7 +18314,7 @@ function App() {
           </section>
         </div>
       ) : null}
-      {mobileNavOpen ? <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} /> : null}
+      {mobileNavOpen ? <button className="nav-scrim" aria-label="Close navigation overlay" onClick={() => setMobileNavOpen(false)} /> : null}
     </div>
   )
 }

@@ -418,6 +418,24 @@ function createBackupFixture(t, suffix = 'success') {
     occurredAt: attendanceCheckOutAt,
     entryKey: `migration-attendance-out-${suffix}`
   }, { actor: 'migration_fixture' });
+  const week = new Date();
+  week.setUTCHours(0, 0, 0, 0);
+  week.setUTCDate(week.getUTCDate() - (week.getUTCDay() || 7) - 6);
+  const timesheetPeriodStart = week.toISOString().slice(0, 10);
+  source.addTimeLog(job.id, {
+    workerId: attendanceWorker.id,
+    workDate: timesheetPeriodStart,
+    hours: 7.5,
+    rate: 44,
+    source: 'migration_verified_timecard',
+    verificationReference: `migration-time-${suffix}`
+  }, { actor: 'migration_fixture' });
+  const timesheetRequest = source.requestWeeklyTimesheet(attendanceWorker.id, { periodStart: timesheetPeriodStart }, { actor: 'migration_fixture' });
+  source.resolveApproval(timesheetRequest.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration weekly timesheet sources verified.'
+  });
+  const weeklyTimesheet = source.getWeeklyTimesheet(timesheetRequest.timesheet.id);
+  const timesheetExport = source.prepareTimesheetExport({ periodStart: timesheetPeriodStart }, { actor: 'migration_fixture' }).export;
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -443,7 +461,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
+  return { attendanceSession, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet };
 }
 
 class FakeHostedStorage {
@@ -533,7 +551,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '033_site_attendance');
+  assert.equal(migration.migrationVersion, '034_weekly_timesheets');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -587,6 +605,13 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedAttendance.status, 'checked_out');
     assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);
     assert.equal(migratedAttendance.data.payrollDerived, false);
+    const migratedTimesheet = hosted.getWeeklyTimesheet(fixture.weeklyTimesheet.id);
+    assert.equal(migratedTimesheet.status, 'approved');
+    assert.equal(migratedTimesheet.integrityValid, true);
+    assert.equal(migratedTimesheet.sourceHash, fixture.weeklyTimesheet.sourceHash);
+    const migratedTimesheetExport = hosted.getTimesheetExportContent(fixture.timesheetExport.id);
+    assert.equal(migratedTimesheetExport.export.integrityValid, true);
+    assert.match(migratedTimesheetExport.content, /7\.50/);
     const migratedDocument = detail.documents.find(item => item.id === fixture.document.id);
     assert.match(migratedDocument.storageRef, /^s3:\/\/migration-test\/migrated-1-/);
     assert.notEqual(migratedDocument.storageRef, fixture.localStorageRef);
