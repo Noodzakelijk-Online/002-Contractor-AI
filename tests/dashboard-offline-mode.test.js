@@ -177,16 +177,22 @@ test('job workspace exposes approval-safe commercial drafting and acceptance evi
   assert.match(dashboardSource, /data-testid="commercial-control"/);
   assert.match(dashboardSource, /data-testid="commercial-draft-modal"/);
   assert.match(dashboardSource, /data-testid="commercial-acceptance-modal"/);
+  assert.match(dashboardSource, /data-testid="commercial-delivery-modal"/);
   assert.match(dashboardSource, /server-derived totals/);
   assert.match(dashboardSource, /quotes\/\$\{encodeURIComponent\(record\.id\)\}\/acceptance/);
   assert.match(dashboardSource, /change-orders\/\$\{encodeURIComponent\(record\.id\)\}\/acceptance/);
+  assert.match(dashboardSource, /change-orders\/\$\{encodeURIComponent\(changeOrder\.id\)\}\/issue-package/);
+  assert.match(
+    dashboardSource,
+    /communications\/\$\{encodeURIComponent\(commercialDelivery\.communication\.id\)\}\/delivery-receipt/
+  );
   assert.match(dashboardSource, /acceptedAt: commercialAcceptanceDraft\.acceptedAt/);
   assert.match(dashboardSource, /Contract value remains unchanged until client acceptance is verified/);
   assert.match(dashboardSource, /Internal change-order approval alone does not alter contract value|internal approval request/);
   assert.match(dashboardSource, /commercialDialogOpenerRef\.current = document\.activeElement/);
   assert.match(dashboardSource, /commercialDialogReturnFocusRef = useRef\(false\)/);
   assert.match(dashboardSource, /if \(opener\?\.isConnected && !opener\.disabled\) opener\.focus\(\)/);
-  assert.match(dashboardSource, /\[commercialAcceptance, commercialDraftMode, submitting, takeoffDialog\]/);
+  assert.match(dashboardSource, /\[commercialAcceptance, commercialDelivery, commercialDraftMode, submitting, takeoffDialog\]/);
   assert.match(dashboardSource, /if \(selectedJobId\) closeJobWorkspace\(\)/);
 });
 

@@ -3344,6 +3344,7 @@ function CommercialControl({
   onNewQuote,
   onNewChangeOrder,
   onRequestAcceptance,
+  onRecordChangeDelivery,
   onOpenApprovals,
 }) {
   const quotes = job.quotes || EMPTY_LIST
@@ -3528,6 +3529,21 @@ function CommercialControl({
               {changeOrders.map((changeOrder) => {
                 const approval = pendingFor('change_order', changeOrder.id)
                 const acceptanceApproval = pendingFor('change_order_acceptance', changeOrder.id)
+                const issuePackage = job.documents?.find(
+                  (document) =>
+                    document.type === 'change_order_issue_package' && document.data?.sourceRecordId === changeOrder.id,
+                )
+                const deliveryDraft = issuePackage
+                  ? job.communications?.find(
+                      (communication) =>
+                        communication.data?.source === 'change_order_issue_package' &&
+                        communication.data?.sourceRecordId === changeOrder.id,
+                    )
+                  : null
+                const deliveryApproval = deliveryDraft ? pendingFor('communication', deliveryDraft.id) : null
+                const canPrepare = changeOrder.status === 'approved' && canCoordinate && !issuePackage
+                const canRecordDelivery =
+                  changeOrder.status === 'approved' && deliveryDraft?.status === 'approved' && canCoordinate
                 return (
                   <div className="activity-row commercial-row" key={changeOrder.id} data-testid={`commercial-change-${changeOrder.id}`}>
                     <div className="commercial-record">
@@ -3541,6 +3557,10 @@ function CommercialControl({
                       </small>
                       <small>
                         {changeOrder.scopeDelta || 'Scope evidence not retained'}
+                        {issuePackage ? ` · package ${issuePackage.data?.issueReference || 'retained'}` : ''}
+                        {changeOrder.data?.issuePackage?.transportStatus
+                          ? ` · ${formatStatus(changeOrder.data.issuePackage.transportStatus)}`
+                          : ''}
                         {changeOrder.data?.acceptance?.evidenceReference
                           ? ` · evidence ${changeOrder.data.acceptance.evidenceReference}`
                           : ''}
@@ -3558,6 +3578,52 @@ function CommercialControl({
                           Review change
                         </button>
                       ) : null}
+                      {canPrepare ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          data-testid={`prepare-change-package-${changeOrder.id}`}
+                          disabled={submitting}
+                          title="Prepare an immutable change-order package and approval-gated delivery draft"
+                          onClick={() => onRequestAcceptance('change_issue_package', changeOrder)}
+                        >
+                          <FileDown size={15} />
+                          Prepare issue package
+                        </button>
+                      ) : null}
+                      {issuePackage ? (
+                        <a
+                          className="secondary-button"
+                          data-testid={`download-change-package-${changeOrder.id}`}
+                          href={`/api/ledger/documents/${encodeURIComponent(issuePackage.id)}/issue-package`}
+                          download
+                        >
+                          <FileDown size={15} />
+                          Download package
+                        </a>
+                      ) : null}
+                      {deliveryApproval && canApprove ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={submitting}
+                          onClick={() => onOpenApprovals({ approvalId: deliveryApproval.id })}
+                        >
+                          <ShieldCheck size={15} />
+                          Review delivery
+                        </button>
+                      ) : null}
+                      {canRecordDelivery ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={submitting}
+                          onClick={() => onRecordChangeDelivery(changeOrder, deliveryDraft)}
+                        >
+                          <MailCheck size={15} />
+                          Record delivery receipt
+                        </button>
+                      ) : null}
                       {acceptanceApproval && canApprove ? (
                         <button
                           type="button"
@@ -3569,7 +3635,7 @@ function CommercialControl({
                           Verify acceptance
                         </button>
                       ) : null}
-                      {changeOrder.status === 'approved' && canCoordinate && !acceptanceApproval ? (
+                      {changeOrder.status === 'issued' && canCoordinate && !acceptanceApproval ? (
                         <button
                           type="button"
                           className="primary-button"
@@ -6483,6 +6549,8 @@ function App() {
   const [changeOrderDraft, setChangeOrderDraft] = useState(emptyChangeOrderDraft)
   const [commercialAcceptance, setCommercialAcceptance] = useState(null)
   const [commercialAcceptanceDraft, setCommercialAcceptanceDraft] = useState(emptyCommercialAcceptanceDraft)
+  const [commercialDelivery, setCommercialDelivery] = useState(null)
+  const [commercialDeliveryDraft, setCommercialDeliveryDraft] = useState(() => emptyBidOrderDeliveryDraft())
   const [jobLifecycleAction, setJobLifecycleAction] = useState(null)
   const [jobLifecycleReason, setJobLifecycleReason] = useState('')
   const [showResourcePlanner, setShowResourcePlanner] = useState(false)
@@ -6959,6 +7027,7 @@ function App() {
       submitting ||
       commercialDraftMode ||
       commercialAcceptance ||
+      commercialDelivery ||
       takeoffDialog
     )
       return
@@ -6968,7 +7037,7 @@ function App() {
     requestAnimationFrame(() => {
       if (opener?.isConnected && !opener.disabled) opener.focus()
     })
-  }, [commercialAcceptance, commercialDraftMode, submitting, takeoffDialog])
+  }, [commercialAcceptance, commercialDelivery, commercialDraftMode, submitting, takeoffDialog])
 
   useEffect(() => {
     if (!notice || loading || submitting || outboxSyncing) return undefined
@@ -8149,6 +8218,8 @@ function App() {
     setCommercialDraftMode(null)
     setCommercialAcceptance(null)
     setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
+    setCommercialDelivery(null)
+    setCommercialDeliveryDraft(emptyBidOrderDeliveryDraft())
     restoreCommercialDialogFocus()
   }
 
@@ -8260,9 +8331,84 @@ function App() {
     }
   }
 
+  async function prepareChangeOrderIssuePackage(changeOrder) {
+    if (!selectedJobId || !changeOrder?.id) return
+    setSubmitting(true)
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/change-orders/${encodeURIComponent(changeOrder.id)}/issue-package`,
+        {
+          method: 'POST',
+          body: JSON.stringify({}),
+        },
+      )
+      setSelectedJob(result.job)
+      await refresh()
+      notify(
+        result.replayed
+          ? `Change-order package ${result.issueReference} is already retained with its delivery approval.`
+          : `Change-order package ${result.issueReference} retained. Delivery remains blocked until its separate approval and provider receipt are retained.`,
+      )
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openChangeOrderDelivery(changeOrder, communication) {
+    if (!changeOrder?.id || !communication?.id) return
+    commercialDialogReturnFocusRef.current = false
+    commercialDialogOpenerRef.current = document.activeElement
+    setCommercialDelivery({ changeOrder, communication })
+    setCommercialDeliveryDraft(emptyBidOrderDeliveryDraft())
+  }
+
+  async function submitChangeOrderDelivery(event) {
+    event.preventDefault()
+    if (
+      !commercialDelivery?.communication?.id ||
+      !commercialDeliveryDraft.integration.trim() ||
+      !commercialDeliveryDraft.providerMessageId.trim() ||
+      !commercialDeliveryDraft.sentAt
+    ) {
+      return
+    }
+    setSubmitting(true)
+    try {
+      const result = await api(
+        `/api/ledger/communications/${encodeURIComponent(commercialDelivery.communication.id)}/delivery-receipt`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            integration: commercialDeliveryDraft.integration.trim(),
+            providerMessageId: commercialDeliveryDraft.providerMessageId.trim(),
+            sentAt: toIsoDateTime(commercialDeliveryDraft.sentAt),
+          }),
+        },
+      )
+      setSelectedJob(result.job)
+      setCommercialDelivery(null)
+      setCommercialDeliveryDraft(emptyBidOrderDeliveryDraft())
+      restoreCommercialDialogFocus()
+      notify(
+        `Verified provider receipt retained for ${result.changeOrder?.data?.issuePackage?.issueReference || 'the change order'}. Client acceptance can now be recorded; contract value is unchanged.`,
+      )
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function openCommercialAcceptance(type, record) {
     if (type === 'issue_package') {
       prepareQuoteIssuePackage(record)
+      return
+    }
+    if (type === 'change_issue_package') {
+      prepareChangeOrderIssuePackage(record)
       return
     }
     commercialDialogReturnFocusRef.current = false
@@ -13676,6 +13822,7 @@ function App() {
                     onNewQuote={() => openCommercialDraft('quote')}
                     onNewChangeOrder={() => openCommercialDraft('change_order')}
                     onRequestAcceptance={openCommercialAcceptance}
+                    onRecordChangeDelivery={openChangeOrderDelivery}
                     onOpenApprovals={openApprovals}
                   />
                 ) : null}
@@ -14671,6 +14818,95 @@ function App() {
                 <button className="primary-button" disabled={submitting || commercialAcceptanceDraft.evidenceReference.trim().length < 3}>
                   <ShieldCheck size={16} />
                   {submitting ? 'Recording...' : 'Request verification'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {commercialDelivery ? (
+        <div className="modal-backdrop commercial-backdrop" role="presentation">
+          <section
+            className="modal commercial-delivery-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="commercial-delivery-title"
+            data-testid="commercial-delivery-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') closeCommercialDialog()
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Verified delivery evidence</p>
+                <h2 id="commercial-delivery-title">Record change-order delivery</h2>
+                <p>
+                  {commercialDelivery.changeOrder.data?.issuePackage?.issueReference || commercialDelivery.changeOrder.title} /{' '}
+                  {commercialDelivery.communication.data?.recipient}
+                </p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close change-order delivery" onClick={closeCommercialDialog}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitChangeOrderDelivery}>
+              <div className="form-grid commercial-acceptance-form">
+                <label>
+                  Configured integration ID
+                  <input
+                    autoFocus
+                    required
+                    minLength="2"
+                    maxLength="120"
+                    value={commercialDeliveryDraft.integration}
+                    onChange={(event) =>
+                      setCommercialDeliveryDraft({ ...commercialDeliveryDraft, integration: event.target.value })
+                    }
+                    placeholder="verified_client_gateway"
+                  />
+                </label>
+                <label>
+                  Provider message ID
+                  <input
+                    required
+                    minLength="3"
+                    maxLength="240"
+                    value={commercialDeliveryDraft.providerMessageId}
+                    onChange={(event) =>
+                      setCommercialDeliveryDraft({ ...commercialDeliveryDraft, providerMessageId: event.target.value })
+                    }
+                    placeholder="provider-change-000123"
+                  />
+                </label>
+                <label>
+                  Provider sent at
+                  <input
+                    required
+                    type="datetime-local"
+                    value={commercialDeliveryDraft.sentAt}
+                    onChange={(event) => setCommercialDeliveryDraft({ ...commercialDeliveryDraft, sentAt: event.target.value })}
+                  />
+                </label>
+                <p className="workflow-note form-span">
+                  Record this only after the configured provider returns evidence for the approved recipient and exact package. Delivery
+                  does not authorize the work or alter contract value.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={closeCommercialDialog}>
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={
+                    submitting ||
+                    commercialDeliveryDraft.integration.trim().length < 2 ||
+                    commercialDeliveryDraft.providerMessageId.trim().length < 3 ||
+                    !commercialDeliveryDraft.sentAt
+                  }
+                >
+                  <MailCheck size={15} /> {submitting ? 'Recording...' : 'Record verified receipt'}
                 </button>
               </div>
             </form>

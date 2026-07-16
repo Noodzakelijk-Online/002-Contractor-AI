@@ -2417,6 +2417,23 @@ app.post('/api/ledger/jobs/:id/change-orders', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/issue-package', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const issuePackage = operatingLedger.prepareChangeOrderIssuePackage(
+      req.params.id,
+      req.params.changeOrderId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...issuePackage,
+      job: operatingLedger.getJobDetail(req.params.id),
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/acceptance', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const acceptance = operatingLedger.requestChangeOrderAcceptance(
@@ -3929,10 +3946,14 @@ app.post('/api/ledger/communications/:id/delivery-receipt', (req, res) => {
     const purchaseOrder = communication.data?.source === 'purchase_order_issue_package'
       ? operatingLedger.getPurchaseOrder(communication.data.sourceRecordId)
       : null;
+    const changeOrder = communication.data?.source === 'change_order_issue_package'
+      ? operatingLedger.getJobDetail(communication.jobId).changeOrders.find(item => item.id === communication.data.sourceRecordId) || null
+      : null;
     return {
       success: true,
       communication,
       purchaseOrder,
+      changeOrder,
       bidPackage: purchaseOrder ? operatingLedger.getBidPackageByPurchaseOrder(purchaseOrder.id) : null,
       job: operatingLedger.getJobDetail(communication.jobId),
       finance: purchaseOrder ? operatingLedger.listFinanceReadiness({ limit: 100 }) : null,
@@ -4952,6 +4973,15 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         outboundDraftOnly: true,
         deliveryReceiptApprovalRequired: true,
         verifiedIntegrationCount: verifiedIntegrationIds.size
+      },
+      changeControl: {
+        serverCalculatedTotals: true,
+        durableNumbering: true,
+        immutableHtmlPackage: true,
+        deliveryApprovalRequired: true,
+        verifiedProviderReceiptRequired: true,
+        acceptanceBoundToIssuedPackage: true,
+        contractValueChange: 'verified_acceptance_only'
       },
       invoicing: {
         serverCalculatedTotals: true,

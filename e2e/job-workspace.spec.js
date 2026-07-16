@@ -344,6 +344,48 @@ test('commercial control retains server totals and changes contract value only a
   changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
   await expect(changeRow.getByText('approved', { exact: true })).toBeVisible();
   await expect(commercial.getByLabel('Accepted commercial value')).toContainText(/1[.,]500/);
+  await changeRow.getByRole('button', { name: 'Prepare issue package' }).click();
+  await expect(page.getByText(/Change-order package CO-.* retained\. Delivery remains blocked/i)).toBeVisible();
+  await expect(changeRow.getByRole('link', { name: 'Download package' })).toBeVisible();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  const changePackage = detail.job.documents.find(
+    item => item.type === 'change_order_issue_package' && item.data?.sourceRecordId === changeOrder.id
+  );
+  const changeDelivery = detail.job.communications.find(
+    item => item.data?.source === 'change_order_issue_package' && item.data?.sourceRecordId === changeOrder.id
+  );
+  expect(changePackage).toBeTruthy();
+  expect(changeDelivery).toMatchObject({ status: 'draft', sentAt: null });
+  expect(detail.job.contractValue).toBe(1500);
+  await changeRow.getByRole('button', { name: 'Review delivery' }).click();
+  await approveQueueItem(page, page.locator('.approval-item'), 'Change-order attachment, client recipient, and delivery wording verified.');
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
+  await expect(changeRow.getByRole('link', { name: 'Download package' })).toHaveAttribute(
+    'href',
+    `/api/ledger/documents/${changePackage.id}/issue-package`,
+  );
+  await changeRow.getByRole('button', { name: 'Record delivery receipt' }).click();
+  const changeDeliveryModal = page.getByTestId('commercial-delivery-modal');
+  await changeDeliveryModal.getByLabel('Configured integration ID').fill('playwright_test_provider');
+  await changeDeliveryModal.getByLabel('Provider message ID').fill('browser-change-message-001');
+  await changeDeliveryModal.getByRole('button', { name: 'Record verified receipt' }).click();
+  await expect(changeDeliveryModal).toBeHidden();
+  await expect(page.getByText(/Verified provider receipt retained for CO-/i)).toBeVisible();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.changeOrders.find(item => item.id === changeOrder.id)).toMatchObject({
+    status: 'issued',
+    data: { issuePackage: { providerMessageId: 'browser-change-message-001', packageHash: changePackage.data.packageHash } },
+  });
+  expect(detail.job.contractValue).toBe(1500);
+  changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
   await changeRow.getByRole('button', { name: 'Record acceptance' }).click();
   const changeAcceptanceModal = page.getByTestId('commercial-acceptance-modal');
   await changeAcceptanceModal.getByLabel('Evidence reference').fill('signed-change-browser-001');
@@ -374,6 +416,8 @@ test('commercial control retains server totals and changes contract value only a
   expect(detail.job.contractValue).toBe(1750);
   expect(detail.job.audit).toEqual(expect.arrayContaining([
     expect.objectContaining({ action: 'accept_quote_contract', entityId: quote.id }),
+    expect.objectContaining({ action: 'prepare_change_order_issue_package', entityId: changePackage.id }),
+    expect.objectContaining({ action: 'issue_change_order', entityId: changeOrder.id }),
     expect.objectContaining({ action: 'accept_change_order_contract', entityId: changeOrder.id })
   ]));
 

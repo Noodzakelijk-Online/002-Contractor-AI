@@ -2502,6 +2502,21 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON purchase_orders(status, updated_at DESC);
       `);
     }
+  },
+  {
+    version: '030_change_order_issue_packages',
+    description: 'Bind client change-order acceptance to a numbered immutable package and verified delivery receipt.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS change_order_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_change_orders_issue_status
+          ON change_orders(status, updated_at DESC);
+      `);
+    }
   }
 ];
 
@@ -8887,9 +8902,388 @@ class ContractorOperatingLedger {
 </html>`;
   }
 
+  allocateChangeOrderReference(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('change_order_issue_date_invalid', 'Change-order issue date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO change_order_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE change_order_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable change-order number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'change_order_number_allocation_failed';
+      throw error;
+    }
+    return `CO-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  changeOrderIssueBasis(changeOrder) {
+    return {
+      id: changeOrder.id,
+      jobId: changeOrder.jobId,
+      quoteId: changeOrder.quoteId || null,
+      title: changeOrder.title,
+      scopeDelta: changeOrder.scopeDelta || null,
+      currency: changeOrder.currency,
+      amount: roundMoney(changeOrder.amount),
+      taxRate: roundQuantity(changeOrder.taxRate),
+      taxAmount: roundMoney(changeOrder.taxAmount),
+      total: roundMoney(changeOrder.total),
+      scheduleDeltaDays: roundQuantity(changeOrder.scheduleDeltaDays),
+      lineItems: (changeOrder.lineItems || []).map(item => ({
+        description: item.description,
+        quantity: roundQuantity(item.quantity),
+        unitPrice: roundMoney(item.unitPrice),
+        costCode: item.costCode || null
+      })),
+      notes: changeOrder.data?.notes || null
+    };
+  }
+
+  assertChangeOrderIssueCurrent(changeOrder, snapshot) {
+    const retainedHash = normalizeText(snapshot?.changeOrder?.sourceBasisHash, '');
+    const currentHash = sha256Json(this.changeOrderIssueBasis(changeOrder));
+    if (!retainedHash || retainedHash !== currentHash) {
+      throw ledgerInputError(
+        'change_order_issue_package_stale',
+        'The retained change-order package no longer matches its source record.',
+        { changeOrderId: changeOrder?.id, retainedHash: retainedHash || null, currentHash },
+        409
+      );
+    }
+    return currentHash;
+  }
+
+  prepareChangeOrderIssuePackage(jobId, changeOrderId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(changeOrderId, jobId);
+      if (!row) throw ledgerInputError('change_order_not_found', 'Change order not found for this job.', null, 404);
+      const changeOrder = this.mapChangeOrder(row);
+      const identityKey = sha256Text(`${jobId}\0${changeOrderId}`);
+      const documentId = `doc_change_${identityKey.slice(0, 24)}`;
+      const communicationId = `comm_change_${identityKey.slice(0, 24)}`;
+      const retainedDocument = this.db.prepare('SELECT id FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+      let snapshot;
+      let packageHash;
+      let issueReference;
+
+      if (retainedDocument) {
+        const retained = this.getChangeOrderIssuePackage(documentId, { audit: false });
+        snapshot = retained.document.data.snapshot;
+        packageHash = retained.packageHash;
+        issueReference = snapshot.issueReference;
+      } else {
+        if (changeOrder.status !== 'approved') {
+          throw ledgerInputError(
+            'change_order_not_approved_for_issue',
+            'Change order must receive internal approval before an issue package can be prepared.',
+            { changeOrderId, status: changeOrder.status },
+            409
+          );
+        }
+        const organization = this.getOrganizationProfile();
+        if (!organization.readiness.ready) {
+          throw ledgerInputError(
+            'organization_profile_incomplete',
+            'Complete the business identity before preparing a client change-order package.',
+            { missing: organization.readiness.missing },
+            409
+          );
+        }
+        const clientRow = this.db.prepare('SELECT * FROM clients WHERE id = ?').get(job.client_id);
+        if (!clientRow) throw ledgerInputError('change_order_client_missing', 'The job client could not be loaded for issue.', null, 409);
+        const client = this.mapClient(clientRow);
+        const recipient = normalizeText(payload.recipient || client.data?.billingEmail || client.email, '').toLowerCase();
+        if (!recipient || recipient.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+          throw ledgerInputError(
+            'change_order_recipient_required',
+            'Retain a valid client or billing email before preparing the change-order delivery.',
+            { clientId: client.id },
+            409
+          );
+        }
+        const preparedAt = nowIso();
+        issueReference = this.allocateChangeOrderReference(preparedAt);
+        const sourceBasisHash = sha256Json(this.changeOrderIssueBasis(changeOrder));
+        snapshot = {
+          packageVersion: 1,
+          issueReference,
+          preparedAt,
+          preparedBy: options.actor || 'Contractor.AI',
+          organization: {
+            legalName: organization.legalName,
+            tradingName: organization.tradingName,
+            registrationNumber: organization.registrationNumber,
+            vatNumber: organization.vatNumber,
+            vatExempt: organization.data?.vatExempt === true,
+            email: organization.email,
+            phone: organization.phone,
+            website: organization.website,
+            address: organization.address,
+            postalCode: organization.postalCode,
+            city: organization.city,
+            country: organization.country,
+            quoteTerms: organization.data?.quoteTerms || null
+          },
+          client: {
+            id: client.id,
+            name: client.name,
+            company: client.company,
+            email: client.email,
+            billingEmail: client.data?.billingEmail || null,
+            recipient,
+            phone: client.phone,
+            address: client.address,
+            city: client.city,
+            country: client.country
+          },
+          job: {
+            id: job.id,
+            title: job.title,
+            description: job.description,
+            address: job.address,
+            city: job.city,
+            country: job.country
+          },
+          changeOrder: {
+            ...this.changeOrderIssueBasis(changeOrder),
+            statusAtIssue: changeOrder.status,
+            sourceBasisHash
+          }
+        };
+        packageHash = sha256Json(snapshot);
+      }
+
+      const html = this.renderChangeOrderIssuePackageHtml(snapshot, packageHash);
+      const contentHash = sha256Text(html);
+      const filename = `${issueReference.replace(/[^A-Za-z0-9._-]/g, '-')}.html`;
+      const document = this.addDocument(jobId, {
+        type: 'change_order_issue_package',
+        title: `Change order ${issueReference}`,
+        filename,
+        mimeType: 'text/html; charset=utf-8',
+        sizeBytes: Buffer.byteLength(html, 'utf8'),
+        status: 'prepared',
+        data: {
+          packageVersion: 1,
+          sourceRecordType: 'change_order',
+          sourceRecordId: changeOrderId,
+          issueReference,
+          packageHash,
+          contentHash,
+          snapshot,
+          safeguards: {
+            deliveryMode: 'verified_integration_only',
+            clientAcceptanceRequired: true,
+            contractValueChanged: false,
+            externalCommitments: 0
+          }
+        }
+      }, { actor: options.actor, audit: true, id: documentId, ignoreExisting: true });
+      const communication = this.addCommunication(jobId, {
+        clientId: snapshot.client.id,
+        channel: normalizeStatus(payload.channel, 'email'),
+        direction: 'outbound',
+        status: 'draft',
+        subject: `Change order ${issueReference} - ${snapshot.job.title}`,
+        body: `Dear ${snapshot.client.name},\n\nPlease review change order ${issueReference} for ${snapshot.job.title}. The exact scope, price, VAT, and schedule impact are retained in the attached package.\n\nAcceptance is recorded separately and is not implied by receipt of this package.`,
+        recipient: snapshot.client.recipient,
+        expectsReply: true,
+        requiresApproval: true,
+        data: {
+          source: 'change_order_issue_package',
+          sourceRecordId: changeOrderId,
+          issueReference,
+          packageHash,
+          sourceBasisHash: snapshot.changeOrder.sourceBasisHash,
+          attachmentDocumentIds: [documentId],
+          deliveryMode: 'verified_integration_only',
+          externalCommitments: 0
+        }
+      }, { actor: options.actor, audit: true, id: communicationId, ignoreExisting: true });
+
+      const replayed = document.replayed === true && communication.replayed === true;
+      if (!replayed) {
+        const currentData = fromJson(row.data_json, {});
+        this.db.prepare('UPDATE change_orders SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson({
+          ...currentData,
+          issuePackage: {
+            issueReference,
+            documentId,
+            communicationId,
+            communicationApprovalId: communication.approvalId,
+            packageHash,
+            sourceBasisHash: snapshot.changeOrder.sourceBasisHash,
+            recipient: snapshot.client.recipient,
+            preparedAt: snapshot.preparedAt,
+            preparedBy: snapshot.preparedBy,
+            transportStatus: 'approval_required',
+            externalCommitments: 0
+          }
+        }), nowIso(), changeOrderId);
+        this.audit({
+          entityType: 'change_order_issue_package',
+          entityId: documentId,
+          jobId,
+          action: 'prepare_change_order_issue_package',
+          actor: options.actor || 'Contractor.AI',
+          after: {
+            changeOrderId,
+            documentId,
+            communicationId,
+            approvalId: communication.approvalId,
+            issueReference,
+            packageHash,
+            sourceBasisHash: snapshot.changeOrder.sourceBasisHash,
+            externalCommitments: 0
+          },
+          metadata: { deliveryMode: 'verified_integration_only', contractValueChanged: false }
+        });
+      }
+      this.verifyCommunicationAttachments(communicationId);
+      const retainedCommunication = this.getCommunication(communicationId);
+      return {
+        document: this.getDocument(documentId),
+        communication: retainedCommunication,
+        approval: communication.approval || null,
+        changeOrder: this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(changeOrderId)),
+        issueReference,
+        packageHash,
+        replayed,
+        deliveryMode: 'verified_integration_only',
+        notSent: !['sent', 'delivered'].includes(normalizeStatus(retainedCommunication.status, '')),
+        clientAcceptanceRequired: true,
+        externalCommitments: 0
+      };
+    });
+  }
+
+  getChangeOrderIssuePackage(documentId, options = {}) {
+    const document = this.getDocument(documentId);
+    if (document.type !== 'change_order_issue_package') {
+      throw ledgerInputError('change_order_issue_package_required', 'Document is not a generated change-order issue package.', { documentId }, 409);
+    }
+    const snapshot = document.data?.snapshot;
+    const retainedHash = normalizeText(document.data?.packageHash, '');
+    if (!snapshot || !retainedHash || sha256Json(snapshot) !== retainedHash) {
+      throw ledgerInputError('change_order_issue_package_integrity_failed', 'The retained change-order package failed snapshot verification.', { documentId }, 409);
+    }
+    const changeOrderRow = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?')
+      .get(document.data?.sourceRecordId, document.jobId);
+    if (!changeOrderRow) {
+      throw ledgerInputError('change_order_issue_package_source_missing', 'The retained change-order package no longer has its source record.', { documentId }, 409);
+    }
+    this.assertChangeOrderIssueCurrent(this.mapChangeOrder(changeOrderRow), snapshot);
+    const html = this.renderChangeOrderIssuePackageHtml(snapshot, retainedHash);
+    if (!normalizeText(document.data?.contentHash, '') || sha256Text(html) !== document.data.contentHash) {
+      throw ledgerInputError('change_order_issue_package_integrity_failed', 'The retained change-order package failed content verification.', { documentId }, 409);
+    }
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'document',
+        entityId: document.id,
+        jobId: document.jobId,
+        action: 'download_change_order_issue_package',
+        actor: options.actor || 'authenticated_operator',
+        after: { issueReference: document.data.issueReference, packageHash: retainedHash }
+      });
+    }
+    return {
+      document,
+      html,
+      content: html,
+      filename: document.filename || `${document.data.issueReference || 'change-order'}.html`,
+      mimeType: 'text/html; charset=utf-8',
+      packageHash: retainedHash
+    };
+  }
+
+  renderChangeOrderIssuePackageHtml(snapshot, packageHash) {
+    const organization = snapshot.organization || {};
+    const client = snapshot.client || {};
+    const job = snapshot.job || {};
+    const changeOrder = snapshot.changeOrder || {};
+    const money = value => {
+      try {
+        return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: changeOrder.currency || 'EUR' }).format(Number(value || 0));
+      } catch {
+        return `${Number(value || 0).toFixed(2)} ${changeOrder.currency || 'EUR'}`;
+      }
+    };
+    const date = value => {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value || 'Not specified') : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const lines = (changeOrder.lineItems || []).map(item => `<tr><td>${escapeHtml(item.description)}</td><td class="number">${escapeHtml(item.quantity)}</td><td class="number">${escapeHtml(money(item.unitPrice))}</td><td class="number">${escapeHtml(money(Number(item.quantity || 0) * Number(item.unitPrice || 0)))}</td></tr>`).join('');
+    const organizationName = organization.tradingName || organization.legalName || 'Contractor';
+    const organizationAddress = [organization.address, organization.postalCode, organization.city, organization.country].filter(Boolean).map(escapeHtml).join(', ');
+    const clientAddress = [client.address, client.city, client.country].filter(Boolean).map(escapeHtml).join(', ');
+    const siteAddress = [job.address, job.city, job.country].filter(Boolean).map(escapeHtml).join(', ');
+    const scheduleImpact = Number(changeOrder.scheduleDeltaDays || 0);
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 920px; margin: 0 auto; padding: 42px; font-size: 14px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 32px; padding-bottom: 24px; border-bottom: 3px solid #176b57; }
+    h1 { margin: 0; font-size: 30px; color: #174d40; }
+    h2 { margin: 28px 0 10px; font-size: 18px; color: #23483d; }
+    p { margin: 4px 0; }
+    .muted { color: #64736e; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties, .impact { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 26px; }
+    .party, .impact div { padding: 16px 0; border-bottom: 1px solid #dce5e1; }
+    .party span, .impact span { display: block; color: #6a7873; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    table { width: 100%; margin-top: 14px; border-collapse: collapse; }
+    th, td { padding: 11px 9px; border-bottom: 1px solid #dfe7e3; text-align: left; vertical-align: top; }
+    th { color: #53645e; background: #f2f6f4; font-size: 11px; text-transform: uppercase; }
+    .number { text-align: right; white-space: nowrap; }
+    .totals { width: min(390px, 100%); margin: 18px 0 0 auto; }
+    .totals div { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #e3e9e6; }
+    .totals .grand { padding-top: 12px; color: #174d40; font-size: 18px; font-weight: 700; border-bottom: 0; }
+    .notice { margin-top: 28px; padding: 17px; background: #f4f7f6; border-left: 4px solid #176b57; }
+    footer { margin-top: 38px; padding-top: 16px; color: #6c7975; border-top: 1px solid #dce5e1; font-size: 10px; overflow-wrap: anywhere; }
+    @media print { body { max-width: none; padding: 18mm; } }
+    @media (max-width: 650px) { body { padding: 22px; } header, .parties, .impact { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>${escapeHtml(organizationName)}</h1><p>${organizationAddress}</p><p class="muted">Registration ${escapeHtml(organization.registrationNumber || 'not retained')} &middot; VAT ${escapeHtml(organization.vatExempt ? 'exempt' : organization.vatNumber || 'not retained')}</p><p class="muted">${escapeHtml(organization.email || '')}</p></div><div class="reference"><span class="muted">Change order</span><strong>${escapeHtml(snapshot.issueReference)}</strong><p>Prepared ${escapeHtml(date(snapshot.preparedAt))}</p>${changeOrder.quoteId ? `<p>Quote ${escapeHtml(changeOrder.quoteId)}</p>` : ''}</div></header>
+  <section class="parties"><div class="party"><span>Prepared for</span><strong>${escapeHtml(client.company || client.name)}</strong>${client.company && client.name ? `<p>${escapeHtml(client.name)}</p>` : ''}<p>${clientAddress || 'Address not retained'}</p><p>${escapeHtml(client.recipient || client.email || '')}</p></div><div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${siteAddress || 'Site address not retained'}</p><p class="muted">Job reference ${escapeHtml(job.id)}</p></div></section>
+  <h2>${escapeHtml(changeOrder.title)}</h2>
+  <p>${escapeHtml(changeOrder.scopeDelta)}</p>
+  <section class="impact"><div><span>Schedule impact</span><strong>${escapeHtml(scheduleImpact)} day${Math.abs(scheduleImpact) === 1 ? '' : 's'}</strong></div><div><span>Source scope</span><strong>${escapeHtml(changeOrder.quoteId || 'Current contract')}</strong></div></section>
+  <h2>Price change</h2>
+  <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit price</th><th class="number">Amount</th></tr></thead><tbody>${lines}</tbody></table>
+  <div class="totals"><div><span>Net change</span><strong>${escapeHtml(money(changeOrder.amount))}</strong></div><div><span>VAT (${escapeHtml(changeOrder.taxRate)}%)</span><strong>${escapeHtml(money(changeOrder.taxAmount))}</strong></div><div class="grand"><span>Gross change</span><strong>${escapeHtml(money(changeOrder.total))}</strong></div></div>
+  <section class="notice"><strong>Acceptance control</strong>${changeOrder.notes ? `<p>${escapeHtml(changeOrder.notes)}</p>` : ''}${organization.quoteTerms ? `<p>${escapeHtml(organization.quoteTerms)}</p>` : ''}<p>Receipt does not authorize work or alter contract value. Client acceptance is recorded and verified separately against this exact package.</p></section>
+  <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Source basis ${escapeHtml(changeOrder.sourceBasisHash)} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source change order ${escapeHtml(changeOrder.id)}</footer>
+</body>
+</html>`;
+  }
+
   handoverEvidenceDocuments(detail = {}) {
     const generatedTypes = new Set([
       'quote_issue_package',
+      'change_order_issue_package',
       'invoice_issue_package',
       'invoice_ubl_package',
       'credit_note_issue_package',
@@ -10626,6 +11020,9 @@ class ContractorOperatingLedger {
       const issue = this.getQuoteIssuePackage(documentId, options);
       return { ...issue, content: issue.html, mimeType: 'text/html; charset=utf-8' };
     }
+    if (document.type === 'change_order_issue_package') {
+      return this.getChangeOrderIssuePackage(documentId, options);
+    }
     if (['credit_note_issue_package', 'credit_note_ubl_package'].includes(document.type)) {
       return this.getCreditNoteIssueDocument(documentId, options);
     }
@@ -10977,11 +11374,30 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.code = 'change_order_already_accepted';
         throw error;
       }
-      if (changeOrder.status !== 'approved') {
-        const error = new Error('Change order must receive internal approval before client acceptance can be verified');
-        error.statusCode = 409;
-        error.code = 'change_order_not_approved';
-        throw error;
+      if (changeOrder.status !== 'issued') {
+        throw ledgerInputError(
+          'change_order_not_issued',
+          'Change order must be packaged, approved for delivery, and issued through a verified integration before client acceptance can be verified.',
+          { changeOrderId, status: changeOrder.status },
+          409
+        );
+      }
+      const issueData = changeOrder.data?.issuePackage || {};
+      if (!issueData.documentId || !issueData.communicationId || !issueData.packageHash || !issueData.issueReference) {
+        throw ledgerInputError('change_order_issue_package_incomplete', 'The issued change order is missing its retained package chain.', { changeOrderId }, 409);
+      }
+      const issuePackage = this.getChangeOrderIssuePackage(issueData.documentId, { audit: false });
+      const issueCommunication = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?')
+        .get(issueData.communicationId, jobId);
+      const mappedCommunication = issueCommunication ? this.mapCommunication(issueCommunication) : null;
+      if (issuePackage.packageHash !== issueData.packageHash
+        || issuePackage.document.data?.sourceRecordId !== changeOrderId
+        || mappedCommunication?.status !== 'sent'
+        || mappedCommunication.data?.source !== 'change_order_issue_package'
+        || mappedCommunication.data?.sourceRecordId !== changeOrderId
+        || mappedCommunication.data?.packageHash !== issueData.packageHash
+        || !mappedCommunication.data?.deliveryReceipt) {
+        throw ledgerInputError('change_order_issue_package_incomplete', 'The issued change-order package and verified delivery receipt no longer form a valid chain.', { changeOrderId }, 409);
       }
       const evidence = normalizeAcceptanceEvidence(payload);
       const pending = this.db.prepare(`
@@ -11017,7 +11433,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           amount: changeOrder.amount,
           taxAmount: changeOrder.taxAmount,
           total: changeOrder.total,
-          currency: changeOrder.currency
+          currency: changeOrder.currency,
+          issueReference: issueData.issueReference,
+          packageHash: issueData.packageHash,
+          sourceBasisHash: issueData.sourceBasisHash,
+          documentId: issueData.documentId,
+          deliveryCommunicationId: issueData.communicationId,
+          deliveredAt: issueData.deliveredAt,
+          providerMessageId: issueData.providerMessageId
         }
       }, { actor, audit: false });
       this.audit({
@@ -11028,7 +11451,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         actor,
         before: changeOrder,
         after: changeOrder,
-        metadata: { approvalId: approval.id, evidenceReference: evidence.evidenceReference }
+        metadata: {
+          approvalId: approval.id,
+          evidenceReference: evidence.evidenceReference,
+          issueReference: issueData.issueReference,
+          packageHash: issueData.packageHash
+        }
       });
       return { changeOrder, approval, replayed: false };
     });
@@ -14998,7 +15426,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     const communication = this.mapCommunication(row);
     const source = communication.data?.source;
-    if (!['quote_issue_package', 'invoice_issue_package', 'credit_note_issue_package', 'handover_issue_package', 'purchase_order_issue_package'].includes(source)) return communication;
+    if (!['quote_issue_package', 'change_order_issue_package', 'invoice_issue_package', 'credit_note_issue_package', 'handover_issue_package', 'purchase_order_issue_package'].includes(source)) return communication;
 
     const attachmentIds = Array.isArray(communication.data?.attachmentDocumentIds)
       ? communication.data.attachmentDocumentIds.filter(Boolean)
@@ -15019,6 +15447,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.code = 'quote_issue_package_attachment_mismatch';
         throw error;
       }
+      return communication;
+    }
+
+    if (source === 'change_order_issue_package') {
+      if (attachmentIds.length !== 1) {
+        throw ledgerInputError(
+          'change_order_issue_package_attachment_invalid',
+          'The change-order delivery draft must retain exactly one immutable package attachment.',
+          { communicationId },
+          409
+        );
+      }
+      const issuePackage = this.getChangeOrderIssuePackage(attachmentIds[0], { audit: false });
+      const changeOrderRow = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?')
+        .get(communication.data?.sourceRecordId, communication.jobId);
+      if (!changeOrderRow) {
+        throw ledgerInputError('change_order_issue_package_source_missing', 'The change-order delivery draft no longer has its source record.', { communicationId }, 409);
+      }
+      const changeOrder = this.mapChangeOrder(changeOrderRow);
+      const issueData = changeOrder.data?.issuePackage || {};
+      if (issuePackage.document.jobId !== communication.jobId
+        || issuePackage.document.data?.sourceRecordId !== communication.data?.sourceRecordId
+        || issuePackage.packageHash !== communication.data?.packageHash
+        || issueData.documentId !== issuePackage.document.id
+        || issueData.communicationId !== communication.id
+        || issueData.packageHash !== communication.data?.packageHash
+        || issueData.sourceBasisHash !== communication.data?.sourceBasisHash
+        || normalizeText(issueData.recipient, '') !== normalizeText(communication.data?.recipient, '')) {
+        throw ledgerInputError(
+          'change_order_issue_package_attachment_mismatch',
+          'The change-order source, recipient, and retained delivery package no longer match.',
+          { communicationId, changeOrderId: changeOrder.id },
+          409
+        );
+      }
+      this.assertChangeOrderIssueCurrent(changeOrder, issuePackage.document.data.snapshot);
       return communication;
     }
 
@@ -15188,6 +15652,74 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       SET status = 'sent', sent_at = ?, data_json = ?, updated_at = ?
       WHERE id = ?
     `).run(sentAt, toJson(data), nowIso(), row.id);
+    if (existing.data?.source === 'change_order_issue_package' && existing.data?.sourceRecordId) {
+      if (!normalizeText(data.deliveryReceipt.providerMessageId, '') && !payload.receipt) {
+        throw ledgerInputError(
+          'change_order_delivery_evidence_required',
+          'Change-order delivery requires a provider message identifier or retained provider receipt.',
+          { communicationId: row.id },
+          400
+        );
+      }
+      const changeOrderRow = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?')
+        .get(existing.data.sourceRecordId, row.job_id);
+      if (!changeOrderRow) {
+        throw ledgerInputError(
+          'change_order_issue_package_source_missing',
+          'The delivered change-order communication is no longer linked to its source record.',
+          { communicationId: row.id, changeOrderId: existing.data.sourceRecordId },
+          409
+        );
+      }
+      const beforeChangeOrder = this.mapChangeOrder(changeOrderRow);
+      if (beforeChangeOrder.status !== 'approved') {
+        throw ledgerInputError(
+          'change_order_not_approved_for_delivery',
+          'Only an internally approved change order can be issued to the client.',
+          { changeOrderId: beforeChangeOrder.id, status: beforeChangeOrder.status },
+          409
+        );
+      }
+      const attachmentId = normalizeList(existing.data?.attachmentDocumentIds)[0];
+      const issuePackage = this.getChangeOrderIssuePackage(attachmentId, { audit: false });
+      this.assertChangeOrderIssueCurrent(beforeChangeOrder, issuePackage.document.data.snapshot);
+      const changeOrderData = beforeChangeOrder.data || {};
+      this.db.prepare("UPDATE change_orders SET status = 'issued', data_json = ?, updated_at = ? WHERE id = ?").run(
+        toJson({
+          ...changeOrderData,
+          issuePackage: {
+            ...(changeOrderData.issuePackage || {}),
+            transportStatus: 'delivered_by_verified_integration',
+            deliveredAt: sentAt,
+            deliveryIntegration: integration,
+            providerMessageId: data.deliveryReceipt.providerMessageId,
+            deliveryReceipt: payload.receipt || null,
+            externalCommitments: 0
+          }
+        }),
+        nowIso(),
+        changeOrderRow.id
+      );
+      const afterChangeOrder = this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(changeOrderRow.id));
+      this.audit({
+        entityType: 'change_order',
+        entityId: changeOrderRow.id,
+        jobId: row.job_id,
+        action: 'issue_change_order',
+        actor: options.actor || 'verified_integration',
+        before: beforeChangeOrder,
+        after: afterChangeOrder,
+        metadata: {
+          communicationId: row.id,
+          issueReference: issuePackage.document.data.issueReference,
+          packageHash: issuePackage.packageHash,
+          integration,
+          providerMessageId: data.deliveryReceipt.providerMessageId,
+          externalCommitments: 0,
+          contractValueChanged: false
+        }
+      });
+    }
     if (existing.data?.source === 'invoice_issue_package' && existing.data?.sourceRecordId) {
       const invoiceRow = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND job_id = ?')
         .get(existing.data.sourceRecordId, row.job_id);
@@ -23812,12 +24344,49 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ORDER BY resolved_at DESC, updated_at DESC
         LIMIT 1
       `).get(targetId);
-      if (changeOrder && approval && changeOrder.status === 'approved') {
+      if (!changeOrder) {
+        throw ledgerInputError('change_order_not_found', 'The change order for this acceptance decision no longer exists.', { changeOrderId: targetId }, 409);
+      }
+      if (!approval) {
+        throw ledgerInputError('change_order_acceptance_approval_missing', 'The approved change-order acceptance decision could not be loaded.', { changeOrderId: targetId }, 409);
+      }
+      if (changeOrder.status !== 'issued') {
+        throw ledgerInputError(
+          'change_order_acceptance_state_invalid',
+          'The change order is no longer in the issued state required by this acceptance decision.',
+          { changeOrderId: targetId, status: changeOrder.status },
+          409
+        );
+      }
+      {
         const acceptance = fromJson(approval.data_json, {});
+        const mappedBefore = this.mapChangeOrder(changeOrder);
+        const issueData = mappedBefore.data?.issuePackage || {};
+        if (!issueData.documentId
+          || issueData.issueReference !== acceptance.issueReference
+          || issueData.packageHash !== acceptance.packageHash
+          || issueData.sourceBasisHash !== acceptance.sourceBasisHash
+          || issueData.communicationId !== acceptance.deliveryCommunicationId) {
+          throw ledgerInputError(
+            'change_order_acceptance_package_mismatch',
+            'The acceptance decision no longer matches the issued change-order package.',
+            { changeOrderId: targetId, approvalId: approval.id },
+            409
+          );
+        }
+        const issuePackage = this.getChangeOrderIssuePackage(issueData.documentId, { audit: false });
+        if (issuePackage.packageHash !== acceptance.packageHash) {
+          throw ledgerInputError(
+            'change_order_acceptance_package_mismatch',
+            'The acceptance decision package checksum no longer matches the retained issue package.',
+            { changeOrderId: targetId, approvalId: approval.id },
+            409
+          );
+        }
         this.db.prepare(`
           UPDATE change_orders
           SET status = 'accepted', data_json = ?, updated_at = ?
-          WHERE id = ? AND status = 'approved'
+          WHERE id = ? AND status = 'issued'
         `).run(toJson({
           ...fromJson(changeOrder.data_json, {}),
           acceptance: {
@@ -23826,7 +24395,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             acceptedAt: acceptance.acceptedAt,
             notes: acceptance.notes || null,
             verifiedBy: approval.resolved_by,
-            verifiedAt: approval.resolved_at
+            verifiedAt: approval.resolved_at,
+            issueReference: acceptance.issueReference,
+            packageHash: acceptance.packageHash,
+            sourceBasisHash: acceptance.sourceBasisHash,
+            documentId: acceptance.documentId,
+            deliveryCommunicationId: acceptance.deliveryCommunicationId,
+            deliveredAt: acceptance.deliveredAt,
+            providerMessageId: acceptance.providerMessageId
           }
         }), timestamp, targetId);
         const commercial = this.recalculateCommercialContractValue(changeOrder.job_id, { captureBaseline: true });
@@ -23838,9 +24414,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           jobId: changeOrder.job_id,
           action: 'accept_change_order_contract',
           actor: approval.resolved_by || 'approval',
-          before: this.mapChangeOrder(changeOrder),
+          before: mappedBefore,
           after: this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId)),
-          metadata: { approvalId: approval.id, commercial }
+          metadata: {
+            approvalId: approval.id,
+            issueReference: acceptance.issueReference,
+            packageHash: acceptance.packageHash,
+            commercial
+          }
         });
       }
     } else if (targetType === 'field_report') {
@@ -31407,6 +31988,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Purchase order ${purchaseOrder.id} failed issue-package verification: ${error.code || error.message}.` });
       }
     }
+    const changeOrdersWithPackages = this.db.prepare(`
+      SELECT * FROM change_orders
+      WHERE data_json LIKE '%"issuePackage"%'
+      ORDER BY created_at
+    `).all();
+    for (const row of changeOrdersWithPackages) {
+      const changeOrder = this.mapChangeOrder(row);
+      const issuePackage = changeOrder.data?.issuePackage || {};
+      try {
+        const document = this.getChangeOrderIssuePackage(issuePackage.documentId, { audit: false });
+        const communication = this.getCommunication(issuePackage.communicationId);
+        if (document.packageHash !== issuePackage.packageHash
+          || document.document.data?.sourceRecordId !== changeOrder.id
+          || communication.data?.source !== 'change_order_issue_package'
+          || communication.data?.sourceRecordId !== changeOrder.id
+          || communication.data?.packageHash !== issuePackage.packageHash
+          || communication.data?.sourceBasisHash !== issuePackage.sourceBasisHash) {
+          throw new Error('package linkage mismatch');
+        }
+        this.assertChangeOrderIssueCurrent(changeOrder, document.document.data.snapshot);
+        const delivered = issuePackage.transportStatus === 'delivered_by_verified_integration';
+        const verifiedDelivery = communication.status === 'sent'
+          && Boolean(communication.data?.deliveryReceipt?.integration)
+          && Boolean(issuePackage.providerMessageId || issuePackage.deliveryReceipt);
+        if (delivered !== verifiedDelivery || (['issued', 'accepted'].includes(changeOrder.status) && !delivered)) {
+          throw new Error('delivery state mismatch');
+        }
+        if (changeOrder.status === 'accepted') {
+          const acceptance = changeOrder.data?.acceptance || {};
+          if (acceptance.issueReference !== issuePackage.issueReference
+            || acceptance.packageHash !== issuePackage.packageHash
+            || acceptance.sourceBasisHash !== issuePackage.sourceBasisHash
+            || acceptance.deliveryCommunicationId !== issuePackage.communicationId) {
+            throw new Error('acceptance package mismatch');
+          }
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Change order ${changeOrder.id} failed issue-package verification: ${error.code || error.message}.` });
+      }
+    }
     const quotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'draft' AND approval_id IS NULL").get().count || 0);
     if (quotesWithoutApproval) issues.push({ severity: 'warning', message: `${quotesWithoutApproval} draft quote(s) have no approval gate.` });
     const siteVisitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_visits WHERE status IN ('confirmed', 'client_confirmed', 'committed', 'approved') AND approval_id IS NULL").get().count || 0);
@@ -33291,16 +33912,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const message = this.db.prepare('SELECT * FROM communication_records WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = message ? this.mapCommunication(message) : null;
       const purchaseOrderIssue = mapped?.data?.source === 'purchase_order_issue_package';
-      primaryEffect = purchaseOrderIssue
-        ? `Approve purchase-order transmission ${mapped.data.issueReference || ''} to ${mapped.data.recipient || 'the retained supplier recipient'}.`
-        : `Approve ${mapped?.channel || data.channel || 'message'} draft: ${mapped?.subject || data.subject || approval.summary || 'client update'}.`;
-      addEffect(purchaseOrderIssue
-        ? 'Authorize the frozen HTML and UBL 2.1 Order attachments for the exact retained recipient.'
-        : 'Mark the outbound communication draft as approved.');
-      addSafeguard(purchaseOrderIssue
-        ? 'Does not transmit the order or create an external supplier commitment without a configured provider receipt.'
-        : 'Does not send the message automatically; sending remains a separate explicit action.');
-      if (purchaseOrderIssue) addSafeguard('The purchase-order source hash, amount, lines, supplier compliance, recipient, and both attachments are rechecked when approval resolves.');
+      const changeOrderIssue = mapped?.data?.source === 'change_order_issue_package';
+      if (purchaseOrderIssue) {
+        primaryEffect = `Approve purchase-order transmission ${mapped.data.issueReference || ''} to ${mapped.data.recipient || 'the retained supplier recipient'}.`;
+        addEffect('Authorize the frozen HTML and UBL 2.1 Order attachments for the exact retained recipient.');
+        addSafeguard('Does not transmit the order or create an external supplier commitment without a configured provider receipt.');
+        addSafeguard('The purchase-order source hash, amount, lines, supplier compliance, recipient, and both attachments are rechecked when approval resolves.');
+      } else if (changeOrderIssue) {
+        primaryEffect = `Approve change-order delivery ${mapped.data.issueReference || ''} to ${mapped.data.recipient || 'the retained client recipient'}.`;
+        addEffect('Authorize the frozen change-order HTML attachment for the exact retained recipient.');
+        addSafeguard('Does not transmit the package, authorize changed work, or alter contract value without a configured provider receipt and later verified acceptance.');
+        addSafeguard('The change-order source hash, scope, amount, schedule impact, recipient, and attachment are rechecked when approval resolves.');
+      } else {
+        primaryEffect = `Approve ${mapped?.channel || data.channel || 'message'} draft: ${mapped?.subject || data.subject || approval.summary || 'client update'}.`;
+        addEffect('Mark the outbound communication draft as approved.');
+        addSafeguard('Does not send the message automatically; sending remains a separate explicit action.');
+      }
       riskLevel = 'high';
       preview.subject = mapped?.subject || data.subject || null;
       preview.channel = mapped?.channel || data.channel || null;
@@ -33311,6 +33938,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         preview.issueReference = mapped.data.issueReference;
         preview.packageHash = mapped.data.packageHash;
         preview.purchaseOrderBasisHash = mapped.data.purchaseOrderBasisHash;
+        preview.attachmentDocumentIds = mapped.data.attachmentDocumentIds || [];
+      }
+      if (changeOrderIssue) {
+        preview.changeOrderId = mapped.data.sourceRecordId;
+        preview.issueReference = mapped.data.issueReference;
+        preview.packageHash = mapped.data.packageHash;
+        preview.sourceBasisHash = mapped.data.sourceBasisHash;
         preview.attachmentDocumentIds = mapped.data.attachmentDocumentIds || [];
       }
     } else if (targetType === 'job_archive') {
@@ -33408,6 +34042,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       primaryEffect = `Verify retained client acceptance of ${mapped?.title || 'the approved change order'}.`;
       addEffect(`Add ${(mapped?.amount ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} net to accepted contract value.`);
       addSafeguard('Internal change-order approval alone does not alter contract value.');
+      addSafeguard('Acceptance is bound to the checksum of the numbered package issued through a verified integration.');
       addSafeguard('Does not notify the client, order materials, commit schedule dates, issue an invoice, or collect payment.');
       riskLevel = 'high';
       preview.title = mapped?.title || null;
@@ -33416,6 +34051,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.currency = mapped?.currency || data.currency || 'EUR';
       preview.evidenceReference = data.evidenceReference || null;
       preview.acceptedAt = data.acceptedAt || null;
+      preview.issueReference = data.issueReference || null;
+      preview.packageHash = data.packageHash || null;
+      preview.sourceBasisHash = data.sourceBasisHash || null;
+      preview.deliveryCommunicationId = data.deliveryCommunicationId || null;
+      preview.providerMessageId = data.providerMessageId || null;
     } else if (targetType === 'quote') {
       const quote = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = quote ? this.mapQuote(quote) : null;

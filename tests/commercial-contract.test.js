@@ -18,6 +18,7 @@ function temporaryLedger(t) {
 function createCommercialJob(ledger) {
   return ledger.createIntake({
     clientName: 'Commercial Contract Client',
+    client: { name: 'Commercial Contract Client', email: 'commercial-contract@example.test' },
     title: 'Commercial contract controls',
     service: 'renovation',
     estimatedCost: 500,
@@ -155,6 +156,30 @@ test('client acceptance alone changes net contract value and preserves revisions
   assert.equal(changeOrder.total, 242);
   ledger.resolveApproval(changeOrder.approvalId, { status: 'approved', resolvedBy: 'internal-approver' });
   assert.equal(ledger.getJobDetail(job.id).contractValue, 1200);
+
+  ledger.updateOrganizationProfile({
+    legalName: 'Commercial Contract Contractor B.V.',
+    registrationNumber: '12345678',
+    vatNumber: 'NL123456789B01',
+    email: 'commercial@contractor.example',
+    address: 'Ledgerstraat 10',
+    postalCode: '3511 AA',
+    city: 'Utrecht',
+    country: 'NL',
+    iban: 'NL91 ABNA 0417 1643 00',
+    defaultPaymentTermsDays: 30,
+    defaultQuoteValidityDays: 30
+  }, { actor: 'owner-profile' });
+  const changePackage = ledger.prepareChangeOrderIssuePackage(job.id, changeOrder.id, {}, { actor: 'office-commercial' });
+  ledger.resolveApproval(changePackage.approval.id, {
+    status: 'approved',
+    resolvedBy: 'delivery-approver',
+    reason: 'Client recipient and exact change-order package verified.'
+  });
+  ledger.recordCommunicationDelivery(changePackage.communication.id, {
+    integration: 'commercial-contract-provider',
+    providerMessageId: 'commercial-change-message-001'
+  }, { actor: 'verified-integration' });
 
   const changeAcceptance = ledger.requestChangeOrderAcceptance(job.id, changeOrder.id, {
     acceptedAt: '2026-07-14T13:00:00.000Z',

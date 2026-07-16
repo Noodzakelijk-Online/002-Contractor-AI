@@ -1046,7 +1046,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '029_purchase_order_issue_packages');
+    assert.equal(migrations.currentVersion, '030_change_order_issue_packages');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1127,12 +1127,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('029_purchase_order_issue_packages'));
+  assert.deepEqual(versions, Array(4).fill('030_change_order_issue_packages'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 29);
+    assert.equal(Number(migrationCount.count), 30);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1277,6 +1277,7 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     const marker = Date.now();
     const job = ledger.createIntake({
       clientName: `Postgres Commercial ${marker}`,
+      client: { name: `Postgres Commercial ${marker}`, email: `postgres-client-${marker}@example.test` },
       title: `Postgres commercial contract ${marker}`,
       service: 'commercial_contract',
       estimatedCost: 400,
@@ -1333,6 +1334,16 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     }, { actor: 'postgres_commercial_test' });
     ledger.resolveApproval(changeOrder.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
     assert.equal(ledger.getJobDetail(job.id).contractValue, 1000);
+    const changePackage = ledger.prepareChangeOrderIssuePackage(job.id, changeOrder.id, {}, { actor: 'postgres_commercial_test' });
+    ledger.resolveApproval(changePackage.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_approver',
+      reason: 'Client recipient and exact change-order package verified.'
+    });
+    ledger.recordCommunicationDelivery(changePackage.communication.id, {
+      integration: 'postgres_test_provider',
+      providerMessageId: `postgres-change-message-${marker}`
+    }, { actor: 'postgres_verified_integration' });
     const changeAcceptance = ledger.requestChangeOrderAcceptance(job.id, changeOrder.id, {
       acceptedAt: '2026-07-14T13:00:00.000Z',
       evidenceReference: `postgres-change-proof-${marker}`
@@ -1622,7 +1633,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '029_purchase_order_issue_packages');
+    assert.equal(ledger.migrationStatus().currentVersion, '030_change_order_issue_packages');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

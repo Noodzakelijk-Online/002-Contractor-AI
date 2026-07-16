@@ -287,7 +287,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '029_purchase_order_issue_packages');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '030_change_order_issue_packages');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -362,6 +362,15 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.communications.outboundDraftOnly, true);
   assert.equal(capabilities.body.capabilities.communications.deliveryReceiptApprovalRequired, true);
   assert.equal(capabilities.body.capabilities.communications.verifiedIntegrationCount, 0);
+  assert.deepEqual(capabilities.body.capabilities.changeControl, {
+    serverCalculatedTotals: true,
+    durableNumbering: true,
+    immutableHtmlPackage: true,
+    deliveryApprovalRequired: true,
+    verifiedProviderReceiptRequired: true,
+    acceptanceBoundToIssuedPackage: true,
+    contractValueChange: 'verified_acceptance_only'
+  });
   assert.equal(capabilities.body.capabilities.invoicing.serverCalculatedTotals, true);
   assert.equal(capabilities.body.capabilities.invoicing.durableNumbering, true);
   assert.equal(capabilities.body.capabilities.invoicing.immutableHtmlPackage, true);
