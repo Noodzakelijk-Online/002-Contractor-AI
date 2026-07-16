@@ -1047,11 +1047,13 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(portfolioSchedule.jobs[0].baseline.id, scheduleBaseline.baseline.id);
     assert.equal(portfolioSchedule.jobs[0].flags.inWindow, true);
     assert.ok(portfolioSchedule.jobs[0].counts.criticalTasks >= 2);
-    assert.ok(detail.audit.some(entry => entry.action === 'transition_task'));
-    assert.ok(detail.audit.some(entry => entry.actor === 'postgres_contract_test'));
-    assert.ok(detail.audit.some(entry => entry.action === 'apply_job_archive'));
-    assert.ok(detail.audit.some(entry => entry.action === 'apply_job_restore'));
-    assert.ok(detail.audit.some(entry => entry.action === 'release_tool_reservation' && entry.actor === 'postgres_contract_test'));
+    assert.ok(detail.audit.length > 0);
+    const fullAudit = ledger.listAudit({ jobId: job.id, limit: 500 });
+    assert.ok(fullAudit.some(entry => entry.action === 'transition_task'));
+    assert.ok(fullAudit.some(entry => entry.actor === 'postgres_contract_test'));
+    assert.ok(fullAudit.some(entry => entry.action === 'apply_job_archive'));
+    assert.ok(fullAudit.some(entry => entry.action === 'apply_job_restore'));
+    assert.ok(fullAudit.some(entry => entry.action === 'release_tool_reservation' && entry.actor === 'postgres_contract_test'));
 
     const opportunity = ledger.createOpportunity({
       title: 'PostgreSQL preconstruction contract',

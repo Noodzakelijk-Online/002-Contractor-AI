@@ -273,7 +273,7 @@ function createBackupFixture(t, suffix = 'success') {
     resolvedBy: 'migration_fixture_approver',
     reason: 'Migration source-linked cost forecast verified.'
   });
-  const costForecast = source.calculateCostForecast(job.id).activeSnapshot;
+  let costForecast = source.calculateCostForecast(job.id).activeSnapshot;
   source.recordProjectMeetingIssue(job.id, projectMeeting.id, {
     deliveryReference: `migration-meeting-receipt:${suffix}`
   }, { actor: 'migration_fixture' });
@@ -420,6 +420,13 @@ function createBackupFixture(t, suffix = 'success') {
     reason: 'Migration receipt identity, assignment, VAT, and project allocation verified.'
   });
   const expenseReceipt = source.getExpense(expenseReceiptRequest.expense.id);
+  const refreshedCostForecastRequest = source.requestCostForecastSnapshot(job.id, {}, { actor: 'migration_fixture' });
+  source.resolveApproval(refreshedCostForecastRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration forecast refreshed after governed expense recognition.'
+  });
+  costForecast = source.calculateCostForecast(job.id).activeSnapshot;
   const custodyTool = source.upsertTool({
     name: `Migration custody lift ${suffix}`,
     category: 'access',
