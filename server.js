@@ -3207,6 +3207,32 @@ app.post('/api/ledger/jobs/:id/budget-lines', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/jobs/:id/cost-forecast', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    forecast: operatingLedger.calculateCostForecast(req.params.id)
+  }));
+});
+
+app.get('/api/ledger/jobs/:id/cost-forecast/snapshots', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    snapshots: operatingLedger.listCostForecastSnapshots(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/cost-forecast/snapshots', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestCostForecastSnapshot(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/billing-milestones', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -4210,6 +4236,7 @@ function operationalExport() {
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
+    costForecastSnapshots: operatingLedger.listAllCostForecastSnapshots({ limit: 5_000 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
@@ -4266,6 +4293,7 @@ function validateOperationalExport(snapshot) {
     'takeoffSheets',
     'takeoffItems',
     'purchaseOrders',
+    'costForecastSnapshots',
     'inspectionTemplates',
     'inspectionChecklistSubmissions'
   ]) {
@@ -4324,6 +4352,7 @@ function validateOperationalExport(snapshot) {
       supplierInvoices: snapshot.supplierInvoices.length,
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
       billingMilestones: snapshot.billingMilestones.length,
+      costForecastSnapshots: Array.isArray(snapshot.costForecastSnapshots) ? snapshot.costForecastSnapshots.length : 0,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
@@ -4982,6 +5011,18 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         verifiedProviderReceiptRequired: true,
         acceptanceBoundToIssuedPackage: true,
         contractValueChange: 'verified_acceptance_only'
+      },
+      costForecasting: {
+        sourceLinked: true,
+        costCodeBreakdown: true,
+        actualSources: ['time_logs', 'expenses', 'approved_supplier_invoices'],
+        commitmentSources: ['issued_purchase_orders', 'authorized_purchase_orders'],
+        doubleCountControl: 'supplier_invoice_reduces_linked_order_commitment',
+        mixedCurrencySnapshots: false,
+        immutableSnapshots: true,
+        approvalRequired: true,
+        sourceCurrentApprovalRequired: true,
+        externalCommitments: 0
       },
       invoicing: {
         serverCalculatedTotals: true,

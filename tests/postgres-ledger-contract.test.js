@@ -1038,15 +1038,56 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(hostedInspectionApproved.status, 'passed');
     assert.equal(hostedInspectionApproved.checklist.submissions[0].status, 'passed');
 
+    const hostedForecastJob = ledger.createIntake({
+      title: 'PostgreSQL cost forecast',
+      client: { name: 'PostgreSQL Forecast Client' },
+      status: 'in_progress',
+      progressPercent: 50,
+      contractValue: 3000,
+      assignAutomatically: false
+    }, { actor: 'postgres_contract_test' });
+    const hostedForecastBudget = ledger.createBudgetLine(hostedForecastJob.id, {
+      status: 'baseline',
+      costCode: 'PG-COST-100',
+      description: 'Hosted cost forecast baseline',
+      budgetAmount: 1500,
+      forecastAmount: 1400
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(hostedForecastBudget.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted cost baseline verified.'
+    });
+    ledger.addTimeLog(hostedForecastJob.id, {
+      workDate: '2026-07-16',
+      hours: 5,
+      rate: 50,
+      costCode: 'PG-COST-100',
+      notes: 'Hosted labor evidence.'
+    }, { actor: 'postgres_contract_test' });
+    const hostedForecast = ledger.calculateCostForecast(hostedForecastJob.id);
+    assert.equal(hostedForecast.ready, true);
+    assert.equal(hostedForecast.summary.actual, 250);
+    assert.equal(hostedForecast.summary.forecast, 1400);
+    const hostedForecastRequest = ledger.requestCostForecastSnapshot(hostedForecastJob.id, {}, { actor: 'postgres_contract_test' });
+    assert.equal(hostedForecastRequest.snapshot.integrityValid, true);
+    ledger.resolveApproval(hostedForecastRequest.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted source-linked cost forecast verified.'
+    });
+    assert.equal(ledger.calculateCostForecast(hostedForecastJob.id).snapshotCurrent, true);
+
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
     assert.ok(dashboard.metrics.documentTransmittals >= 1);
     assert.ok(dashboard.metrics.projectMeetings >= 1);
+    assert.ok(dashboard.metrics.approvedCostForecasts >= 1);
     assert.ok(Array.isArray(dashboard.nextActions));
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '030_change_order_issue_packages');
+    assert.equal(migrations.currentVersion, '031_cost_forecast_snapshots');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1127,12 +1168,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('030_change_order_issue_packages'));
+  assert.deepEqual(versions, Array(4).fill('031_cost_forecast_snapshots'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 30);
+    assert.equal(Number(migrationCount.count), 31);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1633,7 +1674,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '030_change_order_issue_packages');
+    assert.equal(ledger.migrationStatus().currentVersion, '031_cost_forecast_snapshots');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

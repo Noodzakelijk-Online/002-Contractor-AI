@@ -491,8 +491,12 @@
 
 .finance-summary { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .finance-values { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.cost-forecast-risks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.cost-forecast-risks span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 5px 7px; color: #854f13; background: #fff7e8; border: 1px solid #edd7af; border-radius: 4px; font-size: 10px; font-weight: 700; }
+.cost-forecast-risks code { overflow-wrap: anywhere; color: #5b4630; font-size: 10px; }
 .invoice-preview { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 .status-payable_due { color: #94620a; background: #fff1d4; }
+.status-forecast_at_risk { color: #9b3f2f; background: #ffebe6; }
 @media (max-width: 760px) { .finance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.finance-summary div:nth-child(n+3) { border-top: 1px solid #e6ece9; }.finance-summary div:nth-child(odd) { border-left: 0; }.finance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }.invoice-preview { grid-template-columns: 1fr; } }
 
 .work-plan-control { display: grid; gap: 16px; min-width: 0; }

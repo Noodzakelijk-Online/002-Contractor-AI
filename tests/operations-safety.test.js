@@ -124,6 +124,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.match(exported.body.integrity.digest, /^[a-f0-9]{64}$/);
   assert.ok(exported.body.jobs.some(job => job.id === intake.body.job.id));
   assert.ok(Array.isArray(exported.body.billingMilestones));
+  assert.ok(Array.isArray(exported.body.costForecastSnapshots));
   assert.ok(Array.isArray(exported.body.supplierInvoices));
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
   assert.ok(Array.isArray(exported.body.taskDependencies));
@@ -146,6 +147,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.integrity.verified, true);
   assert.equal(exportValidation.body.counts.jobs, exported.body.jobs.length);
   assert.equal(exportValidation.body.counts.billingMilestones, exported.body.billingMilestones.length);
+  assert.equal(exportValidation.body.counts.costForecastSnapshots, exported.body.costForecastSnapshots.length);
   assert.equal(exportValidation.body.counts.supplierInvoices, exported.body.supplierInvoices.length);
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
   assert.equal(exportValidation.body.counts.taskDependencies, exported.body.taskDependencies.length);
@@ -287,7 +289,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '030_change_order_issue_packages');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '031_cost_forecast_snapshots');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -371,6 +373,13 @@ test('operational export and backup are local, auditable maintenance controls', 
     acceptanceBoundToIssuedPackage: true,
     contractValueChange: 'verified_acceptance_only'
   });
+  assert.equal(capabilities.body.capabilities.costForecasting.sourceLinked, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.costCodeBreakdown, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.doubleCountControl, 'supplier_invoice_reduces_linked_order_commitment');
+  assert.equal(capabilities.body.capabilities.costForecasting.immutableSnapshots, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.approvalRequired, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.sourceCurrentApprovalRequired, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.externalCommitments, 0);
   assert.equal(capabilities.body.capabilities.invoicing.serverCalculatedTotals, true);
   assert.equal(capabilities.body.capabilities.invoicing.durableNumbering, true);
   assert.equal(capabilities.body.capabilities.invoicing.immutableHtmlPackage, true);

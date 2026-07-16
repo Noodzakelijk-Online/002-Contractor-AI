@@ -359,6 +359,19 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error('Backup change-order issue constraints are incomplete: idx_change_orders_issue_status.');
         }
       }
+      if (appliedMigrations.has('031_cost_forecast_snapshots')) {
+        for (const table of ['cost_forecast_number_sequences', 'cost_forecast_snapshots']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup cost-forecast schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_cost_forecast_snapshots_job', 'idx_cost_forecast_snapshots_status']) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup cost-forecast constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

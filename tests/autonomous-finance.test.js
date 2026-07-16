@@ -165,3 +165,95 @@ test('autonomous cycle plans approved contract billing before deriving an invoic
     && job.counts.draftInvoices === 1
   ));
 });
+
+test('autonomous cycle freezes a current cost forecast without creating an external commitment', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const intake = await request(baseUrl, '/api/ledger/intake', {
+    method: 'POST',
+    body: JSON.stringify({
+      clientName: 'Autonomous Forecast Client',
+      title: 'Autonomous cost forecast',
+      service: 'commercial renovation',
+      address: 'Singel 12, Amsterdam',
+      status: 'in_progress',
+      progressPercent: 40,
+      estimatedCost: 5000,
+      contractValue: 7500,
+      assignAutomatically: false
+    })
+  });
+  assert.equal(intake.response.status, 201);
+  const jobId = intake.body.job.id;
+  const budget = await request(baseUrl, `/api/ledger/jobs/${jobId}/budget-lines`, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'baseline',
+      costCode: 'AUTO-100',
+      description: 'Autonomous forecast baseline',
+      budgetAmount: 5000,
+      forecastAmount: 4800
+    })
+  });
+  assert.equal(budget.response.status, 201);
+  const budgetApproval = await request(baseUrl, `/api/ledger/approvals/${budget.body.budgetLine.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Forecast QA', reason: 'Budget basis checked.' })
+  });
+  assert.equal(budgetApproval.response.status, 200);
+  const time = await request(baseUrl, `/api/ledger/jobs/${jobId}/time-logs`, {
+    method: 'POST',
+    body: JSON.stringify({ workDate: '2026-07-16', hours: 10, rate: 60, costCode: 'AUTO-100', notes: 'Verified labor.' })
+  });
+  assert.equal(time.response.status, 201);
+
+  const dryRun = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({ dryRun: true, actionTypes: ['prepare_cost_forecast'], jobIds: [jobId] })
+  });
+  assert.equal(dryRun.response.status, 200);
+  const preview = dryRun.body.preview.find(action => action.type === 'prepare_cost_forecast' && action.jobId === jobId);
+  assert.ok(preview);
+  assert.equal(preview.budget, 5000);
+  assert.equal(preview.forecast, 4800);
+
+  const cycle = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({
+      dryRun: false,
+      actor: 'autonomous-forecast-test',
+      actionTypes: ['prepare_cost_forecast'],
+      jobIds: [jobId],
+      maxActions: 1
+    })
+  });
+  assert.equal(cycle.response.status, 200);
+  const applied = cycle.body.applied.find(action => action.type === 'prepare_cost_forecast' && action.jobId === jobId);
+  assert.ok(applied);
+  assert.equal(applied.status, 'pending_approval');
+  assert.match(applied.forecastNumber, /^FC-\d{4}-\d{6}$/);
+  assert.ok(applied.costForecastId);
+  assert.ok(applied.approvalId);
+  assert.equal(cycle.body.summary.externalCommitments, 0);
+
+  const replayGuard = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({ dryRun: true, actionTypes: ['prepare_cost_forecast'], jobIds: [jobId] })
+  });
+  assert.equal(replayGuard.body.preview.length, 0);
+  const approval = await request(baseUrl, `/api/ledger/approvals/${applied.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Forecast QA', reason: 'Current source-linked forecast checked.' })
+  });
+  assert.equal(approval.response.status, 200);
+
+  const forecast = await request(baseUrl, `/api/ledger/jobs/${jobId}/cost-forecast`);
+  assert.equal(forecast.response.status, 200);
+  assert.equal(forecast.body.forecast.snapshotCurrent, true);
+  assert.equal(forecast.body.forecast.activeSnapshot.id, applied.costForecastId);
+  assert.equal(forecast.body.forecast.activeSnapshot.data.approval.approvalId, applied.approvalId);
+});

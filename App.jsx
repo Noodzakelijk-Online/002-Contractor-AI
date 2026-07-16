@@ -109,6 +109,7 @@ const FINANCE_ACTION_LABELS = {
   prepare_finance_handoff: 'Finance handoff',
   record_time_expense: 'Record costs',
   create_budget_line: 'Budget baseline',
+  prepare_cost_forecast: 'Freeze forecast',
   create_billing_milestone: 'Billing milestone',
   create_draw_request: 'Progress draw',
   request_lien_waiver: 'Waiver request',
@@ -2924,7 +2925,7 @@ function FinanceWorkspace({
       <div className="panel-heading">
         <div>
           <h2>Finance readiness</h2>
-          <p>Review earned value, costs, receivables, supplier payables, and approval gates from the retained ledger.</p>
+          <p>Review source-linked cost forecasts, commitments, receivables, supplier payables, and approval gates.</p>
         </div>
         <span className="count-badge">{rows.length}</span>
       </div>
@@ -2950,6 +2951,14 @@ function FinanceWorkspace({
           <strong>{currency.format(summary.supplierPayableValue || 0)}</strong>
         </div>
         <div>
+          <span>Forecast cost</span>
+          <strong>{currency.format(summary.forecastCostValue || 0)}</strong>
+        </div>
+        <div>
+          <span>Forecast margin</span>
+          <strong>{currency.format(summary.forecastMarginValue || 0)}</strong>
+        </div>
+        <div>
           <span>Approvals</span>
           <strong>{summary.pendingApprovals || 0}</strong>
         </div>
@@ -2957,6 +2966,8 @@ function FinanceWorkspace({
       <div className="finance-list">
         {rows.map((item) => {
           const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
+          const costForecast = item.costForecast || {}
+          const forecastSummary = costForecast.summary || {}
           const canAct = canCoordinate && !item.flags?.approvalRequired
           const draftInvoiceAction = canAct ? item.nextActions?.find((action) => action.type === 'draft_invoice') : null
           const canDraftInvoice = Boolean(draftInvoiceAction) && !item.counts?.draftInvoices
@@ -2968,12 +2979,18 @@ function FinanceWorkspace({
           const issuePackage = item.latest?.invoice?.data?.issuePackage
           const creditNotePackage = item.latest?.creditNote?.data?.issuePackage
           const purchaseOrderPackage = item.latest?.purchaseOrder?.issuePackage
+          const forecastAction = canAct ? item.nextActions?.find((action) => action.type === 'prepare_cost_forecast') : null
+          const forecastRiskLines = (costForecast.lines || [])
+            .filter((line) => line.overBudget || line.unbudgeted)
+            .sort((left, right) => Number(left.variance || 0) - Number(right.variance || 0))
+            .slice(0, 3)
           const financeActions = canAct
             ? item.nextActions
                 ?.filter(
                   (action) =>
                     action.type !== 'review_finance_approval' &&
                     action.type !== 'draft_invoice' &&
+                    action.type !== 'prepare_cost_forecast' &&
                     !['prepare_invoice_package', 'prepare_credit_note_package', 'prepare_purchase_order_package'].includes(action.type) &&
                     FINANCE_ACTION_LABELS[action.type],
                 )
@@ -3004,10 +3021,54 @@ function FinanceWorkspace({
                     Supplier payable <strong>{currency.format(item.money?.supplierPayableValue || 0)}</strong>
                   </span>
                   <span>
-                    Margin net <strong>{currency.format(item.money?.projectedMargin || 0)}</strong>
+                    Cost budget <strong>{currency.format(forecastSummary.budget || 0)}</strong>
+                  </span>
+                  <span>
+                    Actual cost <strong>{currency.format(forecastSummary.actual || 0)}</strong>
+                  </span>
+                  <span>
+                    Issued commitments <strong>{currency.format(forecastSummary.externalCommitment || 0)}</strong>
+                  </span>
+                  <span>
+                    Authorized, not issued <strong>{currency.format(forecastSummary.authorizedNotIssued || 0)}</strong>
+                  </span>
+                  <span>
+                    Forecast cost <strong>{currency.format(forecastSummary.forecast || 0)}</strong>
+                  </span>
+                  <span>
+                    Cost variance <strong>{currency.format(forecastSummary.budgetVariance || 0)}</strong>
+                  </span>
+                  <span>
+                    Forecast margin <strong>{currency.format(forecastSummary.projectedMargin || 0)}</strong>
                   </span>
                 </div>
+                {forecastRiskLines.length ? (
+                  <div className="cost-forecast-risks" aria-label={`${item.jobTitle} cost forecast risks`}>
+                    {forecastRiskLines.map((line) => (
+                      <span key={line.costCode}>
+                        <code>{line.costCode}</code>
+                        {line.unbudgeted ? 'Unbudgeted' : `${currency.format(Math.abs(line.variance || 0))} over`}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="finance-flags">
+                  {costForecast.activeSnapshot ? (
+                    <span className={`tag ${costForecast.snapshotCurrent ? 'tag-green' : 'tag-amber'}`}>
+                      {costForecast.activeSnapshot.forecastNumber} {costForecast.snapshotCurrent ? 'current' : 'stale'}
+                    </span>
+                  ) : null}
+                  {costForecast.pendingSnapshot ? (
+                    <span className="tag tag-amber">{costForecast.pendingSnapshot.forecastNumber} awaiting approval</span>
+                  ) : null}
+                  {forecastSummary.costPerformanceIndex != null ? (
+                    <span className={`tag ${forecastSummary.costPerformanceIndex >= 1 ? 'tag-green' : 'tag-amber'}`}>
+                      CPI {Number(forecastSummary.costPerformanceIndex).toFixed(2)}
+                    </span>
+                  ) : null}
+                  {forecastSummary.unbudgetedCostCodes ? (
+                    <span className="tag tag-amber">{forecastSummary.unbudgetedCostCodes} unbudgeted cost code{forecastSummary.unbudgetedCostCodes === 1 ? '' : 's'}</span>
+                  ) : null}
                   {item.counts?.billingMilestones ? (
                     <span className="tag tag-green">
                       {item.counts.billingMilestones} billing milestone{item.counts.billingMilestones === 1 ? '' : 's'}
@@ -3116,6 +3177,17 @@ function FinanceWorkspace({
                       : prepareAction.type === 'prepare_purchase_order_package'
                         ? 'Prepare order'
                         : 'Prepare package'}
+                  </button>
+                ) : null}
+                {forecastAction ? (
+                  <button
+                    className="secondary-button"
+                    aria-label={`${forecastAction.label} for ${job.title}`}
+                    disabled={submitting}
+                    onClick={() => onAction(item, forecastAction)}
+                  >
+                    <Gauge size={16} />
+                    {forecastAction.label}
                   </button>
                 ) : null}
                 {issuePackage?.htmlDocumentId ? (
@@ -10271,6 +10343,31 @@ function App() {
     }
   }
 
+  async function requestCostForecastSnapshot(item) {
+    if (!item?.jobId) {
+      setError('The cost forecast is not linked to a retained job.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}/cost-forecast/snapshots`, {
+        method: 'POST',
+        body: JSON.stringify({ actor: 'office_operator' }),
+      })
+      notify(
+        result.replayed
+          ? `Cost forecast ${result.snapshot?.forecastNumber || ''} is already awaiting approval.`
+          : `Cost forecast ${result.snapshot?.forecastNumber || ''} retained from the current cost-code evidence. Approval is required before it becomes the active forecast.`,
+      )
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function openFinanceControl(item, action) {
     if (!item?.jobId || !action?.type || !FINANCE_ACTION_LABELS[action.type]) {
       setError('The finance action is not linked to a supported ledger workflow.')
@@ -10283,6 +10380,10 @@ function App() {
       }
       setFinanceOrderDelivery({ item, action })
       setFinanceOrderDeliveryDraft(emptyBidOrderDeliveryDraft())
+      return
+    }
+    if (action.type === 'prepare_cost_forecast') {
+      void requestCostForecastSnapshot(item)
       return
     }
     const paymentAmount = Number(

@@ -2367,6 +2367,84 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   expect(mobileGeometry.workspaceWidth).toBeLessThanOrEqual(mobileGeometry.workspaceClientWidth);
 });
 
+test('finance workspace freezes, approves, and invalidates a source-linked cost forecast', async ({ page, request }) => {
+  const intake = await createBrowserJob(request, `Browser cost forecast ${Date.now()}`, {
+    status: 'in_progress',
+    progressPercent: 50,
+    estimatedCost: 3000,
+    contractValue: 5000,
+    assignAutomatically: false
+  });
+  const budgetResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/budget-lines`, {
+    data: {
+      status: 'baseline',
+      costCode: 'BROWSER-FC-100',
+      description: 'Browser cost forecast baseline',
+      budgetAmount: 3000,
+      forecastAmount: 2800
+    }
+  });
+  expect(budgetResponse.ok()).toBeTruthy();
+  const budget = await budgetResponse.json();
+  const budgetApproval = await request.post(`/api/ledger/approvals/${budget.budgetLine.approval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser forecast approver', reason: 'Cost-code baseline checked.' }
+  });
+  expect(budgetApproval.ok()).toBeTruthy();
+  const costsResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/finance-costs`, {
+    data: {
+      timeLog: { workDate: '2026-07-16', hours: 8, rate: 50, costCode: 'BROWSER-FC-100', notes: 'Verified browser labor.' },
+      expense: { amount: 200, category: 'materials', costCode: 'BROWSER-FC-100', vendor: 'Bouwmaat', receiptRef: 'BROWSER-FC-200' }
+    }
+  });
+  expect(costsResponse.ok()).toBeTruthy();
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Finance', exact: true }).click();
+  const finance = page.getByTestId('finance-workspace');
+  let row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await expect(row).toContainText('Cost budget');
+  await expect(row).toContainText('Actual cost');
+  await expect(row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` })).toBeVisible();
+  await row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` }).click();
+  await expect(page.getByText(/Cost forecast FC-\d{4}-\d{6} retained from the current cost-code evidence/)).toBeVisible();
+
+  const detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  expect(detailResponse.ok()).toBeTruthy();
+  const detail = await detailResponse.json();
+  const forecastApproval = detail.job.approvals.find(item => item.targetType === 'cost_forecast' && item.status === 'pending');
+  expect(forecastApproval).toBeTruthy();
+  const approvalResponse = await request.post(`/api/ledger/approvals/${forecastApproval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser forecast approver', reason: 'Current source evidence and margin checked.' }
+  });
+  expect(approvalResponse.ok()).toBeTruthy();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await expect(row).toContainText(/FC-\d{4}-\d{6} current/);
+  await expect(row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` })).toHaveCount(0);
+
+  const changedCost = await request.post(`/api/ledger/jobs/${intake.job.id}/expenses`, {
+    data: { status: 'submitted', amount: 75, category: 'materials', costCode: 'BROWSER-FC-100', vendor: 'Bouwmaat', receiptRef: 'BROWSER-FC-REVISION' }
+  });
+  expect(changedCost.ok()).toBeTruthy();
+  await page.getByRole('button', { name: 'Refresh data' }).click();
+  row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await expect(row).toContainText(/FC-\d{4}-\d{6} stale/);
+  await expect(row.getByRole('button', { name: `Freeze revised cost forecast for ${intake.job.title}` })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const geometry = await page.evaluate(() => {
+    const workspace = document.querySelector('[data-testid="finance-workspace"]');
+    return {
+      pageWidth: document.body.scrollWidth,
+      viewportWidth: window.innerWidth,
+      workspaceWidth: workspace?.scrollWidth || 0,
+      workspaceClientWidth: workspace?.clientWidth || 0
+    };
+  });
+  expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+  expect(geometry.workspaceWidth).toBeLessThanOrEqual(geometry.workspaceClientWidth);
+});
+
 test('job workspace remains horizontally contained on a mobile field viewport', async ({ page, request }) => {
   const intake = await createBrowserJob(request, 'Mobile browser job workspace');
   await page.setViewportSize({ width: 390, height: 844 });

@@ -56,6 +56,16 @@ test('finance dashboard completes standalone purchase orders through approved im
   assert.match(dashboardSource, /This records an existing delivery receipt; it does not contact the supplier or initiate payment/);
 });
 
+test('finance dashboard freezes server-derived cost forecasts through approval-backed snapshots', () => {
+  assert.match(dashboardSource, /prepare_cost_forecast/);
+  assert.match(dashboardSource, /\/cost-forecast\/snapshots`/);
+  assert.match(dashboardSource, /Forecast cost/);
+  assert.match(dashboardSource, /Forecast margin/);
+  assert.match(dashboardSource, /costForecast\.snapshotCurrent/);
+  assert.match(dashboardSource, /awaiting approval/);
+  assert.match(dashboardSource, /Cost forecast .* retained from the current cost-code evidence/);
+});
+
 test('field updates use a bounded operator-scoped IndexedDB outbox only for interrupted requests', () => {
   assert.match(outboxSource, /const DATABASE_VERSION = 2/);
   assert.match(outboxSource, /indexedDB\.open\(DATABASE_NAME, DATABASE_VERSION\)/);

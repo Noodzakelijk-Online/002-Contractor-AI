@@ -166,6 +166,18 @@ function createBackupFixture(t, suffix = 'success') {
     resolvedBy: 'migration_fixture_approver',
     reason: 'Migration supplier payment evidence verified.'
   });
+  const costBudget = source.createBudgetLine(job.id, {
+    status: 'baseline',
+    costCode: 'MIG-COST-100',
+    description: 'Migration cost forecast baseline',
+    budgetAmount: 2000,
+    forecastAmount: 1800
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(costBudget.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration cost baseline verified.'
+  });
   const billingMilestone = source.createBillingMilestone(job.id, {
     title: 'Migration staged billing control',
     amount: 123456.78,
@@ -240,6 +252,13 @@ function createBackupFixture(t, suffix = 'success') {
     resolvedBy: 'migration_fixture_approver',
     reason: 'Updated migration work plan verified after meeting action approval.'
   });
+  const costForecastRequest = source.requestCostForecastSnapshot(job.id, {}, { actor: 'migration_fixture' });
+  source.resolveApproval(costForecastRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration source-linked cost forecast verified.'
+  });
+  const costForecast = source.calculateCostForecast(job.id).activeSnapshot;
   source.recordProjectMeetingIssue(job.id, projectMeeting.id, {
     deliveryReference: `migration-meeting-receipt:${suffix}`
   }, { actor: 'migration_fixture' });
@@ -352,7 +371,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
+  return { backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -442,7 +461,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '030_change_order_issue_packages');
+  assert.equal(migration.migrationVersion, '031_cost_forecast_snapshots');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -480,6 +499,13 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.ok(detail.taskDependencies.some(item => item.id === fixture.taskDependency.id && item.status === 'active'));
     assert.equal(detail.scheduleControl.activeBaseline.id, fixture.scheduleBaseline.baseline.id);
     assert.equal(detail.scheduleControl.baselineCurrent, true);
+    const migratedForecast = hosted.getCostForecastSnapshot(fixture.costForecast.id, { verifyCurrent: true });
+    assert.equal(migratedForecast.forecastNumber, fixture.costForecast.forecastNumber);
+    assert.equal(migratedForecast.status, 'approved');
+    assert.equal(migratedForecast.integrityValid, true);
+    assert.equal(migratedForecast.sourceCurrent, true);
+    assert.equal(migratedForecast.snapshotHash, fixture.costForecast.snapshotHash);
+    assert.ok(detail.costForecastSnapshots.some(item => item.id === fixture.costForecast.id));
     const migratedDocument = detail.documents.find(item => item.id === fixture.document.id);
     assert.match(migratedDocument.storageRef, /^s3:\/\/migration-test\/migrated-1-/);
     assert.notEqual(migratedDocument.storageRef, fixture.localStorageRef);

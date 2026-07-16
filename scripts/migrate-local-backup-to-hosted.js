@@ -232,6 +232,9 @@ const IMMUTABLE_ISSUE_PACKAGE_TYPES = new Set([
   'invoice_ubl_package',
   'credit_note_issue_package',
   'credit_note_ubl_package',
+  'purchase_order_issue_package',
+  'purchase_order_ubl_package',
+  'change_order_issue_package',
   'handover_issue_package'
 ]);
 
