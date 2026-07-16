@@ -163,7 +163,9 @@ test('job workspace exposes approval-safe commercial drafting and acceptance evi
   assert.match(dashboardSource, /Contract value remains unchanged until client acceptance is verified/);
   assert.match(dashboardSource, /Internal change-order approval alone does not alter contract value|internal approval request/);
   assert.match(dashboardSource, /commercialDialogOpenerRef\.current = document\.activeElement/);
-  assert.match(dashboardSource, /requestAnimationFrame\(\(\) => opener\?\.focus\?\.\(\)\)/);
+  assert.match(dashboardSource, /commercialDialogReturnFocusRef = useRef\(false\)/);
+  assert.match(dashboardSource, /if \(opener\?\.isConnected && !opener\.disabled\) opener\.focus\(\)/);
+  assert.match(dashboardSource, /\[commercialAcceptance, commercialDraftMode, submitting\]/);
   assert.match(dashboardSource, /if \(selectedJobId\) closeJobWorkspace\(\)/);
 });
 
