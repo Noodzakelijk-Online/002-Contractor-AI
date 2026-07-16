@@ -2471,6 +2471,22 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON takeoff_items(cost_code, category);
       `);
     }
+  },
+  {
+    version: '028_bid_commitment_bridge',
+    description: 'Bind an approved preferred bid to one tamper-evident, approval-gated project purchasing commitment.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE bid_packages ADD COLUMN purchase_order_id TEXT REFERENCES purchase_orders(id) ON DELETE SET NULL;
+        ALTER TABLE bid_packages ADD COLUMN commitment_hash TEXT;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bid_packages_purchase_order
+          ON bid_packages(purchase_order_id)
+          WHERE purchase_order_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_bid_packages_commitment
+          ON bid_packages(job_id, status, purchase_order_id, updated_at DESC);
+      `);
+    }
   }
 ];
 
@@ -5363,6 +5379,45 @@ class ContractorOperatingLedger {
     };
   }
 
+  bidCommitmentSnapshot(bidPackage, terms = {}) {
+    const participant = bidPackage?.selectedParticipant;
+    if (!bidPackage || !participant) return null;
+    return {
+      package: {
+        id: bidPackage.id,
+        packageNumber: bidPackage.packageNumber,
+        opportunityId: bidPackage.opportunityId,
+        jobId: bidPackage.jobId,
+        title: bidPackage.title,
+        trade: bidPackage.trade,
+        scope: bidPackage.scope,
+        currency: bidPackage.currency,
+        comparisonHash: bidPackage.comparisonHash,
+        selectionApprovalId: bidPackage.data?.selection?.approvalId || null
+      },
+      selectedReturn: {
+        participantId: participant.id,
+        tradePartnerId: participant.tradePartnerId,
+        currency: participant.currency,
+        netAmount: participant.netAmount,
+        taxRate: participant.taxRate,
+        taxAmount: participant.taxAmount,
+        total: participant.total,
+        receivedAt: participant.receivedAt,
+        validUntil: participant.validUntil,
+        durationDays: participant.durationDays,
+        evidenceReference: participant.evidenceReference,
+        exclusions: participant.exclusions,
+        qualifications: participant.qualifications
+      },
+      terms: {
+        requiredBy: terms.requiredBy || null,
+        costCode: terms.costCode || 'SUBCONTRACT',
+        notes: terms.notes || null
+      }
+    };
+  }
+
   enrichBidPackage(row, participants = []) {
     const bidPackage = this.mapBidPackage(row);
     const returned = participants.filter(participant => ['returned', 'selected', 'not_selected'].includes(participant.status));
@@ -5372,10 +5427,43 @@ class ContractorOperatingLedger {
     const averageTotal = totals.length ? roundMoney(totals.reduce((sum, total) => sum + total, 0) / totals.length) : 0;
     const openStatus = ['draft', 'open_for_returns', 'under_review', 'pending_selection_approval'].includes(bidPackage.status);
     const overdue = Boolean(openStatus && bidPackage.dueAt && Date.parse(bidPackage.dueAt) < Date.now());
+    const selectedParticipant = participants.find(participant => participant.id === bidPackage.selectedBidParticipantId) || null;
+    const purchaseOrderRow = bidPackage.purchaseOrderId
+      ? this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(bidPackage.purchaseOrderId)
+      : null;
+    const purchaseOrder = purchaseOrderRow ? this.mapPurchaseOrder(purchaseOrderRow) : null;
+    const source = purchaseOrder?.data?.source;
+    const expectedCommitmentHash = selectedParticipant && source?.terms
+      ? sha256Json(this.bidCommitmentSnapshot({ ...bidPackage, selectedParticipant }, source.terms))
+      : null;
+    const commitmentIntegrityValid = purchaseOrder
+      ? Boolean(
+        bidPackage.commitmentHash
+        && expectedCommitmentHash === bidPackage.commitmentHash
+        && source?.type === 'bid_package_commitment'
+        && source?.bidPackageId === bidPackage.id
+        && source?.participantId === selectedParticipant?.id
+        && source?.commitmentHash === bidPackage.commitmentHash
+        && purchaseOrder.jobId === bidPackage.jobId
+        && purchaseOrder.tradePartnerId === selectedParticipant?.tradePartnerId
+        && roundMoney(purchaseOrder.amount) === roundMoney(selectedParticipant?.netAmount)
+        && purchaseOrder.currency === selectedParticipant?.currency
+      )
+      : null;
     return {
       ...bidPackage,
       participants,
-      selectedParticipant: participants.find(participant => participant.id === bidPackage.selectedBidParticipantId) || null,
+      selectedParticipant,
+      commitment: purchaseOrder ? {
+        purchaseOrder,
+        purchaseOrderId: purchaseOrder.id,
+        approvalId: purchaseOrder.approvalId,
+        status: purchaseOrder.status,
+        integrityValid: commitmentIntegrityValid,
+        spendAuthorized: purchaseOrder.data?.spendAuthorized === true,
+        awardIssued: purchaseOrder.data?.awardIssued === true,
+        externalCommitments: Number(purchaseOrder.data?.externalCommitments || 0)
+      } : null,
       comparison: {
         invited: participants.length,
         returned: returned.length,
@@ -5390,7 +5478,10 @@ class ContractorOperatingLedger {
         noReturns: returned.length === 0,
         singleSource: returned.length === 1,
         approvalRequired: bidPackage.status === 'pending_selection_approval',
-        selected: bidPackage.status === 'selected'
+        selected: bidPackage.status === 'selected',
+        commitmentPending: purchaseOrder?.status === 'pending_approval',
+        commitmentReady: ['approved', 'ready_to_order'].includes(purchaseOrder?.status),
+        commitmentRejected: ['rejected', 'cancelled'].includes(purchaseOrder?.status)
       }
     };
   }
@@ -5456,6 +5547,11 @@ class ContractorOperatingLedger {
   getBidPackage(bidPackageId) {
     const row = this.requireBidPackage(bidPackageId);
     return this.enrichBidPackage(row, this.listBidPackageParticipants({ bidPackageId, limit: 500 }));
+  }
+
+  getBidPackageByPurchaseOrder(purchaseOrderId) {
+    const row = this.db.prepare('SELECT id FROM bid_packages WHERE purchase_order_id = ?').get(purchaseOrderId);
+    return row ? this.getBidPackage(row.id) : null;
   }
 
   createBidPackage(opportunityId, payload = {}, options = {}) {
@@ -5771,6 +5867,250 @@ class ContractorOperatingLedger {
       metadata: { approvalId: approvalRow.id, participantId: participant.id, tradePartnerId: partner.id, externalCommitments: 0, spendAuthorized: false }
     });
     return after;
+  }
+
+  assertBidPackageCommitmentCurrent(purchaseOrder) {
+    const data = fromJson(purchaseOrder?.data_json, purchaseOrder?.data || {});
+    const source = data.source;
+    if (source?.type !== 'bid_package_commitment') return null;
+    const bidPackage = this.getBidPackage(source.bidPackageId);
+    if (
+      bidPackage.status !== 'selected'
+      || bidPackage.purchaseOrderId !== purchaseOrder.id
+      || bidPackage.selectedParticipant?.id !== source.participantId
+      || bidPackage.commitment?.integrityValid !== true
+    ) {
+      throw ledgerInputError(
+        'bid_commitment_integrity_failed',
+        'The preferred-bidder commitment no longer matches its retained package, selection, or purchase-order snapshot.',
+        { bidPackageId: bidPackage.id, purchaseOrderId: purchaseOrder.id },
+        409
+      );
+    }
+    if (bidPackage.selectedParticipant.validUntil && Date.parse(bidPackage.selectedParticipant.validUntil) < Date.now()) {
+      throw ledgerInputError(
+        'bid_commitment_return_expired',
+        'The selected bid return expired before commitment approval. Retain renewed return evidence and rebuild the commitment.',
+        { bidPackageId: bidPackage.id, validUntil: bidPackage.selectedParticipant.validUntil },
+        409
+      );
+    }
+    return bidPackage;
+  }
+
+  recordBidPackageCommitmentDecision(purchaseOrderId, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM bid_packages WHERE purchase_order_id = ?').get(purchaseOrderId);
+    if (!row) return null;
+    const before = this.getBidPackage(row.id);
+    const timestamp = options.timestamp || nowIso();
+    const actor = options.actor || 'approval';
+    const purchaseOrder = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(purchaseOrderId);
+    const purchaseOrderData = fromJson(purchaseOrder?.data_json, {});
+    const spendAuthorized = status === 'approved';
+    const decision = {
+      status,
+      approvalId: purchaseOrder?.approval_id || null,
+      resolvedAt: timestamp,
+      resolvedBy: actor,
+      reason: options.reason || null
+    };
+    this.db.prepare('UPDATE purchase_orders SET data_json = ?, updated_at = ? WHERE id = ?').run(
+      toJson({
+        ...purchaseOrderData,
+        commitmentDecision: decision,
+        spendAuthorized,
+        awardIssued: false,
+        externalCommitments: 0
+      }),
+      timestamp,
+      purchaseOrderId
+    );
+    const packageData = fromJson(row.data_json, {});
+    this.db.prepare('UPDATE bid_packages SET data_json = ?, updated_at = ? WHERE id = ?').run(
+      toJson({
+        ...packageData,
+        commitment: {
+          ...(packageData.commitment || {}),
+          decision,
+          spendAuthorized,
+          awardIssued: false,
+          externalCommitments: 0
+        },
+        spendAuthorized,
+        externalCommitments: 0
+      }),
+      timestamp,
+      row.id
+    );
+    const after = this.getBidPackage(row.id);
+    this.audit({
+      entityType: 'bid_package',
+      entityId: row.id,
+      jobId: row.job_id,
+      action: `${status}_bid_package_commitment`,
+      actor,
+      before,
+      after,
+      metadata: {
+        purchaseOrderId,
+        approvalId: purchaseOrder?.approval_id || null,
+        commitmentHash: row.commitment_hash,
+        spendAuthorized,
+        awardIssued: false,
+        externalCommitments: 0
+      }
+    });
+    return after;
+  }
+
+  createBidPackageCommitment(bidPackageId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getBidPackage(bidPackageId);
+      if (before.status !== 'selected' || !before.selectedParticipant) {
+        throw ledgerInputError('bid_commitment_selection_required', 'Approve one preferred bidder before preparing a purchasing commitment.', { bidPackageId }, 409);
+      }
+      if (!before.jobId) {
+        throw ledgerInputError('bid_commitment_job_required', 'Convert the opportunity to a retained job before preparing a purchasing commitment.', { bidPackageId }, 409);
+      }
+      this.requireJob(before.jobId);
+      const participant = before.selectedParticipant;
+      if (participant.status !== 'selected' || !(participant.netAmount > 0)) {
+        throw ledgerInputError('bid_commitment_return_invalid', 'The selected bid return is not available as a positive net commitment basis.', { participantId: participant.id }, 409);
+      }
+      const selection = before.data?.selection || {};
+      const comparisonHash = sha256Json(this.bidComparisonSnapshot(bidPackageId, {
+        bidParticipantId: participant.id,
+        rationale: selection.rationale
+      }));
+      if (!before.comparisonHash || comparisonHash !== before.comparisonHash || comparisonHash !== selection.comparisonHash) {
+        throw ledgerInputError('bid_commitment_comparison_changed', 'The approved bid comparison no longer matches the retained selection.', { bidPackageId }, 409);
+      }
+      const partner = this.getTradePartner(participant.tradePartnerId);
+      if (!partner.compliance.compliant) {
+        throw ledgerInputError('bid_commitment_partner_compliance_required', 'Current trade-partner compliance evidence is required before preparing a commitment.', { tradePartnerId: partner.id, compliance: partner.compliance }, 409);
+      }
+      if (participant.validUntil && Date.parse(participant.validUntil) < Date.now()) {
+        throw ledgerInputError('bid_commitment_return_expired', 'The selected bid return has expired. Retain renewed return evidence before preparing a commitment.', { validUntil: participant.validUntil }, 409);
+      }
+      const requiredByInput = normalizeText(payload.requiredBy || payload.required_by, '');
+      const requiredByDate = new Date(requiredByInput);
+      if (!requiredByInput || Number.isNaN(requiredByDate.getTime()) || requiredByDate.getTime() <= Date.now()) {
+        throw ledgerInputError('bid_commitment_required_by_invalid', 'Commitment preparation requires a valid future required-by date.');
+      }
+      const costCode = normalizeText(payload.costCode || payload.cost_code, 'SUBCONTRACT');
+      if (costCode.length < 2 || costCode.length > 80) {
+        throw ledgerInputError('bid_commitment_cost_code_invalid', 'Commitment cost code must contain between 2 and 80 characters.');
+      }
+      const notes = normalizeText(payload.notes, '');
+      if (notes.length > 4000) throw ledgerInputError('bid_commitment_notes_too_long', 'Commitment notes must be 4,000 characters or fewer.');
+      const terms = { requiredBy: requiredByDate.toISOString(), costCode, notes: notes || null };
+      const commitmentHash = sha256Json(this.bidCommitmentSnapshot(before, terms));
+
+      let priorPurchaseOrderId = null;
+      if (before.purchaseOrderId) {
+        const retained = before.commitment?.purchaseOrder;
+        if (!retained || before.commitment.integrityValid !== true) {
+          throw ledgerInputError('bid_commitment_integrity_failed', 'The retained purchasing commitment failed source verification.', { bidPackageId }, 409);
+        }
+        if (!['rejected', 'cancelled'].includes(retained.status)) {
+          if (before.commitmentHash !== commitmentHash) {
+            throw ledgerInputError('bid_commitment_terms_changed', 'This package already has a commitment with different retained terms.', { bidPackageId, purchaseOrderId: retained.id }, 409);
+          }
+          return { replayed: true, bidPackage: before, purchaseOrder: retained, approval: retained.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(retained.approvalId)) : null };
+        }
+        priorPurchaseOrderId = retained.id;
+      }
+
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const source = {
+        type: 'bid_package_commitment',
+        bidPackageId,
+        participantId: participant.id,
+        selectionApprovalId: selection.approvalId,
+        comparisonHash,
+        commitmentHash,
+        terms
+      };
+      const purchaseOrder = this.createPurchaseOrder(before.jobId, {
+        status: 'ready_to_order',
+        requiresApproval: true,
+        tradePartnerId: partner.id,
+        supplier: partner.name,
+        amount: participant.netAmount,
+        currency: participant.currency,
+        requiredBy: terms.requiredBy,
+        notes: terms.notes || `Prepared from selected bid package ${before.packageNumber}.`,
+        items: [{
+          name: `${before.packageNumber} / ${before.title}`,
+          description: before.scope,
+          quantity: 1,
+          unit: 'package',
+          unitCost: participant.netAmount,
+          costCode
+        }]
+      }, { actor, source });
+      const timestamp = nowIso();
+      if (priorPurchaseOrderId) {
+        const prior = this.db.prepare('SELECT data_json FROM purchase_orders WHERE id = ?').get(priorPurchaseOrderId);
+        this.db.prepare('UPDATE purchase_orders SET data_json = ?, updated_at = ? WHERE id = ?').run(
+          toJson({ ...fromJson(prior?.data_json, {}), supersededBy: purchaseOrder.id, supersededAt: timestamp }),
+          timestamp,
+          priorPurchaseOrderId
+        );
+      }
+      const priorIds = [...new Set([...(before.data?.commitment?.priorPurchaseOrderIds || []), priorPurchaseOrderId].filter(Boolean))];
+      this.db.prepare(`
+        UPDATE bid_packages
+        SET purchase_order_id = ?, commitment_hash = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'selected'
+      `).run(
+        purchaseOrder.id,
+        commitmentHash,
+        toJson({
+          ...before.data,
+          commitment: {
+            purchaseOrderId: purchaseOrder.id,
+            approvalId: purchaseOrder.approval?.id || null,
+            commitmentHash,
+            preparedAt: timestamp,
+            preparedBy: actor,
+            terms,
+            priorPurchaseOrderIds: priorIds,
+            spendAuthorized: false,
+            awardIssued: false,
+            externalCommitments: 0
+          },
+          spendAuthorized: false,
+          externalCommitments: 0
+        }),
+        timestamp,
+        bidPackageId
+      );
+      const after = this.getBidPackage(bidPackageId);
+      this.audit({
+        entityType: 'bid_package', entityId: bidPackageId, jobId: before.jobId,
+        action: 'prepare_bid_package_commitment', actor, before, after,
+        metadata: {
+          purchaseOrderId: purchaseOrder.id,
+          approvalId: purchaseOrder.approval?.id || null,
+          participantId: participant.id,
+          tradePartnerId: partner.id,
+          commitmentHash,
+          supersededPurchaseOrderId: priorPurchaseOrderId,
+          spendAuthorized: false,
+          awardIssued: false,
+          externalCommitments: 0
+        }
+      });
+      return {
+        replayed: false,
+        bidPackage: after,
+        purchaseOrder: after.commitment.purchaseOrder,
+        approval: purchaseOrder.approval,
+        externalCommitments: 0,
+        awardIssued: false
+      };
+    });
   }
 
   restoreRejectedBidPackageSelection(approvalRow, status, options = {}) {
@@ -18562,7 +18902,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           procurementOrderId: payload.procurementOrderId || payload.procurement_order_id || null,
           tradePartnerId: tradePartner?.id || null,
           partnerComplianceRequired: true,
-          partnerComplianceSnapshot: partnerSnapshot
+          partnerComplianceSnapshot: partnerSnapshot,
+          source: options.source || null,
+          spendAuthorized: false,
+          awardIssued: false,
+          externalCommitments: 0
         }),
         timestamp,
         timestamp
@@ -18583,7 +18927,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             currency,
             supplier,
             tradePartnerId: tradePartner?.id || null,
-            partnerCompliance: partnerSnapshot
+            partnerCompliance: partnerSnapshot,
+            source: options.source || null,
+            externalCommitments: 0
           }
         }, { actor, audit: false });
         this.db.prepare('UPDATE purchase_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
@@ -18595,6 +18941,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       return { ...purchaseOrder, approval };
     });
+  }
+
+  listPurchaseOrders(options = {}) {
+    const limit = safeLimit(options.limit, 500, 5000);
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    return this.db.prepare(`
+      SELECT * FROM purchase_orders
+      WHERE (? = '' OR job_id = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, limit).map(row => this.mapPurchaseOrder(row));
   }
 
   supplierInvoiceDuplicateKey({ tradePartnerId = null, supplier = '', invoiceNumber = '' } = {}) {
@@ -22407,6 +22764,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       } else if (before.target_type === 'purchase_order') {
         this.db.prepare("UPDATE purchase_orders SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
           .run(status, timestamp, before.target_id);
+        this.recordBidPackageCommitmentDecision(before.target_id, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'draw_request') {
         this.db.prepare("UPDATE draw_requests SET status = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
           .run(status, timestamp, before.target_id);
@@ -23418,6 +23780,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.db.prepare('UPDATE budget_lines SET status = ?, updated_at = ? WHERE id = ?').run(approvedStatus, timestamp, targetId);
     } else if (targetType === 'purchase_order') {
       const purchaseOrder = this.db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(targetId);
+      if (!purchaseOrder) throw ledgerInputError('purchase_order_not_found', 'Purchase order not found.', { purchaseOrderId: targetId }, 404);
+      this.assertBidPackageCommitmentCurrent(purchaseOrder);
       const partner = this.assertTradePartnerReadyForCommitment(purchaseOrder, 'purchase order');
       const purchaseOrderData = fromJson(purchaseOrder?.data_json, {});
       const requestedStatus = normalizeStatus(purchaseOrderData.requestedStatus, 'ready_to_order');
@@ -23434,11 +23798,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           tradePartnerId: partner.id,
           partnerComplianceRequired: true,
           partnerComplianceSnapshot: this.tradePartnerComplianceSnapshot(partner),
-          approvedAt: timestamp
+          approvedAt: timestamp,
+          spendAuthorized: true,
+          awardIssued: false,
+          externalCommitments: 0
         }),
         timestamp,
         targetId
       );
+      const approval = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'purchase_order' AND target_id = ? AND status = 'approved'
+        ORDER BY resolved_at DESC, updated_at DESC
+        LIMIT 1
+      `).get(targetId);
+      this.recordBidPackageCommitmentDecision(targetId, 'approved', {
+        timestamp,
+        actor: approval?.resolved_by || 'approval',
+        reason: approval?.reason || null
+      });
     } else if (targetType === 'draw_request') {
       const drawRequest = this.db.prepare('SELECT data_json, requested_amount FROM draw_requests WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(drawRequest?.data_json, {}).requestedStatus, 'approved');
@@ -30223,6 +30601,44 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Pending bid package ${pendingBidPackage.package_number} has an invalid approval or comparison snapshot.` });
       }
     }
+    const bidCommitmentRows = this.db.prepare(`
+      SELECT * FROM bid_packages
+      WHERE purchase_order_id IS NOT NULL OR commitment_hash IS NOT NULL
+      ORDER BY created_at
+    `).all();
+    for (const row of bidCommitmentRows) {
+      if (!row.purchase_order_id || !row.commitment_hash) {
+        issues.push({ severity: 'error', message: `Bid package ${row.package_number} has an incomplete purchasing-commitment link.` });
+        continue;
+      }
+      let bidPackage = null;
+      try {
+        bidPackage = this.getBidPackage(row.id);
+      } catch {
+        bidPackage = null;
+      }
+      const purchaseOrder = bidPackage?.commitment?.purchaseOrder;
+      if (!bidPackage || !purchaseOrder || bidPackage.commitment.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `Bid package ${row.package_number} failed purchasing-commitment snapshot verification.` });
+        continue;
+      }
+      const approval = purchaseOrder.approvalId
+        ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'purchase_order' AND target_id = ?").get(purchaseOrder.approvalId, purchaseOrder.id)
+        : null;
+      const expectedApprovalStatus = purchaseOrder.status === 'pending_approval'
+        ? 'pending'
+        : ['approved', 'ready_to_order'].includes(purchaseOrder.status)
+          ? 'approved'
+          : ['rejected', 'cancelled'].includes(purchaseOrder.status)
+            ? purchaseOrder.status
+            : null;
+      if (!approval || (expectedApprovalStatus && approval.status !== expectedApprovalStatus)) {
+        issues.push({ severity: 'error', message: `Bid package ${row.package_number} purchasing commitment lacks its matching approval decision.` });
+      }
+      if (bidPackage.commitment.awardIssued || bidPackage.commitment.externalCommitments !== 0) {
+        issues.push({ severity: 'error', message: `Bid package ${row.package_number} incorrectly claims an externally issued award or commitment.` });
+      }
+    }
     const quotesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM quotes WHERE status = 'draft' AND approval_id IS NULL").get().count || 0);
     if (quotesWithoutApproval) issues.push({ severity: 'warning', message: `${quotesWithoutApproval} draft quote(s) have no approval gate.` });
     const siteVisitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_visits WHERE status IN ('confirmed', 'client_confirmed', 'committed', 'approved') AND approval_id IS NULL").get().count || 0);
@@ -30577,6 +30993,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         opportunityActivities: this.count('opportunity_activities'),
         bidPackages: this.count('bid_packages'),
         bidPackageParticipants: this.count('bid_package_participants'),
+        bidCommitments: Number(this.db.prepare('SELECT COUNT(*) AS count FROM bid_packages WHERE purchase_order_id IS NOT NULL').get().count || 0),
         takeoffs: this.count('takeoff_sheets'),
         takeoffItems: this.count('takeoff_items'),
         tradePartners: this.count('trade_partners'),
@@ -30725,6 +31142,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       approvalId: row.approval_id,
       selectedBidParticipantId: row.selected_bid_participant_id,
       comparisonHash: row.comparison_hash,
+      purchaseOrderId: row.purchase_order_id || null,
+      commitmentHash: row.commitment_hash || null,
       opportunity: {
         id: row.opportunity_id,
         title: row.opportunity_title || null,
@@ -32357,9 +32776,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.activePurchaseOrders = Number(data.activePurchaseOrders || 0);
       preview.compliance = data.compliance || null;
     } else if (['procurement_order', 'purchase_order'].includes(targetType)) {
-      primaryEffect = `Approve ${ledgerApprovalHumanTarget(targetType)} readiness.`;
-      addEffect('Move the purchasing record to the approved or ready-to-order state.');
-      addSafeguard('Does not place a supplier order or spend money automatically.');
+      const source = data.source;
+      const selectedBid = targetType === 'purchase_order' && source?.type === 'bid_package_commitment';
+      primaryEffect = selectedBid
+        ? `Authorize the exact retained purchasing envelope for selected bid package ${source.bidPackageId}.`
+        : `Approve ${ledgerApprovalHumanTarget(targetType)} readiness.`;
+      addEffect(selectedBid
+        ? 'Move the selected-bid purchase order to ready-to-order without changing its frozen scope, partner, or amount.'
+        : 'Move the purchasing record to the approved or ready-to-order state.');
+      addSafeguard('Does not contact the supplier, transmit an award or order, sign a subcontract, or move money automatically.');
+      if (selectedBid) addSafeguard('The selected return, comparison, commitment terms, and source hash are rechecked when this approval resolves.');
       if (data.partnerCompliance?.compliant === false) {
         addSafeguard('Resolution is refused until the linked trade partner has current retained compliance evidence.');
       } else {
@@ -32370,6 +32796,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.supplier = data.supplier || null;
       preview.tradePartnerId = data.tradePartnerId || null;
       preview.partnerCompliance = data.partnerCompliance || null;
+      if (selectedBid) {
+        preview.bidPackageId = source.bidPackageId;
+        preview.participantId = source.participantId;
+        preview.commitmentHash = source.commitmentHash;
+        preview.requiredBy = source.terms?.requiredBy || null;
+        preview.costCode = source.terms?.costCode || null;
+      }
     } else if (targetType === 'payment') {
       const requestedStatus = normalizeStatus(data.requestedStatus, 'received');
       primaryEffect = requestedStatus === 'written_off' ? 'Approve invoice balance write-off.' : 'Approve payment reconciliation.';

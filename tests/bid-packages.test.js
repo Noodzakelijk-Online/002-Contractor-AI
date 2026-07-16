@@ -171,3 +171,122 @@ test('opportunity conversion links retained bid packages without creating commit
   assert.ok(ledger.getJobDetail(conversion.job.id).bidPackages.some(item => item.id === bidPackage.id));
   assert.equal(ledger.getOpportunity(opportunity.id).bidPackages[0].id, bidPackage.id);
 });
+
+test('selected bid becomes one approval-gated project commitment without issuing an award', t => {
+  const ledger = temporaryLedger(t);
+  const partner = verifiedPartner(ledger, 'Commitment Bridge BV', '5');
+  const opportunity = ledger.createOpportunity({ clientName: 'Commitment Client', title: 'Interior fit-out tender' });
+  const bidPackage = ledger.createBidPackage(opportunity.id, {
+    title: 'Joinery package',
+    trade: 'Joinery',
+    scope: 'Detail, supply, install, test, and hand over the complete joinery package.',
+    dueAt: new Date(Date.now() + 10 * 86_400_000).toISOString(),
+    tradePartnerIds: [partner.id]
+  });
+  const participant = bidPackage.participants[0];
+  ledger.recordBidReturn(bidPackage.id, participant.id, {
+    amount: 48000,
+    taxRate: 21,
+    validUntil: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    durationDays: 40,
+    evidenceReference: 'joinery-return-48000',
+    exclusions: ['Builder works outside joinery openings'],
+    qualifications: ['Final dimensions after site survey']
+  });
+  const selection = ledger.requestBidPackageSelection(bidPackage.id, participant.id, {
+    rationale: 'Compliant return with verified scope coverage and acceptable programme.'
+  });
+  ledger.resolveApproval(selection.approval.id, { status: 'approved', resolvedBy: 'Tender approver' });
+  assert.throws(
+    () => ledger.createBidPackageCommitment(bidPackage.id, { requiredBy: new Date(Date.now() + 20 * 86_400_000).toISOString() }),
+    error => error.code === 'bid_commitment_job_required' && error.statusCode === 409
+  );
+  const job = ledger.convertOpportunityToJob(opportunity.id, {}, { actor: 'bid-test' }).job;
+  const terms = {
+    requiredBy: new Date(Date.now() + 20 * 86_400_000).toISOString(),
+    costCode: 'SUB-410',
+    notes: 'Retain selected scope, exclusions, and qualifications for purchasing review.'
+  };
+  const commitment = ledger.createBidPackageCommitment(bidPackage.id, terms, { actor: 'commercial-manager' });
+  assert.equal(commitment.replayed, false);
+  assert.equal(commitment.bidPackage.jobId, job.id);
+  assert.equal(commitment.bidPackage.commitment.integrityValid, true);
+  assert.equal(commitment.bidPackage.commitment.status, 'pending_approval');
+  assert.equal(commitment.purchaseOrder.amount, 48000);
+  assert.equal(commitment.purchaseOrder.status, 'pending_approval');
+  assert.equal(commitment.purchaseOrder.tradePartnerId, partner.id);
+  assert.equal(commitment.purchaseOrder.data.source.type, 'bid_package_commitment');
+  assert.equal(commitment.purchaseOrder.data.source.commitmentHash, commitment.bidPackage.commitmentHash);
+  assert.equal(commitment.purchaseOrder.data.spendAuthorized, false);
+  assert.equal(commitment.awardIssued, false);
+  assert.equal(commitment.externalCommitments, 0);
+  assert.match(commitment.approval.decision.primaryEffect, /exact retained purchasing envelope/i);
+  assert.ok(commitment.approval.decision.safeguards.some(item => /does not contact the supplier/i.test(item)));
+
+  const replay = ledger.createBidPackageCommitment(bidPackage.id, terms, { actor: 'second-operator' });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.purchaseOrder.id, commitment.purchaseOrder.id);
+  assert.equal(ledger.count('purchase_orders'), 1);
+  assert.throws(
+    () => ledger.createBidPackageCommitment(bidPackage.id, { ...terms, costCode: 'SUB-999' }),
+    error => error.code === 'bid_commitment_terms_changed' && error.statusCode === 409
+  );
+
+  ledger.resolveApproval(commitment.approval.id, {
+    status: 'approved',
+    resolvedBy: 'Purchasing approver',
+    reason: 'Selected return, scope, exclusions, qualifications, compliance, amount, and required date verified.'
+  });
+  const approved = ledger.getBidPackage(bidPackage.id);
+  assert.equal(approved.commitment.status, 'ready_to_order');
+  assert.equal(approved.commitment.integrityValid, true);
+  assert.equal(approved.commitment.spendAuthorized, true);
+  assert.equal(approved.commitment.awardIssued, false);
+  assert.equal(approved.commitment.externalCommitments, 0);
+  assert.equal(approved.data.spendAuthorized, true);
+  assert.equal(ledger.getJobDetail(job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
+  assert.equal(ledger.diagnose().valid, true);
+  assert.equal(ledger.verifyAuditIntegrity().valid, true);
+});
+
+test('bid commitment approval fails closed on source changes and a rejected draft can be revised', t => {
+  const ledger = temporaryLedger(t);
+  const partner = verifiedPartner(ledger, 'Revision Bridge BV', '6');
+  const opportunity = ledger.createOpportunity({ clientName: 'Revision Client', title: 'Roof tender' });
+  const bidPackage = ledger.createBidPackage(opportunity.id, {
+    title: 'Roof package',
+    trade: 'Roofing',
+    scope: 'Supply and install the complete roof package with tested handover evidence.',
+    dueAt: new Date(Date.now() + 8 * 86_400_000).toISOString(),
+    tradePartnerIds: [partner.id]
+  });
+  const participant = bidPackage.participants[0];
+  ledger.recordBidReturn(bidPackage.id, participant.id, { amount: 36000, evidenceReference: 'roof-return-36000' });
+  const selection = ledger.requestBidPackageSelection(bidPackage.id, participant.id, { rationale: 'Verified compliant specialist return.' });
+  ledger.resolveApproval(selection.approval.id, { status: 'approved', resolvedBy: 'Tender approver' });
+  ledger.convertOpportunityToJob(opportunity.id);
+  const first = ledger.createBidPackageCommitment(bidPackage.id, {
+    requiredBy: new Date(Date.now() + 18 * 86_400_000).toISOString(),
+    costCode: 'SUB-ROOF'
+  });
+  ledger.db.prepare('UPDATE purchase_orders SET amount = amount + 1 WHERE id = ?').run(first.purchaseOrder.id);
+  assert.throws(
+    () => ledger.resolveApproval(first.approval.id, { status: 'approved', resolvedBy: 'Purchasing approver' }),
+    error => error.code === 'bid_commitment_integrity_failed' && error.statusCode === 409
+  );
+  assert.equal(ledger.listApprovals({ status: 'pending' }).some(item => item.id === first.approval.id), true);
+  ledger.db.prepare('UPDATE purchase_orders SET amount = amount - 1 WHERE id = ?').run(first.purchaseOrder.id);
+  ledger.resolveApproval(first.approval.id, { status: 'rejected', resolvedBy: 'Purchasing approver', reason: 'Revise required date and purchasing notes.' });
+  assert.equal(ledger.getBidPackage(bidPackage.id).commitment.status, 'rejected');
+
+  const revised = ledger.createBidPackageCommitment(bidPackage.id, {
+    requiredBy: new Date(Date.now() + 25 * 86_400_000).toISOString(),
+    costCode: 'SUB-ROOF-REV',
+    notes: 'Revised after purchasing review.'
+  });
+  assert.equal(revised.replayed, false);
+  assert.notEqual(revised.purchaseOrder.id, first.purchaseOrder.id);
+  assert.deepEqual(revised.bidPackage.data.commitment.priorPurchaseOrderIds, [first.purchaseOrder.id]);
+  assert.equal(ledger.count('purchase_orders'), 2);
+  assert.equal(ledger.diagnose().valid, true);
+});

@@ -640,6 +640,19 @@
 .bid-package-summary > div:last-child, .bid-selection-review > div:last-child { border-right: 0; }
 .bid-package-summary span, .bid-selection-review span { color: #74827c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .bid-package-summary strong, .bid-selection-review strong { overflow-wrap: anywhere; color: #2d433a; font-size: 11px; line-height: 1.45; }
+.bid-commitment { display: grid; gap: 0; min-width: 0; background: #f6faf8; border-bottom: 1px solid #dfe9e4; box-shadow: inset 3px 0 #2c7561; }
+.bid-commitment-invalid { background: #fff6f3; box-shadow: inset 3px 0 #a5482d; }
+.bid-commitment-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; padding: 13px 16px 9px; }
+.bid-commitment-heading > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.bid-commitment-heading strong { overflow-wrap: anywhere; color: #263d34; font-size: 12px; }
+.bid-commitment-tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.bid-commitment-values { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-width: 0; margin: 0; border-top: 1px solid #dfe9e4; border-bottom: 1px solid #dfe9e4; }
+.bid-commitment-values > div { display: grid; gap: 3px; min-width: 0; padding: 9px 16px; border-right: 1px solid #dfe9e4; }
+.bid-commitment-values > div:last-child { border-right: 0; }
+.bid-commitment-values dt { color: #74827c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.bid-commitment-values dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #2d433a; font-size: 11px; font-weight: 700; }
+.bid-commitment-values code { font-size: 9px; font-weight: 650; }
+.bid-commitment > p { margin: 0; padding: 10px 16px 13px; color: #526b62; font-size: 10px; line-height: 1.5; }
 .bid-participant-row { display: grid; grid-template-columns: minmax(240px, 1.2fr) minmax(300px, .9fr) minmax(220px, auto); align-items: center; gap: 14px; min-width: 0; padding: 13px 18px; border-bottom: 1px solid #e8eeeb; }
 .bid-participant-row:last-child { border-bottom: 0; }
 .bid-participant-copy { display: grid; gap: 4px; min-width: 0; }
@@ -654,7 +667,7 @@
 .status-not_selected, .status-withdrawn, .status-declined, .status-cancelled { color: #646f6b; background: #e9eeec; }
 .bid-package-modal { width: min(900px, 100%); }
 .bid-return-modal { width: min(760px, 100%); }
-.bid-selection-modal, .bid-add-participants-modal { width: min(680px, 100%); }
+.bid-selection-modal, .bid-add-participants-modal, .bid-commitment-modal { width: min(760px, 100%); }
 .bid-package-form, .bid-return-form { max-height: min(68vh, 720px); overflow-y: auto; }
 .bid-partner-picker { min-width: 0; margin: 0; padding: 12px; border: 1px solid #d5e1dc; border-radius: 6px; }
 .bid-partner-picker legend { padding: 0 6px; color: #40564d; font-size: 10px; font-weight: 750; }
@@ -669,6 +682,11 @@
 .bid-partner-picker > p { margin: 0; color: #687971; font-size: 11px; }
 .bid-add-partner-picker { margin: 16px; max-height: min(58vh, 560px); overflow-y: auto; }
 .bid-selection-review { border-bottom: 0; }
+.bid-commitment-review { display: grid; grid-template-columns: .7fr .8fr 1.5fr 1fr; border-bottom: 1px solid #e3ebe7; }
+.bid-commitment-review > div { display: grid; align-content: start; gap: 5px; min-width: 0; padding: 13px 16px; border-right: 1px solid #e3ebe7; }
+.bid-commitment-review > div:last-child { border-right: 0; }
+.bid-commitment-review span { color: #74827c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.bid-commitment-review strong { overflow-wrap: anywhere; color: #2d433a; font-size: 11px; line-height: 1.45; }
 
 @media (max-width: 1180px) {
   .pipeline-row { grid-template-columns: minmax(260px, 1.2fr) minmax(300px, .9fr); }
@@ -694,6 +712,9 @@
   .bid-package-summary > div:last-child { border-bottom: 0; }
   .bid-participant-row { grid-template-columns: minmax(0, 1fr); }
   .bid-participant-actions { grid-column: auto; }
+  .bid-commitment-values, .bid-commitment-review { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bid-commitment-values > div:nth-child(2), .bid-commitment-review > div:nth-child(2) { border-right: 0; }
+  .bid-commitment-values > div:nth-child(-n + 2), .bid-commitment-review > div:nth-child(-n + 2) { border-bottom: 1px solid #dfe9e4; }
 }
 
 @media (max-width: 760px) {
@@ -736,12 +757,17 @@
   .bid-participant-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bid-participant-actions { align-items: stretch; }
   .bid-participant-actions .secondary-button, .bid-participant-actions .primary-button { flex: 1 1 160px; }
+  .bid-commitment-heading { align-items: stretch; flex-direction: column; }
+  .bid-commitment-tags { justify-content: flex-start; }
+  .bid-commitment-values, .bid-commitment-review { grid-template-columns: minmax(0, 1fr); }
+  .bid-commitment-values > div, .bid-commitment-review > div { border-right: 0; border-bottom: 1px solid #dfe9e4; }
+  .bid-commitment-values > div:last-child, .bid-commitment-review > div:last-child { border-bottom: 0; }
   .bid-partner-picker > div { grid-template-columns: minmax(0, 1fr); }
   .bid-selection-review { grid-template-columns: minmax(0, 1fr); }
   .bid-selection-review > div { border-right: 0; border-bottom: 1px solid #e3ebe7; }
   .bid-selection-review > div:last-child { border-bottom: 0; }
-  .bid-package-modal .modal-actions, .bid-return-modal .modal-actions, .bid-selection-modal .modal-actions, .bid-add-participants-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }
-  .bid-package-modal .modal-actions button, .bid-return-modal .modal-actions button, .bid-selection-modal .modal-actions button, .bid-add-participants-modal .modal-actions button { width: 100%; }
+  .bid-package-modal .modal-actions, .bid-return-modal .modal-actions, .bid-selection-modal .modal-actions, .bid-add-participants-modal .modal-actions, .bid-commitment-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }
+  .bid-package-modal .modal-actions button, .bid-return-modal .modal-actions button, .bid-selection-modal .modal-actions button, .bid-add-participants-modal .modal-actions button, .bid-commitment-modal .modal-actions button { width: 100%; }
 }
 
 .capability-setup-control { display: grid; gap: 14px; min-width: 0; }

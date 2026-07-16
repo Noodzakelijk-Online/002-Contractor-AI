@@ -1046,7 +1046,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '027_quantity_takeoffs');
+    assert.equal(migrations.currentVersion, '028_bid_commitment_bridge');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1127,12 +1127,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('027_quantity_takeoffs'));
+  assert.deepEqual(versions, Array(4).fill('028_bid_commitment_bridge'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 27);
+    assert.equal(Number(migrationCount.count), 28);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1548,7 +1548,29 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(selected.status, 'selected');
     assert.equal(selected.selectedParticipant.id, returned.participant.id);
     assert.equal(selected.data.spendAuthorized, false);
-    assert.equal(ledger.migrationStatus().currentVersion, '027_quantity_takeoffs');
+    const converted = ledger.convertOpportunityToJob(opportunity.id, {}, { actor: 'postgres_bid_test' });
+    const commitment = ledger.createBidPackageCommitment(bidPackage.id, {
+      requiredBy: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+      costCode: 'PG-SUB-410',
+      notes: 'Hosted selected return retained as the exact internal purchasing envelope.'
+    }, { actor: 'postgres_bid_test' });
+    assert.equal(commitment.bidPackage.commitment.integrityValid, true);
+    assert.equal(commitment.purchaseOrder.status, 'pending_approval');
+    ledger.resolveApproval(commitment.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_bid_approver',
+      reason: 'Hosted commitment source, amount, terms, and partner compliance verified.'
+    });
+    const committed = ledger.getBidPackage(bidPackage.id);
+    assert.equal(committed.jobId, converted.job.id);
+    assert.equal(committed.commitment.status, 'ready_to_order');
+    assert.equal(committed.commitment.integrityValid, true);
+    assert.equal(committed.commitment.spendAuthorized, true);
+    assert.equal(committed.commitment.awardIssued, false);
+    assert.equal(committed.commitment.externalCommitments, 0);
+    assert.equal(committed.commitment.purchaseOrder.data.source.commitmentHash, committed.commitmentHash);
+    assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
+    assert.equal(ledger.migrationStatus().currentVersion, '028_bid_commitment_bridge');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

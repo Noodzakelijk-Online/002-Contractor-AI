@@ -327,6 +327,20 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error(`Backup quantity-takeoff constraints are incomplete: ${missingTakeoffIndexes.join(', ')}.`);
         }
       }
+      if (appliedMigrations.has('028_bid_commitment_bridge')) {
+        const packageColumns = new Set(database.prepare('PRAGMA table_info(bid_packages)').all().map(row => row.name));
+        const missingCommitmentColumns = ['purchase_order_id', 'commitment_hash']
+          .filter(column => !packageColumns.has(column));
+        if (missingCommitmentColumns.length) {
+          throw new Error(`Backup bid-commitment columns are incomplete: ${missingCommitmentColumns.join(', ')}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        const commitmentIndexes = ['idx_bid_packages_purchase_order', 'idx_bid_packages_commitment'];
+        const missingCommitmentIndexes = commitmentIndexes.filter(index => !retainedIndexes.has(index));
+        if (missingCommitmentIndexes.length) {
+          throw new Error(`Backup bid-commitment constraints are incomplete: ${missingCommitmentIndexes.join(', ')}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

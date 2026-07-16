@@ -105,12 +105,77 @@ test('operator compares bid returns and approves a preferred bidder without issu
   await selectedRow.getByRole('button', { name: /Open bid package BID-/ }).first().click();
   await expect(detail.getByText('Preferred / no award sent')).toBeVisible();
 
+  const conversionResponse = await request.post(`/api/ledger/opportunities/${opportunity.id}/convert`, { data: {} });
+  expect(conversionResponse.ok()).toBeTruthy();
+  const convertedJob = (await conversionResponse.json()).job;
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await pipeline.getByRole('tab', { name: 'Bid packages' }).click();
+  const convertedRow = bids.locator('.bid-package-row').filter({ hasText: 'Mechanical services package' });
+  await convertedRow.getByRole('button', { name: /Open bid package BID-/ }).first().click();
+  await detail.getByRole('button', { name: 'Prepare commitment' }).click();
+  const commitmentModal = page.getByTestId('bid-commitment-modal');
+  await expect(commitmentModal.getByText(/cannot contact the supplier, issue an award or order/i)).toBeVisible();
+  await commitmentModal.getByLabel('Required by').fill(dateInput(20));
+  await commitmentModal.getByLabel('Cost code').fill('SUB-MECH-410');
+  await commitmentModal.getByLabel('Purchasing notes').fill('Retain scope interfaces, exclusions, programme, and handover evidence for purchasing review.');
+  await commitmentModal.getByRole('button', { name: 'Freeze and request approval' }).click();
+  await expect(page.getByText('Selected bid frozen into purchasing approval. No supplier contact, award, order, or payment occurred.')).toBeVisible();
+
+  let commitmentPanel = detail.getByTestId('bid-commitment');
+  await expect(commitmentPanel).toContainText(/pending approval/i);
+  await expect(commitmentPanel).toContainText('Source verified');
+  await expect(commitmentPanel).toContainText('SUB-MECH-410');
+  await expect(commitmentPanel).toContainText('No supplier contact, award, order transmission, subcontract signature, or payment occurred.');
+  await detail.getByRole('button', { name: 'Review commitment' }).click();
+  const commitmentApproval = page.locator('.approval-item').filter({ hasText: 'Approve purchase order' });
+  await expect(commitmentApproval).toHaveCount(1);
+  await commitmentApproval.getByRole('button', { name: 'Review and approve' }).click();
+  const commitmentApprovalModal = page.getByTestId('approval-review-modal');
+  await expect(commitmentApprovalModal.getByText(/exact retained purchasing envelope/i)).toBeVisible();
+  await expect(commitmentApprovalModal.getByText(/does not contact the supplier, transmit an award or order/i)).toBeVisible();
+  await commitmentApprovalModal.getByLabel('Reviewer reason').fill('Browser QA verified the frozen selected return, purchasing terms, source hash, and current partner compliance.');
+  await commitmentApprovalModal.getByRole('button', { name: 'Confirm approval' }).click();
+  await expect(page.getByText('Approval approved. The ledger and audit trail were updated.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await pipeline.getByRole('tab', { name: 'Bid packages' }).click();
+  await convertedRow.getByRole('button', { name: /Open bid package BID-/ }).first().click();
+  commitmentPanel = detail.getByTestId('bid-commitment');
+  await expect(commitmentPanel).toContainText(/ready to order/i);
+  await expect(commitmentPanel).toContainText('Source verified');
+  await expect(commitmentPanel).toContainText('approved and ready for a separate ordering action');
+
   const portfolio = await request.get('/api/ledger/bid-packages?includeClosed=true&limit=500');
   expect(portfolio.ok()).toBeTruthy();
   const retained = (await portfolio.json()).bidPackages.find((item) => item.title === 'Mechanical services package');
-  expect(retained).toMatchObject({ status: 'selected', data: { spendAuthorized: false, externalCommitments: 0 } });
+  expect(retained).toMatchObject({
+    status: 'selected',
+    jobId: convertedJob.id,
+    data: { spendAuthorized: true, externalCommitments: 0 },
+    commitment: {
+      status: 'ready_to_order',
+      integrityValid: true,
+      spendAuthorized: true,
+      awardIssued: false,
+      externalCommitments: 0
+    }
+  });
+  const jobResponse = await request.get(`/api/ledger/jobs/${convertedJob.id}`);
+  expect(jobResponse.ok()).toBeTruthy();
+  const retainedJob = (await jobResponse.json()).job;
+  expect(retainedJob.purchaseOrders).toContainEqual(expect.objectContaining({
+    id: retained.commitment.purchaseOrderId,
+    status: 'ready_to_order',
+    data: expect.objectContaining({ awardIssued: false, externalCommitments: 0 })
+  }));
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(async () => {
+    const navigation = await page.locator('.side-nav').boundingBox();
+    return navigation ? navigation.x + navigation.width : 0;
+  }).toBeLessThanOrEqual(0.5);
+  const commitmentBounds = await commitmentPanel.boundingBox();
+  expect(commitmentBounds.x).toBeGreaterThanOrEqual(0);
   const geometry = await pipeline.evaluate((element) => ({
     pageWidth: document.body.scrollWidth,
     viewportWidth: window.innerWidth,

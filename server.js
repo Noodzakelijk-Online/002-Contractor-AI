@@ -2108,6 +2108,20 @@ app.post('/api/ledger/bid-packages/:id/selection', (req, res) => {
   }), 201);
 });
 
+app.post('/api/ledger/bid-packages/:id/commitment', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const commitment = operatingLedger.createBidPackageCommitment(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'pipeline')
+    });
+    return {
+      success: true,
+      ...commitment,
+      job: commitment.bidPackage.jobId ? operatingLedger.getJobDetail(commitment.bidPackage.jobId) : null,
+      dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/intake', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3364,13 +3378,16 @@ app.get('/api/ledger/approvals', (req, res) => {
 app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
+    const bidPackage = approval.targetType === 'bid_package_selection'
+      ? operatingLedger.getBidPackage(approval.targetId)
+      : approval.targetType === 'purchase_order'
+        ? operatingLedger.getBidPackageByPurchaseOrder(approval.targetId)
+        : null;
     return {
       success: true,
       approval,
       job: approval.jobId ? operatingLedger.getJobDetail(approval.jobId) : null,
-      bidPackage: approval.targetType === 'bid_package_selection'
-        ? operatingLedger.getBidPackage(approval.targetId)
-        : null,
+      bidPackage,
       dashboard: operatingLedger.dashboardSummary()
     };
   });
@@ -4132,6 +4149,7 @@ function operationalExport() {
     takeoffItems: operatingLedger.listAllTakeoffItems({ limit: 10_000 }),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
+    purchaseOrders: operatingLedger.listPurchaseOrders({ limit: 5_000 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
@@ -4190,6 +4208,7 @@ function validateOperationalExport(snapshot) {
     'bidPackageParticipants',
     'takeoffSheets',
     'takeoffItems',
+    'purchaseOrders',
     'inspectionTemplates',
     'inspectionChecklistSubmissions'
   ]) {
@@ -4244,6 +4263,7 @@ function validateOperationalExport(snapshot) {
       takeoffSheets: Array.isArray(snapshot.takeoffSheets) ? snapshot.takeoffSheets.length : 0,
       takeoffItems: Array.isArray(snapshot.takeoffItems) ? snapshot.takeoffItems.length : 0,
       tradePartners: snapshot.tradePartners.length,
+      purchaseOrders: Array.isArray(snapshot.purchaseOrders) ? snapshot.purchaseOrders.length : 0,
       supplierInvoices: snapshot.supplierInvoices.length,
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
       billingMilestones: snapshot.billingMilestones.length,

@@ -722,6 +722,14 @@ function emptyBidReturnDraft() {
   }
 }
 
+function emptyBidCommitmentDraft() {
+  return {
+    requiredBy: futureDateInput(21),
+    costCode: 'SUBCONTRACT',
+    notes: '',
+  }
+}
+
 function emptyRfiDraft() {
   return {
     title: '',
@@ -1027,6 +1035,8 @@ function BidPackageWorkspace({
   onRecordReturn,
   onRequestSelection,
   onReviewApproval,
+  onPrepareCommitment,
+  onReviewCommitment,
 }) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('open')
@@ -1123,14 +1133,70 @@ function BidPackageWorkspace({
                   <ShieldCheck size={15} /> Review approval
                 </button>
               ) : null}
+              {selectedBidPackage.status === 'selected' && canCoordinate && (!selectedBidPackage.commitment || selectedBidPackage.flags?.commitmentRejected) ? (
+                <button
+                  className="primary-button"
+                  disabled={!selectedBidPackage.jobId || submitting}
+                  title={selectedBidPackage.jobId ? 'Prepare the selected return for purchasing approval' : 'Convert the opportunity to a job first'}
+                  onClick={() => onPrepareCommitment(selectedBidPackage)}
+                >
+                  <ReceiptEuro size={15} /> {selectedBidPackage.flags?.commitmentRejected ? 'Revise commitment' : selectedBidPackage.jobId ? 'Prepare commitment' : 'Job required'}
+                </button>
+              ) : null}
+              {selectedBidPackage.commitment?.status === 'pending_approval' && canApprove ? (
+                <button className="primary-button" onClick={() => onReviewCommitment(selectedBidPackage)}>
+                  <ShieldCheck size={15} /> Review commitment
+                </button>
+              ) : null}
               <button className="icon-button" aria-label="Close bid package detail" onClick={() => onSelect(null)}><X size={17} /></button>
             </div>
           </div>
           <div className="bid-package-summary">
             <div><span>Scope</span><strong>{selectedBidPackage.scope}</strong></div>
             <div><span>Comparison</span><strong>{selectedBidPackage.comparison?.returned ? `${currency.format(selectedBidPackage.comparison.lowestTotal)} to ${currency.format(selectedBidPackage.comparison.highestTotal)}` : 'No returns retained'}</strong></div>
-            <div><span>Control</span><strong>{selectedBidPackage.status === 'selected' ? 'Preferred bidder retained; no award sent' : 'Internal only; no invitations sent'}</strong></div>
+            <div>
+              <span>Control</span>
+              <strong>
+                {selectedBidPackage.commitment?.status === 'ready_to_order'
+                  ? 'Purchasing envelope approved; no award sent'
+                  : selectedBidPackage.commitment?.status === 'pending_approval'
+                    ? 'Commitment approval pending; no award sent'
+                    : selectedBidPackage.flags?.commitmentRejected
+                      ? 'Commitment rejected; retained for revision'
+                      : selectedBidPackage.status === 'selected'
+                        ? 'Preferred bidder retained; no commitment prepared'
+                        : 'Internal only; no invitations sent'}
+              </strong>
+            </div>
           </div>
+          {selectedBidPackage.commitment ? (
+            <div className={`bid-commitment ${selectedBidPackage.commitment.integrityValid ? '' : 'bid-commitment-invalid'}`} data-testid="bid-commitment">
+              <div className="bid-commitment-heading">
+                <div>
+                  <span className="eyebrow">Purchasing commitment</span>
+                  <strong>{selectedBidPackage.commitment.purchaseOrder.supplier}</strong>
+                </div>
+                <div className="bid-commitment-tags">
+                  <span className={`status status-${selectedBidPackage.commitment.status}`}>{formatStatus(selectedBidPackage.commitment.status)}</span>
+                  <span className={`tag ${selectedBidPackage.commitment.integrityValid ? 'tag-green' : 'tag-red'}`}>
+                    {selectedBidPackage.commitment.integrityValid ? 'Source verified' : 'Integrity failed'}
+                  </span>
+                </div>
+              </div>
+              <dl className="bid-commitment-values">
+                <div><dt>Net envelope</dt><dd>{currency.format(selectedBidPackage.commitment.purchaseOrder.amount || 0)}</dd></div>
+                <div><dt>Required by</dt><dd>{formatDate(selectedBidPackage.commitment.purchaseOrder.requiredBy)}</dd></div>
+                <div><dt>Cost code</dt><dd>{selectedBidPackage.commitment.purchaseOrder.data?.source?.terms?.costCode || 'SUBCONTRACT'}</dd></div>
+                <div><dt>Hash</dt><dd><code>{shortHash(selectedBidPackage.commitmentHash)}</code></dd></div>
+              </dl>
+              <p>
+                {selectedBidPackage.commitment.spendAuthorized
+                  ? 'The exact internal spend envelope is approved and ready for a separate ordering action.'
+                  : 'Approval is required before this exact internal spend envelope becomes ready to order.'}{' '}
+                No supplier contact, award, order transmission, subcontract signature, or payment occurred.
+              </p>
+            </div>
+          ) : null}
           <div className="bid-participant-list">
             {selectedBidPackage.participants.map((participant) => {
               const canEditReturn = canCoordinate && ['open_for_returns', 'under_review'].includes(selectedBidPackage.status)
@@ -1198,6 +1264,8 @@ function PipelineWorkspace({
   onRecordBidReturn,
   onRequestBidSelection,
   onReviewBidApproval,
+  onPrepareBidCommitment,
+  onReviewBidCommitment,
 }) {
   const [query, setQuery] = useState('')
   const [stage, setStage] = useState('open')
@@ -1434,6 +1502,8 @@ function PipelineWorkspace({
           onRecordReturn={onRecordBidReturn}
           onRequestSelection={onRequestBidSelection}
           onReviewApproval={onReviewBidApproval}
+          onPrepareCommitment={onPrepareBidCommitment}
+          onReviewCommitment={onReviewBidCommitment}
         />
       )}
     </section>
@@ -6279,6 +6349,7 @@ function App() {
   const [bidReturnDraft, setBidReturnDraft] = useState(() => emptyBidReturnDraft())
   const [bidSelectionRationale, setBidSelectionRationale] = useState('')
   const [bidAddPartnerIds, setBidAddPartnerIds] = useState([])
+  const [bidCommitmentDraft, setBidCommitmentDraft] = useState(() => emptyBidCommitmentDraft())
   const [approvalFocus, setApprovalFocus] = useState(null)
   const [approvalReview, setApprovalReview] = useState(null)
   const [approvalReason, setApprovalReason] = useState('')
@@ -6848,12 +6919,17 @@ function App() {
       setApprovalReason('')
       if (result.bidPackage) {
         setSelectedBidPackage(result.bidPackage)
-        setData((current) => current ? {
-          ...current,
-          dashboard: result.dashboard || current.dashboard,
-          approvals: (current.approvals || EMPTY_LIST).filter((approval) => approval.id !== item.id),
-          bidPackages: upsertById(current.bidPackages, result.bidPackage),
-        } : current)
+        setData((current) => {
+          if (!current) return current
+          const next = {
+            ...current,
+            dashboard: result.dashboard || current.dashboard,
+            approvals: (current.approvals || EMPTY_LIST).filter((approval) => approval.id !== item.id),
+            bidPackages: upsertById(current.bidPackages, result.bidPackage),
+          }
+          return result.job ? reconcileJobCollections(next, result.job) : next
+        })
+        if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
       } else if (result.job) {
         setData((current) => reconcileJobCollections({
           ...current,
@@ -7204,6 +7280,56 @@ function App() {
       approvalId: bidPackage.approvalId,
       jobId: bidPackage.jobId || null,
       jobTitle: `${bidPackage.packageNumber} ${bidPackage.title}`,
+    })
+  }
+
+  function openBidCommitment(bidPackage) {
+    setBidCommitmentDraft({
+      ...emptyBidCommitmentDraft(),
+      notes: `Prepare the exact selected return for ${bidPackage.packageNumber} as an internal purchasing commitment.`,
+    })
+    setBidPackageAction({ type: 'commitment', bidPackage })
+  }
+
+  async function submitBidCommitment(event) {
+    event.preventDefault()
+    if (bidPackageAction?.type !== 'commitment') return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/bid-packages/${encodeURIComponent(bidPackageAction.bidPackage.id)}/commitment`, {
+        method: 'POST',
+        body: JSON.stringify(bidCommitmentDraft),
+      })
+      setBidPackageAction(null)
+      setBidCommitmentDraft(emptyBidCommitmentDraft())
+      setSelectedBidPackage(result.bidPackage)
+      setData((current) => {
+        if (!current) return current
+        const next = {
+          ...current,
+          dashboard: result.dashboard || current.dashboard,
+          bidPackages: upsertById(current.bidPackages, result.bidPackage),
+          approvals: result.approval ? upsertById(current.approvals, result.approval) : current.approvals,
+        }
+        return result.job ? reconcileJobCollections(next, result.job) : next
+      })
+      notify(result.replayed
+        ? 'The existing verified purchasing commitment was reopened. No award or order was sent.'
+        : 'Selected bid frozen into purchasing approval. No supplier contact, award, order, or payment occurred.')
+      await refreshSection('pipeline')
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function reviewBidCommitment(bidPackage) {
+    openApprovals({
+      approvalId: bidPackage.commitment?.approvalId,
+      jobId: bidPackage.jobId || null,
+      jobTitle: `${bidPackage.packageNumber} purchasing commitment`,
     })
   }
 
@@ -10888,6 +11014,8 @@ function App() {
                 onRecordBidReturn={openBidReturn}
                 onRequestBidSelection={openBidSelection}
                 onReviewBidApproval={reviewBidApproval}
+                onPrepareBidCommitment={openBidCommitment}
+                onReviewBidCommitment={reviewBidCommitment}
               />
             ) : null}
 
@@ -14773,6 +14901,61 @@ function App() {
                 <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
                 <button className="primary-button" disabled={submitting || bidSelectionRationale.trim().length < 8}>
                   {submitting ? 'Requesting...' : 'Request selection approval'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {bidPackageAction?.type === 'commitment' ? (
+        <div className="modal-backdrop bid-package-backdrop" role="presentation">
+          <section
+            className="modal bid-commitment-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bid-commitment-modal-title"
+            data-testid="bid-commitment-modal"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && !submitting) setBidPackageAction(null)
+            }}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Selected-bid control</p>
+                <h2 id="bid-commitment-modal-title">Prepare purchasing commitment</h2>
+                <p>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.selectedParticipant?.partner?.name}</p>
+              </div>
+              <button className="icon-button" aria-label="Close purchasing commitment" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={submitBidCommitment}>
+              <div className="bid-commitment-review">
+                <div><span>Selected net</span><strong>{currency.format(bidPackageAction.bidPackage.selectedParticipant?.netAmount || 0)}</strong></div>
+                <div><span>VAT / gross</span><strong>{bidPackageAction.bidPackage.selectedParticipant?.taxRate || 0}% / {currency.format(bidPackageAction.bidPackage.selectedParticipant?.total || 0)}</strong></div>
+                <div><span>Scope</span><strong>{bidPackageAction.bidPackage.scope}</strong></div>
+                <div><span>Source</span><strong>{bidPackageAction.bidPackage.selectedParticipant?.evidenceReference}</strong></div>
+              </div>
+              <div className="form-grid bid-commitment-form">
+                <label>
+                  Required by
+                  <input autoFocus required type="date" min={futureDateInput(1)} value={bidCommitmentDraft.requiredBy} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, requiredBy: event.target.value })} />
+                </label>
+                <label>
+                  Cost code
+                  <input required minLength="2" maxLength="80" value={bidCommitmentDraft.costCode} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, costCode: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Purchasing notes
+                  <textarea maxLength="4000" value={bidCommitmentDraft.notes} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, notes: event.target.value })} placeholder="Record interfaces, required evidence, exclusions, qualifications, and reviewer context." />
+                </label>
+                <p className="workflow-note form-span">
+                  The selected return, scope, exclusions, qualifications, partner, amount, date, and cost code will be frozen behind SHA-256 verification. This creates an internal approval only; it cannot contact the supplier, issue an award or order, sign a subcontract, or move money.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button className="primary-button" disabled={submitting || !bidCommitmentDraft.requiredBy || bidCommitmentDraft.costCode.trim().length < 2}>
+                  <ShieldCheck size={15} /> {submitting ? 'Preparing...' : 'Freeze and request approval'}
                 </button>
               </div>
             </form>

@@ -132,10 +132,63 @@ test('bid-package API enforces roles and carries a tender comparison through app
   assert.equal(approval.body.bidPackage.selectedBidParticipantId, participantId);
   assert.equal(approval.body.bidPackage.data.spendAuthorized, false);
 
+  const converted = await request(baseUrl, `/api/ledger/opportunities/${opportunity.body.opportunity.id}/convert`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({})
+  });
+  assert.equal(converted.response.status, 201, JSON.stringify(converted.body));
+
+  const approverCommitment = await request(baseUrl, `/api/ledger/bid-packages/${bidPackageId}/commitment`, tokens.approver, {
+    method: 'POST',
+    body: JSON.stringify({ requiredBy: new Date(Date.now() + 20 * 86_400_000).toISOString(), costCode: 'SUB-API' })
+  });
+  assert.equal(approverCommitment.response.status, 403);
+  assert.equal(approverCommitment.body.error.code, 'insufficient_role');
+
+  const commitmentTerms = {
+    requiredBy: new Date(Date.now() + 20 * 86_400_000).toISOString(),
+    costCode: 'SUB-API',
+    notes: 'API selected-return commitment review.'
+  };
+  const commitment = await request(baseUrl, `/api/ledger/bid-packages/${bidPackageId}/commitment`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify(commitmentTerms)
+  });
+  assert.equal(commitment.response.status, 201, JSON.stringify(commitment.body));
+  assert.equal(commitment.body.bidPackage.commitment.integrityValid, true);
+  assert.equal(commitment.body.purchaseOrder.status, 'pending_approval');
+  assert.equal(commitment.body.purchaseOrder.amount, 52500);
+  assert.equal(commitment.body.purchaseOrder.data.source.type, 'bid_package_commitment');
+  assert.equal(commitment.body.externalCommitments, 0);
+  assert.equal(commitment.body.awardIssued, false);
+
+  const replay = await request(baseUrl, `/api/ledger/bid-packages/${bidPackageId}/commitment`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify(commitmentTerms)
+  });
+  assert.equal(replay.response.status, 201);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.purchaseOrder.id, commitment.body.purchaseOrder.id);
+
+  const commitmentApproval = await request(baseUrl, `/api/ledger/approvals/${commitment.body.approval.id}/resolve`, tokens.approver, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'approved',
+      resolvedBy: 'API purchasing approver',
+      reason: 'Exact selected return, scope, terms, amount, and compliance verified.'
+    })
+  });
+  assert.equal(commitmentApproval.response.status, 200, JSON.stringify(commitmentApproval.body));
+  assert.equal(commitmentApproval.body.bidPackage.commitment.status, 'ready_to_order');
+  assert.equal(commitmentApproval.body.bidPackage.commitment.spendAuthorized, true);
+  assert.equal(commitmentApproval.body.bidPackage.commitment.awardIssued, false);
+  assert.equal(commitmentApproval.body.job.purchaseOrders[0].id, commitment.body.purchaseOrder.id);
+
   const detail = await request(baseUrl, `/api/ledger/bid-packages/${bidPackageId}`, tokens.approver);
   assert.equal(detail.response.status, 200);
   assert.equal(detail.body.bidPackage.status, 'selected');
-  assert.equal(detail.body.bidPackage.data.spendAuthorized, false);
+  assert.equal(detail.body.bidPackage.data.spendAuthorized, true);
+  assert.equal(detail.body.bidPackage.commitment.integrityValid, true);
 
   const portfolio = await request(baseUrl, '/api/ledger/bid-packages?includeClosed=true&limit=100', tokens.owner);
   assert.equal(portfolio.response.status, 200);
@@ -145,4 +198,5 @@ test('bid-package API enforces roles and carries a tender comparison through app
   const exported = await request(baseUrl, '/api/operations/export', tokens.owner);
   assert.ok(exported.body.bidPackages.some(item => item.id === bidPackageId));
   assert.ok(exported.body.bidPackageParticipants.some(item => item.id === participantId));
+  assert.ok(exported.body.purchaseOrders.some(item => item.id === commitment.body.purchaseOrder.id));
 });

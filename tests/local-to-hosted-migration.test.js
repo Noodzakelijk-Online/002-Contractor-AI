@@ -262,6 +262,49 @@ function createBackupFixture(t, suffix = 'success') {
   const convertedTakeoff = source.convertTakeoffToQuote(job.id, takeoff.id, {
     validUntil: '2026-12-31'
   }, { actor: 'migration_fixture' });
+  const bidOpportunity = source.createOpportunity({
+    clientName: `Migration tender client ${suffix}`,
+    title: `Migration selected bid ${suffix}`,
+    stage: 'estimating',
+    estimatedValue: 75_000
+  }, { actor: 'migration_fixture' });
+  const bidPackage = source.createBidPackage(bidOpportunity.id, {
+    title: 'Migration mechanical package',
+    trade: 'Mechanical',
+    scope: 'Supply, install, commission, and retain handover evidence for the complete mechanical scope.',
+    dueAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+    tradePartnerIds: [tradePartner.id]
+  }, { actor: 'migration_fixture' });
+  const bidReturn = source.recordBidReturn(bidPackage.id, bidPackage.participants[0].id, {
+    amount: 23_456.78,
+    taxRate: 21,
+    receivedAt: new Date().toISOString(),
+    validUntil: new Date(Date.now() + 45 * 86_400_000).toISOString(),
+    durationDays: 30,
+    evidenceReference: `MIGRATION-BID-RETURN-${suffix}`,
+    exclusions: ['Builder-provided temporary power'],
+    qualifications: ['Final coordination drawing approval']
+  }, { actor: 'migration_fixture' });
+  const bidSelection = source.requestBidPackageSelection(bidPackage.id, bidReturn.participant.id, {
+    rationale: 'Verified compliant return retained as the migration purchasing basis.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(bidSelection.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration bid comparison and trade-partner evidence verified.'
+  });
+  const bidJob = source.convertOpportunityToJob(bidOpportunity.id, {}, { actor: 'migration_fixture' }).job;
+  const preparedBidCommitment = source.createBidPackageCommitment(bidPackage.id, {
+    requiredBy: new Date(Date.now() + 60 * 86_400_000).toISOString(),
+    costCode: 'MIG-SUB-410',
+    notes: 'Retain the exact approved selected-bid envelope through environment migration.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(preparedBidCommitment.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration purchasing envelope, source hash, and current partner compliance verified.'
+  });
+  const bidCommitment = source.getBidPackage(bidPackage.id).commitment;
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -287,7 +330,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, billingMilestone, controlledDocument, convertedTakeoff, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
+  return { backupDir, backupId, bidCommitment, bidJob, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -377,7 +420,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '027_quantity_takeoffs');
+  assert.equal(migration.migrationVersion, '028_bid_commitment_bridge');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -425,6 +468,21 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPartner.name, fixture.tradePartner.name);
     assert.equal(migratedPartner.compliance.status, 'verified');
     assert.equal(migratedPartner.data.verificationReference, fixture.tradePartner.data.verificationReference);
+    const migratedBidPackage = hosted.getBidPackage(fixture.bidPackage.id);
+    assert.equal(migratedBidPackage.jobId, fixture.bidJob.id);
+    assert.equal(migratedBidPackage.commitment.purchaseOrderId, fixture.bidCommitment.purchaseOrderId);
+    assert.equal(migratedBidPackage.commitment.status, 'ready_to_order');
+    assert.equal(migratedBidPackage.commitment.integrityValid, true);
+    assert.equal(migratedBidPackage.commitment.spendAuthorized, true);
+    assert.equal(migratedBidPackage.commitment.awardIssued, false);
+    assert.equal(migratedBidPackage.commitment.externalCommitments, 0);
+    assert.equal(migratedBidPackage.commitment.purchaseOrder.data.source.commitmentHash, migratedBidPackage.commitmentHash);
+    const migratedBidJob = hosted.getJobDetail(fixture.bidJob.id);
+    assert.ok(migratedBidJob.purchaseOrders.some(item =>
+      item.id === fixture.bidCommitment.purchaseOrderId
+      && item.status === 'ready_to_order'
+      && item.data.source.type === 'bid_package_commitment'
+    ));
     const migratedSupplierInvoice = detail.supplierInvoices.find(item => item.id === fixture.supplierInvoice.id);
     assert.equal(migratedSupplierInvoice.status, 'paid');
     assert.equal(migratedSupplierInvoice.data.reconciliation.outstandingAmount, 0);
