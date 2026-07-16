@@ -144,6 +144,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   for (const command of ['npm run verify:release', 'npm run lint', 'npm test', 'npm run build', 'npm run test:browser']) {
     if (!workflow.includes(command)) failures.push(`CI workflow is missing required gate: ${command}`);
   }
+  if (!/push:\s*\n\s+branches:\s*\n\s+- main/.test(workflow)) {
+    failures.push('CI push verification must be limited to main so pull request branches do not run duplicate suites.');
+  }
   if (!/CONTRACTOR_AI_POSTGRES_TEST_URL:.*sslmode=require/.test(workflow)) {
     failures.push('CI PostgreSQL contract must run with sslmode=require.');
   }
