@@ -145,6 +145,15 @@ test('supplier payables retain three-way matches, refuse duplicates, and reconci
   assert.equal(purchaseOrder.body.purchaseOrder.status, 'pending_approval');
   const purchaseApproval = await resolve(baseUrl, purchaseOrder.body.purchaseOrder.approvalId, 'Supplier compliance and purchase commitment verified.');
   assert.equal(purchaseApproval.response.status, 200);
+  const deliveryEvidence = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/documents`, {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'service_completion',
+      title: 'Signed service completion GR-0042',
+      filename: 'service-completion-gr-0042.pdf'
+    })
+  });
+  assert.equal(deliveryEvidence.response.status, 201);
 
   const invoiceDate = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
   const dueAt = new Date(Date.now() - 1_000).toISOString();
@@ -159,7 +168,7 @@ test('supplier payables retain three-way matches, refuse duplicates, and reconci
     taxAmount: 210,
     total: 1210,
     currency: 'EUR',
-    deliveryReference: 'Signed goods receipt GR-0042',
+    deliveryDocumentId: deliveryEvidence.body.document.id,
     notes: 'Goods receipt, quantity, supplier, and amount checked against the approved purchase order.'
   };
   const supplierInvoice = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/supplier-invoices`, {
@@ -170,7 +179,7 @@ test('supplier payables retain three-way matches, refuse duplicates, and reconci
   assert.equal(supplierInvoice.body.externalPaymentInitiated, false);
   assert.equal(supplierInvoice.body.supplierInvoice.status, 'pending_approval');
   assert.equal(supplierInvoice.body.supplierInvoice.match.status, 'matched');
-  assert.equal(supplierInvoice.body.supplierInvoice.match.type, 'three_way');
+  assert.equal(supplierInvoice.body.supplierInvoice.match.type, 'three_way_service_completion');
   assert.deepEqual(supplierInvoice.body.supplierInvoice.match.exceptions, []);
   assert.equal(supplierInvoice.body.supplierInvoice.total, 1210);
 

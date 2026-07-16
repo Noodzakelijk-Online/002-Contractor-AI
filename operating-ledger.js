@@ -139,6 +139,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'timesheet', label: 'Approved weekly timesheet', table: 'weekly_timesheets', readyStatuses: ['approved'], ledgerOnly: true },
     { key: 'attendance', label: 'Site attendance and labor map', table: 'attendance_sessions', detailKey: 'attendanceSessions', readyStatuses: ['checked_in', 'checked_out'] },
     { key: 'materials', label: 'Material tracking', table: 'material_requirements', detailKey: 'materials' },
+    { key: 'material_receipt', label: 'Material delivery receipts', table: 'material_receipts', detailKey: 'materialReceipts', readyStatuses: ['received', 'discrepancy', 'pending_reversal'] },
     { key: 'equipment', label: 'Tool/equipment tracking', table: 'tool_reservations', detailKey: 'tools' },
     { key: 'availability', label: 'Worker availability', table: 'worker_availability_periods', readyStatuses: ['active', 'pending_cancellation'], ledgerOnly: true },
     { key: 'evidence', label: 'Photo evidence', table: 'documents', detailKey: 'documents' },
@@ -161,6 +162,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'billing_milestone', label: 'Billing milestones', table: 'billing_milestones', detailKey: 'billingMilestones' },
     { key: 'expense', label: 'Expenses', table: 'expenses', detailKey: 'expenses' },
     { key: 'purchase_order', label: 'Purchase orders', table: 'purchase_orders', detailKey: 'purchaseOrders' },
+    { key: 'material_receipt', label: 'Goods receipt evidence', table: 'material_receipts', detailKey: 'materialReceipts', readyStatuses: ['received', 'discrepancy', 'pending_reversal'] },
     { key: 'supplier_invoice', label: 'Supplier invoices', table: 'supplier_invoices', detailKey: 'supplierInvoices' },
     { key: 'invoice', label: 'Invoices', table: 'invoices', detailKey: 'invoices' },
     { key: 'credit_note', label: 'Credit notes', table: 'credit_notes', detailKey: 'creditNotes' },
@@ -2875,6 +2877,67 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON worker_availability_periods(status, starts_at, ends_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_availability_pending_cancellation
           ON worker_availability_periods(cancellation_approval_id) WHERE status = 'pending_cancellation';
+      `);
+    }
+  },
+  {
+    version: '037_material_receiving',
+    description: 'Retain replay-safe material delivery receipts, normalized line evidence, discrepancy state, and approval-backed reversals.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS material_receipts (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          purchase_order_id TEXT,
+          trade_partner_id TEXT,
+          receipt_reference TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'received',
+          delivered_at TEXT NOT NULL,
+          received_by TEXT NOT NULL,
+          location TEXT,
+          evidence_reference TEXT NOT NULL,
+          evidence_document_id TEXT,
+          entry_key TEXT NOT NULL,
+          entry_fingerprint TEXT NOT NULL,
+          reversal_approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(purchase_order_id) REFERENCES purchase_orders(id) ON DELETE SET NULL,
+          FOREIGN KEY(trade_partner_id) REFERENCES trade_partners(id) ON DELETE SET NULL,
+          FOREIGN KEY(evidence_document_id) REFERENCES documents(id) ON DELETE SET NULL,
+          FOREIGN KEY(reversal_approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, entry_key)
+        );
+        CREATE TABLE IF NOT EXISTS material_receipt_lines (
+          id TEXT PRIMARY KEY,
+          receipt_id TEXT NOT NULL,
+          line_key TEXT NOT NULL,
+          material_requirement_id TEXT,
+          item_name TEXT NOT NULL,
+          unit TEXT NOT NULL,
+          ordered_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+          received_quantity DOUBLE PRECISION NOT NULL,
+          accepted_quantity DOUBLE PRECISION NOT NULL,
+          damaged_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(receipt_id) REFERENCES material_receipts(id) ON DELETE CASCADE,
+          FOREIGN KEY(material_requirement_id) REFERENCES material_requirements(id) ON DELETE SET NULL,
+          UNIQUE(receipt_id, line_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_material_receipts_job_delivery
+          ON material_receipts(job_id, delivered_at DESC, status);
+        CREATE INDEX IF NOT EXISTS idx_material_receipts_purchase_order
+          ON material_receipts(purchase_order_id, status, delivered_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_material_receipts_exception
+          ON material_receipts(status, delivered_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_material_receipts_pending_reversal
+          ON material_receipts(reversal_approval_id) WHERE status = 'pending_reversal';
+        CREATE INDEX IF NOT EXISTS idx_material_receipt_lines_requirement
+          ON material_receipt_lines(material_requirement_id, receipt_id);
       `);
     }
   }
@@ -15234,6 +15297,510 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  materialReceiptLineKey(item = {}, index = 0) {
+    const explicit = normalizeText(item.lineKey || item.line_key, '');
+    if (explicit) return explicit.toLowerCase().replace(/[^a-z0-9._:-]+/g, '-').slice(0, 120);
+    const name = normalizeText(item.name || item.itemName || item.item_name || item.material, 'item').toLowerCase();
+    const unit = normalizeText(item.unit, 'unit').toLowerCase();
+    return `line-${index + 1}-${sha256Text(`${name}\0${unit}`).slice(0, 16)}`;
+  }
+
+  materialReceiptPurchaseOrderPlan(purchaseOrderId, options = {}) {
+    const purchaseOrder = this.getPurchaseOrder(purchaseOrderId);
+    const activeStatuses = ['received', 'discrepancy', 'pending_reversal'];
+    const retainedLines = this.db.prepare(`
+      SELECT lines.line_key, lines.received_quantity, lines.accepted_quantity, lines.damaged_quantity
+      FROM material_receipt_lines lines
+      JOIN material_receipts receipts ON receipts.id = lines.receipt_id
+      WHERE receipts.purchase_order_id = ? AND receipts.status IN (${activeStatuses.map(() => '?').join(', ')})
+    `).all(purchaseOrderId, ...activeStatuses);
+    const totals = new Map();
+    for (const line of retainedLines) {
+      const current = totals.get(line.line_key) || { received: 0, accepted: 0, damaged: 0 };
+      current.received += normalizeNumber(line.received_quantity, 0);
+      current.accepted += normalizeNumber(line.accepted_quantity, 0);
+      current.damaged += normalizeNumber(line.damaged_quantity, 0);
+      totals.set(line.line_key, current);
+    }
+    const materialRequirements = this.db.prepare('SELECT * FROM material_requirements WHERE job_id = ?').all(purchaseOrder.jobId);
+    const lines = (purchaseOrder.items || []).map((item, index) => {
+      const lineKey = this.materialReceiptLineKey(item, index);
+      const orderedQuantity = normalizeNumber(item.quantity, 1);
+      const retained = totals.get(lineKey) || { received: 0, accepted: 0, damaged: 0 };
+      const explicitRequirementId = item.materialRequirementId || item.material_requirement_id || null;
+      const matchingRequirement = explicitRequirementId
+        ? materialRequirements.find(row => row.id === explicitRequirementId)
+        : materialRequirements.find(row => normalizeText(row.name, '').toLowerCase() === normalizeText(item.name, '').toLowerCase());
+      return {
+        lineKey,
+        purchaseOrderLineIndex: index,
+        materialRequirementId: matchingRequirement?.id || null,
+        itemName: normalizeText(item.name || item.description || item.material, `Purchase order line ${index + 1}`),
+        unit: normalizeText(item.unit, matchingRequirement?.unit || 'unit'),
+        orderedQuantity,
+        receivedQuantity: roundQuantity(retained.received),
+        acceptedQuantity: roundQuantity(retained.accepted),
+        damagedQuantity: roundQuantity(retained.damaged),
+        remainingQuantity: roundQuantity(Math.max(0, orderedQuantity - retained.received)),
+        complete: retained.received >= orderedQuantity - 0.000001
+      };
+    });
+    return {
+      purchaseOrder,
+      lines,
+      summary: {
+        lineCount: lines.length,
+        completeLines: lines.filter(line => line.complete).length,
+        remainingLines: lines.filter(line => !line.complete).length,
+        receiptCount: Number(this.db.prepare(`
+          SELECT COUNT(*) AS count FROM material_receipts
+          WHERE purchase_order_id = ? AND status IN ('received', 'discrepancy', 'pending_reversal')
+        `).get(purchaseOrderId).count || 0),
+        complete: lines.length > 0 && lines.every(line => line.complete)
+      },
+      includeFinancials: options.includeFinancials !== false
+    };
+  }
+
+  normalizeMaterialReceiptLines(jobId, purchaseOrder, payload = {}) {
+    const supplied = normalizeList(payload.lines || payload.items || payload.materials)
+      .filter(line => line && typeof line === 'object')
+      .slice(0, 100);
+    if (!supplied.length) {
+      throw ledgerInputError('material_receipt_lines_required', 'A material receipt requires at least one delivered line.');
+    }
+    const purchasePlan = purchaseOrder ? this.materialReceiptPurchaseOrderPlan(purchaseOrder.id) : null;
+    const plannedByKey = new Map((purchasePlan?.lines || []).map(line => [line.lineKey, line]));
+    const plannedByName = new Map((purchasePlan?.lines || []).map(line => [normalizeText(line.itemName, '').toLowerCase(), line]));
+    const requirementsByName = new Map(this.db.prepare('SELECT * FROM material_requirements WHERE job_id = ?').all(jobId)
+      .map(row => [normalizeText(row.name, '').toLowerCase(), row]));
+    const seen = new Set();
+    return supplied.map((line, index) => {
+      const suppliedKey = normalizeText(line.lineKey || line.line_key, '');
+      const planned = (suppliedKey && plannedByKey.get(this.materialReceiptLineKey({ lineKey: suppliedKey }, index)))
+        || plannedByName.get(normalizeText(line.itemName || line.item_name || line.name || line.material, '').toLowerCase())
+        || null;
+      const lineKey = planned?.lineKey || this.materialReceiptLineKey(line, index);
+      if (seen.has(lineKey)) throw ledgerInputError('material_receipt_line_duplicate', `Material receipt line ${lineKey} is duplicated.`);
+      seen.add(lineKey);
+      const suppliedName = normalizeText(line.itemName || line.item_name || line.name || line.material, '');
+      const namedRequirement = requirementsByName.get(suppliedName.toLowerCase()) || null;
+      const materialRequirementId = line.materialRequirementId || line.material_requirement_id || planned?.materialRequirementId || namedRequirement?.id || null;
+      const requirement = materialRequirementId
+        ? this.db.prepare('SELECT * FROM material_requirements WHERE id = ? AND job_id = ?').get(materialRequirementId, jobId)
+        : null;
+      if (materialRequirementId && !requirement) {
+        throw ledgerInputError('material_receipt_requirement_not_found', 'A linked material requirement was not found for this job.', { materialRequirementId });
+      }
+      const itemName = normalizeText(suppliedName, planned?.itemName || requirement?.name || '');
+      if (itemName.length < 2 || itemName.length > 240) {
+        throw ledgerInputError('material_receipt_item_invalid', 'Each delivered item name must be between 2 and 240 characters.');
+      }
+      const unit = normalizeText(line.unit, planned?.unit || requirement?.unit || 'unit');
+      if (unit.length > 40) throw ledgerInputError('material_receipt_unit_invalid', 'Material receipt units cannot exceed 40 characters.');
+      const receivedQuantity = roundQuantity(Number(line.receivedQuantity ?? line.received_quantity ?? line.quantity));
+      const damagedQuantity = roundQuantity(Number(line.damagedQuantity ?? line.damaged_quantity ?? 0));
+      const acceptedQuantity = roundQuantity(Number(line.acceptedQuantity ?? line.accepted_quantity ?? (receivedQuantity - damagedQuantity)));
+      if (!Number.isFinite(receivedQuantity) || receivedQuantity <= 0 || receivedQuantity > 1_000_000_000) {
+        throw ledgerInputError('material_receipt_quantity_invalid', 'Each received quantity must be greater than zero and no more than 1,000,000,000.');
+      }
+      if (!Number.isFinite(acceptedQuantity) || !Number.isFinite(damagedQuantity) || acceptedQuantity < 0 || damagedQuantity < 0
+        || acceptedQuantity + damagedQuantity > receivedQuantity + 0.000001) {
+        throw ledgerInputError('material_receipt_quantity_breakdown_invalid', 'Accepted and damaged quantities must be non-negative and cannot exceed the received quantity.');
+      }
+      return {
+        lineKey,
+        materialRequirementId: requirement?.id || null,
+        itemName,
+        unit,
+        orderedQuantity: roundQuantity(planned?.orderedQuantity || requirement?.quantity || 0),
+        previouslyReceivedQuantity: roundQuantity(planned?.receivedQuantity || 0),
+        receivedQuantity,
+        acceptedQuantity,
+        damagedQuantity,
+        rejectedQuantity: roundQuantity(Math.max(0, receivedQuantity - acceptedQuantity - damagedQuantity)),
+        planned: Boolean(planned),
+        notes: normalizeText(line.notes || line.note, '').slice(0, 1000) || null
+      };
+    });
+  }
+
+  materialReceiptExceptions({ purchaseOrder = null, lines = [], finalDelivery = false } = {}) {
+    const exceptions = [];
+    if (!purchaseOrder) {
+      exceptions.push({ code: 'purchase_order_missing', message: 'No retained purchase order is linked to this delivery.' });
+    } else if (!['ordered', 'sent', 'submitted', 'issued', 'received', 'closed'].includes(normalizeStatus(purchaseOrder.status, 'draft'))) {
+      exceptions.push({ code: 'purchase_order_not_issued', message: `Purchase order ${purchaseOrder.id} has not been issued through verified delivery.` });
+    }
+    for (const line of lines) {
+      if (purchaseOrder && !line.planned) {
+        exceptions.push({ code: 'unplanned_item', lineKey: line.lineKey, message: `${line.itemName} is not present on the retained purchase order.` });
+      }
+      if (line.damagedQuantity > 0) {
+        exceptions.push({ code: 'damaged_quantity', lineKey: line.lineKey, message: `${line.damagedQuantity} ${line.unit} of ${line.itemName} is recorded as damaged.` });
+      }
+      if (line.rejectedQuantity > 0) {
+        exceptions.push({ code: 'rejected_quantity', lineKey: line.lineKey, message: `${line.rejectedQuantity} ${line.unit} of ${line.itemName} was neither accepted nor recorded as damaged.` });
+      }
+      if (line.orderedQuantity > 0 && line.previouslyReceivedQuantity + line.receivedQuantity > line.orderedQuantity + 0.000001) {
+        exceptions.push({ code: 'over_delivery', lineKey: line.lineKey, message: `${line.itemName} exceeds the retained ordered quantity.` });
+      }
+      if (finalDelivery && line.orderedQuantity > 0 && line.previouslyReceivedQuantity + line.receivedQuantity < line.orderedQuantity - 0.000001) {
+        exceptions.push({ code: 'short_final_delivery', lineKey: line.lineKey, message: `${line.itemName} is short on a delivery marked final.` });
+      }
+    }
+    return exceptions;
+  }
+
+  createMaterialReceipt(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const purchaseOrderId = normalizeText(payload.purchaseOrderId || payload.purchase_order_id, '') || null;
+      const purchaseOrder = purchaseOrderId ? this.getPurchaseOrder(purchaseOrderId) : null;
+      if (purchaseOrder && purchaseOrder.jobId !== jobId) {
+        throw ledgerInputError('material_receipt_purchase_order_not_found', 'The selected purchase order was not found for this job.');
+      }
+      const receiptReference = normalizeText(payload.receiptReference || payload.receipt_reference || payload.deliveryReference || payload.delivery_reference, '');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const receivedBy = normalizeText(payload.receivedBy || payload.received_by, '');
+      const location = normalizeText(payload.location, '');
+      if (receiptReference.length < 3 || receiptReference.length > 160) {
+        throw ledgerInputError('material_receipt_reference_invalid', 'Supplier delivery-note reference must be between 3 and 160 characters.');
+      }
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) {
+        throw ledgerInputError('material_receipt_evidence_required', 'A signed ticket, photo, or retained evidence reference between 3 and 240 characters is required.');
+      }
+      if (receivedBy.length < 2 || receivedBy.length > 160) {
+        throw ledgerInputError('material_receipt_receiver_invalid', 'The receiver name must be between 2 and 160 characters.');
+      }
+      if (location.length > 240) throw ledgerInputError('material_receipt_location_invalid', 'Delivery location cannot exceed 240 characters.');
+      const deliveredAt = this.normalizeReservationDate(payload.deliveredAt || payload.delivered_at || nowIso(), 'deliveredAt');
+      if (Date.parse(deliveredAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('material_receipt_delivery_time_invalid', 'Delivery time cannot be in the future.');
+      }
+      const evidenceDocumentId = normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null;
+      if (evidenceDocumentId && !this.db.prepare('SELECT id FROM documents WHERE id = ? AND job_id = ?').get(evidenceDocumentId, jobId)) {
+        throw ledgerInputError('material_receipt_evidence_document_not_found', 'The selected delivery evidence document was not found for this job.');
+      }
+      const finalDelivery = normalizeBoolean(payload.finalDelivery ?? payload.final_delivery, false);
+      const lines = this.normalizeMaterialReceiptLines(jobId, purchaseOrder, payload);
+      const exceptions = this.materialReceiptExceptions({ purchaseOrder, lines, finalDelivery });
+      const status = exceptions.length ? 'discrepancy' : 'received';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, `receipt:${purchaseOrderId || 'unplanned'}:${receiptReference.toLowerCase()}`);
+      if (entryKey.length < 3 || entryKey.length > 240) {
+        throw ledgerInputError('material_receipt_entry_key_invalid', 'Material receipt entry key must be between 3 and 240 characters.');
+      }
+      const fingerprint = sha256Json({
+        jobId, purchaseOrderId, receiptReference, deliveredAt, receivedBy, location: location || null,
+        evidenceReference, evidenceDocumentId, finalDelivery,
+        lines: lines.map(line => ({
+          lineKey: line.lineKey, materialRequirementId: line.materialRequirementId, itemName: line.itemName,
+          unit: line.unit, receivedQuantity: line.receivedQuantity, acceptedQuantity: line.acceptedQuantity,
+          damagedQuantity: line.damagedQuantity, notes: line.notes
+        }))
+      });
+      const replay = this.db.prepare('SELECT * FROM material_receipts WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('material_receipt_replay_conflict', 'This material receipt entry key is already retained with different evidence.', { receiptId: replay.id }, 409);
+        }
+        return { receipt: this.getMaterialReceipt(replay.id), replayed: true };
+      }
+      const purchaseData = purchaseOrder?.data || {};
+      const tradePartnerId = purchaseOrder?.tradePartnerId || purchaseData.tradePartnerId || null;
+      const id = makeId('material_receipt');
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'dashboard';
+      this.db.prepare(`
+        INSERT INTO material_receipts (
+          id, job_id, purchase_order_id, trade_partner_id, receipt_reference, status, delivered_at,
+          received_by, location, evidence_reference, evidence_document_id, entry_key, entry_fingerprint,
+          reversal_approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id, jobId, purchaseOrderId, tradePartnerId, receiptReference, status, deliveredAt,
+        receivedBy, location || null, evidenceReference, evidenceDocumentId, entryKey, fingerprint,
+        toJson({ finalDelivery, exceptions, notes: normalizeText(payload.notes || payload.note, '').slice(0, 2000) || null, externalCommitments: 0 }),
+        timestamp, timestamp
+      );
+      for (const line of lines) {
+        this.db.prepare(`
+          INSERT INTO material_receipt_lines (
+            id, receipt_id, line_key, material_requirement_id, item_name, unit, ordered_quantity,
+            received_quantity, accepted_quantity, damaged_quantity, data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          makeId('material_receipt_line'), id, line.lineKey, line.materialRequirementId, line.itemName, line.unit,
+          line.orderedQuantity, line.receivedQuantity, line.acceptedQuantity, line.damagedQuantity,
+          toJson({ notes: line.notes, planned: line.planned, rejectedQuantity: line.rejectedQuantity }), timestamp, timestamp
+        );
+      }
+      for (const materialRequirementId of [...new Set(lines.map(line => line.materialRequirementId).filter(Boolean))]) {
+        this.synchronizeMaterialRequirementReceiptStatus(materialRequirementId, { actor, receiptId: id });
+      }
+      const receipt = this.getMaterialReceipt(id);
+      this.audit({
+        entityType: 'material_receipt', entityId: id, jobId, action: 'create_material_receipt', actor, after: receipt,
+        metadata: { purchaseOrderId, lineCount: lines.length, status, exceptionCount: exceptions.length, entryKey, externalCommitments: 0 }
+      });
+      return { receipt, replayed: false };
+    });
+  }
+
+  synchronizeMaterialRequirementReceiptStatus(materialRequirementId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM material_requirements WHERE id = ?').get(materialRequirementId);
+    if (!row) return null;
+    const before = this.mapMaterialRequirement(row);
+    const totals = this.db.prepare(`
+      SELECT COALESCE(SUM(lines.accepted_quantity), 0) AS accepted_quantity,
+        COUNT(DISTINCT receipts.id) AS receipt_count,
+        MAX(receipts.delivered_at) AS last_delivered_at
+      FROM material_receipt_lines lines
+      JOIN material_receipts receipts ON receipts.id = lines.receipt_id
+      WHERE lines.material_requirement_id = ?
+        AND receipts.status IN ('received', 'discrepancy', 'pending_reversal')
+    `).get(materialRequirementId);
+    const acceptedQuantity = roundQuantity(totals.accepted_quantity || 0);
+    const existingData = fromJson(row.data_json, {});
+    const priorControl = existingData.receiptControl || {};
+    const previousStatus = priorControl.previousStatus || normalizeStatus(row.status, 'needed');
+    const status = acceptedQuantity <= 0
+      ? previousStatus
+      : acceptedQuantity >= normalizeNumber(row.quantity, 0) - 0.000001 ? 'available' : 'received';
+    const timestamp = nowIso();
+    const receiptControl = {
+      previousStatus,
+      acceptedQuantity,
+      receiptCount: Number(totals.receipt_count || 0),
+      lastDeliveredAt: totals.last_delivered_at || null,
+      updatedAt: timestamp,
+      source: 'material_receipts'
+    };
+    this.db.prepare('UPDATE material_requirements SET status = ?, data_json = ?, updated_at = ? WHERE id = ?')
+      .run(status, toJson({ ...existingData, availableQuantity: acceptedQuantity, receiptControl }), timestamp, materialRequirementId);
+    const after = this.mapMaterialRequirement(this.db.prepare('SELECT * FROM material_requirements WHERE id = ?').get(materialRequirementId));
+    if (before.status !== after.status || normalizeNumber(before.data?.availableQuantity, 0) !== acceptedQuantity) {
+      this.audit({
+        entityType: 'material_requirement', entityId: materialRequirementId, jobId: row.job_id,
+        action: 'synchronize_material_receipt_status', actor: options.actor || 'material_receiving', before, after,
+        metadata: { receiptId: options.receiptId || null, acceptedQuantity, receiptCount: receiptControl.receiptCount, externalCommitments: 0 }
+      });
+    }
+    return after;
+  }
+
+  listMaterialReceipts(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const purchaseOrderId = normalizeText(filters.purchaseOrderId || filters.purchase_order_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const includeReversed = normalizeBoolean(filters.includeReversed ?? filters.include_reversed, false);
+    const limit = safeLimit(filters.limit, 250, 1000);
+    const clauses = [];
+    const values = [];
+    if (jobId) { clauses.push('receipts.job_id = ?'); values.push(jobId); }
+    if (purchaseOrderId) { clauses.push('receipts.purchase_order_id = ?'); values.push(purchaseOrderId); }
+    if (status) { clauses.push('receipts.status = ?'); values.push(status); }
+    if (!includeReversed && !status) clauses.push("receipts.status <> 'reversed'");
+    return this.db.prepare(`
+      SELECT receipts.*, jobs.title AS job_title, purchase_orders.supplier,
+        trade_partners.name AS trade_partner_name
+      FROM material_receipts receipts
+      JOIN jobs ON jobs.id = receipts.job_id
+      LEFT JOIN purchase_orders ON purchase_orders.id = receipts.purchase_order_id
+      LEFT JOIN trade_partners ON trade_partners.id = receipts.trade_partner_id
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY receipts.delivered_at DESC, receipts.created_at DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapMaterialReceipt(row));
+  }
+
+  getMaterialReceipt(receiptId) {
+    const row = this.db.prepare(`
+      SELECT receipts.*, jobs.title AS job_title, purchase_orders.supplier,
+        trade_partners.name AS trade_partner_name
+      FROM material_receipts receipts
+      JOIN jobs ON jobs.id = receipts.job_id
+      LEFT JOIN purchase_orders ON purchase_orders.id = receipts.purchase_order_id
+      LEFT JOIN trade_partners ON trade_partners.id = receipts.trade_partner_id
+      WHERE receipts.id = ?
+    `).get(String(receiptId || ''));
+    if (!row) throw ledgerInputError('material_receipt_not_found', 'Material receipt not found.', { receiptId }, 404);
+    return this.mapMaterialReceipt(row);
+  }
+
+  requestMaterialReceiptReversal(jobId, receiptId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM material_receipts WHERE id = ? AND job_id = ?').get(receiptId, jobId);
+      if (!row) throw ledgerInputError('material_receipt_not_found', 'Material receipt not found for this job.', { receiptId }, 404);
+      if (row.status === 'reversed') return { receipt: this.getMaterialReceipt(receiptId), approval: null, replayed: true };
+      if (row.status === 'pending_reversal') {
+        const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.reversal_approval_id);
+        return { receipt: this.getMaterialReceipt(receiptId), approval: approval ? this.mapApproval(approval) : null, replayed: true };
+      }
+      if (!['received', 'discrepancy'].includes(row.status)) {
+        throw ledgerInputError('material_receipt_state_conflict', `Material receipt cannot be reversed from ${row.status}.`, { receiptId }, 409);
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 1000) {
+        throw ledgerInputError('material_receipt_reversal_reason_required', 'Receipt reversal reason must be between 8 and 1000 characters.');
+      }
+      const actor = options.actor || payload.actor || 'dashboard';
+      const before = this.getMaterialReceipt(receiptId);
+      const approval = this.createApproval({
+        targetType: 'material_receipt_reversal', targetId: receiptId, jobId,
+        approvalType: 'material_receipt_reversal', requestedBy: actor,
+        summary: `Reverse material receipt ${row.receipt_reference}`,
+        reason,
+        data: {
+          receiptId, purchaseOrderId: row.purchase_order_id, receiptReference: row.receipt_reference,
+          previousStatus: row.status, lineCount: before.lines.length, acceptedQuantity: before.summary.acceptedQuantity
+        }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE material_receipts SET status = 'pending_reversal', reversal_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status IN ('received', 'discrepancy')
+      `).run(approval.id, toJson({ ...fromJson(row.data_json, {}), reversalPreviousStatus: row.status, reversalReason: reason, reversalRequestedAt: timestamp, reversalRequestedBy: actor }), timestamp, receiptId);
+      const receipt = this.getMaterialReceipt(receiptId);
+      this.audit({
+        entityType: 'material_receipt', entityId: receiptId, jobId, action: 'request_material_receipt_reversal', actor, before, after: receipt,
+        metadata: { approvalId: approval.id, purchaseOrderId: row.purchase_order_id, externalCommitments: 0 }
+      });
+      return { receipt, approval, replayed: false };
+    });
+  }
+
+  applyMaterialReceiptReversal(receiptId, timestamp = nowIso()) {
+    const row = this.db.prepare('SELECT * FROM material_receipts WHERE id = ?').get(receiptId);
+    if (!row || row.status === 'reversed') return row ? this.getMaterialReceipt(receiptId) : null;
+    if (row.status !== 'pending_reversal') {
+      throw ledgerInputError('material_receipt_state_conflict', `Material receipt cannot complete reversal from ${row.status}.`, { receiptId }, 409);
+    }
+    const approval = this.db.prepare(`
+      SELECT * FROM approvals WHERE id = ? AND target_type = 'material_receipt_reversal' AND target_id = ? AND status = 'approved'
+    `).get(row.reversal_approval_id, receiptId);
+    if (!approval) throw ledgerInputError('material_receipt_reversal_approval_missing', 'Material receipt reversal requires a matching approved decision.', { receiptId }, 409);
+    const linkedSupplierInvoices = this.db.prepare(`
+      SELECT * FROM supplier_invoices
+      WHERE job_id = ? AND status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+    `).all(row.job_id).filter(invoice => fromJson(invoice.data_json, {}).match?.materialReceiptId === receiptId);
+    if (linkedSupplierInvoices.length) {
+      throw ledgerInputError(
+        'material_receipt_linked_payable_required',
+        'Material receipt reversal is blocked while an active supplier invoice relies on this receiving evidence.',
+        { receiptId, supplierInvoiceIds: linkedSupplierInvoices.map(invoice => invoice.id) },
+        409
+      );
+    }
+    const before = this.getMaterialReceipt(receiptId);
+    this.db.prepare("UPDATE material_receipts SET status = 'reversed', data_json = ?, updated_at = ? WHERE id = ? AND status = 'pending_reversal'")
+      .run(toJson({ ...fromJson(row.data_json, {}), reversedAt: timestamp, reversedBy: approval.resolved_by || 'approval' }), timestamp, receiptId);
+    const requirementIds = this.db.prepare('SELECT DISTINCT material_requirement_id FROM material_receipt_lines WHERE receipt_id = ? AND material_requirement_id IS NOT NULL').all(receiptId);
+    for (const requirement of requirementIds) this.synchronizeMaterialRequirementReceiptStatus(requirement.material_requirement_id, { actor: approval.resolved_by || 'approval', receiptId });
+    const after = this.getMaterialReceipt(receiptId);
+    this.audit({
+      entityType: 'material_receipt', entityId: receiptId, jobId: row.job_id, action: 'reverse_material_receipt',
+      actor: approval.resolved_by || 'approval', before, after,
+      metadata: { approvalId: approval.id, purchaseOrderId: row.purchase_order_id, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  restoreRejectedMaterialReceiptReversal(approval, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM material_receipts WHERE id = ?').get(approval.target_id);
+    if (!row || row.status !== 'pending_reversal') return row ? this.getMaterialReceipt(row.id) : null;
+    const data = fromJson(row.data_json, {});
+    const restoredStatus = ['received', 'discrepancy'].includes(data.reversalPreviousStatus) ? data.reversalPreviousStatus : 'discrepancy';
+    const timestamp = options.timestamp || nowIso();
+    const before = this.getMaterialReceipt(row.id);
+    this.db.prepare('UPDATE material_receipts SET status = ?, reversal_approval_id = NULL, data_json = ?, updated_at = ? WHERE id = ?')
+      .run(restoredStatus, toJson({ ...data, reversalDecision: status, reversalResolvedAt: timestamp, reversalResolvedBy: options.actor || 'approval' }), timestamp, row.id);
+    const after = this.getMaterialReceipt(row.id);
+    this.audit({
+      entityType: 'material_receipt', entityId: row.id, jobId: row.job_id, action: 'restore_material_receipt_after_rejected_reversal',
+      actor: options.actor || 'approval', before, after,
+      metadata: { approvalId: approval.id, decision: status, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  detectMaterialReceivingActions(limit = 50) {
+    const actions = [];
+    const discrepancyRows = this.listMaterialReceipts({ status: 'discrepancy', limit });
+    for (const receipt of discrepancyRows) {
+      const taskId = `task_${sha256Text(`material-receipt-discrepancy:${receipt.id}:${receipt.entryFingerprint}`).slice(0, 24)}`;
+      const existing = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (!existing) actions.push({
+        type: 'review_material_receipt', reason: 'discrepancy', jobId: receipt.jobId, jobTitle: receipt.jobTitle,
+        materialReceiptId: receipt.id, receiptReference: receipt.receiptReference, taskId,
+        sourceHash: receipt.entryFingerprint, severity: 'high',
+        message: `Material receipt ${receipt.receiptReference} has ${receipt.exceptions.length} retained delivery discrepancy record(s).`
+      });
+      if (actions.length >= limit) return actions;
+    }
+    const overdueOrders = this.db.prepare(`
+      SELECT orders.*, jobs.title AS job_title
+      FROM purchase_orders orders
+      JOIN jobs ON jobs.id = orders.job_id
+      LEFT JOIN material_receipts receipts
+        ON receipts.purchase_order_id = orders.id AND receipts.status IN ('received', 'discrepancy', 'pending_reversal')
+      WHERE orders.status IN ('ordered', 'sent', 'submitted', 'issued')
+        AND orders.required_by IS NOT NULL AND orders.required_by < ?
+        AND receipts.id IS NULL AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY orders.required_by ASC
+      LIMIT ?
+    `).all(nowIso(), limit);
+    for (const row of overdueOrders) {
+      const taskId = `task_${sha256Text(`material-receipt-overdue:${row.id}:${row.required_by}`).slice(0, 24)}`;
+      const existing = this.db.prepare("SELECT id FROM job_tasks WHERE id = ? AND status NOT IN ('completed', 'cancelled')").get(taskId);
+      if (!existing) actions.push({
+        type: 'review_material_receipt', reason: 'overdue', jobId: row.job_id, jobTitle: row.job_title,
+        purchaseOrderId: row.id, receiptReference: null, taskId,
+        sourceHash: sha256Json({ purchaseOrderId: row.id, requiredBy: row.required_by }), severity: 'medium',
+        message: `Purchase order ${row.id} was required by ${String(row.required_by).slice(0, 10)} and has no retained material receipt.`
+      });
+      if (actions.length >= limit) break;
+    }
+    return actions;
+  }
+
+  listMaterialReceivingRegister(filters = {}) {
+    const receipts = this.listMaterialReceipts({ ...filters, includeReversed: normalizeBoolean(filters.includeReversed ?? filters.include_reversed, false), limit: safeLimit(filters.limit, 500, 1000) });
+    const purchaseOrders = this.listPurchaseOrders({ limit: 1000 })
+      .filter(order => ['approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued', 'received'].includes(normalizeStatus(order.status, '')))
+      .map(order => this.materialReceiptPurchaseOrderPlan(order.id));
+    const actions = this.detectMaterialReceivingActions(250);
+    return {
+      generatedAt: nowIso(),
+      policy: {
+        purpose: 'Observed goods receiving and three-way match evidence',
+        immutableReceipts: true,
+        reversalMode: 'approval_gated_compensating_record',
+        externalCommitments: 0
+      },
+      summary: {
+        total: receipts.length,
+        received: receipts.filter(receipt => receipt.status === 'received').length,
+        discrepancies: receipts.filter(receipt => receipt.status === 'discrepancy').length,
+        pendingReversal: receipts.filter(receipt => receipt.status === 'pending_reversal').length,
+        acceptedQuantity: roundQuantity(receipts.reduce((sum, receipt) => sum + receipt.summary.acceptedQuantity, 0)),
+        openOrders: purchaseOrders.filter(plan => !plan.summary.complete).length,
+        overdueActions: actions.filter(action => action.reason === 'overdue').length
+      },
+      receipts,
+      purchaseOrders,
+      actions
+    };
+  }
+
+  listMaterialReceivingPlansForJob(jobId) {
+    this.requireJob(jobId);
+    return this.listPurchaseOrders({ limit: 1000 })
+      .filter(order => order.jobId === jobId && ['approved', 'ready_to_order', 'ordered', 'sent', 'submitted', 'issued', 'received'].includes(normalizeStatus(order.status, '')))
+      .map(order => this.materialReceiptPurchaseOrderPlan(order.id))
+      .filter(plan => !plan.summary.complete);
+  }
+
   defaultLoadItems(jobId) {
     const tools = this.db.prepare(`
       SELECT * FROM tool_reservations
@@ -23543,13 +24110,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (deliveryDocumentId && !deliveryDocument) {
       throw ledgerInputError('supplier_invoice_delivery_document_not_found', 'The selected delivery evidence was not found for this job.');
     }
+    const materialReceiptId = payload.materialReceiptId || payload.material_receipt_id || null;
+    const materialReceipt = materialReceiptId
+      ? this.db.prepare('SELECT * FROM material_receipts WHERE id = ? AND job_id = ?').get(materialReceiptId, jobId)
+      : null;
+    if (materialReceiptId && !materialReceipt) {
+      throw ledgerInputError('supplier_invoice_material_receipt_not_found', 'The selected material receipt was not found for this job.');
+    }
 
     const supplier = normalizeText(payload.supplier || payload.vendor, '');
     const currency = normalizeText(amounts.currency || payload.currency, 'EUR').toUpperCase();
     const netAmount = roundMoney(amounts.netAmount);
     const deliveryReference = normalizeText(
       payload.deliveryReference || payload.delivery_reference || payload.receiptReference || payload.receipt_reference,
-      deliveryDocument?.title || ''
+      materialReceipt?.receipt_reference || deliveryDocument?.title || ''
     );
     const exceptions = [];
     if (!purchaseOrder) {
@@ -23575,6 +24149,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
     if (!deliveryReference) {
       exceptions.push({ code: 'delivery_evidence_missing', message: 'Delivery or service-completion evidence is not retained.' });
+    } else if (!materialReceipt && !deliveryDocument) {
+      exceptions.push({ code: 'delivery_reference_unverified', message: 'The delivery reference is not linked to a retained material receipt or service-completion document.' });
+    }
+    if (materialReceipt) {
+      if (purchaseOrder && materialReceipt.purchase_order_id !== purchaseOrder.id) {
+        exceptions.push({ code: 'material_receipt_purchase_order_mismatch', message: 'The material receipt belongs to a different purchase order.' });
+      }
+      if (materialReceipt.status === 'discrepancy') {
+        exceptions.push({ code: 'material_receipt_discrepancy', message: 'The linked material receipt retains unresolved delivery discrepancies.' });
+      } else if (materialReceipt.status === 'pending_reversal') {
+        exceptions.push({ code: 'material_receipt_pending_reversal', message: 'The linked material receipt is awaiting a reversal decision.' });
+      } else if (materialReceipt.status !== 'received') {
+        exceptions.push({ code: 'material_receipt_inactive', message: `The linked material receipt is ${materialReceipt.status}.` });
+      }
     }
 
     const tradePartner = this.resolveTradePartnerForSpend(payload, supplier);
@@ -23591,10 +24179,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       supplier: tradePartner?.name || supplier,
       deliveryReference: deliveryReference || null,
       deliveryDocumentId: deliveryDocument?.id || null,
+      materialReceipt: materialReceipt ? this.getMaterialReceipt(materialReceipt.id) : null,
       compliance,
       exceptions,
       matched: exceptions.length === 0,
-      matchType: purchaseOrder && deliveryReference ? 'three_way' : purchaseOrder ? 'two_way_exception' : 'manual_exception'
+      matchType: purchaseOrder && materialReceipt
+        ? 'three_way_material_receipt'
+        : purchaseOrder && deliveryDocument ? 'three_way_service_completion'
+          : purchaseOrder ? 'two_way_exception' : 'manual_exception'
     };
   }
 
@@ -23669,6 +24261,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           purchaseOrderAmount: match.purchaseOrder ? roundMoney(match.purchaseOrder.amount) : null,
           deliveryReference: match.deliveryReference,
           deliveryDocumentId: match.deliveryDocumentId,
+          materialReceiptId: match.materialReceipt?.id || null,
+          materialReceiptFingerprint: match.materialReceipt?.entryFingerprint || null,
           exceptions: match.exceptions,
           checkedAt: timestamp
         },
@@ -27212,6 +27806,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'material_receipt_reversal') {
+        this.restoreRejectedMaterialReceiptReversal(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'document_transmittal') {
         const transmittalData = fromJson(
           this.db.prepare('SELECT data_json FROM document_transmittals WHERE id = ?').get(before.target_id)?.data_json,
@@ -27738,6 +28338,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyQualificationRequirementRetirement(targetId, timestamp);
     } else if (targetType === 'worker_availability_cancellation') {
       this.applyWorkerAvailabilityCancellation(targetId, timestamp);
+    } else if (targetType === 'material_receipt_reversal') {
+      this.applyMaterialReceiptReversal(targetId, timestamp);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -28581,6 +29183,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const before = this.mapSupplierInvoice(supplierInvoice);
         const data = fromJson(supplierInvoice.data_json, {});
         const exceptions = data.match?.exceptions || [];
+        if (data.match?.materialReceiptId) {
+          const receipt = this.db.prepare('SELECT * FROM material_receipts WHERE id = ? AND job_id = ?')
+            .get(data.match.materialReceiptId, supplierInvoice.job_id);
+          if (!receipt || !['received', 'discrepancy'].includes(receipt.status)
+            || receipt.entry_fingerprint !== data.match.materialReceiptFingerprint) {
+            throw ledgerInputError(
+              'supplier_invoice_material_receipt_current_required',
+              'Supplier invoice approval requires the same current retained material receipt used for matching.',
+              { materialReceiptId: data.match.materialReceiptId, receiptStatus: receipt?.status || 'missing' },
+              409
+            );
+          }
+        }
         const approvedStatus = 'approved';
         this.db.prepare('UPDATE supplier_invoices SET status = ?, data_json = ?, updated_at = ? WHERE id = ?').run(
           approvedStatus,
@@ -29797,6 +30412,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           && !order.issuePackage
         ));
         const preparedPurchaseOrders = openPurchaseOrders.filter(order => Boolean(order.issuePackage));
+        const activeMaterialReceipts = (detail.materialReceipts || []).filter(receipt => (
+          ['received', 'discrepancy', 'pending_reversal'].includes(normalizeStatus(receipt.status, ''))
+        ));
         const purchaseOrderDeliveryCandidates = preparedPurchaseOrders
           .map(purchaseOrder => ({
             purchaseOrder,
@@ -30001,6 +30619,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
         if (supplierInvoiceCandidates.length) {
           const purchaseOrder = supplierInvoiceCandidates[0];
+          const materialReceipts = activeMaterialReceipts
+            .filter(receipt => receipt.purchaseOrderId === purchaseOrder.id)
+            .map(receipt => ({
+              id: receipt.id,
+              receiptReference: receipt.receiptReference,
+              status: receipt.status,
+              deliveredAt: receipt.deliveredAt,
+              acceptedQuantity: receipt.summary?.acceptedQuantity || 0,
+              discrepancyCount: receipt.summary?.discrepancyCount || 0
+            }));
           nextActions.push({
             type: 'record_supplier_invoice',
             label: 'Match supplier invoice',
@@ -30008,6 +30636,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             supplier: purchaseOrder.supplier,
             currency: purchaseOrder.currency,
             committedAmount: purchaseOrder.amount,
+            materialReceiptId: materialReceipts.find(receipt => receipt.status === 'received')?.id || null,
+            materialReceipts,
             requiresApproval: true
           });
         }
@@ -30939,6 +31569,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   classifyInventoryReadiness(flags = {}) {
     if (flags.supplierComplianceBlocked) return 'supplier_compliance';
+    if (flags.receivingException) return 'receiving_exception';
     if (flags.approvalRequired) return 'approval_required';
     if (flags.toolConflict) return 'tool_conflict';
     if (flags.procurementNeeded) return 'procurement_needed';
@@ -30953,6 +31584,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       matching,
       approvalRequired: 0,
       supplierComplianceBlocked: 0,
+      receivingExceptions: 0,
       toolConflicts: 0,
       procurementNeeded: 0,
       loadingMissing: 0,
@@ -30976,11 +31608,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       loadingExternalCommitments: 0,
       procurementValue: 0,
       materialCost: 0,
-      partnerComplianceBlocks: 0
+      partnerComplianceBlocks: 0,
+      materialReceipts: 0,
+      materialReceiptExceptions: 0
     };
     for (const row of rows) {
       const flags = row.flags || {};
       if (flags.supplierComplianceBlocked) summary.supplierComplianceBlocked += 1;
+      if (flags.receivingException) summary.receivingExceptions += 1;
       if (flags.approvalRequired) summary.approvalRequired += 1;
       if (flags.toolConflict) summary.toolConflicts += 1;
       if (flags.procurementNeeded) summary.procurementNeeded += 1;
@@ -31006,6 +31641,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.procurementValue += normalizeNumber(row.money?.procurementValue, 0);
       summary.materialCost += normalizeNumber(row.money?.materialCost, 0);
       summary.partnerComplianceBlocks += normalizeNumber(row.counts?.partnerComplianceBlocks, 0);
+      summary.materialReceipts += normalizeNumber(row.counts?.materialReceipts, 0);
+      summary.materialReceiptExceptions += normalizeNumber(row.counts?.materialReceiptExceptions, 0);
     }
     return summary;
   }
@@ -31021,7 +31658,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'procurement_order',
       'purchase_order',
       'loading_plan',
-      'material_requirement'
+      'material_requirement',
+      'material_receipt_reversal'
     ]);
     const materialClosedStatuses = ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received', 'delivered', 'available', 'used'];
     const procurementClosedStatuses = ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received'];
@@ -31074,6 +31712,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const purchaseOrders = (detail.purchaseOrders || []).filter(order =>
           this.financeRecordOpen(order.status, ['cancelled', 'canceled', 'rejected', 'void', 'closed', 'received'])
         );
+        const activeMaterialReceipts = (detail.materialReceipts || []).filter(receipt =>
+          ['received', 'discrepancy', 'pending_reversal'].includes(normalizeStatus(receipt.status, ''))
+        );
+        const materialReceiptExceptions = activeMaterialReceipts.filter(receipt =>
+          ['discrepancy', 'pending_reversal'].includes(normalizeStatus(receipt.status, ''))
+        );
         const partnerReadiness = [...procurementOrders, ...purchaseOrders].map(order => ({
           orderId: order.id,
           recordType: detail.procurementOrders?.some(candidate => candidate.id === order.id) ? 'procurement_order' : 'purchase_order',
@@ -31097,6 +31741,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || activeLoadingPlans.some(plan => plan.approvalId && normalizeStatus(plan.status, '') === 'pending_approval');
         const flags = {
           supplierComplianceBlocked: partnerComplianceBlocks.length > 0,
+          receivingException: materialReceiptExceptions.length > 0,
           approvalRequired,
           toolConflict: toolConflicts.length > 0,
           procurementNeeded,
@@ -31118,6 +31763,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           blockers: partnerComplianceBlocks[0].compliance.blockers,
           requiresApproval: false,
           blocked: true
+        });
+        if (materialReceiptExceptions.length) nextActions.push({
+          type: 'review_material_receipt',
+          label: 'Review retained material delivery exception',
+          materialReceiptId: materialReceiptExceptions[0].id,
+          receiptReference: materialReceiptExceptions[0].receiptReference,
+          requiresApproval: materialReceiptExceptions[0].status === 'pending_reversal',
+          approvalId: materialReceiptExceptions[0].reversalApprovalId || null
         });
         if (approvalRequired) nextActions.push({ type: 'review_inventory_approval', label: 'Review inventory or procurement approval gates', approvalId: pendingApprovals[0]?.id || null, requiresApproval: false });
         if (toolConflicts.length) nextActions.push({ type: 'resolve_tool_conflict', label: 'Resolve overlapping tool reservation', reservationId: activeTools[0]?.id || null, toolId: activeTools[0]?.toolId || null, requiresApproval: false });
@@ -31163,6 +31816,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             pendingProcurement: pendingProcurement.length,
             committedProcurement: committedProcurement.length,
             purchaseOrders: purchaseOrders.length,
+            materialReceipts: activeMaterialReceipts.length,
+            materialReceiptExceptions: materialReceiptExceptions.length,
             partnerComplianceBlocks: partnerComplianceBlocks.length,
             loadingPlans: activeLoadingPlans.length,
             loadingItems: normalizeNumber(loadingReadiness?.itemCounts?.total, 0),
@@ -31178,13 +31833,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             material: openMaterials[0] || activeMaterials[0] || null,
             procurementOrder: pendingProcurement[0] || procurementOrders[0] || null,
             purchaseOrder: purchaseOrders[0] || null,
+            materialReceipt: activeMaterialReceipts[0] || null,
             tradePartner: partnerReadiness.find(item => item.partner)?.partner || null,
             loadingPlan: activeLoadingPlan
           },
           loadingReadiness,
           conflicts: toolConflicts.slice(0, 8),
           tools: activeTools.slice(0, 8),
-          materials: activeMaterials.slice(0, 8)
+          materials: activeMaterials.slice(0, 8),
+          materialReceipts: activeMaterialReceipts.slice(0, 8)
         };
       });
 
@@ -31192,6 +31849,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (mode === 'all') return true;
       if (mode === 'approval' || mode === 'approval_required') return row.flags?.approvalRequired === true;
       if (mode === 'supplier' || mode === 'supplier_compliance') return row.flags?.supplierComplianceBlocked === true;
+      if (mode === 'receiving' || mode === 'receiving_exception') return row.flags?.receivingException === true;
       if (mode === 'conflict' || mode === 'tool_conflict') return row.flags?.toolConflict === true;
       if (mode === 'procurement' || mode === 'procurement_needed') return row.flags?.procurementNeeded === true || row.flags?.pendingProcurement === true;
       if (mode === 'loading' || mode === 'loading_missing') return row.flags?.loadingMissing === true;
@@ -31203,12 +31861,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const filtered = rows.filter(row => matchesMode(row) && matchesSearch(row));
     const statusRank = {
       supplier_compliance: 0,
-      approval_required: 1,
-      tool_conflict: 2,
-      procurement_needed: 3,
-      loading_missing: 4,
-      material_needed: 5,
-      stable: 6
+      receiving_exception: 1,
+      approval_required: 2,
+      tool_conflict: 3,
+      procurement_needed: 4,
+      loading_missing: 5,
+      material_needed: 6,
+      stable: 7
     };
     const priorityScore = priority => {
       const rank = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -31729,6 +32388,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       assignments: this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapAssignment(row)),
       tools: this.db.prepare('SELECT * FROM tool_reservations WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapToolReservation(row)),
       materials: this.db.prepare('SELECT * FROM material_requirements WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapMaterialRequirement(row)),
+      materialReceipts: this.listMaterialReceipts({ jobId, includeReversed: true, limit: 1000 }),
       documents: this.db.prepare('SELECT * FROM documents WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapDocument(row)),
       progress: this.db.prepare('SELECT * FROM progress_updates WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapProgress(row)),
       productionBaselines: this.db.prepare('SELECT * FROM production_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapProductionBaseline(row)),
@@ -31823,6 +32483,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       quotes: 'status',
       site_visits: 'status',
       material_requirements: 'status',
+      material_receipts: 'status',
       tool_reservations: 'status',
       assignments: 'status',
       jobs: 'status',
@@ -32780,6 +33441,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       tradePartnerComplianceActions: tradePartnerSummary.actionRequired,
       jobs: this.count('jobs'),
       workerAvailabilityPeriods: Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_availability_periods WHERE status IN ('active', 'pending_cancellation')").get().count || 0),
+      materialReceipts: activeCount('material_receipts', "records.status IN ('received', 'discrepancy', 'pending_reversal')"),
+      materialReceiptDiscrepancies: activeCount('material_receipts', "records.status = 'discrepancy'"),
       openJobs: activeCount('jobs', "records.status <> 'completed'"),
       completedJobs: activeCount('jobs', "records.status = 'completed'"),
       archivedJobs: Number(this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'archived'").get().count || 0),
@@ -32918,6 +33581,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         COALESCE((SELECT COUNT(*) FROM tool_reservations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('reserved', 'in_use')), 0) AS reservedTools,
         COALESCE((SELECT COUNT(*) FROM tool_reservations records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status = 'pending_approval'), 0) AS pendingToolReservations,
         COALESCE((SELECT COUNT(*) FROM material_requirements records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('needed', 'ordered', 'low_stock')), 0) AS materialNeeds,
+        COALESCE((SELECT COUNT(*) FROM material_receipts records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('discrepancy', 'pending_reversal')), 0) AS materialReceiptQueue,
         COALESCE((SELECT COUNT(*) FROM site_visits records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'scheduled', 'pending_approval')), 0) AS siteVisitDrafts,
         COALESCE((SELECT COUNT(*) FROM change_orders records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval', 'submitted', 'sent')), 0) AS changeOrderDrafts,
         COALESCE((SELECT COUNT(*) FROM field_reports records JOIN active_jobs ON active_jobs.id = records.job_id WHERE records.status IN ('draft', 'pending_approval')), 0) AS fieldReportDrafts,
@@ -32983,6 +33647,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         pendingToolReservations: normalizeNumber(workload.pendingToolReservations, 0),
         toolReservationConflicts: toolReservationConflicts.length,
         materialNeeds: normalizeNumber(workload.materialNeeds, 0),
+        materialReceiptQueue: normalizeNumber(workload.materialReceiptQueue, 0),
         siteVisitDrafts: normalizeNumber(workload.siteVisitDrafts, 0),
         changeOrderDrafts: normalizeNumber(workload.changeOrderDrafts, 0),
         fieldReportDrafts: normalizeNumber(workload.fieldReportDrafts, 0),
@@ -33122,6 +33787,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
     }
+
+    for (const action of this.detectMaterialReceivingActions(10)) actions.push(action);
 
     const qualificationAssignments = this.db.prepare(`
       SELECT assignments.id, assignments.job_id, assignments.worker_id, assignments.role,
@@ -34477,6 +35144,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_stale_attendance',
       'review_missing_timesheet',
       'review_stale_timesheet',
+      'review_material_receipt',
       'review_worker_availability_conflict',
       'review_worker_qualification_gap',
       'review_expiring_worker_credential',
@@ -35838,6 +36506,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const materialReceiptReviews = preview.filter(action => action.type === 'review_material_receipt').slice(0, 10);
+        for (const action of materialReceiptReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`material-receipt-review:${action.materialReceiptId || action.purchaseOrderId}:${action.sourceHash}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: action.reason === 'overdue'
+              ? 'Verify overdue material delivery'
+              : `Resolve material receipt discrepancy: ${action.receiptReference || 'delivery'}`,
+            description: `${action.message} Review the retained purchase order, delivery ticket, accepted and damaged quantities, and evidence. Record a supplier decision separately; do not contact the supplier, alter an invoice, or move funds automatically.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'material_receiving_monitor',
+            data: {
+              materialReceiptId: action.materialReceiptId || null,
+              purchaseOrderId: action.purchaseOrderId || null,
+              receiptReason: action.reason,
+              sourceHash: action.sourceHash || null,
+              internalOnly: true,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_material_receipt_review_task', actor, after: task,
+            metadata: { materialReceiptId: action.materialReceiptId || null, purchaseOrderId: action.purchaseOrderId || null, sourceHash: action.sourceHash || null, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -36288,6 +36989,65 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const availabilityConflicts = this.detectWorkerAvailabilityConflicts(250);
     if (availabilityConflicts.length) {
       issues.push({ severity: 'warning', message: `${availabilityConflicts.length} active assignment(s) overlap retained worker unavailability.` });
+    }
+    const materialReceiptRows = this.db.prepare(`
+      SELECT receipts.*, jobs.id AS retained_job_id
+      FROM material_receipts receipts
+      LEFT JOIN jobs ON jobs.id = receipts.job_id
+    `).all();
+    for (const row of materialReceiptRows) {
+      if (!row.retained_job_id) {
+        issues.push({ severity: 'error', message: `Material receipt ${row.id} references a missing job.` });
+        continue;
+      }
+      const receipt = this.getMaterialReceipt(row.id);
+      const fingerprint = sha256Json({
+        jobId: receipt.jobId,
+        purchaseOrderId: receipt.purchaseOrderId,
+        receiptReference: receipt.receiptReference,
+        deliveredAt: receipt.deliveredAt,
+        receivedBy: receipt.receivedBy,
+        location: receipt.location,
+        evidenceReference: receipt.evidenceReference,
+        evidenceDocumentId: receipt.evidenceDocumentId,
+        finalDelivery: receipt.data.finalDelivery === true,
+        lines: receipt.lines.map(line => ({
+          lineKey: line.lineKey,
+          materialRequirementId: line.materialRequirementId,
+          itemName: line.itemName,
+          unit: line.unit,
+          receivedQuantity: line.receivedQuantity,
+          acceptedQuantity: line.acceptedQuantity,
+          damagedQuantity: line.damagedQuantity,
+          notes: line.data.notes || null
+        }))
+      });
+      if (!['received', 'discrepancy', 'pending_reversal', 'reversed'].includes(receipt.status)
+        || !receipt.lines.length || !normalizeText(receipt.entryKey, '')
+        || receipt.entryFingerprint !== fingerprint) {
+        issues.push({ severity: 'error', message: `Material receipt ${receipt.id} violates status, line, entry-key, or fingerprint invariants.` });
+      }
+      for (const line of receipt.lines) {
+        if (!(line.receivedQuantity > 0) || line.acceptedQuantity < 0 || line.damagedQuantity < 0
+          || line.acceptedQuantity + line.damagedQuantity > line.receivedQuantity + 0.000001) {
+          issues.push({ severity: 'error', message: `Material receipt line ${line.id} violates retained quantity invariants.` });
+        }
+      }
+      if (receipt.status === 'discrepancy' && !receipt.exceptions.length) {
+        issues.push({ severity: 'error', message: `Material receipt ${receipt.id} is marked discrepancy without retained exception evidence.` });
+      }
+      if (receipt.status === 'pending_reversal' || receipt.status === 'reversed') {
+        const expectedApprovalStatus = receipt.status === 'reversed' ? 'approved' : 'pending';
+        const approval = this.db.prepare(`
+          SELECT id FROM approvals
+          WHERE id = ? AND target_type = 'material_receipt_reversal' AND target_id = ? AND status = ?
+        `).get(receipt.reversalApprovalId, receipt.id, expectedApprovalStatus);
+        if (!approval) issues.push({ severity: 'error', message: `Material receipt ${receipt.id} lacks its matching ${expectedApprovalStatus} reversal decision.` });
+      }
+    }
+    const openMaterialReceiptActions = this.detectMaterialReceivingActions(250);
+    if (openMaterialReceiptActions.length) {
+      issues.push({ severity: 'warning', message: `${openMaterialReceiptActions.length} material receiving exception or overdue delivery action(s) require review.` });
     }
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
     if (jobsWithoutClient) issues.push({ severity: 'error', message: `${jobsWithoutClient} job(s) are missing clients.` });
@@ -36860,6 +37620,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         workerCredentials: this.count('worker_credentials'),
         qualificationRequirements: this.count('job_qualification_requirements'),
         workerAvailabilityPeriods: this.count('worker_availability_periods'),
+        materialReceipts: this.count('material_receipts'),
+        materialReceiptLines: this.count('material_receipt_lines'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -37862,6 +38624,58 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       cost: normalizeNumber(row.cost, 0),
       neededBy: row.needed_by,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapMaterialReceipt(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const lines = this.db.prepare(`
+      SELECT * FROM material_receipt_lines WHERE receipt_id = ? ORDER BY created_at ASC, id ASC
+    `).all(row.id).map(line => ({
+      id: line.id,
+      receiptId: line.receipt_id,
+      lineKey: line.line_key,
+      materialRequirementId: line.material_requirement_id,
+      itemName: line.item_name,
+      unit: line.unit,
+      orderedQuantity: roundQuantity(normalizeNumber(line.ordered_quantity, 0)),
+      receivedQuantity: roundQuantity(normalizeNumber(line.received_quantity, 0)),
+      acceptedQuantity: roundQuantity(normalizeNumber(line.accepted_quantity, 0)),
+      damagedQuantity: roundQuantity(normalizeNumber(line.damaged_quantity, 0)),
+      data: fromJson(line.data_json, {}),
+      createdAt: line.created_at,
+      updatedAt: line.updated_at
+    }));
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      jobTitle: row.job_title || row.job_id,
+      purchaseOrderId: row.purchase_order_id,
+      tradePartnerId: row.trade_partner_id,
+      supplier: row.trade_partner_name || row.supplier || null,
+      receiptReference: row.receipt_reference,
+      status: row.status,
+      deliveredAt: row.delivered_at,
+      receivedBy: row.received_by,
+      location: row.location,
+      evidenceReference: row.evidence_reference,
+      evidenceDocumentId: row.evidence_document_id,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      reversalApprovalId: row.reversal_approval_id,
+      exceptions: Array.isArray(data.exceptions) ? data.exceptions : [],
+      lines,
+      summary: {
+        lineCount: lines.length,
+        receivedQuantity: roundQuantity(lines.reduce((sum, line) => sum + line.receivedQuantity, 0)),
+        acceptedQuantity: roundQuantity(lines.reduce((sum, line) => sum + line.acceptedQuantity, 0)),
+        damagedQuantity: roundQuantity(lines.reduce((sum, line) => sum + line.damagedQuantity, 0)),
+        discrepancyCount: Array.isArray(data.exceptions) ? data.exceptions.length : 0
+      },
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -38906,6 +39720,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.periodType = data.periodType || null;
       preview.startsAt = data.startsAt || null;
       preview.endsAt = data.endsAt || null;
+    } else if (targetType === 'material_receipt_reversal') {
+      primaryEffect = `Reverse material receipt ${data.receiptReference || approval.targetId || ''}.`;
+      addEffect(`Remove ${roundQuantity(normalizeNumber(data.acceptedQuantity, 0))} accepted unit(s) from receipt-derived material availability.`);
+      addSafeguard('The original receipt, line quantities, discrepancy evidence, and audit history remain immutable.');
+      addSafeguard('Rejection or cancellation restores the prior receipt state; no supplier message, return shipment, invoice, or payment is created.');
+      riskLevel = 'high';
+      preview.purchaseOrderId = data.purchaseOrderId || null;
+      preview.lineCount = normalizeNumber(data.lineCount, 0);
+      preview.acceptedQuantity = roundQuantity(normalizeNumber(data.acceptedQuantity, 0));
     } else if (targetType === 'assignment') {
       primaryEffect = `Approve worker assignment for ${data.workerName || data.workerId || 'worker'}.`;
       addEffect(`Set assignment to ${data.requestedStatus || 'planned'} for ${data.scheduledStart || 'the proposed start'} through ${data.scheduledEnd || 'the proposed end'}.`);

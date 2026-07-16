@@ -722,6 +722,11 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       resolvedBy: 'postgres_contract_approver',
       reason: 'Hosted purchase commitment and supplier evidence verified.'
     });
+    const payableEvidence = ledger.addDocument(job.id, {
+      type: 'service_completion',
+      title: 'PostgreSQL retained service completion GR-320',
+      filename: 'postgres-service-completion-gr-320.pdf'
+    }, { actor: 'postgres_contract_test' });
     const supplierInvoice = ledger.createSupplierInvoice(job.id, {
       purchaseOrderId: purchaseOrder.id,
       tradePartnerId: verifiedTradePartner.id,
@@ -732,10 +737,11 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       netAmount: 320,
       taxAmount: 67.2,
       total: 387.2,
-      deliveryReference: 'PostgreSQL retained receipt GR-320',
+      deliveryDocumentId: payableEvidence.id,
       notes: 'Hosted three-way supplier invoice match.'
     }, { actor: 'postgres_contract_test' });
     assert.equal(supplierInvoice.match.status, 'matched');
+    assert.equal(supplierInvoice.match.type, 'three_way_service_completion');
     ledger.resolveApproval(supplierInvoice.approval.id, {
       status: 'approved',
       resolvedBy: 'postgres_contract_approver',
@@ -1215,6 +1221,23 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       reason: 'Hosted source-linked cost forecast verified.'
     });
     assert.equal(ledger.calculateCostForecast(hostedForecastJob.id).snapshotCurrent, true);
+    const hostedMaterial = ledger.addMaterialRequirement(hostedForecastJob.id, {
+      name: 'Hosted acoustic panels', quantity: 12, unit: 'panels', status: 'needed'
+    }, { actor: 'postgres_contract_test' });
+    const hostedReceipt = ledger.createMaterialReceipt(hostedForecastJob.id, {
+      receiptReference: `PG-RECEIPT-${Date.now()}`,
+      evidenceReference: 'postgres:signed-delivery-ticket',
+      deliveredAt: new Date(Date.now() - 60_000).toISOString(),
+      receivedBy: 'PostgreSQL site receiver',
+      entryKey: `pg-receipt-${Date.now()}`,
+      lines: [{
+        materialRequirementId: hostedMaterial.id,
+        itemName: 'Hosted acoustic panels', unit: 'panels', receivedQuantity: 12, acceptedQuantity: 12, damagedQuantity: 0
+      }]
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(hostedReceipt.receipt.status, 'discrepancy');
+    assert.equal(ledger.getJobDetail(hostedForecastJob.id).materials.find(item => item.id === hostedMaterial.id).status, 'available');
+    assert.equal(ledger.listMaterialReceivingRegister().receipts.some(item => item.id === hostedReceipt.receipt.id), true);
 
     const dashboard = ledger.dashboardSummary();
     assert.ok(dashboard.metrics.jobs >= 1);
@@ -1225,7 +1248,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '036_worker_availability');
+    assert.equal(migrations.currentVersion, '037_material_receiving');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1306,18 +1329,24 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('036_worker_availability'));
+  assert.deepEqual(versions, Array(4).fill('037_material_receiving'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 36);
+    assert.equal(Number(migrationCount.count), 37);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
       WHERE table_schema = 'public' AND table_name = 'worker_availability_periods'
     `).rows[0];
     assert.equal(Number(availabilityTableCount.count), 1);
+    const materialReceivingTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('material_receipts', 'material_receipt_lines')
+    `).rows[0];
+    assert.equal(Number(materialReceivingTableCount.count), 2);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1818,7 +1847,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '036_worker_availability');
+    assert.equal(ledger.migrationStatus().currentVersion, '037_material_receiving');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();

@@ -1947,6 +1947,7 @@ test('finance workspace plans a billing milestone and locks its values into the 
 });
 
 test('finance workspace matches a supplier invoice and confirms payment evidence without moving funds', async ({ page, request }) => {
+  await ensureBrowserOrganization(request);
   const supplier = await ensureVerifiedTradePartner(request, `Browser payable supplier ${Date.now()}`);
   const intake = await createBrowserJob(request, 'Browser supplier payable workflow', {
     status: 'scheduled',
@@ -1972,6 +1973,40 @@ test('finance workspace matches a supplier invoice and confirms payment evidence
     data: { status: 'approved', resolvedBy: 'Browser payables approver', reason: 'Supplier compliance and purchase commitment checked.' }
   });
   expect(purchaseApproval.ok()).toBeTruthy();
+  const orderPackageResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/purchase-orders/${purchaseOrder.purchaseOrder.id}/issue-package`, {
+    data: { recipient: 'browser-payables@supplier.example', channel: 'email' }
+  });
+  expect(orderPackageResponse.ok()).toBeTruthy();
+  const orderPackage = await orderPackageResponse.json();
+  const orderTransmissionApproval = await request.post(`/api/ledger/approvals/${orderPackage.approval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser payables approver', reason: 'Recipient and immutable purchase-order package checked.' }
+  });
+  expect(orderTransmissionApproval.ok()).toBeTruthy();
+  const orderDelivery = await request.post(`/api/ledger/communications/${orderPackage.communication.id}/delivery-receipt`, {
+    data: { integration: 'playwright_test_provider', providerMessageId: `browser-payables-order-${Date.now()}`, receipt: { status: 'accepted' } }
+  });
+  expect(orderDelivery.ok()).toBeTruthy();
+  const material = await request.post(`/api/ledger/jobs/${intake.job.id}/materials`, {
+    data: { name: 'Browser payable materials', quantity: 1, unit: 'package', status: 'needed' }
+  });
+  expect(material.ok()).toBeTruthy();
+  const materialRequirement = (await material.json()).materialRequirement;
+  const receiptResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/material-receipts`, {
+    data: {
+      purchaseOrderId: purchaseOrder.purchaseOrder.id,
+      receiptReference: 'BROWSER-GR-1000',
+      evidenceReference: 'browser:signed-ticket:GR-1000',
+      deliveredAt: new Date(Date.now() - 60_000).toISOString(),
+      receivedBy: 'Browser payable receiver',
+      entryKey: `browser-payable-receipt-${Date.now()}`,
+      lines: [{
+        materialRequirementId: materialRequirement.id,
+        itemName: 'Browser payable materials', unit: 'package', receivedQuantity: 1, acceptedQuantity: 1, damagedQuantity: 0
+      }]
+    }
+  });
+  expect(receiptResponse.ok()).toBeTruthy();
+  const materialReceipt = (await receiptResponse.json()).receipt;
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Finance', exact: true }).click();
@@ -1984,8 +2019,9 @@ test('finance workspace matches a supplier invoice and confirms payment evidence
   await expect(control.getByLabel('Supplier', { exact: true })).toHaveValue(supplier.name);
   await expect(control.getByLabel('Net amount (EUR)')).toHaveValue('1000.00');
   await expect(control.getByLabel('VAT amount (EUR)')).toHaveValue('210.00');
+  await expect(control.getByLabel('Retained goods receipt')).toHaveValue(materialReceipt.id);
   await control.getByLabel('Supplier invoice number').fill('BROWSER-SUP-1000');
-  await control.getByLabel('Delivery or service evidence reference').fill('Browser signed goods receipt GR-1000');
+  await expect(control.getByLabel('Delivery or service evidence reference')).toHaveValue('BROWSER-GR-1000');
   await control.getByLabel('Internal evidence and notes').fill('Supplier, purchase order, goods receipt, net amount, VAT, and due date were checked.');
   await control.getByRole('button', { name: 'Request payable approval' }).click();
   await expect(page.getByText(/Supplier invoice BROWSER-SUP-1000 retained for/)).toBeVisible();
@@ -2019,7 +2055,7 @@ test('finance workspace matches a supplier invoice and confirms payment evidence
     invoiceNumber: 'BROWSER-SUP-1000',
     status: 'paid',
     total: 1210,
-    data: { match: { status: 'matched', type: 'three_way' }, reconciliation: { paidAmount: 1210, outstandingAmount: 0 } }
+    data: { match: { status: 'matched', type: 'three_way_material_receipt', materialReceiptId: materialReceipt.id }, reconciliation: { paidAmount: 1210, outstandingAmount: 0 } }
   });
   expect(detail.job.supplierInvoicePayments[0]).toMatchObject({
     status: 'paid',

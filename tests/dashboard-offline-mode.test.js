@@ -96,7 +96,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -116,7 +116,20 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(dashboardSource, /Save observation offline/);
   assert.match(dashboardSource, /Save incident offline/);
   assert.match(dashboardSource, /Save punch item offline/);
+  assert.match(dashboardSource, /Save receipt offline/);
   assert.doesNotMatch(outboxSource, /localStorage|sessionStorage/);
+});
+
+test('material receiving connects purchasing, field readiness, approvals, and supplier invoice matching', () => {
+  assert.match(dashboardSource, /api\('\/api\/ledger\/material-receipts\?limit=500'\)/);
+  assert.match(dashboardSource, /data-testid="material-receiving-workspace"/);
+  assert.match(dashboardSource, /data-testid="field-material-receipt-form"/);
+  assert.match(dashboardSource, /type: 'material_receipt'/);
+  assert.match(dashboardSource, /type === 'material_receipt'\s*\?\s*'material-receipts'/);
+  assert.match(dashboardSource, /material-receipts\/\$\{encodeURIComponent\(materialReceiptReversal\.id\)\}\/reversal/);
+  assert.match(dashboardSource, /materialReceiptId: financeActionDraft\.materialReceiptId \|\| null/);
+  assert.match(dashboardSource, /Retained goods receipt/);
+  assert.match(dashboardSource, /verified three-way match/);
 });
 
 test('job workspace schedules and completes immutable approval-backed inspection checklists', () => {

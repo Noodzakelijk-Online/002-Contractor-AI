@@ -6,7 +6,7 @@ const MAX_EVIDENCE_DRAFTS = 20;
 const MAX_TOTAL_EVIDENCE_BYTES = 50 * 1024 * 1024;
 const MAX_OPERATION_DRAFTS = 100;
 const MAX_TOTAL_OPERATION_BYTES = 1024 * 1024;
-const FIELD_OPERATION_TYPES = new Set(['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out']);
+const FIELD_OPERATION_TYPES = new Set(['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt']);
 
 function onlineState() {
   return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
@@ -148,7 +148,7 @@ export async function enqueueFieldOperationDraft({ id, type, jobId, payload, ope
   };
   const existingSize = drafts.reduce((total, item) => total + operationSize(item), 0);
   if (drafts.length >= MAX_OPERATION_DRAFTS || existingSize + operationSize(draft) > MAX_TOTAL_OPERATION_BYTES) {
-    throw new Error('The field operation outbox is full. Reconnect and sync existing attendance, daily logs, production output, progress updates, inspection checklists, field risk reports, and punch items before saving another draft.');
+    throw new Error('The field operation outbox is full. Reconnect and sync existing attendance, daily logs, production output, progress updates, inspection checklists, material receipts, field risk reports, and punch items before saving another draft.');
   }
   await withStore(OPERATION_STORE_NAME, 'readwrite', store => requestResult(store.put(draft)));
   return draft;

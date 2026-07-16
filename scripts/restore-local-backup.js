@@ -463,6 +463,25 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('037_material_receiving')) {
+        for (const table of ['material_receipts', 'material_receipt_lines']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup material-receiving schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_material_receipts_job_delivery',
+          'idx_material_receipts_purchase_order',
+          'idx_material_receipts_exception',
+          'idx_material_receipts_pending_reversal',
+          'idx_material_receipt_lines_requirement'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup material-receiving constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

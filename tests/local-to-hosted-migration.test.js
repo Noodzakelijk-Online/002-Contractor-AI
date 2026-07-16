@@ -136,6 +136,21 @@ function createBackupFixture(t, suffix = 'success') {
     resolvedBy: 'migration_fixture_approver',
     reason: 'Migration purchase commitment verified.'
   });
+  const materialRequirement = source.addMaterialRequirement(job.id, {
+    name: 'Migration payable materials', quantity: 1, unit: 'unit', status: 'needed'
+  }, { actor: 'migration_fixture' });
+  const materialReceipt = source.createMaterialReceipt(job.id, {
+    purchaseOrderId: purchaseOrder.id,
+    receiptReference: `MIGRATION-RECEIPT-${suffix}`,
+    evidenceReference: `migration:signed-ticket:${suffix}`,
+    deliveredAt: new Date(Date.now() - 60_000).toISOString(),
+    receivedBy: 'Migration site receiver',
+    entryKey: `migration-receipt-${suffix}`,
+    lines: [{
+      materialRequirementId: materialRequirement.id,
+      itemName: 'Migration payable materials', unit: 'unit', receivedQuantity: 1, acceptedQuantity: 1, damagedQuantity: 0
+    }]
+  }, { actor: 'migration_fixture' }).receipt;
   const supplierInvoice = source.createSupplierInvoice(job.id, {
     purchaseOrderId: purchaseOrder.id,
     tradePartnerId: tradePartner.id,
@@ -146,7 +161,7 @@ function createBackupFixture(t, suffix = 'success') {
     netAmount: 400,
     taxAmount: 84,
     total: 484,
-    deliveryReference: `Migration goods receipt ${suffix}`,
+    materialReceiptId: materialReceipt.id,
     notes: 'Retained supplier payable migration fixture.'
   }, { actor: 'migration_fixture' });
   source.resolveApproval(supplierInvoice.approval.id, {
@@ -492,7 +507,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -582,7 +597,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '036_worker_availability');
+  assert.equal(migration.migrationVersion, '037_material_receiving');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -691,6 +706,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     const migratedSupplierInvoice = detail.supplierInvoices.find(item => item.id === fixture.supplierInvoice.id);
     assert.equal(migratedSupplierInvoice.status, 'paid');
     assert.equal(migratedSupplierInvoice.data.reconciliation.outstandingAmount, 0);
+    assert.equal(migratedSupplierInvoice.data.match.materialReceiptId, fixture.materialReceipt.id);
+    const migratedReceipt = detail.materialReceipts.find(item => item.id === fixture.materialReceipt.id);
+    assert.equal(migratedReceipt.entryFingerprint, fixture.materialReceipt.entryFingerprint);
+    assert.equal(migratedReceipt.summary.acceptedQuantity, 1);
     assert.ok(detail.supplierInvoicePayments.some(item => item.id === fixture.supplierPayment.id && item.status === 'paid'));
     const migratedOrganization = hosted.getOrganizationProfile();
     assert.equal(migratedOrganization.legalName, fixture.organization.legalName);

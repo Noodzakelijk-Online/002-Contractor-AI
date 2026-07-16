@@ -45,6 +45,7 @@ import {
   Target,
   Timer,
   TriangleAlert,
+  Undo2,
   Users,
   Wrench,
   X,
@@ -197,6 +198,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
           ? `attendance/${encodeURIComponent(attendanceSessionId)}/check-out`
       : type === 'production_entry'
         ? 'production-entries'
+      : type === 'material_receipt'
+        ? 'material-receipts'
       : type === 'progress'
         ? 'progress'
         : type === 'observation'
@@ -313,6 +316,38 @@ function emptyFieldProgress() {
     progressPercent: '',
     status: 'in_progress',
     note: '',
+  }
+}
+
+function emptyMaterialReceiptLine(source = {}) {
+  const remaining = Number(source.remainingQuantity ?? source.orderedQuantity ?? 0)
+  return {
+    lineKey: source.lineKey || '',
+    materialRequirementId: source.materialRequirementId || '',
+    itemName: source.itemName || '',
+    unit: source.unit || 'unit',
+    receivedQuantity: remaining > 0 ? String(remaining) : '1',
+    acceptedQuantity: remaining > 0 ? String(remaining) : '1',
+    damagedQuantity: '0',
+    notes: '',
+  }
+}
+
+function emptyMaterialReceiptDraft(plan = null) {
+  const purchaseOrder = plan?.purchaseOrder || null
+  const lines = (plan?.lines || []).filter((line) => !line.complete).map(emptyMaterialReceiptLine)
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    jobId: purchaseOrder?.jobId || '',
+    purchaseOrderId: purchaseOrder?.id || '',
+    receiptReference: '',
+    evidenceReference: '',
+    deliveredAt: toLocalDateTimeInput(new Date()),
+    receivedBy: '',
+    location: '',
+    finalDelivery: plan?.summary?.remainingLines === lines.length && lines.length > 0,
+    notes: '',
+    lines: lines.length ? lines : [emptyMaterialReceiptLine()],
   }
 }
 
@@ -462,6 +497,7 @@ function emptyFinanceActionDraft() {
     invoiceNumber: '',
     invoiceDate: futureDateInput(0),
     taxAmount: '',
+    materialReceiptId: '',
     deliveryReference: '',
     notes: '',
   }
@@ -1038,6 +1074,10 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       return { timesheets: result.timesheets || { rows: [], exports: [], summary: {} } }
     }
     if (resourceView === 'inventory') return { inventory: await api('/api/ledger/inventory?limit=100') }
+    if (resourceView === 'receiving') {
+      const result = await api('/api/ledger/material-receipts?limit=500')
+      return { materialReceiving: result.materialReceiving || { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} } }
+    }
     if (resourceView === 'equipment') {
       const result = await api('/api/ledger/tools?limit=500')
       return { tools: result.tools || [], toolSummary: result.summary || {} }
@@ -3016,6 +3056,97 @@ function TimesheetWorkspace({
   )
 }
 
+function MaterialReceivingWorkspace({ register, canCoordinate, canApprove, submitting, onCreate, onReverse, onOpenApprovals, onOpen }) {
+  const [view, setView] = useState('active')
+  const receipts = register?.receipts || EMPTY_LIST
+  const purchaseOrders = register?.purchaseOrders || EMPTY_LIST
+  const summary = register?.summary || {}
+  const visibleReceipts = receipts.filter((receipt) => {
+    if (view === 'active') return receipt.status !== 'reversed'
+    if (view === 'exceptions') return ['discrepancy', 'pending_reversal'].includes(receipt.status)
+    return true
+  })
+  const openPlans = purchaseOrders.filter((plan) => !plan.summary?.complete)
+
+  return (
+    <div className="material-receiving-workspace" data-testid="material-receiving-workspace">
+      <div className="resource-summary" aria-label="Material receiving summary">
+        <div><span>Receipts</span><strong>{summary.total || 0}</strong></div>
+        <div><span>Discrepancies</span><strong>{summary.discrepancies || 0}</strong></div>
+        <div><span>Awaiting receipt</span><strong>{summary.openOrders || 0}</strong></div>
+        <div><span>Accepted units</span><strong>{roundDisplay(summary.acceptedQuantity || 0)}</strong></div>
+      </div>
+      <div className="workforce-mode-toolbar">
+        <div className="resource-tabs" role="tablist" aria-label="Material receipt status">
+          {[
+            ['active', 'Active'],
+            ['exceptions', 'Exceptions'],
+            ['history', 'History'],
+          ].map(([key, label]) => (
+            <button key={key} type="button" role="tab" aria-selected={view === key} className={view === key ? 'resource-tab-active' : ''} onClick={() => setView(key)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {canCoordinate ? (
+          <button type="button" className="primary-button" disabled={submitting} onClick={() => onCreate()}>
+            <Plus size={15} /> Record delivery
+          </button>
+        ) : null}
+      </div>
+      {view !== 'history' && openPlans.length ? (
+        <div className="resource-readiness-list material-receiving-orders" aria-label="Purchase orders awaiting receipt">
+          {openPlans.map((plan) => {
+            const order = plan.purchaseOrder || {}
+            return (
+              <article className="resource-readiness-item" key={order.id}>
+                <div className="resource-readiness-copy">
+                  <div className="resource-readiness-title">
+                    <h3>{order.supplier || 'Retained supplier'}</h3>
+                    <span className="status status-attention">{plan.summary?.remainingLines || 0} line(s) due</span>
+                  </div>
+                  <p>{order.jobTitle || order.jobId} / {order.issueReference || order.orderNumber || order.id}</p>
+                  <small>{plan.lines.filter((line) => !line.complete).map((line) => `${line.itemName}: ${roundDisplay(line.remainingQuantity)} ${line.unit}`).join(' / ')}</small>
+                </div>
+                {canCoordinate ? (
+                  <button type="button" className="secondary-button" disabled={submitting} onClick={() => onCreate(plan)}>
+                    <PackageCheck size={15} /> Receive
+                  </button>
+                ) : null}
+              </article>
+            )
+          })}
+        </div>
+      ) : null}
+      <div className="resource-readiness-list" role="tabpanel">
+        {visibleReceipts.map((receipt) => (
+          <article className="resource-readiness-item" key={receipt.id} data-testid={`material-receipt-${receipt.id}`}>
+            <div className="resource-readiness-copy">
+              <div className="resource-readiness-title">
+                <h3>{receipt.receiptReference}</h3>
+                <span className={`status status-${receipt.status}`}>{formatStatus(receipt.status)}</span>
+              </div>
+              <p>{receipt.jobTitle || receipt.jobId} / {receipt.receivedBy} / {formatDateTime(receipt.deliveredAt)}</p>
+              <small>{receipt.lines?.map((line) => `${line.itemName}: ${roundDisplay(line.acceptedQuantity)} ${line.unit} accepted`).join(' / ')}</small>
+              {receipt.exceptions?.length ? <p className="workflow-note">{receipt.exceptions.map((item) => item.message).join(' ')}</p> : null}
+            </div>
+            <div className="timesheet-row-actions">
+              <button type="button" className="icon-button" title="Open job" aria-label={`Open ${receipt.jobTitle || 'job'}`} onClick={() => onOpen(receipt.jobId)}><ChevronRight size={16} /></button>
+              {receipt.status === 'pending_reversal' && canApprove ? (
+                <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: receipt.reversalApprovalId })}><ShieldCheck size={15} /> Review</button>
+              ) : canCoordinate && ['received', 'discrepancy'].includes(receipt.status) ? (
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => onReverse(receipt)}><Undo2 size={15} /> Reverse</button>
+              ) : null}
+            </div>
+          </article>
+        ))}
+        {!visibleReceipts.length ? <Empty title="No material receipts" detail="Retained delivery tickets and discrepancy evidence will appear here." /> : null}
+      </div>
+      <p className="timesheet-policy">Receipts are immutable operational evidence. Corrections use an approval-gated reversal; supplier invoices can link only to current retained receipt evidence.</p>
+    </div>
+  )
+}
+
 function ResourcesWorkspace({
   workforce,
   inventory,
@@ -3023,6 +3154,7 @@ function ResourcesWorkspace({
   workerSummary,
   qualificationRegister,
   availabilityRegister,
+  materialReceiving,
   tools,
   toolSummary,
   tradePartners,
@@ -3048,6 +3180,8 @@ function ResourcesWorkspace({
   onRetireQualificationRequirement,
   onCreateAvailability,
   onCancelAvailability,
+  onCreateMaterialReceipt,
+  onReverseMaterialReceipt,
   onCreateEquipment,
   onEditEquipment,
   onInspectEquipment,
@@ -3065,6 +3199,7 @@ function ResourcesWorkspace({
   const [workforceMode, setWorkforceMode] = useState('readiness')
   const isWorkforce = view === 'workforce'
   const isInventory = view === 'inventory'
+  const isReceiving = view === 'receiving'
   const isEquipment = view === 'equipment'
   const isPartners = view === 'partners'
   const isTimesheets = view === 'timesheets'
@@ -3079,10 +3214,12 @@ function ResourcesWorkspace({
     <section className="panel page-panel resources-workspace" data-testid="resources-workspace">
       <div className="panel-heading resources-heading">
         <div>
-          <h2>{isTimesheets ? 'Weekly labor review' : 'Resource readiness'}</h2>
+          <h2>{isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : 'Resource readiness'}</h2>
           <p>
             {isTimesheets
               ? 'Review submitted worker time by week, resolve exceptions, approve immutable revisions, and prepare a controlled payroll handoff.'
+              : isReceiving
+                ? 'Retain delivery-note evidence, resolve quantity and damage exceptions, and connect accepted goods to purchasing and finance.'
               : isPartners
               ? 'Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.'
               : isEquipment
@@ -3114,6 +3251,15 @@ function ResourcesWorkspace({
           >
             <PackageCheck size={15} />
             Inventory
+          </button>
+          <button
+            role="tab"
+            aria-selected={isReceiving}
+            className={isReceiving ? 'resource-tab-active' : ''}
+            onClick={() => onViewChange('receiving')}
+          >
+            <ClipboardList size={15} />
+            Receiving
           </button>
           <button
             role="tab"
@@ -3186,7 +3332,18 @@ function ResourcesWorkspace({
           </div>
         </div>
       ) : null}
-      {isTimesheets ? (
+      {isReceiving ? (
+        <MaterialReceivingWorkspace
+          register={materialReceiving}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          submitting={submitting}
+          onCreate={onCreateMaterialReceipt}
+          onReverse={onReverseMaterialReceipt}
+          onOpenApprovals={onOpenApprovals}
+          onOpen={onOpen}
+        />
+      ) : isTimesheets ? (
         <TimesheetWorkspace
           timesheets={timesheets}
           canCoordinate={canCoordinate}
@@ -7485,6 +7642,10 @@ function App() {
   const [availabilityDraft, setAvailabilityDraft] = useState(() => emptyWorkerAvailabilityDraft())
   const [availabilityCancellation, setAvailabilityCancellation] = useState(null)
   const [availabilityCancellationReason, setAvailabilityCancellationReason] = useState('')
+  const [materialReceiptEditor, setMaterialReceiptEditor] = useState(false)
+  const [materialReceiptDraft, setMaterialReceiptDraft] = useState(() => emptyMaterialReceiptDraft())
+  const [materialReceiptReversal, setMaterialReceiptReversal] = useState(null)
+  const [materialReceiptReversalReason, setMaterialReceiptReversalReason] = useState('')
   const [equipmentEditor, setEquipmentEditor] = useState(null)
   const [equipmentDraft, setEquipmentDraft] = useState(emptyEquipmentDraft)
   const [equipmentInspection, setEquipmentInspection] = useState(null)
@@ -7527,6 +7688,8 @@ function App() {
   const [evidence, setEvidence] = useState({ jobId: '', notes: '', riskLevel: 'medium' })
   const [fieldProgress, setFieldProgress] = useState(emptyFieldProgress)
   const [fieldDailyLog, setFieldDailyLog] = useState(emptyFieldDailyLog)
+  const [fieldMaterialReceipt, setFieldMaterialReceipt] = useState(() => emptyMaterialReceiptDraft())
+  const [fieldMaterialReceiptPlans, setFieldMaterialReceiptPlans] = useState([])
   const [attendanceDraft, setAttendanceDraft] = useState(emptyAttendanceDraft)
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
@@ -7586,6 +7749,7 @@ function App() {
           tools: [],
           toolSummary: {},
           inventory: { jobs: [], summary: {} },
+          materialReceiving: { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} },
           tradePartners: [],
           tradePartnerSummary: {},
           finance: { jobs: [], summary: {} },
@@ -7626,6 +7790,7 @@ function App() {
           tools: [],
           toolSummary: {},
           inventory: { jobs: [], summary: {} },
+          materialReceiving: { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} },
           tradePartners: [],
           tradePartnerSummary: {},
           finance: { jobs: [], summary: {} },
@@ -7741,6 +7906,7 @@ function App() {
     () => jobs.filter((job) => !['archived', 'completed', 'cancelled', 'rejected'].includes(job.status)).slice(0, 8),
     [jobs],
   )
+  const selectedFieldMaterialReceiptPlan = fieldMaterialReceiptPlans.find(plan => plan.purchaseOrder?.id === fieldMaterialReceipt.purchaseOrderId) || null
   const attendanceWorkerId = fieldScoped ? operator.worker?.id || null : attendanceDraft.workerId || null
   const currentAttendanceSession = useMemo(
     () => (attendance.rows || []).find((session) => (
@@ -8844,6 +9010,118 @@ function App() {
           await refreshOutboxState()
           setFieldProgress(emptyFieldProgress())
           notify('Connection interrupted. Field progress was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function selectFieldMaterialReceiptJob(jobId) {
+    setFieldMaterialReceipt({ ...emptyMaterialReceiptDraft(), jobId })
+    setFieldMaterialReceiptPlans([])
+    if (!jobId || navigator.onLine === false) return
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/material-receiving-plan`)
+      setFieldMaterialReceiptPlans(result.plans || [])
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  function selectFieldMaterialReceiptPlan(purchaseOrderId) {
+    const plan = fieldMaterialReceiptPlans.find(item => item.purchaseOrder?.id === purchaseOrderId)
+    if (!plan) {
+      setFieldMaterialReceipt({ ...fieldMaterialReceipt, purchaseOrderId: '', lines: [emptyMaterialReceiptLine()], finalDelivery: false })
+      return
+    }
+    const next = emptyMaterialReceiptDraft(plan)
+    setFieldMaterialReceipt({
+      ...fieldMaterialReceipt,
+      jobId: plan.purchaseOrder.jobId,
+      purchaseOrderId,
+      finalDelivery: plan.summary?.remainingLines === 1,
+      lines: [next.lines[0]],
+    })
+  }
+
+  function selectFieldMaterialReceiptLine(lineKey) {
+    const line = selectedFieldMaterialReceiptPlan?.lines.find(item => item.lineKey === lineKey)
+    if (line) setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [emptyMaterialReceiptLine(line)] })
+  }
+
+  async function recordFieldMaterialReceipt(event) {
+    event.preventDefault()
+    const line = fieldMaterialReceipt.lines[0]
+    const receivedQuantity = Number(line?.receivedQuantity)
+    const acceptedQuantity = Number(line?.acceptedQuantity)
+    const damagedQuantity = Number(line?.damagedQuantity || 0)
+    if (!fieldMaterialReceipt.jobId || fieldMaterialReceipt.receiptReference.trim().length < 3 || fieldMaterialReceipt.evidenceReference.trim().length < 3
+      || line?.itemName.trim().length < 2 || !(receivedQuantity > 0) || acceptedQuantity < 0 || damagedQuantity < 0
+      || acceptedQuantity + damagedQuantity > receivedQuantity) {
+      setError('Choose a job and record a delivery reference, retained evidence, item, and valid received, accepted, and damaged quantities.')
+      return
+    }
+    if (!fieldScoped && fieldMaterialReceipt.receivedBy.trim().length < 2) {
+      setError('Record the person who physically received this delivery.')
+      return
+    }
+    const payload = {
+      purchaseOrderId: fieldMaterialReceipt.purchaseOrderId || null,
+      receiptReference: fieldMaterialReceipt.receiptReference.trim(),
+      evidenceReference: fieldMaterialReceipt.evidenceReference.trim(),
+      deliveredAt: toIsoDateTime(fieldMaterialReceipt.deliveredAt),
+      receivedBy: fieldMaterialReceipt.receivedBy.trim() || undefined,
+      location: fieldMaterialReceipt.location.trim() || null,
+      finalDelivery: fieldMaterialReceipt.finalDelivery,
+      notes: fieldMaterialReceipt.notes.trim() || null,
+      lines: [{
+        lineKey: line.lineKey || undefined,
+        materialRequirementId: line.materialRequirementId || undefined,
+        itemName: line.itemName.trim(),
+        unit: line.unit.trim() || 'unit',
+        receivedQuantity,
+        acceptedQuantity,
+        damagedQuantity,
+        notes: line.notes?.trim() || null,
+      }],
+    }
+    const draft = {
+      id: fieldMaterialReceipt.entryKey,
+      type: 'material_receipt',
+      jobId: fieldMaterialReceipt.jobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setFieldMaterialReceipt(emptyMaterialReceiptDraft())
+        setFieldMaterialReceiptPlans([])
+        notify('Material delivery was saved locally with its quantities and evidence reference. It will sync after reconnection.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      setFieldMaterialReceipt(emptyMaterialReceiptDraft())
+      setFieldMaterialReceiptPlans([])
+      notify(result.replayed ? 'This delivery ticket was already retained; no duplicate receipt was created.' : `Delivery ${result.receipt?.receiptReference || ''} was retained for office review.`)
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setFieldMaterialReceipt(emptyMaterialReceiptDraft())
+          setFieldMaterialReceiptPlans([])
+          notify('Connection interrupted. The complete delivery ticket was saved locally for an exact retry.')
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -10255,7 +10533,7 @@ function App() {
     const { mode, job } = jobLifecycleAction
     setSubmitting(true)
     try {
-      const result = await api(`/api/ledger/jobs/${encodeURIComponent(job.id)}/${mode}`, {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(job.id)}/${mode}?includeDashboard=false`, {
         method: 'POST',
         body: JSON.stringify({ reason: jobLifecycleReason.trim(), actor: 'office_operator' }),
       })
@@ -10959,6 +11237,92 @@ function App() {
         dashboard: result.dashboard || current.dashboard,
       } : current)
       notify(`Cancellation approval requested for ${result.period.title}. The scheduling block remains active until approval.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openMaterialReceiptEditor(plan = null) {
+    setMaterialReceiptDraft(emptyMaterialReceiptDraft(plan))
+    setMaterialReceiptEditor(true)
+  }
+
+  function closeMaterialReceiptEditor() {
+    if (submitting) return
+    setMaterialReceiptEditor(false)
+    setMaterialReceiptDraft(emptyMaterialReceiptDraft())
+  }
+
+  async function saveMaterialReceipt(event) {
+    event.preventDefault()
+    const lines = materialReceiptDraft.lines.map((line) => ({
+      lineKey: line.lineKey || undefined,
+      materialRequirementId: line.materialRequirementId || undefined,
+      itemName: line.itemName.trim(),
+      unit: line.unit.trim() || 'unit',
+      receivedQuantity: Number(line.receivedQuantity),
+      acceptedQuantity: Number(line.acceptedQuantity),
+      damagedQuantity: Number(line.damagedQuantity || 0),
+      notes: line.notes.trim() || null,
+    }))
+    const invalidLine = lines.find((line) => line.itemName.length < 2 || !(line.receivedQuantity > 0) || line.acceptedQuantity < 0
+      || line.damagedQuantity < 0 || line.acceptedQuantity + line.damagedQuantity > line.receivedQuantity)
+    if (!materialReceiptDraft.jobId || materialReceiptDraft.receiptReference.trim().length < 3
+      || materialReceiptDraft.evidenceReference.trim().length < 3 || materialReceiptDraft.receivedBy.trim().length < 2 || invalidLine) {
+      setError('Record the job, delivery reference, retained evidence, receiver, and a valid quantity breakdown for every line.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(materialReceiptDraft.jobId)}/material-receipts`, {
+        method: 'POST',
+        body: JSON.stringify({
+          entryKey: materialReceiptDraft.entryKey,
+          purchaseOrderId: materialReceiptDraft.purchaseOrderId || null,
+          receiptReference: materialReceiptDraft.receiptReference.trim(),
+          evidenceReference: materialReceiptDraft.evidenceReference.trim(),
+          deliveredAt: toIsoDateTime(materialReceiptDraft.deliveredAt),
+          receivedBy: materialReceiptDraft.receivedBy.trim(),
+          location: materialReceiptDraft.location.trim() || null,
+          finalDelivery: materialReceiptDraft.finalDelivery,
+          notes: materialReceiptDraft.notes.trim() || null,
+          lines,
+          actor: 'office_operator',
+        }),
+      })
+      setMaterialReceiptEditor(false)
+      setMaterialReceiptDraft(emptyMaterialReceiptDraft())
+      setData((current) => current ? { ...current, materialReceiving: result.materialReceiving || current.materialReceiving, dashboard: result.dashboard || current.dashboard } : current)
+      notify(result.replayed ? 'The matching delivery ticket was already retained; no duplicate was created.' : `Delivery ${result.receipt.receiptReference} retained as ${formatStatus(result.receipt.status)}.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function openMaterialReceiptReversal(receipt) {
+    setMaterialReceiptReversal(receipt)
+    setMaterialReceiptReversalReason('')
+  }
+
+  async function requestMaterialReceiptReversal(event) {
+    event.preventDefault()
+    if (!materialReceiptReversal || materialReceiptReversalReason.trim().length < 8) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(materialReceiptReversal.jobId)}/material-receipts/${encodeURIComponent(materialReceiptReversal.id)}/reversal`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: materialReceiptReversalReason.trim(), actor: 'office_operator' }),
+      })
+      setMaterialReceiptReversal(null)
+      setMaterialReceiptReversalReason('')
+      setData((current) => current ? { ...current, materialReceiving: result.materialReceiving || current.materialReceiving, dashboard: result.dashboard || current.dashboard } : current)
+      notify('Receipt reversal approval requested. Accepted quantities remain active until an approver resolves it.')
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -11740,6 +12104,9 @@ function App() {
     const contractAmount = Number(item.money?.contractValue || item.money?.quotedNetValue || 0)
     const drawAmount = Number(item.latest?.invoice?.total || item.money?.invoiceValue || item.money?.unpaidValue || 0)
     const supplierInvoiceAmount = Number(action.committedAmount || 0)
+    const suggestedMaterialReceipt = action.type === 'record_supplier_invoice'
+      ? (action.materialReceipts || []).find((receipt) => receipt.status === 'received') || null
+      : null
     const amount =
       action.type === 'create_credit_note'
         ? creditNoteAmount
@@ -11761,6 +12128,8 @@ function App() {
       plannedIssueAt: action.plannedIssueAt ? String(action.plannedIssueAt).slice(0, 10) : futureDateInput(7),
       dueAt: action.dueAt ? String(action.dueAt).slice(0, 10) : futureDateInput(action.type === 'create_billing_milestone' ? 37 : 7),
       vendor: action.supplier || item.latest?.purchaseOrder?.supplier || '',
+      materialReceiptId: suggestedMaterialReceipt?.id || '',
+      deliveryReference: suggestedMaterialReceipt?.receiptReference || '',
       description:
         action.type === 'create_billing_milestone'
           ? `${item.jobTitle || 'Job'} billing milestone ${action.nextSequenceNumber || ''}`.trim()
@@ -11858,9 +12227,9 @@ function App() {
         !vendor ||
         !financeActionDraft.invoiceDate ||
         !financeActionDraft.dueAt ||
-        !deliveryReference
+        (!financeActionDraft.materialReceiptId && !deliveryReference)
       ) {
-        setError('Record the supplier, invoice number, positive net amount, VAT, invoice and due dates, and delivery evidence reference.')
+        setError('Record the supplier, invoice number, positive net amount, VAT, invoice and due dates, and retained receipt or service evidence.')
         return
       }
       route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/supplier-invoices`
@@ -11874,6 +12243,7 @@ function App() {
         taxAmount: roundMoney(financeSupplierTax),
         total: financeSupplierTotal,
         currency: financeAction.action.currency || 'EUR',
+        materialReceiptId: financeActionDraft.materialReceiptId || null,
         deliveryReference,
         notes,
       }
@@ -12675,11 +13045,11 @@ function App() {
         {data ? (
           <>
             {sectionLoading ? (
-              <div className="loading" role="status">
+              <div className="loading section-loading" role="status">
                 <LoaderCircle className="spin" size={26} />
                 Loading {pageTitle.toLowerCase()}
               </div>
-            ) : (
+            ) : null}
               <>
             {section === 'today' && (
               <section className="page-grid">
@@ -13049,6 +13419,7 @@ function App() {
                 workerSummary={data.workerSummary}
                 qualificationRegister={data.qualificationRegister}
                 availabilityRegister={data.availabilityRegister}
+                materialReceiving={data.materialReceiving}
                 tools={tools}
                 toolSummary={data.toolSummary}
                 tradePartners={tradePartners}
@@ -13074,6 +13445,8 @@ function App() {
                 onRetireQualificationRequirement={openQualificationRequirementRetirement}
                 onCreateAvailability={openAvailabilityEditor}
                 onCancelAvailability={openAvailabilityCancellation}
+                onCreateMaterialReceipt={openMaterialReceiptEditor}
+                onReverseMaterialReceipt={openMaterialReceiptReversal}
                 onCreateEquipment={() => openEquipmentEditor()}
                 onEditEquipment={openEquipmentEditor}
                 onInspectEquipment={openEquipmentInspection}
@@ -13295,6 +13668,103 @@ function App() {
                   </div>
                   <p className="attendance-policy">Operational self-reported presence only. Payroll, statutory registers, and location tracking remain separate.</p>
                 </section>
+                <form className="evidence-form material-receipt-form" data-testid="field-material-receipt-form" onSubmit={recordFieldMaterialReceipt}>
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Receive materials</h2>
+                      <p>Retain the delivery note, physical receiver, and accepted or damaged quantities at the point of receipt.</p>
+                    </div>
+                    <PackageCheck size={20} />
+                  </div>
+                  <div className="form-grid">
+                    <label>
+                      Job
+                      <select required value={fieldMaterialReceipt.jobId} onChange={(event) => void selectFieldMaterialReceiptJob(event.target.value)}>
+                        <option value="">Select an active job</option>
+                        {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                      </select>
+                    </label>
+                    {fieldMaterialReceiptPlans.length ? (
+                      <label>
+                        Purchase order
+                        <select value={fieldMaterialReceipt.purchaseOrderId} onChange={(event) => selectFieldMaterialReceiptPlan(event.target.value)}>
+                          <option value="">Unlinked delivery</option>
+                          {fieldMaterialReceiptPlans.map((plan) => (
+                            <option key={plan.purchaseOrder.id} value={plan.purchaseOrder.id}>
+                              {plan.purchaseOrder.issueReference || plan.purchaseOrder.id} / {plan.summary.remainingLines} line(s) open
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {selectedFieldMaterialReceiptPlan?.lines.filter((line) => !line.complete).length > 1 ? (
+                      <label>
+                        Order line
+                        <select value={fieldMaterialReceipt.lines[0].lineKey} onChange={(event) => selectFieldMaterialReceiptLine(event.target.value)}>
+                          {selectedFieldMaterialReceiptPlan.lines.filter((line) => !line.complete).map((line) => (
+                            <option key={line.lineKey} value={line.lineKey}>{line.itemName} / {roundDisplay(line.remainingQuantity)} {line.unit}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <label>
+                      Delivery-note reference
+                      <input required minLength="3" maxLength="160" value={fieldMaterialReceipt.receiptReference} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, receiptReference: event.target.value })} placeholder="Supplier ticket number" />
+                    </label>
+                    <label>
+                      Delivered at
+                      <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldMaterialReceipt.deliveredAt} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, deliveredAt: event.target.value })} />
+                    </label>
+                    {!fieldScoped ? (
+                      <label>
+                        Received by
+                        <input required minLength="2" maxLength="160" value={fieldMaterialReceipt.receivedBy} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, receivedBy: event.target.value })} />
+                      </label>
+                    ) : null}
+                    <label>
+                      Delivery location
+                      <input maxLength="240" value={fieldMaterialReceipt.location} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, location: event.target.value })} placeholder="Gate, floor, or storage area" />
+                    </label>
+                    <label>
+                      Item
+                      <input required minLength="2" maxLength="240" value={fieldMaterialReceipt.lines[0].itemName} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], itemName: event.target.value }] })} placeholder="Match the planned material name when possible" />
+                    </label>
+                    <label>
+                      Unit
+                      <input required maxLength="40" value={fieldMaterialReceipt.lines[0].unit} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], unit: event.target.value }] })} />
+                    </label>
+                    <label>
+                      Received
+                      <input required type="number" min="0.000001" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].receivedQuantity} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], receivedQuantity: event.target.value }] })} />
+                    </label>
+                    <label>
+                      Accepted
+                      <input required type="number" min="0" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].acceptedQuantity} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], acceptedQuantity: event.target.value }] })} />
+                    </label>
+                    <label>
+                      Damaged
+                      <input required type="number" min="0" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].damagedQuantity} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], damagedQuantity: event.target.value }] })} />
+                    </label>
+                    <label className="form-span">
+                      Evidence reference
+                      <input required minLength="3" maxLength="240" value={fieldMaterialReceipt.evidenceReference} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, evidenceReference: event.target.value })} placeholder="Signed ticket, photo, or retained document reference" />
+                    </label>
+                    <label className="form-span">
+                      Delivery note
+                      <textarea maxLength="4000" value={fieldMaterialReceipt.notes} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, notes: event.target.value })} placeholder="Damage, rejection, storage, or follow-up detail" />
+                    </label>
+                    <label className="checkbox-label form-span">
+                      <input type="checkbox" checked={fieldMaterialReceipt.finalDelivery} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, finalDelivery: event.target.checked })} />
+                      This is the final delivery against the order
+                    </label>
+                  </div>
+                  <div className="modal-actions">
+                    <button className="primary-button" disabled={submitting}>
+                      <PackageCheck size={16} />
+                      {submitting ? 'Recording...' : navigator.onLine === false ? 'Save receipt offline' : 'Retain delivery ticket'}
+                    </button>
+                  </div>
+                </form>
                 <form className="evidence-form daily-site-log" data-testid="daily-site-log-form" onSubmit={recordFieldDailyLog}>
                   <div className="panel-heading">
                     <div>
@@ -13855,7 +14325,8 @@ function App() {
                       <strong>
                         {operationCapabilities?.requestSafety?.evidenceUploadIdempotency === 'durable' &&
                         operationCapabilities?.requestSafety?.progressEntryKey === 'durable' &&
-                        operationCapabilities?.requestSafety?.dailyLogEntryKey === 'durable'
+                        operationCapabilities?.requestSafety?.dailyLogEntryKey === 'durable' &&
+                        operationCapabilities?.requestSafety?.materialReceiptEntryKey === 'durable'
                           ? 'scoped + deduplicated'
                           : 'checking'}
                       </strong>
@@ -14064,7 +14535,6 @@ function App() {
               </section>
             )}
               </>
-            )}
           </>
         ) : null}
       </main>
@@ -17608,6 +18078,89 @@ function App() {
           </section>
         </div>
       ) : null}
+      {materialReceiptEditor ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal material-receipt-modal" role="dialog" aria-modal="true" aria-labelledby="material-receipt-title" data-testid="material-receipt-modal">
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Immutable goods-receipt evidence</p>
+                <h2 id="material-receipt-title">Record material delivery</h2>
+                <p>Accepted quantities update material readiness; every exception remains visible to operations and finance.</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close material receipt" onClick={closeMaterialReceiptEditor}><X size={18} /></button>
+            </div>
+            <form onSubmit={saveMaterialReceipt}>
+              <div className="form-grid">
+                <label>
+                  Job
+                  <select required disabled={Boolean(materialReceiptDraft.purchaseOrderId)} value={materialReceiptDraft.jobId} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, jobId: event.target.value })}>
+                    <option value="">Select an active job</option>
+                    {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Delivery-note reference
+                  <input autoFocus required minLength="3" maxLength="160" value={materialReceiptDraft.receiptReference} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, receiptReference: event.target.value })} />
+                </label>
+                <label>
+                  Delivered at
+                  <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={materialReceiptDraft.deliveredAt} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, deliveredAt: event.target.value })} />
+                </label>
+                <label>
+                  Received by
+                  <input required minLength="2" maxLength="160" value={materialReceiptDraft.receivedBy} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, receivedBy: event.target.value })} />
+                </label>
+                <label>
+                  Location
+                  <input maxLength="240" value={materialReceiptDraft.location} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, location: event.target.value })} />
+                </label>
+                <label className="form-span">
+                  Evidence reference
+                  <input required minLength="3" maxLength="240" value={materialReceiptDraft.evidenceReference} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, evidenceReference: event.target.value })} placeholder="Signed ticket, photo, or private document reference" />
+                </label>
+                <div className="form-span material-receipt-lines">
+                  <div className="panel-heading">
+                    <div><h3>Delivered lines</h3><p>Accepted plus damaged cannot exceed the physically received quantity.</p></div>
+                    <button type="button" className="secondary-button" onClick={() => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: [...materialReceiptDraft.lines, emptyMaterialReceiptLine()] })}><Plus size={15} /> Add line</button>
+                  </div>
+                  {materialReceiptDraft.lines.map((line, index) => (
+                    <div className="form-grid material-receipt-line" key={`${line.lineKey || 'manual'}-${index}`}>
+                      <label>Item<input required minLength="2" maxLength="240" value={line.itemName} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: materialReceiptDraft.lines.map((item, itemIndex) => itemIndex === index ? { ...item, itemName: event.target.value } : item) })} /></label>
+                      <label>Unit<input required maxLength="40" value={line.unit} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: materialReceiptDraft.lines.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value } : item) })} /></label>
+                      <label>Received<input required type="number" min="0.000001" step="any" value={line.receivedQuantity} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: materialReceiptDraft.lines.map((item, itemIndex) => itemIndex === index ? { ...item, receivedQuantity: event.target.value } : item) })} /></label>
+                      <label>Accepted<input required type="number" min="0" step="any" value={line.acceptedQuantity} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: materialReceiptDraft.lines.map((item, itemIndex) => itemIndex === index ? { ...item, acceptedQuantity: event.target.value } : item) })} /></label>
+                      <label>Damaged<input required type="number" min="0" step="any" value={line.damagedQuantity} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: materialReceiptDraft.lines.map((item, itemIndex) => itemIndex === index ? { ...item, damagedQuantity: event.target.value } : item) })} /></label>
+                      {materialReceiptDraft.lines.length > 1 ? <button type="button" className="icon-button" title="Remove line" aria-label={`Remove delivery line ${index + 1}`} onClick={() => setMaterialReceiptDraft({ ...materialReceiptDraft, lines: materialReceiptDraft.lines.filter((_, itemIndex) => itemIndex !== index) })}><X size={16} /></button> : null}
+                    </div>
+                  ))}
+                </div>
+                <label className="form-span">Notes<textarea maxLength="4000" value={materialReceiptDraft.notes} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, notes: event.target.value })} /></label>
+                <label className="checkbox-label form-span"><input type="checkbox" checked={materialReceiptDraft.finalDelivery} onChange={(event) => setMaterialReceiptDraft({ ...materialReceiptDraft, finalDelivery: event.target.checked })} /> This is the final delivery against the order</label>
+                <p className="workflow-note form-span">Saving retains the ticket and derives discrepancy evidence. It does not contact a supplier, accept commercial terms, or authorize payment.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" disabled={submitting} onClick={closeMaterialReceiptEditor}>Cancel</button>
+                <button className="primary-button" disabled={submitting}><PackageCheck size={15} /> {submitting ? 'Recording...' : 'Retain delivery'}</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+      {materialReceiptReversal ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="material-receipt-reversal-title">
+            <div className="modal-heading">
+              <div><p className="eyebrow">Compensating ledger action</p><h2 id="material-receipt-reversal-title">Request receipt reversal</h2><p>{materialReceiptReversal.receiptReference} / {materialReceiptReversal.jobTitle}</p></div>
+              <button type="button" className="icon-button" aria-label="Close receipt reversal" onClick={() => setMaterialReceiptReversal(null)}><X size={18} /></button>
+            </div>
+            <form onSubmit={requestMaterialReceiptReversal}>
+              <label>Reason<textarea autoFocus required minLength="8" maxLength="1000" value={materialReceiptReversalReason} onChange={(event) => setMaterialReceiptReversalReason(event.target.value)} placeholder="Explain the wrong allocation, duplicate ticket, or corrected evidence." /></label>
+              <p className="workflow-note">The original ticket remains in history. Quantities stay active until an approver accepts the reversal, and active supplier payables block reversal.</p>
+              <div className="modal-actions"><button type="button" className="secondary-button" disabled={submitting} onClick={() => setMaterialReceiptReversal(null)}>Cancel</button><button className="danger-button" disabled={submitting || materialReceiptReversalReason.trim().length < 8}><ShieldCheck size={15} /> {submitting ? 'Requesting...' : 'Request reversal'}</button></div>
+            </form>
+          </section>
+        </div>
+      ) : null}
       {resourceAction ? (
         <div className="modal-backdrop" role="presentation">
           <section
@@ -18402,10 +18955,33 @@ function App() {
                         onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, taxAmount: event.target.value })}
                       />
                     </label>
+                    {financeAction.action.materialReceipts?.length ? (
+                      <label className="form-span">
+                        Retained goods receipt
+                        <select
+                          value={financeActionDraft.materialReceiptId}
+                          onChange={(event) => {
+                            const receipt = financeAction.action.materialReceipts.find((item) => item.id === event.target.value)
+                            setFinanceActionDraft({
+                              ...financeActionDraft,
+                              materialReceiptId: event.target.value,
+                              deliveryReference: receipt?.receiptReference || financeActionDraft.deliveryReference,
+                            })
+                          }}
+                        >
+                          <option value="">Use service or other retained evidence</option>
+                          {financeAction.action.materialReceipts.map((receipt) => (
+                            <option key={receipt.id} value={receipt.id} disabled={receipt.status !== 'received'}>
+                              {receipt.receiptReference} / {formatDate(receipt.deliveredAt)} / {formatStatus(receipt.status)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
                     <label className="form-span">
                       Delivery or service evidence reference
                       <input
-                        required
+                        required={!financeActionDraft.materialReceiptId}
                         maxLength={240}
                         value={financeActionDraft.deliveryReference}
                         onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, deliveryReference: event.target.value })}
@@ -18427,8 +19003,8 @@ function App() {
                       </span>
                     </div>
                     <p className="workflow-note form-span">
-                      The ledger checks supplier, currency, net amount, approved purchase order, delivery evidence, duplicate invoice
-                      number, and supplier compliance. Any exception requires an explicit approver override.
+                      A current retained goods receipt enables a verified three-way match. Free-text service evidence is retained as an
+                      explicit matching exception. Supplier, currency, amount, duplicate invoice, and compliance checks still apply.
                     </p>
                   </>
                 ) : null}

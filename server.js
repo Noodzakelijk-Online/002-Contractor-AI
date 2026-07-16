@@ -1188,7 +1188,9 @@ function allowsOperatorRequest(role, req) {
       return pathName === '/api/health'
         || pathName === '/api/readiness'
         || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
-        || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
+         || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
         || pathName === '/api/ledger/attendance'
         || /^\/api\/ledger\/jobs\/[^/]+\/attendance$/.test(pathName)
         || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
@@ -1198,7 +1200,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/check-in$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/[^/]+\/check-out$/.test(pathName)) return true;
-    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs)$/.test(pathName);
+    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
 
   return false;
@@ -1311,6 +1313,7 @@ function projectFieldJobDetail(req, detail) {
     assignments: projectFieldRecords(detail.assignments),
     tools: projectFieldRecords(detail.tools),
     materials: projectFieldRecords(detail.materials),
+    materialReceipts: projectFieldRecords(detail.materialReceipts),
     documents: projectFieldRecords(detail.documents),
     progress: projectFieldRecords(detail.progress),
     productionBaselines: projectFieldRecords(detail.productionBaselines),
@@ -2189,7 +2192,9 @@ app.post('/api/ledger/jobs/:id/archive', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestJobArchive(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    dashboard: operatingLedger.dashboardSummary()
+    dashboard: String(req.query.includeDashboard ?? req.query.include_dashboard ?? 'true').toLowerCase() !== 'false'
+      ? operatingLedger.dashboardSummary()
+      : null
   }), 201);
 });
 
@@ -2197,7 +2202,9 @@ app.post('/api/ledger/jobs/:id/restore', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestJobRestore(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    dashboard: operatingLedger.dashboardSummary()
+    dashboard: String(req.query.includeDashboard ?? req.query.include_dashboard ?? 'true').toLowerCase() !== 'false'
+      ? operatingLedger.dashboardSummary()
+      : null
   }), 201);
 });
 
@@ -2894,6 +2901,86 @@ app.patch('/api/ledger/jobs/:id/materials/:materialId/status', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }));
+});
+
+app.get('/api/ledger/material-receipts', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    materialReceiving: operatingLedger.listMaterialReceivingRegister(req.query || {})
+  }));
+});
+
+app.get('/api/ledger/jobs/:id/material-receipts', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const receipts = operatingLedger.listMaterialReceipts({
+      jobId: req.params.id,
+      includeReversed: req.query.includeReversed || req.query.include_reversed,
+      limit: req.query.limit
+    });
+    return {
+      success: true,
+      receipts: req.operator?.role === 'field_worker' ? projectFieldRecords(receipts) : receipts
+    };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/material-receiving-plan', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    plans: operatingLedger.listMaterialReceivingPlansForJob(req.params.id).map(plan => ({
+      purchaseOrder: {
+        id: plan.purchaseOrder.id,
+        jobId: plan.purchaseOrder.jobId,
+        status: plan.purchaseOrder.status,
+        issueReference: plan.purchaseOrder.issueReference || plan.purchaseOrder.orderNumber || null,
+        requiredBy: plan.purchaseOrder.requiredBy || null
+      },
+      lines: plan.lines.map(line => ({
+        lineKey: line.lineKey,
+        materialRequirementId: line.materialRequirementId,
+        itemName: line.itemName,
+        unit: line.unit,
+        orderedQuantity: line.orderedQuantity,
+        receivedQuantity: line.receivedQuantity,
+        remainingQuantity: line.remainingQuantity,
+        complete: line.complete
+      })),
+      summary: plan.summary
+    }))
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/material-receipts', (req, res) => {
+  const payload = { ...(req.body || {}) };
+  if (req.operator?.role === 'field_worker') {
+    const identity = fieldWorkerIdentity(req);
+    payload.receivedBy = identity.workerName;
+  }
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createMaterialReceipt(req.params.id, payload, {
+      actor: actorFromRequest(req, payload.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      receipt: recordForOperator(req, result.receipt),
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id),
+      materialReceiving: req.operator?.role === 'field_worker' ? null : operatingLedger.listMaterialReceivingRegister(),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/material-receipts/:receiptId/reversal', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestMaterialReceiptReversal(req.params.id, req.params.receiptId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id),
+    materialReceiving: operatingLedger.listMaterialReceivingRegister(),
+    dashboard: operatingLedger.dashboardSummary()
+  }), 202);
 });
 
 app.post('/api/ledger/jobs/:id/route-plans', (req, res) => {
@@ -5319,6 +5406,7 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         weeklyTimesheetSnapshot: 'source_current_approval_gated',
         timesheetExportIntegrity: 'sha256',
         dailyLogEntryKey: 'durable',
+        materialReceiptEntryKey: 'durable',
         taskLifecycle: 'retained',
         taskCompletionEvidenceRequired: true,
         fieldTaskScopeEnforced: true,
@@ -5444,6 +5532,17 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         deliveryApprovalRequired: true,
         verifiedProviderReceiptRequired: true,
         externalCommitmentClaim: 'verified_delivery_only'
+      },
+      materialReceiving: {
+        replaySafeFieldCapture: true,
+        normalizedReceiptLines: true,
+        purchaseOrderLinkage: true,
+        materialRequirementSynchronization: true,
+        discrepancyRetention: true,
+        reversalMode: 'approval_gated_compensating_record',
+        supplierInvoiceMatch: 'retained_receipt_or_service_completion',
+        autonomousExceptionReview: 'internal_task_only',
+        externalCommitments: 0
       },
       automation: {
         ledgerOnly: true,
