@@ -1188,12 +1188,13 @@ function allowsOperatorRequest(role, req) {
       return pathName === '/api/health'
         || pathName === '/api/readiness'
         || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
         || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
     }
     if (req.method === 'POST' && pathName === '/api/ledger/upload') return true;
     if (req.method === 'PATCH' && /^\/api\/ledger\/jobs\/[^/]+\/lifecycle\/task\/[^/]+$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/inspections\/[^/]+\/checklist-submissions$/.test(pathName)) return true;
-    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs)$/.test(pathName);
+    return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs)$/.test(pathName);
   }
 
   return false;
@@ -1226,9 +1227,9 @@ function scopedLedgerJobs(req, filters = {}) {
 
 const FIELD_RECORD_PRIVATE_KEYS = new Set([
   'amount', 'approval', 'approvalId', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
-  'data', 'email', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'portalToken',
+  'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
   'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
-  'taxAmount', 'taxRate', 'token', 'total'
+  'snapshotHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
 ]);
 
 function projectFieldRecord(record) {
@@ -1307,6 +1308,9 @@ function projectFieldJobDetail(req, detail) {
     materials: projectFieldRecords(detail.materials),
     documents: projectFieldRecords(detail.documents),
     progress: projectFieldRecords(detail.progress),
+    productionBaselines: projectFieldRecords(detail.productionBaselines),
+    productionEntries: projectFieldRecords(detail.productionEntries),
+    productionControl: projectFieldRecord(detail.productionControl),
     timeLogs: projectFieldRecords(timeLogs),
     qualityChecks: projectFieldRecords(detail.qualityChecks),
     safetyChecks: projectFieldRecords(detail.safetyChecks),
@@ -2812,6 +2816,55 @@ app.post('/api/ledger/jobs/:id/progress', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/jobs/:id/production', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    production: recordForOperator(req, operatingLedger.calculateProductionPerformance(req.params.id))
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/production-baselines', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestProductionBaseline(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id, { includeAudit: true }),
+    field: operatingLedger.listFieldAssurance({ limit: 100 }),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/production-entries', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = timeLogPayloadForOperator(req, req.body || {});
+    const result = operatingLedger.recordProductionEntry(req.params.id, payload, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      entry: recordForOperator(req, result.entry),
+      production: recordForOperator(req, result.production),
+      replayed: result.replayed,
+      job: jobForOperator(req, req.params.id, { includeAudit: true }),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/production-entries/:entryId/reversal', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestProductionEntryReversal(req.params.id, req.params.entryId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id, { includeAudit: true }),
+    field: operatingLedger.listFieldAssurance({ limit: 100 }),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0
+  }), 201);
+});
+
 app.post('/api/ledger/jobs/:id/communication', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = req.body || {};
@@ -4237,6 +4290,8 @@ function operationalExport() {
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
     costForecastSnapshots: operatingLedger.listAllCostForecastSnapshots({ limit: 5_000 }),
+    productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
+    productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
@@ -4279,6 +4334,8 @@ function validateOperationalExport(snapshot) {
     'billingMilestones',
     'taskDependencies',
     'scheduleBaselines',
+    'productionBaselines',
+    'productionEntries',
     'handoverPackages',
     'approvals',
     'audit'
@@ -4353,6 +4410,8 @@ function validateOperationalExport(snapshot) {
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
       billingMilestones: snapshot.billingMilestones.length,
       costForecastSnapshots: Array.isArray(snapshot.costForecastSnapshots) ? snapshot.costForecastSnapshots.length : 0,
+      productionBaselines: snapshot.productionBaselines.length,
+      productionEntries: snapshot.productionEntries.length,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
@@ -4962,6 +5021,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         evidenceUploadLeaseOwnership: 'unique_claim_token',
         evidenceUploadReclaimSafe: true,
         progressEntryKey: 'durable',
+        productionEntryKey: 'durable',
+        productionEntryReversal: 'approval_gated_compensating_record',
         dailyLogEntryKey: 'durable',
         taskLifecycle: 'retained',
         taskCompletionEvidenceRequired: true,
@@ -5022,6 +5083,18 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         immutableSnapshots: true,
         approvalRequired: true,
         sourceCurrentApprovalRequired: true,
+        externalCommitments: 0
+      },
+      productionControl: {
+        immutableBaselines: true,
+        baselineApprovalRequired: true,
+        installedQuantityTracking: true,
+        crewHoursTracking: true,
+        earnedHoursCalculation: true,
+        replaySafeFieldCapture: true,
+        reversalMode: 'approval_gated_compensating_record',
+        autonomousVarianceReview: 'internal_task_only',
+        performanceThreshold: 0.8,
         externalCommitments: 0
       },
       invoicing: {

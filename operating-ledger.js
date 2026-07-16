@@ -132,6 +132,8 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ],
   'field-production': [
     { key: 'progress', label: 'Progress updates', table: 'progress_updates', detailKey: 'progress' },
+    { key: 'production_baseline', label: 'Approved production baseline', table: 'production_baselines', detailKey: 'productionBaselines', readyStatuses: ['approved'] },
+    { key: 'production_output', label: 'Installed production output', table: 'production_entries', detailKey: 'productionEntries', readyStatuses: ['recorded'] },
     { key: 'field_report', label: 'Daily report', table: 'field_reports', detailKey: 'fieldReports' },
     { key: 'time', label: 'Time tracking', table: 'time_logs', detailKey: 'timeLogs' },
     { key: 'materials', label: 'Material tracking', table: 'material_requirements', detailKey: 'materials' },
@@ -276,6 +278,8 @@ const LEDGER_CLOSED_STATUSES = new Set([
   'settled',
   'stored',
   'submitted',
+  'superseded',
+  'reversed',
   'verified'
 ]);
 
@@ -516,6 +520,8 @@ function capabilityRequirementActionTarget(requirementKey) {
     documents: 'document_form',
     closeout: 'closeout_form',
     progress: 'progress_form',
+    production_baseline: 'production_control',
+    production_output: 'production_control',
     time: 'time_log_form',
     evidence: 'document_form',
     instructions: 'worker_instruction_form',
@@ -867,6 +873,7 @@ const AUDIT_CHAIN_ALGORITHM = 'sha256';
 const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
 const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
+const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -2553,6 +2560,57 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON cost_forecast_snapshots(job_id, version_number DESC);
         CREATE INDEX IF NOT EXISTS idx_cost_forecast_snapshots_status
           ON cost_forecast_snapshots(job_id, status, updated_at DESC);
+      `);
+    }
+  },
+  {
+    version: '032_production_control',
+    description: 'Retain approval-backed production baselines, replay-safe installed output, and approval-gated entry reversals.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS production_baselines (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, version_number)
+        );
+        CREATE TABLE IF NOT EXISTS production_entries (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          baseline_id TEXT NOT NULL,
+          line_key TEXT NOT NULL,
+          work_date TEXT NOT NULL,
+          quantity DOUBLE PRECISION NOT NULL,
+          crew_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+          entry_key TEXT NOT NULL,
+          entry_fingerprint TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'recorded',
+          reversal_approval_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(baseline_id) REFERENCES production_baselines(id),
+          FOREIGN KEY(reversal_approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, entry_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_production_baselines_job
+          ON production_baselines(job_id, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_production_baselines_status
+          ON production_baselines(job_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_production_entries_job_date
+          ON production_entries(job_id, work_date DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_production_entries_baseline_line
+          ON production_entries(baseline_id, line_key, status);
       `);
     }
   }
@@ -17979,6 +18037,508 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return after;
   }
 
+  normalizeProductionPlanLines(lines = []) {
+    if (!Array.isArray(lines) || lines.length < 1 || lines.length > 200) {
+      throw ledgerInputError('production_baseline_lines_required', 'A production baseline requires between 1 and 200 plan lines.');
+    }
+    const retainedKeys = new Set();
+    return lines.map((line, index) => {
+      const description = normalizeText(line?.description || line?.title, '');
+      const costCode = normalizeText(line?.costCode || line?.cost_code, 'PRODUCTION').toUpperCase();
+      const lineKey = normalizeText(line?.lineKey || line?.line_key, `${costCode}-${index + 1}`)
+        .toLowerCase()
+        .replace(/[^a-z0-9._:-]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      const unit = normalizeText(line?.unit, 'unit').toLowerCase();
+      const plannedQuantity = roundQuantity(normalizeNumber(line?.plannedQuantity ?? line?.planned_quantity ?? line?.quantity, 0));
+      const plannedLaborHours = roundQuantity(normalizeNumber(line?.plannedLaborHours ?? line?.planned_labor_hours ?? line?.laborHours, 0));
+      if (description.length < 2 || description.length > 300) {
+        throw ledgerInputError('production_line_description_invalid', 'Each production line requires a description between 2 and 300 characters.', { index });
+      }
+      if (!/^[A-Za-z0-9._:/ -]{2,80}$/.test(costCode)) {
+        throw ledgerInputError('production_line_cost_code_invalid', 'Production cost codes must contain 2 to 80 safe characters.', { index });
+      }
+      if (!/^[a-z0-9._:-]{2,100}$/.test(lineKey) || retainedKeys.has(lineKey)) {
+        throw ledgerInputError('production_line_key_invalid', 'Production line keys must be unique and contain 2 to 100 safe characters.', { index, lineKey });
+      }
+      if (!/^[A-Za-z0-9.%/_ -]{1,30}$/.test(unit)) {
+        throw ledgerInputError('production_line_unit_invalid', 'Production units must contain 1 to 30 safe characters.', { index });
+      }
+      if (!(plannedQuantity > 0 && plannedQuantity <= 1_000_000_000)) {
+        throw ledgerInputError('production_line_quantity_invalid', 'Planned production quantity must be greater than zero.', { index });
+      }
+      if (!(plannedLaborHours > 0 && plannedLaborHours <= 1_000_000)) {
+        throw ledgerInputError('production_line_hours_invalid', 'Planned labor hours must be greater than zero.', { index });
+      }
+      retainedKeys.add(lineKey);
+      return {
+        sequenceNumber: index + 1,
+        lineKey,
+        costCode,
+        description,
+        unit,
+        plannedQuantity,
+        plannedLaborHours,
+        sourceReference: normalizeText(line?.sourceReference || line?.source_reference, '') || null
+      };
+    });
+  }
+
+  listProductionBaselines(jobId) {
+    this.requireJob(jobId, { allowInactive: true });
+    return this.db.prepare(`
+      SELECT * FROM production_baselines
+      WHERE job_id = ?
+      ORDER BY version_number DESC
+    `).all(jobId).map(row => this.mapProductionBaseline(row));
+  }
+
+  listAllProductionBaselines(options = {}) {
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare('SELECT * FROM production_baselines ORDER BY created_at DESC LIMIT ?')
+      .all(limit).map(row => this.mapProductionBaseline(row));
+  }
+
+  listAllProductionEntries(options = {}) {
+    const limit = safeLimit(options.limit, 1_000, 10_000);
+    return this.db.prepare('SELECT * FROM production_entries ORDER BY work_date DESC, created_at DESC LIMIT ?')
+      .all(limit).map(row => this.mapProductionEntry(row));
+  }
+
+  getProductionBaseline(baselineId) {
+    const row = this.db.prepare('SELECT * FROM production_baselines WHERE id = ?').get(String(baselineId || ''));
+    if (!row) throw ledgerInputError('production_baseline_not_found', 'Production baseline not found.', { baselineId }, 404);
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    if (!snapshot
+      || snapshot.format !== PRODUCTION_BASELINE_FORMAT
+      || snapshot.jobId !== row.job_id
+      || sha256Json({ format: snapshot.format, jobId: snapshot.jobId, lines: snapshot.lines }) !== snapshot.planHash
+      || sha256Text(snapshotJson) !== row.snapshot_hash) {
+      throw ledgerInputError(
+        'production_baseline_integrity_failed',
+        'The retained production baseline failed integrity verification.',
+        { baselineId: row.id },
+        409
+      );
+    }
+    return this.mapProductionBaseline(row);
+  }
+
+  requestProductionBaseline(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.mapJob(this.requireJob(jobId));
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const lines = this.normalizeProductionPlanLines(payload.lines);
+      const planHash = sha256Json({ format: PRODUCTION_BASELINE_FORMAT, jobId, lines });
+      const existing = this.listProductionBaselines(jobId);
+      const active = existing.find(item => item.status === 'approved') || null;
+      if (active) {
+        const nextByKey = new Map(lines.map(line => [line.lineKey, line]));
+        const activeByKey = new Map((active.snapshot?.lines || []).map(line => [line.lineKey, line]));
+        const retainedEntryKeys = new Set(this.db.prepare(`
+          SELECT DISTINCT line_key FROM production_entries
+          WHERE job_id = ? AND status <> 'reversed'
+        `).all(jobId).map(row => row.line_key));
+        for (const lineKey of retainedEntryKeys) {
+          if (!nextByKey.has(lineKey)) {
+            throw ledgerInputError(
+              'production_baseline_line_history_required',
+              'A revised baseline cannot remove a line that has retained production output.',
+              { lineKey },
+              409
+            );
+          }
+          if (activeByKey.get(lineKey)?.unit && activeByKey.get(lineKey).unit !== nextByKey.get(lineKey).unit) {
+            throw ledgerInputError(
+              'production_baseline_unit_conflict',
+              'A revised baseline cannot change the unit of a line that has retained production output.',
+              { lineKey, priorUnit: activeByKey.get(lineKey).unit, requestedUnit: nextByKey.get(lineKey).unit },
+              409
+            );
+          }
+        }
+      }
+      const matching = existing.find(item => ['approved', 'pending_approval'].includes(item.status) && item.snapshot?.planHash === planHash);
+      if (matching) {
+        return {
+          baseline: matching,
+          approval: matching.approvalId
+            ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(matching.approvalId))
+            : null,
+          production: this.calculateProductionPerformance(jobId),
+          replayed: true
+        };
+      }
+      const pending = existing.find(item => item.status === 'pending_approval');
+      if (pending) {
+        throw ledgerInputError(
+          'production_baseline_pending',
+          'Resolve the pending production baseline before requesting a revised plan.',
+          { baselineId: pending.id, approvalId: pending.approvalId },
+          409
+        );
+      }
+      const notes = normalizeText(payload.notes || payload.reason, '');
+      if (notes.length > 4_000) throw ledgerInputError('production_baseline_notes_too_long', 'Production baseline notes must be 4,000 characters or fewer.');
+      const timestamp = nowIso();
+      const versionNumber = normalizeNumber(this.db.prepare(`
+        SELECT MAX(version_number) AS version_number FROM production_baselines WHERE job_id = ?
+      `).get(jobId)?.version_number, 0) + 1;
+      const snapshot = {
+        format: PRODUCTION_BASELINE_FORMAT,
+        jobId,
+        jobTitle: job.title,
+        versionNumber,
+        preparedAt: timestamp,
+        preparedBy: actor,
+        planHash,
+        lines,
+        totals: {
+          lineCount: lines.length,
+          plannedLaborHours: roundQuantity(lines.reduce((sum, line) => sum + line.plannedLaborHours, 0))
+        },
+        controls: { externalCommitmentsCreated: 0, sourceEvidenceRequiredForFieldEntries: true }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('production_baseline');
+      this.db.prepare(`
+        INSERT INTO production_baselines (
+          id, job_id, version_number, status, snapshot_hash, snapshot_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, NULL, ?, ?, ?)
+      `).run(id, jobId, versionNumber, snapshotHash, snapshotJson, toJson({ requestedBy: actor, notes: notes || null }), timestamp, timestamp);
+      const approval = this.createApproval({
+        targetType: 'production_baseline',
+        targetId: id,
+        jobId,
+        approvalType: 'production_baseline',
+        summary: `Approve production baseline v${versionNumber} for ${job.title}`,
+        reason: 'The baseline fixes planned installed quantities and labor hours used for field productivity variance. It creates no client, supplier, schedule, or finance commitment.',
+        data: {
+          versionNumber,
+          planHash,
+          snapshotHash,
+          lineCount: lines.length,
+          plannedLaborHours: snapshot.totals.plannedLaborHours,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE production_baselines SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const baseline = this.mapProductionBaseline(this.db.prepare('SELECT * FROM production_baselines WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'production_baseline',
+        entityId: id,
+        jobId,
+        action: 'request_production_baseline_approval',
+        actor,
+        after: baseline,
+        metadata: { approvalId: approval.id, versionNumber, planHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { baseline, approval, production: this.calculateProductionPerformance(jobId), replayed: false };
+    });
+  }
+
+  applyProductionBaselineApproval(baselineId) {
+    const row = this.db.prepare('SELECT * FROM production_baselines WHERE id = ?').get(baselineId);
+    if (!row) throw ledgerInputError('production_baseline_not_found', 'Production baseline not found.', { baselineId }, 404);
+    if (row.status === 'approved') return this.mapProductionBaseline(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('production_baseline_state_conflict', `Production baseline cannot be approved from ${row.status}.`, { baselineId, status: row.status }, 409);
+    }
+    this.getProductionBaseline(baselineId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    const before = this.mapProductionBaseline(row);
+    this.db.prepare(`
+      UPDATE production_baselines SET status = 'superseded', updated_at = ?
+      WHERE job_id = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.job_id, baselineId);
+    this.db.prepare(`
+      UPDATE production_baselines SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, baselineId);
+    const after = this.mapProductionBaseline(this.db.prepare('SELECT * FROM production_baselines WHERE id = ?').get(baselineId));
+    this.audit({
+      entityType: 'production_baseline',
+      entityId: baselineId,
+      jobId: row.job_id,
+      action: 'approve_production_baseline',
+      actor,
+      before,
+      after,
+      metadata: { approvalId: row.approval_id || null, versionNumber: row.version_number, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  recordProductionEntry(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const baselineRow = this.db.prepare(`
+        SELECT * FROM production_baselines WHERE job_id = ? AND status = 'approved'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(jobId);
+      if (!baselineRow) {
+        throw ledgerInputError('production_baseline_required', 'An approved production baseline is required before installed output can be recorded.', { jobId }, 409);
+      }
+      const baseline = this.getProductionBaseline(baselineRow.id);
+      const requestedBaselineId = normalizeText(payload.baselineId || payload.baseline_id, '');
+      if (requestedBaselineId && requestedBaselineId !== baseline.id) {
+        throw ledgerInputError('production_baseline_stale', 'The selected production baseline is no longer active. Reload the job before recording output.', { requestedBaselineId, activeBaselineId: baseline.id }, 409);
+      }
+      const lineKey = normalizeText(payload.lineKey || payload.line_key, '').toLowerCase();
+      const line = baseline.snapshot.lines.find(item => item.lineKey === lineKey);
+      if (!line) throw ledgerInputError('production_line_not_found', 'The production line is not part of the active approved baseline.', { lineKey }, 404);
+      const workDate = normalizeText(payload.workDate || payload.work_date, nowIso().slice(0, 10));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(workDate)
+        || Number.isNaN(Date.parse(`${workDate}T00:00:00.000Z`))
+        || new Date(`${workDate}T00:00:00.000Z`).toISOString().slice(0, 10) !== workDate) {
+        throw ledgerInputError('production_work_date_invalid', 'Production work date must be a valid calendar date.');
+      }
+      const quantity = roundQuantity(normalizeNumber(payload.quantity ?? payload.installedQuantity ?? payload.installed_quantity, 0));
+      const crewHours = roundQuantity(normalizeNumber(payload.crewHours ?? payload.crew_hours ?? payload.laborHours, 0));
+      if (!(quantity > 0 && quantity <= 1_000_000_000)) throw ledgerInputError('production_quantity_invalid', 'Installed quantity must be greater than zero.');
+      if (!(crewHours >= 0 && crewHours <= 12_000)) throw ledgerInputError('production_crew_hours_invalid', 'Crew hours must be between zero and 12,000.');
+      const note = normalizeText(payload.note || payload.notes, '');
+      if (note.length < 3 || note.length > 4_000) throw ledgerInputError('production_note_invalid', 'Production output requires a field note between 3 and 4,000 characters.');
+      const evidenceDocumentIds = [...new Set(normalizeList(payload.evidenceDocumentIds || payload.evidence_document_ids))];
+      if (evidenceDocumentIds.length > 20) throw ledgerInputError('production_evidence_limit', 'A production entry can reference at most 20 evidence documents.');
+      for (const documentId of evidenceDocumentIds) {
+        const document = this.db.prepare('SELECT job_id FROM documents WHERE id = ?').get(documentId);
+        if (!document || document.job_id !== jobId) {
+          throw ledgerInputError('production_evidence_invalid', 'Production evidence must belong to the same job.', { documentId }, 409);
+        }
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('production_entry_key_invalid', 'Production entry key must contain 8 to 200 safe characters.');
+      }
+      const fingerprintBasis = { baselineId: baseline.id, lineKey, workDate, quantity, crewHours, note, evidenceDocumentIds };
+      const entryFingerprint = sha256Json(fingerprintBasis);
+      const existing = this.db.prepare('SELECT * FROM production_entries WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (existing) {
+        if (existing.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('production_entry_key_reused', 'Production entry key was already used for different content.', { entryKey }, 409);
+        }
+        return { entry: { ...this.mapProductionEntry(existing), replayed: true }, production: this.calculateProductionPerformance(jobId), replayed: true };
+      }
+      const timestamp = nowIso();
+      const id = makeId('production');
+      this.db.prepare(`
+        INSERT INTO production_entries (
+          id, job_id, baseline_id, line_key, work_date, quantity, crew_hours, entry_key, entry_fingerprint,
+          status, reversal_approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'recorded', NULL, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        baseline.id,
+        lineKey,
+        workDate,
+        quantity,
+        crewHours,
+        entryKey,
+        entryFingerprint,
+        toJson({
+          note,
+          evidenceDocumentIds,
+          workerId: payload.workerId || payload.worker_id || null,
+          workerName: payload.workerName || payload.worker_name || null,
+          source: payload.source || 'manual',
+          externalCommitments: 0
+        }),
+        timestamp,
+        timestamp
+      );
+      const entry = this.mapProductionEntry(this.db.prepare('SELECT * FROM production_entries WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'production_entry',
+        entityId: id,
+        jobId,
+        action: 'record_production_output',
+        actor,
+        after: entry,
+        metadata: { baselineId: baseline.id, lineKey, entryKey, entryFingerprint, externalCommitments: 0 }
+      });
+      return { entry: { ...entry, replayed: false }, production: this.calculateProductionPerformance(jobId), replayed: false };
+    });
+  }
+
+  requestProductionEntryReversal(jobId, entryId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const row = this.db.prepare('SELECT * FROM production_entries WHERE id = ? AND job_id = ?').get(entryId, jobId);
+      if (!row) throw ledgerInputError('production_entry_not_found', 'Production entry not found for this job.', { entryId }, 404);
+      if (row.status === 'reversed') return { entry: this.mapProductionEntry(row), approval: null, replayed: true };
+      if (row.status === 'pending_reversal' && row.reversal_approval_id) {
+        return {
+          entry: this.mapProductionEntry(row),
+          approval: this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.reversal_approval_id)),
+          replayed: true
+        };
+      }
+      if (row.status !== 'recorded') throw ledgerInputError('production_entry_state_conflict', `Production entry cannot be reversed from ${row.status}.`, { entryId, status: row.status }, 409);
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 5 || reason.length > 2_000) throw ledgerInputError('production_reversal_reason_invalid', 'Production reversal requires a reason between 5 and 2,000 characters.');
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const approval = this.createApproval({
+        targetType: 'production_entry_reversal',
+        targetId: entryId,
+        jobId,
+        approvalType: 'production_entry_reversal',
+        summary: `Reverse production entry ${entryId}`,
+        reason: 'The original field entry remains retained. Approval excludes it from future productivity calculations without deleting audit evidence.',
+        data: { entryId, baselineId: row.baseline_id, lineKey: row.line_key, quantity: row.quantity, crewHours: row.crew_hours, reason, externalCommitments: 0 }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE production_entries SET status = 'pending_reversal', reversal_approval_id = ?, data_json = ?, updated_at = ? WHERE id = ?
+      `).run(approval.id, toJson({ ...fromJson(row.data_json, {}), reversalRequested: { approvalId: approval.id, requestedAt: timestamp, requestedBy: actor, reason } }), timestamp, entryId);
+      const entry = this.mapProductionEntry(this.db.prepare('SELECT * FROM production_entries WHERE id = ?').get(entryId));
+      this.audit({
+        entityType: 'production_entry',
+        entityId: entryId,
+        jobId,
+        action: 'request_production_entry_reversal',
+        actor,
+        before: this.mapProductionEntry(row),
+        after: entry,
+        metadata: { approvalId: approval.id, externalCommitments: 0 }
+      });
+      return { entry, approval, replayed: false };
+    });
+  }
+
+  applyProductionEntryReversal(entryId) {
+    const row = this.db.prepare('SELECT * FROM production_entries WHERE id = ?').get(entryId);
+    if (!row) throw ledgerInputError('production_entry_not_found', 'Production entry not found.', { entryId }, 404);
+    if (row.status === 'reversed') return this.mapProductionEntry(row);
+    if (row.status !== 'pending_reversal') throw ledgerInputError('production_entry_state_conflict', `Production entry cannot be reversed from ${row.status}.`, { entryId, status: row.status }, 409);
+    const approval = row.reversal_approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.reversal_approval_id) : null;
+    const timestamp = nowIso();
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const before = this.mapProductionEntry(row);
+    this.db.prepare(`
+      UPDATE production_entries SET status = 'reversed', data_json = ?, updated_at = ? WHERE id = ? AND status = 'pending_reversal'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      reversal: { approvalId: row.reversal_approval_id || null, reversedAt: timestamp, reversedBy: actor }
+    }), timestamp, entryId);
+    const after = this.mapProductionEntry(this.db.prepare('SELECT * FROM production_entries WHERE id = ?').get(entryId));
+    this.audit({
+      entityType: 'production_entry',
+      entityId: entryId,
+      jobId: row.job_id,
+      action: 'reverse_production_entry',
+      actor,
+      before,
+      after,
+      metadata: { approvalId: row.reversal_approval_id || null, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  calculateProductionPerformance(jobId, options = {}) {
+    this.requireJob(jobId, { allowInactive: true });
+    const baselines = options.baselines || this.db.prepare(`
+      SELECT * FROM production_baselines WHERE job_id = ? ORDER BY version_number DESC
+    `).all(jobId).map(row => this.mapProductionBaseline(row));
+    const entries = options.entries || this.db.prepare(`
+      SELECT * FROM production_entries WHERE job_id = ? ORDER BY work_date DESC, created_at DESC
+    `).all(jobId).map(row => this.mapProductionEntry(row));
+    const activeBaseline = baselines.find(item => item.status === 'approved') || null;
+    const pendingBaseline = baselines.find(item => item.status === 'pending_approval') || null;
+    if (!activeBaseline) {
+      return {
+        format: PRODUCTION_BASELINE_FORMAT,
+        jobId,
+        ready: false,
+        status: pendingBaseline ? 'pending_approval' : 'baseline_required',
+        activeBaseline: null,
+        pendingBaseline,
+        baselines,
+        entries,
+        lines: [],
+        summary: { lineCount: 0, completeLines: 0, atRiskLines: 0, plannedLaborHours: 0, earnedHours: 0, crewHours: 0, laborVarianceHours: 0, performanceFactor: null, quantityProgressPercent: 0, atRisk: false },
+        sourceHash: null,
+        warnings: []
+      };
+    }
+    this.getProductionBaseline(activeBaseline.id);
+    const activeLineKeys = new Set(activeBaseline.snapshot.lines.map(line => line.lineKey));
+    const includedEntries = entries.filter(entry => activeLineKeys.has(entry.lineKey) && ['recorded', 'pending_reversal'].includes(entry.status));
+    const lines = activeBaseline.snapshot.lines.map(planLine => {
+      const lineEntries = includedEntries.filter(entry => entry.lineKey === planLine.lineKey);
+      const installedQuantity = roundQuantity(lineEntries.reduce((sum, entry) => sum + entry.quantity, 0));
+      const crewHours = roundQuantity(lineEntries.reduce((sum, entry) => sum + entry.crewHours, 0));
+      const quantityRatio = installedQuantity / planLine.plannedQuantity;
+      const earnedHours = roundQuantity(planLine.plannedLaborHours * Math.min(1, Math.max(0, quantityRatio)));
+      const laborVarianceHours = roundQuantity(earnedHours - crewHours);
+      const performanceFactor = crewHours > 0 ? roundQuantity(earnedHours / crewHours) : null;
+      const atRisk = performanceFactor !== null && earnedHours >= 1 && performanceFactor < 0.8;
+      return {
+        ...planLine,
+        installedQuantity,
+        crewHours,
+        earnedHours,
+        laborVarianceHours,
+        performanceFactor,
+        quantityProgressPercent: roundQuantity(quantityRatio * 100),
+        complete: installedQuantity + 0.000001 >= planLine.plannedQuantity,
+        atRisk,
+        entryCount: lineEntries.length
+      };
+    });
+    const total = key => roundQuantity(lines.reduce((sum, line) => sum + normalizeNumber(line[key], 0), 0));
+    const plannedLaborHours = total('plannedLaborHours');
+    const earnedHours = total('earnedHours');
+    const crewHours = total('crewHours');
+    const performanceFactor = crewHours > 0 ? roundQuantity(earnedHours / crewHours) : null;
+    const quantityProgressPercent = plannedLaborHours > 0 ? roundQuantity(earnedHours / plannedLaborHours * 100) : 0;
+    const summary = {
+      lineCount: lines.length,
+      completeLines: lines.filter(line => line.complete).length,
+      atRiskLines: lines.filter(line => line.atRisk).length,
+      plannedLaborHours,
+      earnedHours,
+      crewHours,
+      laborVarianceHours: roundQuantity(earnedHours - crewHours),
+      performanceFactor,
+      quantityProgressPercent,
+      atRisk: lines.some(line => line.atRisk) || (performanceFactor !== null && earnedHours >= 1 && performanceFactor < 0.8)
+    };
+    const sourceHash = sha256Json({
+      baselineId: activeBaseline.id,
+      snapshotHash: activeBaseline.snapshotHash,
+      entries: includedEntries.map(entry => ({ id: entry.id, fingerprint: entry.entryFingerprint, status: entry.status }))
+    });
+    const warnings = [];
+    if (summary.atRiskLines) warnings.push({ code: 'production_labor_variance', message: `${summary.atRiskLines} production line(s) are below the 0.80 earned-hours performance threshold.` });
+    if (entries.some(entry => entry.status === 'pending_reversal')) warnings.push({ code: 'production_reversal_pending', message: 'One or more production entries remain included until their reversal approvals are resolved.' });
+    return {
+      format: PRODUCTION_BASELINE_FORMAT,
+      generatedAt: nowIso(),
+      jobId,
+      ready: true,
+      status: summary.atRisk ? 'at_risk' : includedEntries.length ? 'tracking' : 'ready_for_entry',
+      activeBaseline,
+      pendingBaseline,
+      baselines,
+      entries,
+      lines,
+      summary,
+      sourceHash,
+      warnings
+    };
+  }
+
   organizationElectronicAddress(organization = {}) {
     const configuredScheme = normalizeText(organization.data?.electronicAddressScheme, '');
     const configuredAddress = normalizeText(organization.data?.electronicAddress, '');
@@ -24557,6 +25117,45 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'production_baseline') {
+        this.db.prepare(`
+          UPDATE production_baselines
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM production_baselines WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
+      } else if (before.target_type === 'production_entry_reversal') {
+        this.db.prepare(`
+          UPDATE production_entries
+          SET status = 'recorded', data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_reversal'
+        `).run(
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM production_entries WHERE id = ?').get(before.target_id)?.data_json, {}),
+            reversalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'change_order') {
         this.db.prepare(`
           UPDATE change_orders
@@ -24823,6 +25422,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyScheduleBaselineApproval(targetId);
     } else if (targetType === 'cost_forecast') {
       this.applyCostForecastApproval(targetId);
+    } else if (targetType === 'production_baseline') {
+      this.applyProductionBaselineApproval(targetId);
+    } else if (targetType === 'production_entry_reversal') {
+      this.applyProductionEntryReversal(targetId);
     } else if (targetType === 'schedule_commitment') {
       const approval = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(targetId);
       const approvalData = fromJson(approval?.data_json, {});
@@ -28214,6 +28817,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (flags.safetyGap) return 'safety_gap';
     if (flags.designReview) return 'design_review';
     if (flags.qualityReview) return 'quality_review';
+    if (flags.productionAtRisk) return 'production_variance';
+    if (flags.productionBaselineMissing) return 'production_baseline_missing';
     if (flags.evidenceMissing) return 'evidence_missing';
     return 'stable';
   }
@@ -28228,6 +28833,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       designReviews: 0,
       qualityReviews: 0,
       evidenceMissing: 0,
+      productionAtRisk: 0,
+      productionBaselineMissing: 0,
       stable: 0,
       pendingApprovals: 0,
       openRfis: 0,
@@ -28244,6 +28851,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       safetyOpen: 0,
       punchOpen: 0,
       evidenceRecords: 0,
+      productionEntries: 0,
+      productionAtRiskLines: 0,
       documentReviews: 0
     };
     for (const row of rows) {
@@ -28254,6 +28863,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (flags.designReview) summary.designReviews += 1;
       if (flags.qualityReview) summary.qualityReviews += 1;
       if (flags.evidenceMissing) summary.evidenceMissing += 1;
+      if (flags.productionAtRisk) summary.productionAtRisk += 1;
+      if (flags.productionBaselineMissing) summary.productionBaselineMissing += 1;
       if (normalizeStatus(row.fieldStatus, 'stable') === 'stable') summary.stable += 1;
       summary.pendingApprovals += normalizeNumber(row.counts?.pendingApprovals, 0);
       summary.openRfis += normalizeNumber(row.counts?.openRfis, 0);
@@ -28270,6 +28881,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.safetyOpen += normalizeNumber(row.counts?.safetyOpen, 0);
       summary.punchOpen += normalizeNumber(row.counts?.punchOpen, 0);
       summary.evidenceRecords += normalizeNumber(row.counts?.evidenceRecords, 0);
+      summary.productionEntries += normalizeNumber(row.counts?.productionEntries, 0);
+      summary.productionAtRiskLines += normalizeNumber(row.counts?.productionAtRiskLines, 0);
       summary.documentReviews += normalizeNumber(row.counts?.documentReviews, 0);
     }
     return summary;
@@ -28296,6 +28909,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'quality_check',
       'safety_check',
       'punch_item',
+      'production_baseline',
+      'production_entry_reversal',
       'document'
     ]);
     const closedStatuses = ['approved', 'accepted', 'closed', 'complete', 'completed', 'current', 'valid', 'passed', 'resolved', 'verified', 'cancelled', 'canceled', 'rejected', 'void'];
@@ -28398,6 +29013,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || punchOpen.length > 0;
         const evidenceMissing = ['in_progress', 'completed'].includes(jobStatus)
           && evidenceRecords === 0;
+        const production = detail.productionControl || this.calculateProductionPerformance(detail.id);
+        const productionAtRisk = production.ready && production.summary?.atRisk === true;
+        const productionBaselineMissing = ['scheduled', 'in_progress'].includes(jobStatus) && !production.activeBaseline;
         const flags = {
           approvalRequired: pendingApprovals.length > 0,
           incidentBlocker,
@@ -28405,6 +29023,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           designReview,
           qualityReview,
           evidenceMissing,
+          productionAtRisk,
+          productionBaselineMissing,
           dueSafety: dueSafetyRecords.length > 0,
           dueDesign: expiringPermits.length > 0,
           siteAccessBlocked: siteAccessBlocks.length > 0
@@ -28509,6 +29129,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           requiresApproval: true
         });
         if (evidenceMissing) nextActions.push({ type: 'capture_field_evidence', label: 'Capture photo, document, field report, or progress evidence', requiresApproval: false });
+        if (productionAtRisk) nextActions.push({
+          type: 'review_productivity_variance',
+          label: 'Review installed quantity and crew-hour variance',
+          sourceHash: production.sourceHash,
+          performanceFactor: production.summary.performanceFactor,
+          atRiskLines: production.summary.atRiskLines,
+          requiresApproval: false
+        });
+        if (productionBaselineMissing) nextActions.push({
+          type: 'prepare_production_baseline',
+          label: 'Prepare an approved quantity and labor baseline',
+          requiresApproval: true
+        });
 
         return {
           jobId: detail.id,
@@ -28523,6 +29156,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           scheduledStart: detail.scheduledStart,
           targetCompletion: detail.targetCompletion,
           progressPercent: detail.progressPercent,
+          production,
           fieldStatus,
           nextAction: nextActions[0]?.label || 'Field assurance workflow is stable.',
           nextActions,
@@ -28556,6 +29190,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             fieldReports: (detail.fieldReports || []).length,
             progressUpdates: (detail.progress || []).length,
             evidenceRecords,
+            productionEntries: (detail.productionEntries || []).filter(entry => entry.status !== 'reversed').length,
+            productionAtRiskLines: production.summary?.atRiskLines || 0,
             documentReviews: documentReviews.length
           },
           latest: {
@@ -28586,6 +29222,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (mode === 'safety' || mode === 'safety_gap') return row.flags?.safetyGap === true || row.counts?.openSafetyRecords > 0;
       if (mode === 'design' || mode === 'design_review') return row.flags?.designReview === true;
       if (mode === 'quality' || mode === 'quality_review') return row.flags?.qualityReview === true;
+      if (mode === 'production' || mode === 'production_variance') return row.flags?.productionAtRisk === true;
+      if (mode === 'production_baseline_missing') return row.flags?.productionBaselineMissing === true;
       if (mode === 'evidence' || mode === 'evidence_missing') return row.flags?.evidenceMissing === true;
       if (mode === 'stable') return row.fieldStatus === 'stable';
       return row.fieldStatus === mode;
@@ -28598,8 +29236,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       safety_gap: 2,
       design_review: 3,
       quality_review: 4,
-      evidence_missing: 5,
-      stable: 6
+      production_variance: 5,
+      production_baseline_missing: 6,
+      evidence_missing: 7,
+      stable: 8
     };
     const priorityScore = priority => ({ low: 1, medium: 2, high: 3, critical: 4 }[normalizePriority(priority)] || 0);
     filtered.sort((left, right) => {
@@ -28666,6 +29306,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       materials: this.db.prepare('SELECT * FROM material_requirements WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapMaterialRequirement(row)),
       documents: this.db.prepare('SELECT * FROM documents WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapDocument(row)),
       progress: this.db.prepare('SELECT * FROM progress_updates WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapProgress(row)),
+      productionBaselines: this.db.prepare('SELECT * FROM production_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapProductionBaseline(row)),
+      productionEntries: this.db.prepare('SELECT * FROM production_entries WHERE job_id = ? ORDER BY work_date DESC, created_at DESC').all(jobId).map(row => this.mapProductionEntry(row)),
       communications: this.db.prepare('SELECT * FROM communication_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCommunication(row)),
       timeLogs: this.db.prepare('SELECT * FROM time_logs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapTimeLog(row)),
       expenses: this.db.prepare('SELECT * FROM expenses WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapExpense(row)),
@@ -28719,6 +29361,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       baselineCurrent: Boolean(approvedBaseline && schedulePlan.ready && approvedBaseline.planningHash === schedulePlan.planningHash),
       baselineStale: Boolean(approvedBaseline && (!schedulePlan.ready || approvedBaseline.planningHash !== schedulePlan.planningHash))
     };
+    detail.productionControl = this.calculateProductionPerformance(jobId, {
+      baselines: detail.productionBaselines,
+      entries: detail.productionEntries
+    });
     if (options.includeAudit) {
       detail.audit = this.listAudit({ jobId, limit: 50 });
     }
@@ -28776,6 +29422,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       site_access_logs: 'status',
       budget_lines: 'status',
       cost_forecast_snapshots: 'status',
+      production_baselines: 'status',
+      production_entries: 'status',
       billing_milestones: 'status',
       expenses: 'status',
       purchase_orders: 'status',
@@ -29742,6 +30390,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       costForecastSnapshots: activeCount('cost_forecast_snapshots'),
       approvedCostForecasts: activeCount('cost_forecast_snapshots', "records.status = 'approved'"),
       pendingCostForecasts: activeCount('cost_forecast_snapshots', "records.status = 'pending_approval'"),
+      productionBaselines: activeCount('production_baselines'),
+      approvedProductionBaselines: activeCount('production_baselines', "records.status = 'approved'"),
+      productionEntries: activeCount('production_entries', "records.status <> 'reversed'"),
       purchaseOrders: activeCount('purchase_orders'),
       supplierInvoices: activeCount('supplier_invoices'),
       openSupplierInvoices: activeCount('supplier_invoices', "records.status IN ('pending_approval', 'approved', 'partially_paid')"),
@@ -31043,6 +31694,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'recurring_job_due', recurringPlanId: plan.id, jobId: plan.job_id, severity: 'medium', message: `${plan.service} recurring plan is due ${plan.next_due_at ? plan.next_due_at.slice(0, 10) : 'now'}.` });
     }
 
+    const productionJobs = this.db.prepare(`
+      SELECT DISTINCT baselines.job_id, jobs.title
+      FROM production_baselines baselines
+      JOIN jobs ON jobs.id = baselines.job_id
+      WHERE baselines.status = 'approved'
+        AND jobs.status IN ('planned', 'scheduled', 'in_progress', 'active')
+      ORDER BY jobs.updated_at DESC
+      LIMIT 25
+    `).all();
+    for (const productionJob of productionJobs) {
+      const activeReview = this.db.prepare(`
+        SELECT id FROM job_tasks
+        WHERE job_id = ?
+          AND title = 'Review production productivity variance'
+          AND status NOT IN ('completed', 'cancelled', 'canceled')
+        LIMIT 1
+      `).get(productionJob.job_id);
+      if (activeReview) continue;
+      const production = this.calculateProductionPerformance(productionJob.job_id);
+      if (!production.summary?.atRisk || !production.sourceHash) continue;
+      const taskId = `task_${sha256Text(`production-variance:${productionJob.job_id}:${production.sourceHash}`).slice(0, 24)}`;
+      const existingTask = this.db.prepare(`
+        SELECT id FROM job_tasks
+        WHERE id = ? AND status NOT IN ('completed', 'cancelled')
+      `).get(taskId);
+      if (existingTask) continue;
+      actions.push({
+        type: 'review_productivity_variance',
+        jobId: productionJob.job_id,
+        taskId,
+        baselineId: production.activeBaseline?.id || null,
+        sourceHash: production.sourceHash,
+        performanceFactor: production.summary.performanceFactor,
+        atRiskLines: production.lines.filter(line => line.atRisk).map(line => line.lineKey),
+        severity: production.summary.performanceFactor !== null && production.summary.performanceFactor < 0.6 ? 'high' : 'medium',
+        requiresApproval: false,
+        message: `${productionJob.title} production performance is ${production.summary.performanceFactor?.toFixed(2) || 'unrated'} across ${production.summary.atRiskLines} at-risk line(s). Create an internal review task; do not change scope, crew, cost, or schedule automatically.`
+      });
+    }
+
     const learningRefreshes = this.learningJobTypesNeedingRefresh(5);
     for (const profile of learningRefreshes) {
       actions.push({
@@ -31109,7 +31800,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -31153,6 +31844,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'resolve_observation',
       'review_incident',
       'safety_review',
+      'review_productivity_variance',
       'aftercare_follow_up',
       'recurring_job_due',
       'refresh_learning_profile'
@@ -32349,6 +33041,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           this.audit({ entityType: 'task', entityId: task.id, jobId: action.jobId, action: 'autonomous_create_safety_review_task', actor, after: task });
         }
 
+        const productivityReviews = preview.filter(action => action.type === 'review_productivity_variance').slice(0, 5);
+        for (const action of productivityReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`production-variance:${action.jobId}:${action.sourceHash}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: 'Review production productivity variance',
+            description: `${action.message} Verify installed quantities, crew hours, site conditions, baseline assumptions, and evidence. Record a corrective decision before changing crew, cost, scope, or schedule.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'production_variance',
+            data: {
+              productionSourceHash: action.sourceHash,
+              productionBaselineId: action.baselineId || null,
+              atRiskLineKeys: action.atRiskLines || [],
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created' });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_productivity_review_task',
+            actor,
+            after: task,
+            metadata: { productionSourceHash: action.sourceHash, baselineId: action.baselineId || null, externalCommitments: 0 }
+          });
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -32615,6 +33340,50 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Job ${forecastRow.job_id} cost forecast cannot be recalculated: ${error.message}` });
       }
     }
+    const approvedProductionBaselinesWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM production_baselines baselines
+      LEFT JOIN approvals ON approvals.id = baselines.approval_id
+      WHERE baselines.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'production_baseline' OR approvals.target_id <> baselines.id
+        )
+    `).get().count || 0);
+    if (approvedProductionBaselinesWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedProductionBaselinesWithoutApproval} approved production baseline(s) lack a matching approval decision.` });
+    }
+    const productionBaselineRows = this.db.prepare(`
+      SELECT * FROM production_baselines
+      WHERE status IN ('pending_approval', 'approved', 'superseded')
+      ORDER BY job_id, version_number
+    `).all();
+    for (const baseline of productionBaselineRows) {
+      try {
+        this.getProductionBaseline(baseline.id);
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Production baseline ${baseline.id} failed retained snapshot verification: ${error.code || error.message}.` });
+      }
+    }
+    const invalidProductionEntries = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM production_entries entries
+      LEFT JOIN production_baselines baselines ON baselines.id = entries.baseline_id
+      WHERE baselines.id IS NULL OR baselines.job_id <> entries.job_id
+        OR entries.quantity <= 0 OR entries.crew_hours < 0
+    `).get().count || 0);
+    if (invalidProductionEntries) issues.push({ severity: 'error', message: `${invalidProductionEntries} production entry record(s) cross a job boundary or contain invalid quantities.` });
+    const productionReversalsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM production_entries entries
+      LEFT JOIN approvals ON approvals.id = entries.reversal_approval_id
+      WHERE entries.status = 'reversed'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'production_entry_reversal' OR approvals.target_id <> entries.id
+        )
+    `).get().count || 0);
+    if (productionReversalsWithoutApproval) issues.push({ severity: 'error', message: `${productionReversalsWithoutApproval} reversed production entry record(s) lack a matching approval decision.` });
     const jobsWithoutClient = Number(this.db.prepare('SELECT COUNT(*) AS count FROM jobs LEFT JOIN clients ON clients.id = jobs.client_id WHERE clients.id IS NULL').get().count || 0);
     if (jobsWithoutClient) issues.push({ severity: 'error', message: `${jobsWithoutClient} job(s) are missing clients.` });
     const invalidOpportunityProbabilities = Number(this.db.prepare(`
@@ -33177,6 +33946,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         taskDependencies: this.count('task_dependencies'),
         scheduleBaselines: this.count('schedule_baselines'),
         costForecastSnapshots: this.count('cost_forecast_snapshots'),
+        productionBaselines: this.count('production_baselines'),
+        productionEntries: this.count('production_entries'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -34441,6 +35212,56 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapProductionBaseline(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === PRODUCTION_BASELINE_FORMAT
+        && snapshot.jobId === row.job_id
+        && sha256Json({ format: snapshot.format, jobId: snapshot.jobId, lines: snapshot.lines }) === snapshot.planHash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      approvalId: row.approval_id,
+      data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapProductionEntry(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      baselineId: row.baseline_id,
+      lineKey: row.line_key,
+      workDate: row.work_date,
+      quantity: roundQuantity(normalizeNumber(row.quantity, 0)),
+      crewHours: roundQuantity(normalizeNumber(row.crew_hours, 0)),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      status: row.status,
+      reversalApprovalId: row.reversal_approval_id,
+      note: data.note || null,
+      evidenceDocumentIds: normalizeList(data.evidenceDocumentIds),
+      workerId: data.workerId || null,
+      workerName: data.workerName || null,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapPurchaseOrder(row) {
     const data = fromJson(row.data_json);
     return {
@@ -35130,6 +35951,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       addEffect('Move the field, safety, access, or quality record to its approved/completed state.');
       addSafeguard('Does not override future safety observations, client issues, or field blockers.');
       riskLevel = ['incident_record', 'safety_check', 'jha_record', 'site_access_log'].includes(targetType) ? 'high' : 'medium';
+    } else if (targetType === 'production_baseline') {
+      const row = this.db.prepare('SELECT * FROM production_baselines WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapProductionBaseline(row) : null;
+      primaryEffect = `Approve production baseline v${mapped?.versionNumber || data.versionNumber || ''}.`;
+      addEffect(`Fix ${normalizeNumber(data.lineCount, 0)} planned production line(s) and ${normalizeNumber(data.plannedLaborHours, 0).toFixed(2)} planned labor hours for field variance tracking.`);
+      addSafeguard('Does not assert installed work, change the schedule or budget, contact a client or supplier, authorize spend, or create an external commitment.');
+      addSafeguard('Only output recorded after approval is measured against this baseline; later revisions require a new approval and preserve prior records.');
+      riskLevel = 'medium';
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.lineCount = data.lineCount ?? mapped?.snapshot?.totals?.lineCount ?? null;
+      preview.plannedLaborHours = data.plannedLaborHours ?? mapped?.snapshot?.totals?.plannedLaborHours ?? null;
+      preview.planHash = mapped?.snapshot?.planHash || data.planHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'production_entry_reversal') {
+      const row = this.db.prepare('SELECT * FROM production_entries WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapProductionEntry(row) : null;
+      primaryEffect = `Reverse retained production entry ${mapped?.id || data.entryId || ''}.`;
+      addEffect(`Exclude ${normalizeNumber(mapped?.quantity ?? data.quantity, 0).toFixed(3)} installed units and ${normalizeNumber(mapped?.crewHours ?? data.crewHours, 0).toFixed(2)} crew hours from future production calculations.`);
+      addSafeguard('The original entry, reason, approval, and audit evidence remain retained; no row is deleted or rewritten as if it never existed.');
+      addSafeguard('Does not alter time cards, payroll, invoices, budgets, schedules, or external commitments.');
+      riskLevel = 'high';
+      preview.entryId = mapped?.id || data.entryId || null;
+      preview.lineKey = mapped?.lineKey || data.lineKey || null;
+      preview.quantity = mapped?.quantity ?? data.quantity ?? null;
+      preview.crewHours = mapped?.crewHours ?? data.crewHours ?? null;
+      preview.reason = data.reason || null;
     } else if (targetType === 'cost_forecast') {
       const row = this.db.prepare('SELECT * FROM cost_forecast_snapshots WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapCostForecastSnapshot(row) : null;

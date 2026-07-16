@@ -125,6 +125,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(exported.body.jobs.some(job => job.id === intake.body.job.id));
   assert.ok(Array.isArray(exported.body.billingMilestones));
   assert.ok(Array.isArray(exported.body.costForecastSnapshots));
+  assert.ok(Array.isArray(exported.body.productionBaselines));
+  assert.ok(Array.isArray(exported.body.productionEntries));
   assert.ok(Array.isArray(exported.body.supplierInvoices));
   assert.ok(Array.isArray(exported.body.supplierInvoicePayments));
   assert.ok(Array.isArray(exported.body.taskDependencies));
@@ -148,6 +150,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(exportValidation.body.counts.jobs, exported.body.jobs.length);
   assert.equal(exportValidation.body.counts.billingMilestones, exported.body.billingMilestones.length);
   assert.equal(exportValidation.body.counts.costForecastSnapshots, exported.body.costForecastSnapshots.length);
+  assert.equal(exportValidation.body.counts.productionBaselines, exported.body.productionBaselines.length);
+  assert.equal(exportValidation.body.counts.productionEntries, exported.body.productionEntries.length);
   assert.equal(exportValidation.body.counts.supplierInvoices, exported.body.supplierInvoices.length);
   assert.equal(exportValidation.body.counts.supplierInvoicePayments, exported.body.supplierInvoicePayments.length);
   assert.equal(exportValidation.body.counts.taskDependencies, exported.body.taskDependencies.length);
@@ -289,7 +293,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '031_cost_forecast_snapshots');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '032_production_control');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -351,6 +355,8 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.requestSafety.evidenceUploadLeaseOwnership, 'unique_claim_token');
   assert.equal(capabilities.body.capabilities.requestSafety.evidenceUploadReclaimSafe, true);
   assert.equal(capabilities.body.capabilities.requestSafety.progressEntryKey, 'durable');
+  assert.equal(capabilities.body.capabilities.requestSafety.productionEntryKey, 'durable');
+  assert.equal(capabilities.body.capabilities.requestSafety.productionEntryReversal, 'approval_gated_compensating_record');
   assert.equal(capabilities.body.capabilities.requestSafety.dailyLogEntryKey, 'durable');
   assert.equal(capabilities.body.capabilities.requestSafety.taskLifecycle, 'retained');
   assert.equal(capabilities.body.capabilities.requestSafety.taskCompletionEvidenceRequired, true);
@@ -380,6 +386,12 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.costForecasting.approvalRequired, true);
   assert.equal(capabilities.body.capabilities.costForecasting.sourceCurrentApprovalRequired, true);
   assert.equal(capabilities.body.capabilities.costForecasting.externalCommitments, 0);
+  assert.equal(capabilities.body.capabilities.productionControl.immutableBaselines, true);
+  assert.equal(capabilities.body.capabilities.productionControl.baselineApprovalRequired, true);
+  assert.equal(capabilities.body.capabilities.productionControl.earnedHoursCalculation, true);
+  assert.equal(capabilities.body.capabilities.productionControl.replaySafeFieldCapture, true);
+  assert.equal(capabilities.body.capabilities.productionControl.autonomousVarianceReview, 'internal_task_only');
+  assert.equal(capabilities.body.capabilities.productionControl.externalCommitments, 0);
   assert.equal(capabilities.body.capabilities.invoicing.serverCalculatedTotals, true);
   assert.equal(capabilities.body.capabilities.invoicing.durableNumbering, true);
   assert.equal(capabilities.body.capabilities.invoicing.immutableHtmlPackage, true);

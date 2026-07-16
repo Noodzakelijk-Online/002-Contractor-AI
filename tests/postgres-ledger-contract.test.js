@@ -1087,7 +1087,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '031_cost_forecast_snapshots');
+    assert.equal(migrations.currentVersion, '032_production_control');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1168,12 +1168,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('031_cost_forecast_snapshots'));
+  assert.deepEqual(versions, Array(4).fill('032_production_control'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 31);
+    assert.equal(Number(migrationCount.count), 32);
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1674,7 +1674,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '031_cost_forecast_snapshots');
+    assert.equal(ledger.migrationStatus().currentVersion, '032_production_control');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -1898,6 +1898,50 @@ test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceab
     assert.equal(converted.quote.subtotal, converted.takeoff.subtotal);
     assert.equal(converted.quote.data.source.snapshotHash, converted.takeoff.snapshotHash);
     assert.equal(ledger.convertTakeoffToQuote(job.id, takeoff.id).replayed, true);
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL production control parity preserves approved baselines, replay, and earned hours', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const marker = Date.now();
+    const job = ledger.createIntake({
+      clientName: `Hosted production client ${marker}`,
+      title: `Hosted measured production ${marker}`,
+      status: 'in_progress',
+      assignAutomatically: false
+    }, { actor: 'postgres_production_test' });
+    const requested = ledger.requestProductionBaseline(job.id, {
+      lines: [{
+        lineKey: 'hosted-installed-area',
+        costCode: 'PG-PROD-100',
+        description: 'Hosted installed finish area',
+        unit: 'm2',
+        plannedQuantity: 100,
+        plannedLaborHours: 80
+      }]
+    }, { actor: 'postgres_production_test' });
+    ledger.resolveApproval(requested.approval.id, {
+      status: 'approved', resolvedBy: 'postgres_production_approver', reason: 'Hosted baseline verified.'
+    });
+    const payload = {
+      entryKey: `postgres-production-${marker}`,
+      lineKey: 'hosted-installed-area',
+      quantity: 20,
+      crewHours: 24,
+      note: 'Hosted production quantity and crew hours retained.'
+    };
+    const recorded = ledger.recordProductionEntry(job.id, payload, { actor: 'postgres_production_test' });
+    const replay = ledger.recordProductionEntry(job.id, payload, { actor: 'postgres_production_test' });
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.entry.id, recorded.entry.id);
+    assert.equal(recorded.production.summary.earnedHours, 16);
+    assert.equal(recorded.production.summary.crewHours, 24);
+    assert.equal(recorded.production.summary.performanceFactor, 0.6667);
+    assert.equal(ledger.getProductionBaseline(requested.baseline.id).integrityValid, true);
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();

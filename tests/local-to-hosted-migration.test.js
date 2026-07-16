@@ -346,6 +346,30 @@ function createBackupFixture(t, suffix = 'success') {
     providerMessageId: `migration-order-${suffix}`
   }, { actor: 'migration_fixture_provider' });
   const bidCommitment = source.getBidPackage(bidPackage.id).commitment;
+  const productionBaselineRequest = source.requestProductionBaseline(job.id, {
+    lines: [{
+      lineKey: 'migration-installed-area',
+      costCode: 'MIG-PROD-100',
+      description: 'Migration installed finish area',
+      unit: 'm2',
+      plannedQuantity: 250,
+      plannedLaborHours: 200
+    }]
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(productionBaselineRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration production baseline quantities and labor hours verified.'
+  });
+  const productionEntry = source.recordProductionEntry(job.id, {
+    entryKey: `migration-production-${suffix}-0001`,
+    lineKey: 'migration-installed-area',
+    workDate: '2026-07-13',
+    quantity: 62.5,
+    crewHours: 48,
+    note: 'Migration production evidence retained for hosted parity.'
+  }, { actor: 'migration_fixture' }).entry;
+  const productionBaseline = source.calculateProductionPerformance(job.id).activeBaseline;
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -371,7 +395,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
+  return { backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, evidenceBytes, handover, job, localStorageRef, organization, productionBaseline, productionEntry, projectMeeting, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, tradePartner };
 }
 
 class FakeHostedStorage {
@@ -461,7 +485,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '031_cost_forecast_snapshots');
+  assert.equal(migration.migrationVersion, '032_production_control');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -506,6 +530,11 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedForecast.sourceCurrent, true);
     assert.equal(migratedForecast.snapshotHash, fixture.costForecast.snapshotHash);
     assert.ok(detail.costForecastSnapshots.some(item => item.id === fixture.costForecast.id));
+    assert.equal(detail.productionControl.activeBaseline.id, fixture.productionBaseline.id);
+    assert.equal(detail.productionControl.activeBaseline.integrityValid, true);
+    assert.equal(detail.productionControl.lines[0].installedQuantity, 62.5);
+    assert.equal(detail.productionControl.lines[0].crewHours, 48);
+    assert.ok(detail.productionEntries.some(item => item.id === fixture.productionEntry.id && item.entryFingerprint === fixture.productionEntry.entryFingerprint));
     const migratedDocument = detail.documents.find(item => item.id === fixture.document.id);
     assert.match(migratedDocument.storageRef, /^s3:\/\/migration-test\/migrated-1-/);
     assert.notEqual(migratedDocument.storageRef, fixture.localStorageRef);

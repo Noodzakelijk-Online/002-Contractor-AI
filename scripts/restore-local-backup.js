@@ -372,6 +372,24 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('032_production_control')) {
+        for (const table of ['production_baselines', 'production_entries']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup production-control schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_production_baselines_job',
+          'idx_production_baselines_status',
+          'idx_production_entries_job_date',
+          'idx_production_entries_baseline_line'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup production-control constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

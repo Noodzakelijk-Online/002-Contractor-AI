@@ -189,6 +189,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const route =
     type === 'daily_log'
       ? 'daily-logs'
+      : type === 'production_entry'
+        ? 'production-entries'
       : type === 'progress'
         ? 'progress'
         : type === 'observation'
@@ -636,6 +638,29 @@ function emptyOpportunityActivityDraft() {
     summary: '',
     dueAt: '',
     notes: '',
+  }
+}
+
+function emptyProductionBaselineLine(index = 0) {
+  return {
+    lineKey: `production-line-${index + 1}`,
+    costCode: 'PRODUCTION',
+    description: '',
+    unit: 'unit',
+    plannedQuantity: '',
+    plannedLaborHours: '',
+  }
+}
+
+function emptyProductionEntry(baselineId = '', lineKey = '') {
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    baselineId,
+    lineKey,
+    workDate: futureDateInput(0),
+    quantity: '',
+    crewHours: '',
+    note: '',
   }
 }
 
@@ -3408,6 +3433,238 @@ function TakeoffControl({
   )
 }
 
+function ProductionControl({
+  job,
+  canCoordinate,
+  canReport,
+  canApprove,
+  submitting,
+  outboxPending,
+  outboxSyncing,
+  onRequestBaseline,
+  onRecordEntry,
+  onRequestReversal,
+  onOpenApprovals,
+  onSyncOutbox,
+}) {
+  const production = job.productionControl || {}
+  const activeBaseline = production.activeBaseline || null
+  const activeBaselineId = activeBaseline?.id || ''
+  const firstProductionLineKey = activeBaseline?.snapshot?.lines?.[0]?.lineKey || ''
+  const pendingBaseline = production.pendingBaseline || null
+  const lines = production.lines || EMPTY_LIST
+  const entries = production.entries || job.productionEntries || EMPTY_LIST
+  const [editingBaseline, setEditingBaseline] = useState(false)
+  const [baselineLines, setBaselineLines] = useState(() => [emptyProductionBaselineLine(0)])
+  const [baselineNotes, setBaselineNotes] = useState('')
+  const [entryDraft, setEntryDraft] = useState(() => emptyProductionEntry(activeBaselineId, firstProductionLineKey))
+  const [reversalEntryId, setReversalEntryId] = useState(null)
+  const [reversalReason, setReversalReason] = useState('')
+
+  useEffect(() => {
+    setEntryDraft(emptyProductionEntry(activeBaselineId, firstProductionLineKey))
+    setEditingBaseline(false)
+    setReversalEntryId(null)
+    setReversalReason('')
+  }, [job.id, activeBaselineId, firstProductionLineKey])
+
+  function beginBaselineRevision() {
+    const retainedLines = activeBaseline?.snapshot?.lines || EMPTY_LIST
+    setBaselineLines(retainedLines.length
+      ? retainedLines.map((line) => ({
+          lineKey: line.lineKey,
+          costCode: line.costCode,
+          description: line.description,
+          unit: line.unit,
+          plannedQuantity: String(line.plannedQuantity),
+          plannedLaborHours: String(line.plannedLaborHours),
+        }))
+      : [emptyProductionBaselineLine(0)])
+    setBaselineNotes('')
+    setEditingBaseline(true)
+  }
+
+  function updateBaselineLine(index, patch) {
+    setBaselineLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line))
+  }
+
+  async function submitBaseline(event) {
+    event.preventDefault()
+    const retainedLines = baselineLines.map((line) => ({
+      ...line,
+      plannedQuantity: Number(line.plannedQuantity),
+      plannedLaborHours: Number(line.plannedLaborHours),
+    }))
+    if (retainedLines.some((line) => !line.description.trim() || !(line.plannedQuantity > 0) || !(line.plannedLaborHours > 0))) return
+    const retained = await onRequestBaseline({ lines: retainedLines, notes: baselineNotes.trim() })
+    if (retained) setEditingBaseline(false)
+  }
+
+  async function submitEntry(event) {
+    event.preventDefault()
+    const quantity = Number(entryDraft.quantity)
+    const crewHours = Number(entryDraft.crewHours)
+    if (!entryDraft.lineKey || !(quantity > 0) || !(crewHours >= 0) || entryDraft.note.trim().length < 3) return
+    const retained = await onRecordEntry({
+      ...entryDraft,
+      quantity,
+      crewHours,
+      note: entryDraft.note.trim(),
+      source: 'job_workspace',
+    })
+    if (retained) setEntryDraft(emptyProductionEntry(activeBaselineId, firstProductionLineKey))
+  }
+
+  async function submitReversal(event) {
+    event.preventDefault()
+    if (!reversalEntryId || reversalReason.trim().length < 5) return
+    const retained = await onRequestReversal(reversalEntryId, reversalReason.trim())
+    if (retained) {
+      setReversalEntryId(null)
+      setReversalReason('')
+    }
+  }
+
+  const summary = production.summary || {}
+  const performanceStatus = summary.performanceFactor === null || summary.performanceFactor === undefined
+    ? 'Not rated'
+    : roundDisplay(summary.performanceFactor)
+
+  return (
+    <section className="job-workspace-section production-control" data-testid="production-control">
+      <div className="section-heading production-heading">
+        <Activity size={18} />
+        <div>
+          <h3>Production control</h3>
+          <p>Compare measured installed output and crew hours with one approved production baseline.</p>
+        </div>
+        {canCoordinate && !pendingBaseline && !editingBaseline ? (
+          <button type="button" className="secondary-button" disabled={submitting} onClick={beginBaselineRevision}>
+            <Ruler size={15} />
+            {activeBaseline ? 'Revise baseline' : 'Create baseline'}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="production-summary" aria-label="Production performance summary">
+        <div><span>Quantity progress</span><strong>{roundDisplay(summary.quantityProgressPercent || 0)}%</strong></div>
+        <div><span>Earned / crew hours</span><strong>{roundDisplay(summary.earnedHours || 0)} / {roundDisplay(summary.crewHours || 0)}</strong></div>
+        <div><span>Performance factor</span><strong>{performanceStatus}</strong></div>
+        <div><span>At-risk lines</span><strong>{summary.atRiskLines || 0}</strong></div>
+      </div>
+
+      {pendingBaseline ? (
+        <div className="production-pending" role="status">
+          <ShieldCheck size={16} />
+          <span>Baseline v{pendingBaseline.versionNumber} is awaiting approval. Output remains bound to the current approved baseline.</span>
+          {canApprove ? (
+            <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pendingBaseline.approvalId, jobId: job.id, jobTitle: job.title })}>
+              Review approval
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {editingBaseline ? (
+        <form className="production-baseline-editor" data-testid="production-baseline-form" onSubmit={submitBaseline}>
+          <div className="production-editor-heading">
+            <div>
+              <strong>{activeBaseline ? 'Revised production baseline' : 'Initial production baseline'}</strong>
+              <small>Keep existing line keys and units when revising lines with retained output.</small>
+            </div>
+            <button type="button" className="icon-button" aria-label="Cancel production baseline" onClick={() => setEditingBaseline(false)}><X size={16} /></button>
+          </div>
+          <div className="production-baseline-lines">
+            {baselineLines.map((line, index) => (
+              <div className="production-baseline-line" key={index}>
+                <label>Line key<input required minLength="2" maxLength="100" value={line.lineKey} onChange={(event) => updateBaselineLine(index, { lineKey: event.target.value })} /></label>
+                <label>Cost code<input required minLength="2" maxLength="80" value={line.costCode} onChange={(event) => updateBaselineLine(index, { costCode: event.target.value })} /></label>
+                <label className="production-description">Description<input required minLength="2" maxLength="300" value={line.description} onChange={(event) => updateBaselineLine(index, { description: event.target.value })} /></label>
+                <label>Unit<input required maxLength="30" value={line.unit} onChange={(event) => updateBaselineLine(index, { unit: event.target.value })} /></label>
+                <label>Planned quantity<input required type="number" min="0.0001" step="0.0001" value={line.plannedQuantity} onChange={(event) => updateBaselineLine(index, { plannedQuantity: event.target.value })} /></label>
+                <label>Labor hours<input required type="number" min="0.01" step="0.01" value={line.plannedLaborHours} onChange={(event) => updateBaselineLine(index, { plannedLaborHours: event.target.value })} /></label>
+                {baselineLines.length > 1 ? (
+                  <button type="button" className="icon-button production-remove-line" aria-label={`Remove production line ${index + 1}`} onClick={() => setBaselineLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X size={15} /></button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <label className="production-notes">Reviewer context<textarea maxLength="4000" value={baselineNotes} onChange={(event) => setBaselineNotes(event.target.value)} placeholder="Record measurement basis, crew assumptions, and retained references." /></label>
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" disabled={submitting || baselineLines.length >= 200} onClick={() => setBaselineLines((current) => [...current, emptyProductionBaselineLine(current.length)])}><Plus size={15} />Line</button>
+            <button className="primary-button" disabled={submitting}><ShieldCheck size={15} />{submitting ? 'Retaining...' : 'Request baseline approval'}</button>
+          </div>
+        </form>
+      ) : null}
+
+      {activeBaseline ? (
+        <div className="production-line-register" role="table" aria-label="Production baseline lines">
+          {lines.map((line) => (
+            <div className={`production-line-row ${line.atRisk ? 'production-line-risk' : ''}`} role="row" key={line.lineKey}>
+              <div className="production-line-copy" role="cell"><strong>{line.description}</strong><small>{line.costCode} / {line.lineKey}</small></div>
+              <div role="cell"><span>Installed</span><strong>{roundDisplay(line.installedQuantity)} / {roundDisplay(line.plannedQuantity)} {line.unit}</strong></div>
+              <div role="cell"><span>Earned / crew</span><strong>{roundDisplay(line.earnedHours)} / {roundDisplay(line.crewHours)} h</strong></div>
+              <div role="cell"><span>Factor</span><strong>{line.performanceFactor === null ? 'Not rated' : roundDisplay(line.performanceFactor)}</strong></div>
+            </div>
+          ))}
+        </div>
+      ) : !editingBaseline ? (
+        <Empty title="No approved production baseline" detail="An office operator must retain measured plan quantities and labor hours before field output can be recorded." />
+      ) : null}
+
+      {activeBaseline && canReport ? (
+        <form className="production-entry-form" data-testid="production-entry-form" onSubmit={submitEntry}>
+          <div className="production-entry-heading">
+            <div className="production-entry-copy"><strong>Record installed output</strong><small>Operational crew hours support productivity review and do not replace payroll time cards.</small></div>
+            <div className="production-outbox-status" aria-live="polite">
+              {outboxPending ? (
+                <button type="button" className="secondary-button" disabled={outboxSyncing || navigator.onLine === false} onClick={onSyncOutbox}>
+                  <RefreshCw size={14} className={outboxSyncing ? 'spin' : ''} />
+                  {outboxSyncing ? 'Syncing...' : `${outboxPending} queued`}
+                </button>
+              ) : (
+                <span className="tag tag-green">Outbox clear</span>
+              )}
+            </div>
+          </div>
+          <div className="form-grid">
+            <label>Production line<select required value={entryDraft.lineKey} onChange={(event) => setEntryDraft({ ...entryDraft, lineKey: event.target.value })}>{lines.map((line) => <option key={line.lineKey} value={line.lineKey}>{line.description} ({line.unit})</option>)}</select></label>
+            <label>Work date<input required type="date" value={entryDraft.workDate} onChange={(event) => setEntryDraft({ ...entryDraft, workDate: event.target.value })} /></label>
+            <label>Installed quantity<input required type="number" min="0.0001" step="0.0001" value={entryDraft.quantity} onChange={(event) => setEntryDraft({ ...entryDraft, quantity: event.target.value })} /></label>
+            <label>Crew hours<input required type="number" min="0" max="12000" step="0.01" value={entryDraft.crewHours} onChange={(event) => setEntryDraft({ ...entryDraft, crewHours: event.target.value })} /></label>
+            <label className="form-span">Field note<textarea required minLength="3" maxLength="4000" value={entryDraft.note} onChange={(event) => setEntryDraft({ ...entryDraft, note: event.target.value })} placeholder="Record measured area, work location, crew conditions, and evidence reference." /></label>
+          </div>
+          <div className="modal-actions"><button className="primary-button" disabled={submitting}><Activity size={15} />{submitting ? 'Recording...' : navigator.onLine === false ? 'Save output offline' : 'Record output'}</button></div>
+        </form>
+      ) : null}
+
+      {entries.length ? (
+        <div className="production-entry-register" aria-label="Recent production entries">
+          {entries.slice(0, 10).map((entry) => {
+            const line = (activeBaseline?.snapshot?.lines || EMPTY_LIST).find((item) => item.lineKey === entry.lineKey)
+            return (
+              <div className="production-entry-row" key={entry.id}>
+                <div><strong>{line?.description || entry.lineKey}</strong><small>{formatDate(entry.workDate)} / {entry.note || 'No note'}</small></div>
+                <div><span>{roundDisplay(entry.quantity)} {line?.unit || 'unit'}</span><span>{roundDisplay(entry.crewHours)} h</span><span className={`status status-${entry.status}`}>{formatStatus(entry.status)}</span></div>
+                {canCoordinate && entry.status === 'recorded' ? <button type="button" className="icon-button" aria-label={`Request reversal for ${line?.description || entry.lineKey}`} onClick={() => { setReversalEntryId(entry.id); setReversalReason('') }}><RefreshCw size={15} /></button> : null}
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+
+      {reversalEntryId ? (
+        <form className="production-reversal-form" data-testid="production-reversal-form" onSubmit={submitReversal}>
+          <label>Reversal reason<textarea autoFocus required minLength="5" maxLength="2000" value={reversalReason} onChange={(event) => setReversalReason(event.target.value)} /></label>
+          <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setReversalEntryId(null)}>Cancel</button><button className="primary-button" disabled={submitting || reversalReason.trim().length < 5}><ShieldCheck size={15} />Request reversal approval</button></div>
+        </form>
+      ) : null}
+
+      <p className="workflow-note">Baseline approval, field capture, and reversals stay internal. Contractor.AI does not alter payroll, budget, schedule, scope, or external commitments from these records.</p>
+    </section>
+  )
+}
+
 function CommercialControl({
   job,
   canCoordinate,
@@ -5229,6 +5486,10 @@ function FieldAssuranceWorkspace({
           <span>Evidence missing</span>
           <strong>{summary.evidenceMissing || 0}</strong>
         </div>
+        <div>
+          <span>Production risk</span>
+          <strong>{summary.productionAtRisk || 0}</strong>
+        </div>
       </div>
       <div className="assurance-list">
         {rows.map((item) => {
@@ -5278,6 +5539,14 @@ function FieldAssuranceWorkspace({
                   <span>
                     Evidence <strong>{item.counts?.evidenceRecords || 0}</strong>
                   </span>
+                  <span>
+                    Production{' '}
+                    <strong>
+                      {item.production?.summary?.performanceFactor == null
+                        ? item.production?.activeBaseline ? 'ready' : 'no baseline'
+                        : `${roundDisplay(item.production.summary.performanceFactor)} factor`}
+                    </strong>
+                  </span>
                 </div>
                 <div className="assurance-flags">
                   {item.counts?.pendingApprovals ? (
@@ -5286,6 +5555,8 @@ function FieldAssuranceWorkspace({
                     </span>
                   ) : null}
                   {item.flags?.safetyGap ? <span className="tag tag-amber">Safety pack missing</span> : null}
+                  {item.flags?.productionAtRisk ? <span className="tag tag-amber">Production variance</span> : null}
+                  {item.flags?.productionBaselineMissing ? <span className="tag">Production baseline missing</span> : null}
                   {item.counts?.expiringPermits ? <span className="tag tag-amber">{item.counts.expiringPermits} permit due</span> : null}
                   {item.counts?.siteAccessBlocks ? (
                     <span className="tag">
@@ -8010,6 +8281,113 @@ function App() {
         }
       }
       setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestProductionBaseline(payload) {
+    if (!selectedJobId || !Array.isArray(payload?.lines) || !payload.lines.length) {
+      setError('Add at least one measured production line before requesting baseline approval.')
+      return false
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/production-baselines`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      if (result.job) setSelectedJob(result.job)
+      notify(
+        result.replayed
+          ? `Production baseline v${result.baseline?.versionNumber || ''} is already retained.`
+          : `Production baseline v${result.baseline?.versionNumber || ''} retained for approval. No field output, schedule, budget, or external commitment was created.`,
+      )
+      await refreshSection(sectionRef.current)
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function recordProductionOutput(payload) {
+    if (!selectedJobId || !payload?.entryKey) return false
+    const draft = {
+      id: payload.entryKey,
+      type: 'production_entry',
+      jobId: selectedJobId,
+      payload: {
+        baselineId: payload.baselineId,
+        lineKey: payload.lineKey,
+        workDate: payload.workDate,
+        quantity: payload.quantity,
+        crewHours: payload.crewHours,
+        note: payload.note,
+        source: payload.source || 'job_workspace',
+      },
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        notify('Production output was saved locally and will be recorded for this operator after reconnection.')
+        return true
+      }
+      const result = await recordFieldOperation(draft)
+      if (result.job) setSelectedJob(result.job)
+      notify(
+        result.replayed || result.entry?.replayed
+          ? 'This production output was already retained; no duplicate was created.'
+          : 'Installed quantity and crew hours were recorded against the approved production baseline.',
+      )
+      await refreshSection(sectionRef.current)
+      return true
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          notify('Connection interrupted. Production output was saved locally for an exact retry.')
+          return true
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return false
+        }
+      }
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestProductionReversal(entryId, reason) {
+    if (!selectedJobId || !entryId || reason.length < 5) return false
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/production-entries/${encodeURIComponent(entryId)}/reversal`,
+        { method: 'POST', body: JSON.stringify({ reason }) },
+      )
+      if (result.job) setSelectedJob(result.job)
+      notify(
+        result.replayed
+          ? 'The production reversal is already retained.'
+          : 'Production reversal retained for approval. The entry remains included until the decision is approved.',
+      )
+      await refreshSection(sectionRef.current)
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
     } finally {
       setSubmitting(false)
     }
@@ -13914,6 +14292,20 @@ function App() {
                     onConvert={openTakeoffConversion}
                   />
                 ) : null}
+                <ProductionControl
+                  job={selectedJob}
+                  canCoordinate={canCoordinate}
+                  canReport={canCoordinate || capabilities.fieldEvidence === true}
+                  canApprove={capabilities.approvals === true}
+                  submitting={submitting}
+                  outboxPending={outboxPending}
+                  outboxSyncing={outboxSyncing}
+                  onRequestBaseline={requestProductionBaseline}
+                  onRecordEntry={recordProductionOutput}
+                  onRequestReversal={requestProductionReversal}
+                  onOpenApprovals={openApprovals}
+                  onSyncOutbox={() => syncFieldOutbox({ announce: true })}
+                />
                 {!fieldScoped ? (
                   <CommercialControl
                     job={selectedJob}
