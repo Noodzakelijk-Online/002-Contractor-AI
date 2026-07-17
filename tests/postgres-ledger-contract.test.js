@@ -1456,7 +1456,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 42);
+    assert.equal(Number(migrationCount.count), 43);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
