@@ -284,6 +284,20 @@ test('backup verification rejects a migration 040 ledger with missing environmen
   );
 });
 
+test('backup verification rejects a migration 041 ledger with missing governed safety-briefing constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-safety-briefing-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Safety briefing schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_safety_attendees_job_entry_key');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /governed safety-briefing constraints are incomplete: idx_safety_attendees_job_entry_key/i
+  );
+});
+
 test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-restore safety copy', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));

@@ -156,6 +156,33 @@
 .attendance-empty { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 84px; color: #6b7b75; font-size: 12px; }
 .attendance-policy { margin: 0; padding: 11px 22px; color: #687771; background: #f4f7f6; border-top: 1px solid #e4ebe8; font-size: 11px; line-height: 1.45; }
 
+.safety-briefing-control { border-bottom: 1px solid #dfe8e4; background: #fff; }
+.safety-briefing-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.safety-briefing-selector { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 14px; padding: 16px 22px; border-top: 1px solid #e7eeeb; }
+.safety-briefing-selector label,.safety-acknowledgement-form label,.safety-signoff-form label,.safety-briefing-create label { display: grid; gap: 6px; color: #40564e; font-size: 12px; font-weight: 700; }
+.safety-briefing-detail { border-top: 1px solid #dfe8e4; }
+.safety-briefing-context { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 22px; background: #f7faf8; }
+.safety-briefing-context > div { display: grid; min-width: 0; gap: 4px; }
+.safety-briefing-context strong { color: #23382f; font-size: 14px; }
+.safety-briefing-context small { color: #6d7d76; font-size: 11px; }
+.safety-briefing-topics { display: grid; gap: 8px; padding: 14px 22px; border-top: 1px solid #e7eeeb; }
+.safety-briefing-topics > strong { color: #344c42; font-size: 12px; }
+.safety-briefing-topics ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px; margin: 0; padding-left: 18px; color: #526a61; font-size: 12px; line-height: 1.45; }
+.safety-attendee-list { border-top: 1px solid #e7eeeb; }
+.safety-attendee-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; min-height: 58px; padding: 9px 22px; border-bottom: 1px solid #edf1ef; }
+.safety-attendee-row > div { display: grid; min-width: 0; gap: 3px; }
+.safety-attendee-row strong { overflow: hidden; color: #263a31; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.safety-attendee-row small { color: #73817b; font-size: 11px; }
+.safety-attendee-row .secondary-button { min-width: 84px; }
+.safety-acknowledgement-form,.safety-signoff-form { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(280px, 1.4fr) auto; align-items: end; gap: 14px; padding: 16px 22px; border-top: 1px solid #dfe8e4; background: #fbfcfc; }
+.safety-acknowledgement-form .checkbox-label { align-self: center; grid-template-columns: auto minmax(0, 1fr); font-weight: 500; line-height: 1.45; }
+.safety-signoff-form { grid-template-columns: repeat(2, minmax(220px, 1fr)) auto; }
+.safety-briefing-create { display: grid; grid-template-columns: minmax(200px, .9fr) minmax(190px, .6fr) auto; align-items: end; gap: 14px; padding: 16px 22px; border-top: 1px solid #dfe8e4; }
+.safety-briefing-create-heading { display: grid; grid-column: 1 / -1; gap: 3px; }
+.safety-briefing-create-heading strong { color: #263a31; font-size: 13px; }
+.safety-briefing-create-heading span { color: #6d7d76; font-size: 11px; }
+.safety-briefing-create .form-span { grid-column: 1 / 3; }
+
 @media (max-width: 760px) {
   .attendance-summary { width: 100%; justify-content: flex-start; }
   .attendance-form .modal-actions { padding: 0 16px 16px; }
@@ -163,6 +190,14 @@
   .attendance-row { padding: 10px 14px; }
   .attendance-row small { white-space: normal; }
   .attendance-policy { padding: 11px 14px; }
+  .safety-briefing-summary { width: 100%; justify-content: flex-start; }
+  .safety-briefing-selector,.safety-acknowledgement-form,.safety-signoff-form,.safety-briefing-create { grid-template-columns: 1fr; padding: 14px; }
+  .safety-briefing-context,.safety-briefing-topics { padding: 12px 14px; }
+  .safety-briefing-topics ul { grid-template-columns: 1fr; }
+  .safety-attendee-row { grid-template-columns: 8px minmax(0, 1fr) auto; padding: 10px 14px; }
+  .safety-attendee-row .secondary-button { width: 100%; grid-column: 1 / -1; }
+  .safety-acknowledgement-form .primary-button,.safety-signoff-form .primary-button,.safety-briefing-create .secondary-button { width: 100%; min-height: 42px; }
+  .safety-briefing-create .form-span { grid-column: auto; }
 }
 
 .production-control { display: grid; gap: 15px; min-width: 0; overflow: hidden; }

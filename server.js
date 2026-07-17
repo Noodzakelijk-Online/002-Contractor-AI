@@ -1197,6 +1197,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
+        || pathName === '/api/ledger/safety-briefings'
+        || /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings$/.test(pathName)
         || pathName === '/api/ledger/attendance'
         || /^\/api\/ledger\/jobs\/[^/]+\/attendance$/.test(pathName)
         || /^\/api\/ledger\/documents\/[^/]+\/content$/.test(pathName);
@@ -1210,6 +1212,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
 
@@ -1245,7 +1248,7 @@ const FIELD_RECORD_PRIVATE_KEYS = new Set([
   'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
   'checkoutEntryKey', 'checkoutFingerprint', 'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
   'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
-  'returnEntryKey', 'returnFingerprint', 'snapshotHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
+  'returnEntryKey', 'returnFingerprint', 'snapshot', 'snapshotHash', 'sourceCurrentHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
 ]);
 
 function projectFieldRecord(record) {
@@ -1364,7 +1367,7 @@ function projectFieldJobDetail(req, detail) {
     inspections: projectFieldRecords(detail.inspections),
     observations: projectFieldRecords(detail.observations),
     incidents: projectFieldRecords(detail.incidents),
-    safetyMeetings: projectFieldRecords(detail.safetyMeetings),
+    safetyMeetings: (detail.safetyMeetings || []).map(meeting => safetyMeetingForOperator(req, meeting)),
     orientations: projectFieldRecords(detail.orientations),
     jhas: projectFieldRecords(detail.jhas),
     sdsSheets: projectFieldRecords(detail.sdsSheets),
@@ -1467,6 +1470,51 @@ function environmentalActivityPayloadForOperator(req, payload = {}) {
     submitted_by: identity.workerName,
     source: 'field_environmental_activity'
   };
+}
+
+function safetyAcknowledgementPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field safety acknowledgement requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    attendeeName: identity.workerName,
+    attendee_name: identity.workerName,
+    acknowledgedBy: identity.workerName,
+    acknowledged_by: identity.workerName,
+    source: 'field_safety_briefing_acknowledgement'
+  };
+}
+
+function safetyMeetingForOperator(req, meeting) {
+  if (req.operator?.role !== 'field_worker') return meeting;
+  const workerId = req.operator.scope?.workerId || null;
+  const attendeeRecords = workerId
+    ? (meeting.attendeeRecords || []).filter(attendee => String(attendee.workerId || '') === String(workerId))
+    : [];
+  return projectFieldRecord({
+    ...meeting,
+    attendees: attendeeRecords.map(attendee => attendee.attendeeName),
+    attendeeRecords,
+    attendanceSummary: {
+      total: attendeeRecords.length,
+      expected: attendeeRecords.filter(attendee => attendee.status === 'expected').length,
+      acknowledged: attendeeRecords.filter(attendee => attendee.status === 'acknowledged').length,
+      excused: attendeeRecords.filter(attendee => attendee.status === 'excused').length,
+      outstanding: attendeeRecords.filter(attendee => attendee.status === 'expected').length,
+      readyForSignoff: false
+    },
+    fieldScoped: true
+  });
 }
 
 function getLedgerDiagnostics({ force = false } = {}) {
@@ -2743,12 +2791,89 @@ app.post('/api/ledger/jobs/:id/incidents', (req, res) => {
 });
 
 app.post('/api/ledger/jobs/:id/safety-meetings', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const safetyMeeting = operatingLedger.createSafetyMeeting(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      safetyMeeting: safetyMeetingForOperator(req, safetyMeeting),
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/safety-briefings', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const meetings = operatingLedger.listSafetyMeetings(req.query || {})
+      .filter(meeting => fieldWorkerCanAccessJob(req, meeting.jobId))
+      .map(meeting => safetyMeetingForOperator(req, meeting));
+    return { success: true, safetyMeetings: meetings };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/safety-meetings', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    safetyMeeting: operatingLedger.createSafetyMeeting(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
-  }), 201);
+    safetyMeetings: operatingLedger.listSafetyMeetings({ ...(req.query || {}), jobId: req.params.id })
+      .map(meeting => safetyMeetingForOperator(req, meeting))
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/acknowledgments', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.acknowledgeSafetyMeeting(
+      req.params.id,
+      req.params.meetingId,
+      safetyAcknowledgementPayloadForOperator(req, req.body || {}),
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      safetyMeeting: safetyMeetingForOperator(req, result.meeting),
+      attendee: recordForOperator(req, result.attendee),
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/signoff', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.signOffSafetyMeeting(req.params.id, req.params.meetingId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      safetyMeeting: result.meeting,
+      approval: result.approval,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 202);
+});
+
+app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/attendees/:attendeeId/excuse', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.excuseSafetyMeetingAttendee(
+      req.params.id,
+      req.params.meetingId,
+      req.params.attendeeId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      safetyMeeting: result.meeting,
+      attendee: result.attendee,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  });
 });
 
 app.post('/api/ledger/jobs/:id/orientations', (req, res) => {
@@ -5792,6 +5917,10 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         weeklyTimesheetSnapshot: 'source_current_approval_gated',
         timesheetExportIntegrity: 'sha256',
         dailyLogEntryKey: 'durable',
+        safetyBriefingEntryKey: 'durable',
+        safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
+        safetyBriefingSignoff: 'source_current_approval_gated',
+        safetyBriefingAttendanceInference: false,
         materialReceiptEntryKey: 'durable',
         expenseReceiptEntryKey: 'durable',
         expenseReceiptDuplicateControl: 'vendor_reference_date_amount_currency',

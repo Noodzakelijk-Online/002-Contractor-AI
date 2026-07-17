@@ -572,6 +572,37 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('041_governed_safety_briefings')) {
+        for (const table of ['safety_meetings', 'safety_meeting_attendees']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed safety-briefing schema is incomplete: ${table}.`);
+          }
+        }
+        const meetingColumns = new Set(database.prepare('PRAGMA table_info(safety_meetings)').all().map(row => row.name));
+        for (const column of ['evidence_reference', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint']) {
+          if (!meetingColumns.has(column)) {
+            throw new Error(`Backup governed safety-briefing schema is incomplete: safety_meetings.${column}.`);
+          }
+        }
+        const attendeeColumns = new Set(database.prepare('PRAGMA table_info(safety_meeting_attendees)').all().map(row => row.name));
+        for (const column of ['meeting_id', 'job_id', 'worker_id', 'attendee_key', 'status', 'evidence_reference', 'entry_key', 'entry_fingerprint']) {
+          if (!attendeeColumns.has(column)) {
+            throw new Error(`Backup governed safety-briefing schema is incomplete: safety_meeting_attendees.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_safety_meetings_job_entry_key',
+          'idx_safety_meetings_job_status_schedule',
+          'idx_safety_attendees_meeting_status',
+          'idx_safety_attendees_worker_status',
+          'idx_safety_attendees_job_entry_key'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed safety-briefing constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

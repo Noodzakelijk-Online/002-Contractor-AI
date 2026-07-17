@@ -192,13 +192,16 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const inspectionId = type === 'inspection_checklist' ? String(payload?.inspectionId || '') : ''
   const attendanceSessionId = type === 'attendance_check_out' ? String(payload?.sessionId || '') : ''
   const custodySessionId = type === 'equipment_return' ? String(payload?.custodySessionId || '') : ''
+  const safetyMeetingId = type === 'safety_briefing_acknowledgement' ? String(payload?.meetingId || '') : ''
   const route =
     type === 'daily_log'
       ? 'daily-logs'
       : type === 'attendance_check_in'
         ? 'attendance/check-in'
-        : type === 'attendance_check_out' && attendanceSessionId
+      : type === 'attendance_check_out' && attendanceSessionId
           ? `attendance/${encodeURIComponent(attendanceSessionId)}/check-out`
+      : type === 'safety_briefing_acknowledgement' && safetyMeetingId
+        ? `safety-meetings/${encodeURIComponent(safetyMeetingId)}/acknowledgments`
       : type === 'production_entry'
         ? 'production-entries'
       : type === 'material_receipt'
@@ -227,6 +230,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   delete requestPayload.inspectionId
   delete requestPayload.sessionId
   delete requestPayload.custodySessionId
+  delete requestPayload.meetingId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
     body: JSON.stringify(requestPayload),
@@ -409,6 +413,21 @@ function emptyAttendanceDraft() {
     workerId: '',
     note: '',
     accessPoint: '',
+  }
+}
+
+function emptySafetyBriefingDraft() {
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    jobId: '',
+    meetingId: '',
+    title: '',
+    scheduledAt: toLocalDateTimeInput(new Date()),
+    topics: '',
+    evidenceReference: '',
+    acknowledged: false,
+    completionEvidence: '',
+    excusalReason: '',
   }
 }
 
@@ -1209,14 +1228,16 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'field') {
-    const [field, attendance, workers] = await Promise.all([
+    const [field, attendance, safetyBriefings, workers] = await Promise.all([
       api('/api/ledger/field-assurance?limit=100'),
       api('/api/ledger/attendance?limit=250'),
+      api('/api/ledger/safety-briefings?limit=100'),
       fieldScoped ? Promise.resolve(null) : api('/api/ledger/workers?limit=500'),
     ])
     return {
       field,
       attendance: attendance.attendance || { rows: [], summary: {} },
+      safetyMeetings: safetyBriefings.safetyMeetings || [],
       ...(workers
         ? { workers: workers.workers || [], workerSummary: workers.summary || {} }
         : {}),
@@ -7883,6 +7904,7 @@ function App() {
   const [fieldEquipmentPlans, setFieldEquipmentPlans] = useState([])
   const [fieldEquipmentCustody, setFieldEquipmentCustody] = useState([])
   const [attendanceDraft, setAttendanceDraft] = useState(emptyAttendanceDraft)
+  const [safetyBriefingDraft, setSafetyBriefingDraft] = useState(emptySafetyBriefingDraft)
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
   const [outboxSyncing, setOutboxSyncing] = useState(false)
@@ -7949,6 +7971,7 @@ function App() {
           clients: { jobs: [], summary: {} },
           field: { rows: [] },
           attendance: { rows: [], summary: {} },
+          safetyMeetings: [],
           inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
@@ -7991,6 +8014,7 @@ function App() {
           clients: { jobs: [], summary: {} },
           field: { rows: [] },
           attendance: { rows: [], summary: {} },
+          safetyMeetings: [],
           inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
@@ -8091,6 +8115,7 @@ function App() {
   const approvals = data?.approvals ?? EMPTY_LIST
   const inspectionTemplates = data?.inspectionTemplates ?? EMPTY_LIST
   const attendance = data?.attendance || { rows: EMPTY_LIST, summary: {} }
+  const safetyMeetings = data?.safetyMeetings ?? EMPTY_LIST
   const visibleApprovals = useMemo(() => {
     if (!approvalFocus) return approvals
     if (approvalFocus.approvalId) return approvals.filter((approval) => approval.id === approvalFocus.approvalId)
@@ -8112,6 +8137,8 @@ function App() {
     )) || null,
     [attendance.rows, attendanceDraft.jobId, attendanceWorkerId],
   )
+  const selectedSafetyMeeting = safetyMeetings.find((meeting) => meeting.id === safetyBriefingDraft.meetingId) || null
+  const selectedJobSafetyMeetings = safetyMeetings.filter((meeting) => meeting.jobId === safetyBriefingDraft.jobId)
   const taskAssigneeOptions = Array.from(
     new Map(
       (selectedJob?.assignments || [])
@@ -8431,6 +8458,24 @@ function App() {
       setSection('today')
     }
   }, [section, visibleNavItems])
+
+  useEffect(() => {
+    const jobId = safetyBriefingDraft.jobId
+    if (!jobId) return
+    const currentIsValid = safetyMeetings.some((meeting) => (
+      meeting.id === safetyBriefingDraft.meetingId && meeting.jobId === jobId
+    ))
+    if (currentIsValid) return
+    const firstMeeting = safetyMeetings.find((meeting) => (
+      meeting.jobId === jobId && ['scheduled', 'in_progress', 'pending_approval'].includes(meeting.status)
+    )) || safetyMeetings.find((meeting) => meeting.jobId === jobId)
+    if (!firstMeeting) return
+    setSafetyBriefingDraft((current) => (
+      current.jobId === jobId && current.meetingId !== firstMeeting.id
+        ? { ...current, meetingId: firstMeeting.id }
+        : current
+    ))
+  }, [safetyBriefingDraft.jobId, safetyBriefingDraft.meetingId, safetyMeetings])
 
   useEffect(() => {
     if (authState !== 'active' || !fieldOutboxAvailable()) return undefined
@@ -9841,6 +9886,167 @@ function App() {
           return
         }
       }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function retainSafetyMeeting(meeting) {
+    if (!meeting?.id) return
+    setData((current) => current ? {
+      ...current,
+      safetyMeetings: [meeting, ...(current.safetyMeetings || []).filter((item) => item.id !== meeting.id)],
+    } : current)
+  }
+
+  function selectSafetyBriefingJob(jobId) {
+    const firstMeeting = safetyMeetings.find((meeting) => (
+      meeting.jobId === jobId && ['scheduled', 'in_progress', 'pending_approval'].includes(meeting.status)
+    )) || safetyMeetings.find((meeting) => meeting.jobId === jobId) || null
+    setSafetyBriefingDraft({
+      ...emptySafetyBriefingDraft(),
+      jobId,
+      meetingId: firstMeeting?.id || '',
+    })
+  }
+
+  async function createSafetyBriefing(event) {
+    event.preventDefault()
+    const topics = safetyBriefingDraft.topics.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
+    if (!canCoordinate || !safetyBriefingDraft.jobId || safetyBriefingDraft.title.trim().length < 2 || !topics.length) {
+      setError('Choose a job and retain a briefing title plus at least one discussion topic.')
+      return
+    }
+    if (navigator.onLine === false) {
+      setError('Reconnect before scheduling a briefing so the assigned crew list can be frozen from the ledger.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(safetyBriefingDraft.jobId)}/safety-meetings`, {
+        method: 'POST',
+        body: JSON.stringify({
+          entryKey: safetyBriefingDraft.entryKey,
+          title: safetyBriefingDraft.title.trim(),
+          scheduledAt: toIsoDateTime(safetyBriefingDraft.scheduledAt),
+          topics,
+          status: 'scheduled',
+          source: 'field_dashboard',
+        }),
+      })
+      retainSafetyMeeting(result.safetyMeeting)
+      setSafetyBriefingDraft({
+        ...emptySafetyBriefingDraft(),
+        jobId: safetyBriefingDraft.jobId,
+        meetingId: result.safetyMeeting.id,
+      })
+      notify(result.safetyMeeting.replayed
+        ? 'This briefing was already retained; no duplicate session was scheduled.'
+        : 'Safety briefing scheduled with the current assigned crew as expected attendees.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function acknowledgeSafetyBriefing(event) {
+    event.preventDefault()
+    if (!fieldScoped || !selectedSafetyMeeting || !safetyBriefingDraft.acknowledged || safetyBriefingDraft.evidenceReference.trim().length < 3) {
+      setError('Select an assigned briefing, confirm the attestation, and retain an evidence reference.')
+      return
+    }
+    const jobId = selectedSafetyMeeting.jobId
+    const meetingId = selectedSafetyMeeting.id
+    const draft = {
+      id: safetyBriefingDraft.entryKey,
+      type: 'safety_briefing_acknowledgement',
+      jobId,
+      payload: {
+        meetingId,
+        acknowledged: true,
+        acknowledgedAt: new Date().toISOString(),
+        evidenceReference: safetyBriefingDraft.evidenceReference.trim(),
+        attestation: 'I attended this briefing, understood the retained topics, and will stop work if conditions or controls change.',
+      },
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setSafetyBriefingDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), evidenceReference: '', acknowledged: false }))
+        notify('Safety briefing acknowledgement was saved locally for an exact worker-scoped retry.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      retainSafetyMeeting(result.safetyMeeting)
+      setSafetyBriefingDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), evidenceReference: '', acknowledged: false }))
+      notify(result.replayed
+        ? 'This acknowledgement was already retained; no duplicate attendance evidence was created.'
+        : 'Your safety briefing acknowledgement was retained for facilitator signoff.')
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setSafetyBriefingDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), evidenceReference: '', acknowledged: false }))
+          notify('Connection interrupted. The acknowledgement was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function signOffSafetyBriefing(event) {
+    event.preventDefault()
+    if (!canCoordinate || !selectedSafetyMeeting || safetyBriefingDraft.completionEvidence.trim().length < 3) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedSafetyMeeting.jobId)}/safety-meetings/${encodeURIComponent(selectedSafetyMeeting.id)}/signoff`, {
+        method: 'POST',
+        body: JSON.stringify({ evidenceReference: safetyBriefingDraft.completionEvidence.trim(), status: 'completed' }),
+      })
+      retainSafetyMeeting(result.safetyMeeting)
+      setSafetyBriefingDraft((current) => ({ ...current, completionEvidence: '' }))
+      notify(result.replayed ? 'The briefing signoff request is already pending.' : 'Briefing evidence was frozen and sent to the approval queue.')
+      await refresh()
+      if (capabilities.approvals && result.approval?.id) {
+        openApprovals({ jobId: selectedSafetyMeeting.jobId, jobTitle: selectedSafetyMeeting.jobTitle, approvalId: result.approval.id })
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function excuseSafetyBriefingAttendee(attendee) {
+    if (!canCoordinate || !selectedSafetyMeeting || !attendee?.id || safetyBriefingDraft.excusalReason.trim().length < 8) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedSafetyMeeting.jobId)}/safety-meetings/${encodeURIComponent(selectedSafetyMeeting.id)}/attendees/${encodeURIComponent(attendee.id)}/excuse`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: safetyBriefingDraft.excusalReason.trim() }),
+      })
+      retainSafetyMeeting(result.safetyMeeting)
+      setSafetyBriefingDraft((current) => ({ ...current, excusalReason: '' }))
+      notify(`${attendee.attendeeName} was explicitly excused with the retained reason.`)
+    } catch (requestError) {
       setError(requestError.message)
     } finally {
       setSubmitting(false)
@@ -14527,6 +14733,166 @@ function App() {
                     ) : null}
                   </div>
                   <p className="attendance-policy">Operational self-reported presence only. Payroll, statutory registers, and location tracking remain separate.</p>
+                </section>
+                <section className="safety-briefing-control" data-testid="safety-briefing-control">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Safety briefings</h2>
+                      <p>Worker-scoped acknowledgement, explicit attendance exceptions, and approval-backed facilitator signoff.</p>
+                    </div>
+                    <div className="safety-briefing-summary" aria-label="Safety briefing summary">
+                      <span className="tag">{safetyMeetings.filter((meeting) => ['scheduled', 'in_progress'].includes(meeting.status)).length} active</span>
+                      {safetyMeetings.some((meeting) => meeting.status === 'pending_approval') ? <span className="tag tag-amber">Signoff review</span> : null}
+                    </div>
+                  </div>
+                  <div className="safety-briefing-selector">
+                    <label>
+                      Job
+                      <select required value={safetyBriefingDraft.jobId} onChange={(event) => selectSafetyBriefingJob(event.target.value)}>
+                        <option value="">Select an assigned job</option>
+                        {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      Briefing
+                      <select
+                        value={safetyBriefingDraft.meetingId}
+                        disabled={!safetyBriefingDraft.jobId || !selectedJobSafetyMeetings.length}
+                        onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, meetingId: event.target.value, evidenceReference: '', acknowledged: false, completionEvidence: '', excusalReason: '' })}
+                      >
+                        <option value="">{selectedJobSafetyMeetings.length ? 'Select a briefing' : 'No retained briefing'}</option>
+                        {selectedJobSafetyMeetings.map((meeting) => (
+                          <option key={meeting.id} value={meeting.id}>{meeting.title} / {formatStatus(meeting.status)}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  {selectedSafetyMeeting ? (
+                    <div className="safety-briefing-detail" aria-live="polite">
+                      <div className="safety-briefing-context">
+                        <div>
+                          <strong>{selectedSafetyMeeting.title}</strong>
+                          <small>{formatDateTime(selectedSafetyMeeting.scheduledAt)} / {selectedSafetyMeeting.facilitator || 'Facilitator not assigned'}</small>
+                        </div>
+                        <span className={`status status-${selectedSafetyMeeting.status}`}>{formatStatus(selectedSafetyMeeting.status)}</span>
+                      </div>
+                      <div className="safety-briefing-topics">
+                        <strong>Retained topics</strong>
+                        <ul>{(selectedSafetyMeeting.topics || []).map((topic) => <li key={topic}>{topic}</li>)}</ul>
+                      </div>
+                      <div className="safety-attendee-list" aria-label="Briefing attendance">
+                        {(selectedSafetyMeeting.attendeeRecords || []).map((attendee) => (
+                          <div className="safety-attendee-row" key={attendee.id}>
+                            <span className={`attendance-presence ${attendee.status === 'acknowledged' ? 'attendance-present' : ''}`} aria-hidden="true" />
+                            <div>
+                              <strong>{attendee.attendeeName}</strong>
+                              <small>{attendee.company || 'Assigned crew'}{attendee.acknowledgedAt ? ` / ${formatDateTime(attendee.acknowledgedAt)}` : ''}</small>
+                            </div>
+                            <span className={`status status-${attendee.status}`}>{formatStatus(attendee.status)}</span>
+                            {canCoordinate && attendee.status === 'expected' ? (
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                disabled={submitting || safetyBriefingDraft.excusalReason.trim().length < 8}
+                                onClick={() => void excuseSafetyBriefingAttendee(attendee)}
+                              >
+                                <Ban size={15} /> Excuse
+                              </button>
+                            ) : null}
+                          </div>
+                        ))}
+                        {!selectedSafetyMeeting.attendeeRecords?.length ? <div className="attendance-empty"><Users size={20} /><span>No assigned attendee is retained for this briefing.</span></div> : null}
+                      </div>
+                      {fieldScoped && ['scheduled', 'in_progress'].includes(selectedSafetyMeeting.status) ? (
+                        <form className="safety-acknowledgement-form" onSubmit={acknowledgeSafetyBriefing}>
+                          <label>
+                            Evidence reference
+                            <input
+                              required
+                              minLength="3"
+                              maxLength="240"
+                              value={safetyBriefingDraft.evidenceReference}
+                              onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, evidenceReference: event.target.value })}
+                              placeholder="Device, badge, signature, or retained field record"
+                            />
+                          </label>
+                          <label className="checkbox-label">
+                            <input
+                              type="checkbox"
+                              checked={safetyBriefingDraft.acknowledged}
+                              onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, acknowledged: event.target.checked })}
+                            />
+                            I attended, understood the retained topics, and will stop work if conditions or controls change.
+                          </label>
+                          <button
+                            className="primary-button"
+                            disabled={submitting || selectedSafetyMeeting.attendeeRecords?.[0]?.status === 'acknowledged'}
+                          >
+                            <ShieldCheck size={16} />
+                            {selectedSafetyMeeting.attendeeRecords?.[0]?.status === 'acknowledged'
+                              ? 'Acknowledged'
+                              : navigator.onLine === false ? 'Save acknowledgement offline' : 'Acknowledge briefing'}
+                          </button>
+                        </form>
+                      ) : null}
+                      {canCoordinate && ['scheduled', 'in_progress'].includes(selectedSafetyMeeting.status) ? (
+                        <form className="safety-signoff-form" onSubmit={signOffSafetyBriefing}>
+                          {selectedSafetyMeeting.attendanceSummary?.expected ? (
+                            <label>
+                              Attendance exception reason
+                              <input
+                                minLength="8"
+                                maxLength="500"
+                                value={safetyBriefingDraft.excusalReason}
+                                onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, excusalReason: event.target.value })}
+                                placeholder="Retained reason for an expected attendee absence"
+                              />
+                            </label>
+                          ) : null}
+                          <label>
+                            Completion evidence
+                            <input
+                              required
+                              minLength="3"
+                              maxLength="240"
+                              value={safetyBriefingDraft.completionEvidence}
+                              onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, completionEvidence: event.target.value })}
+                              placeholder="Signed register, minutes, photo, or document reference"
+                            />
+                          </label>
+                          <button className="primary-button" disabled={submitting || !selectedSafetyMeeting.attendanceSummary?.readyForSignoff}>
+                            <ClipboardCheck size={16} /> Request signoff approval
+                          </button>
+                        </form>
+                      ) : null}
+                    </div>
+                  ) : safetyBriefingDraft.jobId ? (
+                    <div className="attendance-empty"><ClipboardList size={20} /><span>No briefing is retained for this job.</span></div>
+                  ) : null}
+                  {canCoordinate ? (
+                    <form className="safety-briefing-create" onSubmit={createSafetyBriefing}>
+                      <div className="safety-briefing-create-heading">
+                        <strong>Schedule briefing</strong>
+                        <span>Assigned crew are frozen as expected attendees.</span>
+                      </div>
+                      <label>
+                        Title
+                        <input required minLength="2" maxLength="240" value={safetyBriefingDraft.title} onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, title: event.target.value })} placeholder="Pre-start or toolbox talk" />
+                      </label>
+                      <label>
+                        Scheduled time
+                        <input required type="datetime-local" value={safetyBriefingDraft.scheduledAt} onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, scheduledAt: event.target.value })} />
+                      </label>
+                      <label className="form-span">
+                        Discussion topics
+                        <textarea required minLength="2" maxLength="4000" value={safetyBriefingDraft.topics} onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, topics: event.target.value })} placeholder="One retained topic per line" />
+                      </label>
+                      <button className="secondary-button" disabled={submitting || !safetyBriefingDraft.jobId}>
+                        <Plus size={16} /> Schedule briefing
+                      </button>
+                    </form>
+                  ) : null}
+                  <p className="attendance-policy">Acknowledgements prove only the retained briefing event. They do not certify legal compliance, worker competence, or unchanged site conditions.</p>
                 </section>
                 <section className="equipment-handoff-control" data-testid="field-equipment-custody">
                   <div className="panel-heading">

@@ -96,7 +96,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -119,7 +119,20 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(dashboardSource, /Save receipt offline/);
   assert.match(dashboardSource, /Save handoff offline/);
   assert.match(dashboardSource, /Save return offline/);
+  assert.match(dashboardSource, /Save acknowledgement offline/);
   assert.doesNotMatch(outboxSource, /localStorage|sessionStorage/);
+});
+
+test('governed safety briefings connect office scheduling, worker-scoped offline acknowledgement, and approval-backed signoff', () => {
+  assert.match(dashboardSource, /api\('\/api\/ledger\/safety-briefings\?limit=100'\)/);
+  assert.match(dashboardSource, /data-testid="safety-briefing-control"/);
+  assert.match(dashboardSource, /type: 'safety_briefing_acknowledgement'/);
+  assert.match(dashboardSource, /safety-meetings\/\$\{encodeURIComponent\(safetyMeetingId\)\}\/acknowledgments/);
+  assert.match(dashboardSource, /\/signoff`/);
+  assert.match(dashboardSource, /\/attendees\/\$\{encodeURIComponent\(attendee\.id\)\}\/excuse/);
+  assert.match(dashboardSource, /I attended this briefing, understood the retained topics/);
+  assert.match(dashboardSource, /Request signoff approval/);
+  assert.match(dashboardSource, /do not certify legal compliance/i);
 });
 
 test('material receiving connects purchasing, field readiness, approvals, and supplier invoice matching', () => {

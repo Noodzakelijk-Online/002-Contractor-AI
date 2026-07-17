@@ -149,6 +149,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   'safety-quality': [
     { key: 'qualification', label: 'Worker qualifications', table: 'job_qualification_requirements', detailKey: 'qualificationRequirements', readyStatuses: ['active', 'pending_retirement'] },
     { key: 'orientation', label: 'Worker orientation', table: 'worker_orientations', detailKey: 'orientations' },
+    { key: 'safety_briefing', label: 'Approved safety briefing', table: 'safety_meetings', detailKey: 'safetyMeetings', readyStatuses: ['completed', 'approved', 'client_visible'] },
     { key: 'jha', label: 'JHA / risk assessment', table: 'jha_records', detailKey: 'jhas' },
     { key: 'sds', label: 'SDS register', table: 'sds_sheets', detailKey: 'sdsSheets' },
     { key: 'permit', label: 'Permits', table: 'permit_records', detailKey: 'permits' },
@@ -944,6 +945,7 @@ const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
 const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
 const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
 const ENVIRONMENTAL_REPORT_FORMAT = 'contractor-ai-environmental-report/v1';
+const SAFETY_BRIEFING_FORMAT = 'contractor-ai-safety-briefing/v1';
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -3099,6 +3101,132 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE UNIQUE INDEX IF NOT EXISTS idx_environmental_report_pending_source
           ON environmental_reports(job_id, period_start, period_end, source_hash) WHERE status = 'pending_approval';
       `);
+    }
+  },
+  {
+    version: '041_governed_safety_briefings',
+    description: 'Retain worker-scoped, replay-safe safety briefing acknowledgements with immutable approval-backed signoff evidence.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE safety_meetings ADD COLUMN evidence_reference TEXT;
+        ALTER TABLE safety_meetings ADD COLUMN source_hash TEXT;
+        ALTER TABLE safety_meetings ADD COLUMN snapshot_hash TEXT;
+        ALTER TABLE safety_meetings ADD COLUMN snapshot_json TEXT;
+        ALTER TABLE safety_meetings ADD COLUMN entry_key TEXT;
+        ALTER TABLE safety_meetings ADD COLUMN entry_fingerprint TEXT;
+        CREATE TABLE IF NOT EXISTS safety_meeting_attendees (
+          id TEXT PRIMARY KEY,
+          meeting_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          assignment_id TEXT,
+          worker_id TEXT,
+          attendee_key TEXT NOT NULL,
+          attendee_name TEXT NOT NULL,
+          company TEXT,
+          status TEXT NOT NULL DEFAULT 'expected',
+          acknowledged_at TEXT,
+          acknowledged_by TEXT,
+          evidence_reference TEXT,
+          entry_key TEXT,
+          entry_fingerprint TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(meeting_id) REFERENCES safety_meetings(id) ON DELETE CASCADE,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(assignment_id) REFERENCES assignments(id) ON DELETE SET NULL,
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          UNIQUE(meeting_id, attendee_key),
+          UNIQUE(job_id, entry_key)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_safety_meetings_job_entry_key
+          ON safety_meetings(job_id, entry_key) WHERE entry_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_safety_meetings_job_status_schedule
+          ON safety_meetings(job_id, status, scheduled_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_safety_attendees_meeting_status
+          ON safety_meeting_attendees(meeting_id, status, attendee_name);
+        CREATE INDEX IF NOT EXISTS idx_safety_attendees_worker_status
+          ON safety_meeting_attendees(worker_id, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_safety_attendees_job_entry_key
+          ON safety_meeting_attendees(job_id, entry_key) WHERE entry_key IS NOT NULL;
+      `);
+      const retainedMeetings = db.prepare(`
+        SELECT * FROM safety_meetings
+        WHERE status IN ('pending_approval', 'completed', 'approved', 'client_visible')
+          AND approval_id IS NOT NULL
+          AND snapshot_hash IS NULL
+        ORDER BY created_at
+      `).all();
+      for (const meeting of retainedMeetings) {
+        const meetingData = fromJson(meeting.data_json, {});
+        const evidenceReference = normalizeText(
+          meetingData.lifecycleTransition?.note || meetingData.notes,
+          'Migrated retained safety meeting record'
+        );
+        const acknowledgedAt = meeting.completed_at || meeting.updated_at || meeting.created_at;
+        const acknowledgedBy = meeting.facilitator || 'ledger_migration';
+        const attendeeNames = [...new Set(normalizeList(fromJson(meeting.attendees_json, [])))];
+        for (const attendeeName of attendeeNames) {
+          const attendeeKey = `person:${sha256Json({ name: normalizeText(attendeeName, '').toLowerCase(), company: '' }).slice(0, 24)}`;
+          const basis = {
+            meetingId: meeting.id,
+            jobId: meeting.job_id,
+            assignmentId: null,
+            workerId: null,
+            attendeeName,
+            company: null,
+            status: 'acknowledged',
+            acknowledgedAt,
+            acknowledgedBy,
+            evidenceReference,
+            attestation: null
+          };
+          db.prepare(`
+            INSERT INTO safety_meeting_attendees (
+              id, meeting_id, job_id, attendee_key, attendee_name, status, acknowledged_at,
+              acknowledged_by, evidence_reference, entry_fingerprint, data_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'acknowledged', ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            makeId('safety_attendee'), meeting.id, meeting.job_id, attendeeKey, attendeeName,
+            acknowledgedAt, acknowledgedBy, evidenceReference, sha256Json(basis),
+            toJson({ migratedLegacyAttendance: true }), meeting.created_at, meeting.updated_at
+          );
+        }
+        const attendeeRows = db.prepare('SELECT * FROM safety_meeting_attendees WHERE meeting_id = ? ORDER BY attendee_key, created_at').all(meeting.id);
+        if (!attendeeRows.length) continue;
+        const sourceBasis = {
+          format: SAFETY_BRIEFING_FORMAT,
+          meetingId: meeting.id,
+          jobId: meeting.job_id,
+          meetingType: meeting.meeting_type,
+          title: meeting.title,
+          facilitator: meeting.facilitator,
+          scheduledAt: meeting.scheduled_at,
+          completedAt: meeting.completed_at || acknowledgedAt,
+          evidenceReference,
+          topics: normalizeList(fromJson(meeting.topics_json, [])),
+          attendees: attendeeRows.map(row => ({
+            attendeeKey: row.attendee_key,
+            assignmentId: null,
+            workerId: null,
+            attendeeName: row.attendee_name,
+            company: null,
+            status: row.status,
+            acknowledgedAt: row.acknowledged_at,
+            acknowledgedBy: row.acknowledged_by,
+            evidenceReference: row.evidence_reference,
+            entryFingerprint: row.entry_fingerprint
+          }))
+        };
+        const sourceHash = sha256Json(sourceBasis);
+        const requestedStatus = normalizeStatus(meetingData.requestedStatus, meeting.status === 'pending_approval' ? 'completed' : meeting.status);
+        const snapshot = { ...sourceBasis, sourceHash, requestedStatus, retainedAt: meeting.updated_at || meeting.created_at };
+        db.prepare(`
+          UPDATE safety_meetings
+          SET completed_at = COALESCE(completed_at, ?), evidence_reference = ?, source_hash = ?, snapshot_hash = ?, snapshot_json = ?
+          WHERE id = ?
+        `).run(acknowledgedAt, evidenceReference, sourceHash, sha256Json(snapshot), toJson(snapshot), meeting.id);
+      }
     }
   }
 ];
@@ -24660,66 +24788,497 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  safetyMeetingAttendeeKey({ workerId = null, attendeeName = '', company = '' } = {}) {
+    if (workerId) return `worker:${workerId}`;
+    return `person:${sha256Json({ name: normalizeText(attendeeName, '').toLowerCase(), company: normalizeText(company, '').toLowerCase() }).slice(0, 24)}`;
+  }
+
+  safetyMeetingAttendeeEvidenceBasis(record = {}) {
+    return {
+      meetingId: record.meetingId || record.meeting_id,
+      jobId: record.jobId || record.job_id,
+      assignmentId: record.assignmentId || record.assignment_id || null,
+      workerId: record.workerId || record.worker_id || null,
+      attendeeName: record.attendeeName || record.attendee_name,
+      company: record.company || null,
+      status: normalizeStatus(record.status, 'expected'),
+      acknowledgedAt: record.acknowledgedAt || record.acknowledged_at || null,
+      acknowledgedBy: record.acknowledgedBy || record.acknowledged_by || null,
+      evidenceReference: record.evidenceReference || record.evidence_reference || null,
+      attestation: record.attestation || fromJson(record.data_json, {}).attestation || null
+    };
+  }
+
+  safetyMeetingSourceBasis(meetingRow, attendeeRows = null) {
+    const rows = attendeeRows || this.db.prepare(`
+      SELECT * FROM safety_meeting_attendees
+      WHERE meeting_id = ?
+      ORDER BY attendee_key, created_at
+    `).all(meetingRow.id);
+    return {
+      format: SAFETY_BRIEFING_FORMAT,
+      meetingId: meetingRow.id,
+      jobId: meetingRow.job_id,
+      meetingType: meetingRow.meeting_type,
+      title: meetingRow.title,
+      facilitator: meetingRow.facilitator,
+      scheduledAt: meetingRow.scheduled_at,
+      completedAt: meetingRow.completed_at,
+      evidenceReference: meetingRow.evidence_reference || null,
+      topics: normalizeList(fromJson(meetingRow.topics_json, [])),
+      attendees: rows.map(row => ({
+        attendeeKey: row.attendee_key,
+        assignmentId: row.assignment_id || null,
+        workerId: row.worker_id || null,
+        attendeeName: row.attendee_name,
+        company: row.company || null,
+        status: row.status,
+        acknowledgedAt: row.acknowledged_at || null,
+        acknowledgedBy: row.acknowledged_by || null,
+        evidenceReference: row.evidence_reference || null,
+        entryFingerprint: row.entry_fingerprint || null
+      }))
+    };
+  }
+
+  seedSafetyMeetingAttendees(jobId, meetingId, payload = {}) {
+    const assignments = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, workers.data_json AS worker_data_json
+      FROM assignments
+      LEFT JOIN workers ON workers.id = assignments.worker_id
+      WHERE assignments.job_id = ?
+      ORDER BY assignments.created_at
+    `).all(jobId).filter(row => this.activeAssignmentStatus(row.status));
+    const rawAttendees = Array.isArray(payload.attendees) ? payload.attendees : normalizeList(payload.attendees);
+    const assignmentIds = normalizeList(payload.assignmentIds || payload.assignment_ids);
+    const workerIds = normalizeList(payload.workerIds || payload.worker_ids);
+    const explicit = [
+      ...assignmentIds.map(assignmentId => ({ assignmentId })),
+      ...workerIds.map(workerId => ({ workerId })),
+      ...rawAttendees.map(attendee => typeof attendee === 'object' && attendee !== null ? attendee : { attendeeName: attendee })
+    ];
+    const candidates = explicit.length || payload.includeAssignedCrew === false
+      ? explicit
+      : assignments.map(assignment => ({ assignmentId: assignment.id }));
+    const timestamp = nowIso();
+    for (const candidate of candidates) {
+      const assignment = candidate.assignmentId || candidate.assignment_id
+        ? assignments.find(row => String(row.id) === String(candidate.assignmentId || candidate.assignment_id))
+        : candidate.workerId || candidate.worker_id
+          ? assignments.find(row => String(row.worker_id || '') === String(candidate.workerId || candidate.worker_id))
+          : assignments.find(row => normalizeText(row.worker_name, '').toLowerCase() === normalizeText(candidate.attendeeName || candidate.name, '').toLowerCase());
+      const workerId = assignment?.worker_id || candidate.workerId || candidate.worker_id || null;
+      const attendeeName = normalizeText(assignment?.worker_name || candidate.attendeeName || candidate.attendee_name || candidate.name, '');
+      if (!attendeeName) continue;
+      const workerData = fromJson(assignment?.worker_data_json, {});
+      const company = normalizeText(candidate.company || workerData.company, '') || null;
+      const attendeeKey = this.safetyMeetingAttendeeKey({ workerId, attendeeName, company });
+      this.db.prepare(`
+        INSERT INTO safety_meeting_attendees (
+          id, meeting_id, job_id, assignment_id, worker_id, attendee_key, attendee_name, company,
+          status, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expected', '{}', ?, ?)
+        ON CONFLICT(meeting_id, attendee_key) DO NOTHING
+      `).run(
+        makeId('safety_attendee'), meetingId, jobId, assignment?.id || candidate.assignmentId || candidate.assignment_id || null,
+        workerId, attendeeKey, attendeeName, company, timestamp, timestamp
+      );
+    }
+    return this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE meeting_id = ? ORDER BY attendee_name, created_at').all(meetingId);
+  }
+
+  getSafetyMeeting(meetingId, options = {}) {
+    const row = this.db.prepare(`
+      SELECT safety_meetings.*, jobs.title AS job_title
+      FROM safety_meetings
+      JOIN jobs ON jobs.id = safety_meetings.job_id
+      WHERE safety_meetings.id = ?
+    `).get(meetingId);
+    if (!row || (options.jobId && String(row.job_id) !== String(options.jobId))) {
+      throw ledgerInputError('safety_briefing_not_found', 'Safety briefing not found for this job.', {}, 404);
+    }
+    const attendeeRows = this.db.prepare(`
+      SELECT * FROM safety_meeting_attendees
+      WHERE meeting_id = ?
+      ORDER BY attendee_key, created_at
+    `).all(meetingId);
+    const attendeeRecords = attendeeRows
+      .map(attendee => this.mapSafetyMeetingAttendee(attendee))
+      .sort((left, right) => String(left.attendeeName || '').localeCompare(String(right.attendeeName || '')));
+    const counts = attendeeRecords.reduce((summary, attendee) => {
+      summary.total += 1;
+      summary[attendee.status] = (summary[attendee.status] || 0) + 1;
+      return summary;
+    }, { total: 0, expected: 0, acknowledged: 0, excused: 0 });
+    const sourceCurrentHash = sha256Json(this.safetyMeetingSourceBasis(row, attendeeRows));
+    const snapshot = fromJson(row.snapshot_json, null);
+    const snapshotValid = row.snapshot_hash
+      ? Boolean(snapshot && sha256Json(snapshot) === row.snapshot_hash && snapshot.sourceHash === row.source_hash)
+      : null;
+    const sourceCurrent = row.source_hash ? sourceCurrentHash === row.source_hash : null;
+    return {
+      ...this.mapSafetyMeeting(row),
+      jobTitle: row.job_title || null,
+      attendees: attendeeRecords.length ? attendeeRecords.map(attendee => attendee.attendeeName) : fromJson(row.attendees_json, []),
+      attendeeRecords,
+      attendanceSummary: {
+        ...counts,
+        outstanding: counts.expected,
+        readyForSignoff: counts.acknowledged > 0 && counts.expected === 0
+      },
+      sourceCurrentHash,
+      sourceCurrent,
+      snapshotValid,
+      integrityValid: row.snapshot_hash ? snapshotValid && sourceCurrent : null
+    };
+  }
+
+  listSafetyMeetings(filters = {}) {
+    const params = [];
+    const clauses = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('safety_meetings.job_id = ?');
+      params.push(filters.jobId || filters.job_id);
+    }
+    if (filters.status) {
+      clauses.push('safety_meetings.status = ?');
+      params.push(normalizeStatus(filters.status, 'scheduled'));
+    }
+    const limit = Math.max(1, Math.min(500, Number(filters.limit) || 100));
+    const rows = this.db.prepare(`
+      SELECT safety_meetings.id
+      FROM safety_meetings
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY safety_meetings.scheduled_at DESC, safety_meetings.created_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+    return rows.map(row => this.getSafetyMeeting(row.id));
+  }
+
+  acknowledgeSafetyMeeting(jobId, meetingId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const meetingRow = this.db.prepare('SELECT * FROM safety_meetings WHERE id = ? AND job_id = ?').get(meetingId, jobId);
+      if (!meetingRow) throw ledgerInputError('safety_briefing_not_found', 'Safety briefing not found for this job.', {}, 404);
+      if (!['scheduled', 'in_progress'].includes(meetingRow.status)) {
+        throw ledgerInputError('safety_briefing_locked', 'Attendance cannot change after safety briefing signoff begins.', {}, 409);
+      }
+      if (!normalizeBoolean(payload.acknowledged ?? payload.attestationAccepted ?? payload.attestation_accepted, false)) {
+        throw ledgerInputError('safety_briefing_attestation_required', 'The attendee must explicitly acknowledge the retained briefing topics.');
+      }
+      const assignment = this.resolveCrewAssignment(jobId, {
+        ...payload,
+        workerName: payload.workerName || payload.worker_name || payload.attendeeName || payload.attendee_name
+      });
+      const workerId = assignment?.workerId || payload.workerId || payload.worker_id || null;
+      const attendeeName = normalizeText(assignment?.workerName || payload.attendeeName || payload.attendee_name || payload.workerName || payload.worker_name, '');
+      if (attendeeName.length < 2) throw ledgerInputError('safety_briefing_attendee_required', 'A retained attendee identity is required.');
+      const company = normalizeText(payload.company, '') || null;
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3) throw ledgerInputError('safety_briefing_evidence_required', 'A retained acknowledgement evidence reference is required.');
+      const attendeeKey = this.safetyMeetingAttendeeKey({ workerId, attendeeName, company });
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('safety_briefing_entry_key_invalid', 'Safety briefing acknowledgement requires an 8 to 200 character replay key.');
+      }
+      const replay = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      const acknowledgedAt = normalizeScheduleTimestamp(payload.acknowledgedAt || payload.acknowledged_at || replay?.acknowledged_at || nowIso(), {
+        required: true,
+        label: 'Acknowledgement time',
+        code: 'safety_briefing_acknowledged_at_invalid'
+      });
+      const acknowledgedMs = Date.parse(acknowledgedAt);
+      if (acknowledgedMs > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('safety_briefing_acknowledged_at_future', 'Safety briefing acknowledgement cannot be recorded in the future.');
+      }
+      if (options.legacy !== true && meetingRow.scheduled_at && acknowledgedMs < Date.parse(meetingRow.scheduled_at) - 30 * 60 * 1000) {
+        throw ledgerInputError('safety_briefing_acknowledged_before_session', 'Safety briefing acknowledgement cannot predate the scheduled session.');
+      }
+      const attestation = normalizeText(
+        payload.attestation,
+        'I attended this briefing, understood the retained topics, and will stop work if conditions or controls change.'
+      );
+      const basis = {
+        meetingId, jobId, assignmentId: assignment?.id || payload.assignmentId || payload.assignment_id || null,
+        workerId, attendeeName, company, status: 'acknowledged', acknowledgedAt,
+        acknowledgedBy: normalizeText(payload.acknowledgedBy || payload.acknowledged_by, attendeeName),
+        evidenceReference, attestation
+      };
+      const entryFingerprint = sha256Json(basis);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('safety_briefing_entry_key_reused', 'Safety briefing replay key was already used for different acknowledgement evidence.', { entryKey }, 409);
+        }
+        return { meeting: this.getSafetyMeeting(meetingId, { jobId }), attendee: this.mapSafetyMeetingAttendee(replay), replayed: true, externalCommitments: 0 };
+      }
+      let attendeeRow = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE meeting_id = ? AND attendee_key = ?').get(meetingId, attendeeKey);
+      if (attendeeRow?.status === 'acknowledged') {
+        if (attendeeRow.entry_fingerprint === entryFingerprint) {
+          return { meeting: this.getSafetyMeeting(meetingId, { jobId }), attendee: this.mapSafetyMeetingAttendee(attendeeRow), replayed: true, externalCommitments: 0 };
+        }
+        throw ledgerInputError('safety_briefing_already_acknowledged', 'This attendee already has retained acknowledgement evidence for the briefing.', {}, 409);
+      }
+      const timestamp = nowIso();
+      if (!attendeeRow) {
+        const id = makeId('safety_attendee');
+        this.db.prepare(`
+          INSERT INTO safety_meeting_attendees (
+            id, meeting_id, job_id, assignment_id, worker_id, attendee_key, attendee_name, company,
+            status, acknowledged_at, acknowledged_by, evidence_reference, entry_key, entry_fingerprint,
+            data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'acknowledged', ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id, meetingId, jobId, basis.assignmentId, workerId, attendeeKey, attendeeName, company,
+          acknowledgedAt, basis.acknowledgedBy, evidenceReference, entryKey, entryFingerprint,
+          toJson({ attestation, source: payload.source || 'safety_briefing_acknowledgement' }), timestamp, timestamp
+        );
+        attendeeRow = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE id = ?').get(id);
+      } else {
+        this.db.prepare(`
+          UPDATE safety_meeting_attendees
+          SET assignment_id = ?, worker_id = ?, attendee_name = ?, company = ?, status = 'acknowledged',
+            acknowledged_at = ?, acknowledged_by = ?, evidence_reference = ?, entry_key = ?, entry_fingerprint = ?,
+            data_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          basis.assignmentId, workerId, attendeeName, company, acknowledgedAt, basis.acknowledgedBy,
+          evidenceReference, entryKey, entryFingerprint,
+          toJson({ ...fromJson(attendeeRow.data_json, {}), attestation, source: payload.source || 'safety_briefing_acknowledgement' }),
+          timestamp, attendeeRow.id
+        );
+        attendeeRow = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE id = ?').get(attendeeRow.id);
+      }
+      this.db.prepare("UPDATE safety_meetings SET status = CASE WHEN status = 'scheduled' THEN 'in_progress' ELSE status END, updated_at = ? WHERE id = ?")
+        .run(timestamp, meetingId);
+      const attendee = this.mapSafetyMeetingAttendee(attendeeRow);
+      const meeting = this.getSafetyMeeting(meetingId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'safety_meeting_attendee', entityId: attendee.id, jobId,
+          action: 'acknowledge_safety_briefing', actor, after: attendee,
+          metadata: { meetingId, workerId, entryKey, externalCommitments: 0 }
+        });
+      }
+      return { meeting, attendee, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  excuseSafetyMeetingAttendee(jobId, meetingId, attendeeId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const meeting = this.db.prepare('SELECT * FROM safety_meetings WHERE id = ? AND job_id = ?').get(meetingId, jobId);
+      if (!meeting) throw ledgerInputError('safety_briefing_not_found', 'Safety briefing not found for this job.', {}, 404);
+      if (!['scheduled', 'in_progress'].includes(meeting.status)) {
+        throw ledgerInputError('safety_briefing_locked', 'Attendance cannot change after safety briefing signoff begins.', {}, 409);
+      }
+      const row = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE id = ? AND meeting_id = ? AND job_id = ?').get(attendeeId, meetingId, jobId);
+      if (!row) throw ledgerInputError('safety_briefing_attendee_not_found', 'Safety briefing attendee not found.', {}, 404);
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8) throw ledgerInputError('safety_briefing_excusal_reason_required', 'Excusing an expected attendee requires a retained reason.');
+      if (row.status === 'excused' && fromJson(row.data_json, {}).excusalReason === reason) {
+        return { meeting: this.getSafetyMeeting(meetingId, { jobId }), attendee: this.mapSafetyMeetingAttendee(row), replayed: true };
+      }
+      if (row.status !== 'expected') throw ledgerInputError('safety_briefing_attendee_locked', 'Only an expected attendee can be excused.', {}, 409);
+      const timestamp = nowIso();
+      const actor = options.actor || 'Contractor.AI';
+      const basis = {
+        meetingId, jobId, assignmentId: row.assignment_id || null, workerId: row.worker_id || null,
+        attendeeName: row.attendee_name, company: row.company || null, status: 'excused', acknowledgedAt: timestamp,
+        acknowledgedBy: actor, evidenceReference: reason, attestation: null
+      };
+      this.db.prepare(`
+        UPDATE safety_meeting_attendees
+        SET status = 'excused', acknowledged_at = ?, acknowledged_by = ?, evidence_reference = ?,
+          entry_fingerprint = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, actor, reason, sha256Json(basis), toJson({ ...fromJson(row.data_json, {}), excusalReason: reason }), timestamp, attendeeId);
+      const attendee = this.mapSafetyMeetingAttendee(this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE id = ?').get(attendeeId));
+      if (options.audit !== false) {
+        this.audit({ entityType: 'safety_meeting_attendee', entityId: attendeeId, jobId, action: 'excuse_safety_briefing_attendee', actor, before: this.mapSafetyMeetingAttendee(row), after: attendee, metadata: { meetingId, externalCommitments: 0 } });
+      }
+      return { meeting: this.getSafetyMeeting(meetingId, { jobId }), attendee, replayed: false };
+    });
+  }
+
+  signOffSafetyMeeting(jobId, meetingId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      let meetingRow = this.db.prepare('SELECT * FROM safety_meetings WHERE id = ? AND job_id = ?').get(meetingId, jobId);
+      if (!meetingRow) throw ledgerInputError('safety_briefing_not_found', 'Safety briefing not found for this job.', {}, 404);
+      if (meetingRow.status === 'pending_approval') {
+        const approval = meetingRow.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(meetingRow.approval_id) : null;
+        const current = this.getSafetyMeeting(meetingId, { jobId });
+        if (approval?.status === 'pending' && current.integrityValid) {
+          return { record: current, meeting: current, approval: this.mapApproval(approval), replayed: true, approvalRequired: true, externalCommitments: 0 };
+        }
+        throw ledgerInputError('safety_briefing_signoff_conflict', 'Safety briefing signoff is already pending with different or invalid evidence.', {}, 409);
+      }
+      if (!['scheduled', 'in_progress'].includes(meetingRow.status)) {
+        throw ledgerInputError('safety_briefing_locked', 'This safety briefing can no longer be submitted for signoff.', {}, 409);
+      }
+      const legacyAttendees = normalizeList(payload.legacyAttendees || payload.attendees);
+      for (const attendeeName of legacyAttendees) {
+        const legacyKey = `legacy:${sha256Json({ meetingId, attendeeName }).slice(0, 32)}`;
+        this.acknowledgeSafetyMeeting(jobId, meetingId, {
+          attendeeName,
+          acknowledged: true,
+          acknowledgedAt: payload.completedAt || payload.completed_at || nowIso(),
+          acknowledgedBy: actor,
+          evidenceReference: payload.evidenceReference || payload.evidence_reference || payload.notes || payload.note || 'Recorded attendance list',
+          entryKey: legacyKey,
+          source: 'legacy_safety_meeting_completion'
+        }, { actor, audit: options.audit, legacy: true });
+      }
+      for (const attendeeId of normalizeList(payload.excusedAttendeeIds || payload.excused_attendee_ids)) {
+        this.excuseSafetyMeetingAttendee(jobId, meetingId, attendeeId, { reason: payload.excusalReason || payload.excusal_reason }, { actor, audit: options.audit });
+      }
+      const topics = normalizeList(payload.topics || fromJson(meetingRow.topics_json, []));
+      if (!topics.length) throw ledgerInputError('safety_briefing_topics_required', 'Safety briefing signoff requires retained discussion topics.');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.notes || payload.note, '');
+      if (evidenceReference.length < 3) throw ledgerInputError('safety_briefing_evidence_required', 'Safety briefing signoff requires a retained completion evidence reference.');
+      const completedAt = normalizeScheduleTimestamp(payload.completedAt || payload.completed_at || nowIso(), {
+        required: true,
+        label: 'Briefing completion time',
+        code: 'safety_briefing_completed_at_invalid'
+      });
+      if (Date.parse(completedAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('safety_briefing_completed_at_future', 'Safety briefing completion cannot be recorded in the future.');
+      }
+      const attendeeRows = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE meeting_id = ? ORDER BY attendee_key').all(meetingId);
+      const acknowledgedCount = attendeeRows.filter(row => row.status === 'acknowledged').length;
+      const outstandingCount = attendeeRows.filter(row => row.status === 'expected').length;
+      if (!acknowledgedCount) throw ledgerInputError('safety_briefing_acknowledgement_required', 'At least one retained attendee acknowledgement is required before signoff.');
+      if (outstandingCount) throw ledgerInputError('safety_briefing_attendance_incomplete', `${outstandingCount} expected attendee acknowledgement(s) are still outstanding.`, { outstandingCount }, 409);
+      const requestedStatus = ['completed', 'approved', 'client_visible'].includes(normalizeStatus(payload.status || payload.requestedStatus, 'completed'))
+        ? normalizeStatus(payload.status || payload.requestedStatus, 'completed')
+        : 'completed';
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE safety_meetings
+        SET status = 'in_progress', facilitator = ?, completed_at = ?, attendees_json = ?, topics_json = ?,
+          evidence_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(
+        normalizeText(payload.facilitator || payload.owner, meetingRow.facilitator || actor), completedAt,
+        toJson(attendeeRows.map(row => row.attendee_name), []), toJson(topics, []), evidenceReference,
+        toJson({
+          ...fromJson(meetingRow.data_json, {}), requestedStatus,
+          notes: payload.notes || payload.note || null,
+          signoffRequestedBy: actor,
+          signoffRequestedAt: timestamp
+        }), timestamp, meetingId, jobId
+      );
+      meetingRow = this.db.prepare('SELECT * FROM safety_meetings WHERE id = ?').get(meetingId);
+      const sourceBasis = this.safetyMeetingSourceBasis(meetingRow);
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = { ...sourceBasis, sourceHash, requestedStatus, retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      let approvalRow = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'safety_meeting' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1
+      `).get(meetingId);
+      if (approvalRow) {
+        this.db.prepare('UPDATE approvals SET summary = ?, reason = ?, data_json = ?, updated_at = ? WHERE id = ?').run(
+          `Approve safety briefing ${meetingRow.title}`,
+          'Safety briefing attendance and completion evidence affect VCA/Wkb records and must be rechecked before signoff.',
+          toJson({ requestedStatus, sourceHash, snapshotHash, attendeeCount: attendeeRows.length, acknowledgedCount }),
+          timestamp, approvalRow.id
+        );
+      } else {
+        const approval = this.createApproval({
+          targetType: 'safety_meeting', targetId: meetingId, jobId,
+          approvalType: 'safety_meeting_signoff',
+          summary: `Approve safety briefing ${meetingRow.title}`,
+          reason: 'Safety briefing attendance and completion evidence affect VCA/Wkb records and must be rechecked before signoff.',
+          data: { requestedStatus, sourceHash, snapshotHash, attendeeCount: attendeeRows.length, acknowledgedCount }
+        }, { actor, audit: false });
+        approvalRow = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approval.id);
+      }
+      this.db.prepare(`
+        UPDATE safety_meetings
+        SET status = 'pending_approval', approval_id = ?, source_hash = ?, snapshot_hash = ?, snapshot_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(approvalRow.id, sourceHash, snapshotHash, toJson(snapshot), timestamp, meetingId);
+      const record = this.getSafetyMeeting(meetingId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'safety_meeting', entityId: meetingId, jobId,
+          action: 'request_safety_briefing_signoff', actor, after: record,
+          metadata: { approvalId: approvalRow.id, sourceHash, snapshotHash, attendeeCount: attendeeRows.length, externalCommitments: 0 }
+        });
+      }
+      return { record, meeting: record, approval: this.mapApproval(approvalRow), replayed: false, approvalRequired: true, externalCommitments: 0 };
+    });
+  }
+
   createSafetyMeeting(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const id = makeId('safety_talk');
       const timestamp = nowIso();
       const requestedStatus = normalizeStatus(payload.status, 'scheduled');
+      const completionStatuses = ['completed', 'approved', 'client_visible'];
       const attendees = normalizeList(payload.attendees);
       const topics = normalizeList(payload.topics);
-      const needsApproval = payload.requiresApproval === true
-        || payload.clientVisible === true
-        || ['completed', 'approved', 'client_visible'].includes(requestedStatus);
-      const status = needsApproval && ['completed', 'approved', 'client_visible'].includes(requestedStatus)
-        ? 'pending_approval'
-        : requestedStatus;
-
+      const meetingType = normalizeStatus(payload.meetingType || payload.meeting_type, 'toolbox_talk');
+      const title = normalizeText(payload.title, 'Toolbox talk');
+      const requestedSchedule = payload.scheduledAt || payload.scheduled_at
+        || (completionStatuses.includes(requestedStatus) ? payload.completedAt || payload.completed_at || null : null);
+      const scheduledAt = requestedSchedule || (completionStatuses.includes(requestedStatus) ? timestamp : futureIsoDate(1));
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '') || null;
+      const entryFingerprint = entryKey ? sha256Json({ jobId, meetingType, title, scheduledAt: requestedSchedule, attendees, topics }) : null;
+      if (entryKey && !/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('safety_briefing_entry_key_invalid', 'Safety briefing replay key must contain 8 to 200 safe characters.');
+      }
+      if (entryKey) {
+        const replay = this.db.prepare('SELECT * FROM safety_meetings WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+        if (replay) {
+          if (replay.entry_fingerprint !== entryFingerprint) {
+            throw ledgerInputError('safety_briefing_entry_key_reused', 'Safety briefing replay key was already used for different content.', { entryKey }, 409);
+          }
+          const meeting = this.getSafetyMeeting(replay.id, { jobId });
+          const approval = meeting.approvalId ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(meeting.approvalId) : null;
+          return { ...meeting, approval: approval ? this.mapApproval(approval) : null, replayed: true };
+        }
+      }
+      const id = makeId('safety_talk');
+      const storedStatus = completionStatuses.includes(requestedStatus) ? 'scheduled' : requestedStatus;
       this.db.prepare(`
-        INSERT INTO safety_meetings (id, job_id, meeting_type, title, status, facilitator, scheduled_at, completed_at, attendees_json, topics_json, approval_id, data_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO safety_meetings (
+          id, job_id, meeting_type, title, status, facilitator, scheduled_at, completed_at,
+          attendees_json, topics_json, approval_id, data_json, entry_key, entry_fingerprint, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        id,
-        jobId,
-        normalizeStatus(payload.meetingType || payload.meeting_type, 'toolbox_talk'),
-        normalizeText(payload.title, 'Toolbox talk'),
-        status,
-        payload.facilitator || payload.owner || actor,
-        payload.scheduledAt || payload.scheduled_at || futureIsoDate(1),
-        payload.completedAt || payload.completed_at || null,
-        toJson(attendees, []),
-        toJson(topics, []),
-        null,
+        id, jobId, meetingType, title, storedStatus, payload.facilitator || payload.owner || actor,
+        scheduledAt, null, toJson(attendees, []), toJson(topics, []), null,
         toJson({
           requestedStatus,
           notes: payload.notes || payload.note || null,
           vcaRelevant: payload.vcaRelevant !== false,
-          clientVisible: payload.clientVisible === true
+          clientVisible: payload.clientVisible === true,
+          source: payload.source || null
         }),
-        timestamp,
-        timestamp
+        entryKey, entryFingerprint, timestamp, timestamp
       );
-
-      let approval = null;
-      if (needsApproval) {
-        approval = this.createApproval({
-          targetType: 'safety_meeting',
-          targetId: id,
-          jobId,
-          approvalType: 'safety_meeting_signoff',
-          summary: `Approve safety talk ${normalizeText(payload.title, 'toolbox talk')}`,
-          reason: 'Completed safety meeting evidence can affect VCA/Wkb compliance records and requires approval before sign-off.',
-          data: { requestedStatus, attendees, topics }
-        }, { actor, audit: false });
-        this.db.prepare('UPDATE safety_meetings SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
-      }
-
-      const meeting = this.mapSafetyMeeting(this.db.prepare('SELECT * FROM safety_meetings WHERE id = ?').get(id));
+      this.seedSafetyMeetingAttendees(jobId, id, payload);
+      let meeting = this.getSafetyMeeting(id, { jobId });
       if (options.audit !== false) {
-        this.audit({ entityType: 'safety_meeting', entityId: id, jobId, action: 'record_safety_meeting', actor, after: meeting });
+        this.audit({ entityType: 'safety_meeting', entityId: id, jobId, action: 'record_safety_meeting', actor, after: meeting, metadata: { entryKey, externalCommitments: 0 } });
       }
-      return { ...meeting, approval };
+      if (completionStatuses.includes(requestedStatus)) {
+        const result = this.signOffSafetyMeeting(jobId, id, {
+          ...payload,
+          status: requestedStatus,
+          legacyAttendees: attendees,
+          evidenceReference: payload.evidenceReference || payload.evidence_reference || payload.notes || payload.note || 'Recorded attendance list'
+        }, options);
+        meeting = result.record;
+        return { ...meeting, approval: result.approval, replayed: false };
+      }
+      return { ...meeting, approval: null, replayed: false };
     });
   }
 
@@ -26767,6 +27326,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     this.requireJob(jobId);
     const actor = options.actor || 'Contractor.AI';
     const normalizedType = normalizeStatus(recordType, '');
+    const requestedLifecycleStatus = normalizeStatus(payload.status, '');
+    if (normalizedType === 'safety_meeting' && ['completed', 'approved', 'client_visible'].includes(requestedLifecycleStatus)) {
+      return this.signOffSafetyMeeting(jobId, recordId, {
+        ...payload,
+        status: requestedLifecycleStatus,
+        legacyAttendees: payload.legacyAttendees || payload.attendees,
+        evidenceReference: payload.evidenceReference || payload.evidence_reference || payload.notes || payload.note
+      }, { ...options, actor });
+    }
     const config = {
       task: {
         table: 'job_tasks',
@@ -30846,8 +31414,31 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       `)
         .run(approvedStatus, approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'safety_meeting') {
-      const meeting = this.db.prepare('SELECT data_json FROM safety_meetings WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(meeting?.data_json, {}).requestedStatus, 'completed');
+      const meeting = this.db.prepare('SELECT * FROM safety_meetings WHERE id = ?').get(targetId);
+      if (!meeting) throw ledgerInputError('safety_briefing_not_found', 'Safety briefing approval target no longer exists.', {}, 409);
+      const snapshot = fromJson(meeting.snapshot_json, null);
+      const attendeeRows = this.db.prepare('SELECT * FROM safety_meeting_attendees WHERE meeting_id = ? ORDER BY attendee_key, created_at').all(targetId);
+      const attendeeRecords = attendeeRows.map(row => this.mapSafetyMeetingAttendee(row));
+      const sourceHash = sha256Json(this.safetyMeetingSourceBasis(meeting, attendeeRows));
+      const attendanceValid = attendeeRecords.some(attendee => attendee.status === 'acknowledged')
+        && attendeeRecords.every(attendee => ['acknowledged', 'excused'].includes(attendee.status) && attendee.integrityValid === true);
+      const snapshotValid = Boolean(
+        snapshot
+        && meeting.snapshot_hash
+        && meeting.source_hash
+        && sha256Json(snapshot) === meeting.snapshot_hash
+        && snapshot.sourceHash === meeting.source_hash
+        && sourceHash === meeting.source_hash
+      );
+      if (!attendanceValid || !snapshotValid) {
+        throw ledgerInputError(
+          'safety_briefing_integrity_failed',
+          'Safety briefing evidence changed or is incomplete. Reopen the briefing and submit a fresh signoff request.',
+          { attendanceValid, snapshotValid },
+          409
+        );
+      }
+      const requestedStatus = normalizeStatus(fromJson(meeting.data_json, {}).requestedStatus, 'completed');
       const approvedStatus = ['completed', 'approved', 'client_visible'].includes(requestedStatus)
         ? requestedStatus
         : 'completed';
@@ -34269,7 +34860,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
       observations: this.db.prepare('SELECT * FROM observation_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapObservation(row)),
       incidents: this.db.prepare('SELECT * FROM incident_records WHERE job_id = ? ORDER BY occurred_at DESC, created_at DESC').all(jobId).map(row => this.mapIncident(row)),
-      safetyMeetings: this.db.prepare('SELECT * FROM safety_meetings WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapSafetyMeeting(row)),
+      safetyMeetings: this.db.prepare('SELECT id FROM safety_meetings WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.getSafetyMeeting(row.id, { jobId })),
       orientations: this.db.prepare('SELECT * FROM worker_orientations WHERE job_id = ? ORDER BY due_at DESC, created_at DESC').all(jobId).map(row => this.mapWorkerOrientation(row)),
       jhas: this.db.prepare('SELECT * FROM jha_records WHERE job_id = ? ORDER BY due_at DESC, created_at DESC').all(jobId).map(row => this.mapJha(row)),
       sdsSheets: this.db.prepare('SELECT * FROM sds_sheets WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapSdsSheet(row)),
@@ -36268,6 +36859,48 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'schedule_safety_meeting', jobId: job.id, severity: 'high', message: `${job.title} needs a pre-task safety talk for VCA/Wkb evidence.` });
     }
 
+    const safetyBriefingAttendanceGaps = this.db.prepare(`
+      SELECT meetings.id, meetings.job_id, meetings.title, meetings.scheduled_at, meetings.updated_at,
+        jobs.title AS job_title,
+        COUNT(attendees.id) AS attendee_count,
+        SUM(CASE WHEN attendees.status = 'expected' THEN 1 ELSE 0 END) AS outstanding_count,
+        SUM(CASE WHEN attendees.status = 'acknowledged' THEN 1 ELSE 0 END) AS acknowledged_count
+      FROM safety_meetings meetings
+      JOIN jobs ON jobs.id = meetings.job_id
+      LEFT JOIN safety_meeting_attendees attendees ON attendees.meeting_id = meetings.id
+      WHERE jobs.status IN ('scheduled', 'in_progress')
+        AND meetings.status IN ('scheduled', 'in_progress')
+        AND meetings.scheduled_at <= ?
+      GROUP BY meetings.id, meetings.job_id, meetings.title, meetings.scheduled_at, meetings.updated_at, jobs.title
+      HAVING COUNT(attendees.id) = 0
+        OR SUM(CASE WHEN attendees.status = 'expected' THEN 1 ELSE 0 END) > 0
+        OR SUM(CASE WHEN attendees.status = 'acknowledged' THEN 1 ELSE 0 END) = 0
+      ORDER BY meetings.scheduled_at, meetings.updated_at
+      LIMIT 10
+    `).all(nowIso());
+    for (const briefing of safetyBriefingAttendanceGaps) {
+      const sourceHash = sha256Json({
+        meetingId: briefing.id,
+        status: 'attendance_incomplete',
+        attendeeCount: Number(briefing.attendee_count || 0),
+        outstandingCount: Number(briefing.outstanding_count || 0),
+        acknowledgedCount: Number(briefing.acknowledged_count || 0),
+        updatedAt: briefing.updated_at
+      });
+      actions.push({
+        type: 'review_safety_briefing_attendance',
+        meetingId: briefing.id,
+        jobId: briefing.job_id,
+        severity: Number(briefing.outstanding_count || 0) > 0 ? 'high' : 'medium',
+        attendeeCount: Number(briefing.attendee_count || 0),
+        outstandingCount: Number(briefing.outstanding_count || 0),
+        acknowledgedCount: Number(briefing.acknowledged_count || 0),
+        sourceHash,
+        taskId: `task_${sha256Text(`safety-briefing-attendance:${briefing.id}:${sourceHash}`).slice(0, 24)}`,
+        message: `${briefing.job_title}: ${briefing.title} has incomplete retained attendance evidence.`
+      });
+    }
+
     const jobsWithoutOrientations = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.priority, jobs.risk_level
       FROM jobs
@@ -37131,6 +37764,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_permit_review',
       'create_inspection_review',
       'schedule_safety_meeting',
+      'review_safety_briefing_attendance',
       'schedule_orientation',
       'create_jha',
       'request_sds',
@@ -38610,6 +39244,38 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const safetyBriefingReviews = preview.filter(action => action.type === 'review_safety_briefing_attendance').slice(0, 10);
+        for (const action of safetyBriefingReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Complete safety briefing attendance: ${action.meetingId}`,
+            description: `${action.message} Confirm each expected attendee acknowledgement or retain an explicit excusal, then submit the briefing for approval-backed signoff. Do not infer attendance, acknowledge for a worker, or publish a compliance claim automatically.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(1),
+            source: 'safety_briefing_monitor',
+            data: {
+              safetyMeetingId: action.meetingId,
+              attendeeCount: action.attendeeCount,
+              outstandingCount: action.outstandingCount,
+              acknowledgedCount: action.acknowledgedCount,
+              sourceHash: action.sourceHash,
+              internalOnly: true,
+              externalCommitments: 0,
+              attendanceInferred: false
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, attendanceInferred: false });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_safety_briefing_attendance_task', actor, after: task,
+            metadata: { safetyMeetingId: action.meetingId, sourceHash: action.sourceHash, externalCommitments: 0, attendanceInferred: false }
+          });
+        }
+
         const materialReceiptReviews = preview.filter(action => action.type === 'review_material_receipt').slice(0, 10);
         for (const action of materialReceiptReviews) {
           const taskId = action.taskId || `task_${sha256Text(`material-receipt-review:${action.materialReceiptId || action.purchaseOrderId}:${action.sourceHash}`).slice(0, 24)}`;
@@ -39573,6 +40239,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (incidentsWithoutApproval) issues.push({ severity: 'warning', message: `${incidentsWithoutApproval} incident record(s) have no approval gate.` });
     const safetyMeetingsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM safety_meetings WHERE status IN ('completed', 'approved', 'client_visible') AND approval_id IS NULL").get().count || 0);
     if (safetyMeetingsWithoutApproval) issues.push({ severity: 'warning', message: `${safetyMeetingsWithoutApproval} completed safety meeting(s) have no approval gate.` });
+    for (const row of this.db.prepare("SELECT * FROM safety_meetings WHERE status IN ('pending_approval', 'completed', 'approved', 'client_visible')").all()) {
+      const meeting = this.getSafetyMeeting(row.id, { jobId: row.job_id });
+      if (meeting.integrityValid !== true || meeting.attendeeRecords.some(attendee => attendee.integrityValid !== true)) {
+        issues.push({ severity: 'error', message: `Safety briefing ${meeting.id} failed retained attendance or signoff snapshot verification.` });
+      }
+      const expectedApprovalStatus = meeting.status === 'pending_approval' ? 'pending' : 'approved';
+      const approval = meeting.approvalId
+        ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'safety_meeting' AND target_id = ? AND status = ?").get(meeting.approvalId, meeting.id, expectedApprovalStatus)
+        : null;
+      if (!approval) {
+        issues.push({ severity: 'error', message: `Safety briefing ${meeting.id} lacks its matching ${expectedApprovalStatus} signoff approval.` });
+      }
+    }
+    for (const row of this.db.prepare("SELECT * FROM safety_meeting_attendees WHERE status IN ('acknowledged', 'excused')").all()) {
+      const attendee = this.mapSafetyMeetingAttendee(row);
+      if (attendee.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `Safety briefing attendee ${attendee.id} failed retained acknowledgement verification.` });
+      }
+    }
     const orientationsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_orientations WHERE status IN ('completed', 'approved', 'cleared', 'valid') AND approval_id IS NULL").get().count || 0);
     if (orientationsWithoutApproval) issues.push({ severity: 'warning', message: `${orientationsWithoutApproval} completed worker orientation(s) have no approval gate.` });
     const jhasWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM jha_records WHERE (risk_level IN ('high', 'critical') OR status IN ('approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible')) AND approval_id IS NULL").get().count || 0);
@@ -39795,6 +40480,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         observationRecords: this.count('observation_records'),
         incidentRecords: this.count('incident_records'),
         safetyMeetings: this.count('safety_meetings'),
+        safetyMeetingAttendees: this.count('safety_meeting_attendees'),
         orientations: this.count('worker_orientations'),
         jhas: this.count('jha_records'),
         sdsSheets: this.count('sds_sheets'),
@@ -40686,10 +41372,47 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       attendees: fromJson(row.attendees_json, []),
       topics: fromJson(row.topics_json, []),
       approvalId: row.approval_id,
+      evidenceReference: row.evidence_reference || null,
+      sourceHash: row.source_hash || null,
+      snapshotHash: row.snapshot_hash || null,
+      snapshot: fromJson(row.snapshot_json, null),
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
       data: fromJson(row.data_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
+  }
+
+  mapSafetyMeetingAttendee(row) {
+    const data = fromJson(row.data_json, {});
+    const status = normalizeStatus(row.status, 'expected');
+    const attendee = {
+      id: row.id,
+      meetingId: row.meeting_id,
+      jobId: row.job_id,
+      assignmentId: row.assignment_id || null,
+      workerId: row.worker_id || null,
+      attendeeKey: row.attendee_key,
+      attendeeName: row.attendee_name,
+      company: row.company || null,
+      status,
+      acknowledgedAt: row.acknowledged_at || null,
+      acknowledgedBy: row.acknowledged_by || null,
+      evidenceReference: row.evidence_reference || null,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+    attendee.integrityValid = ['acknowledged', 'excused'].includes(status)
+      ? Boolean(row.entry_fingerprint && sha256Json(this.safetyMeetingAttendeeEvidenceBasis({
+        ...attendee,
+        attestation: data.attestation || null
+      })) === row.entry_fingerprint)
+      : null;
+    return attendee;
   }
 
   mapWorkerOrientation(row) {

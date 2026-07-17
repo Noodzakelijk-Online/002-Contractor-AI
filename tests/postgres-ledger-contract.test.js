@@ -1370,7 +1370,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '040_governed_environmental_reporting');
+    assert.equal(migrations.currentVersion, '041_governed_safety_briefings');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1451,12 +1451,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('040_governed_environmental_reporting'));
+  assert.deepEqual(versions, Array(4).fill('041_governed_safety_briefings'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-  assert.equal(Number(migrationCount.count), 40);
+    assert.equal(Number(migrationCount.count), 41);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1988,7 +1988,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '040_governed_environmental_reporting');
+    assert.equal(ledger.migrationStatus().currentVersion, '041_governed_safety_briefings');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
