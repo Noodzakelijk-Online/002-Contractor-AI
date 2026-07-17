@@ -24,13 +24,13 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'project-execution',
     label: 'Project execution ledger',
     vendors: ['Procore', 'Autodesk', 'Buildertrend', 'Contractor Foreman'],
-    capabilities: ['jobs', 'tasks', 'schedule', 'site visits', 'change orders', 'RFIs', 'submittals', 'meeting minutes', 'daily logs', 'photos', 'documents', 'punch and closeout'],
+    capabilities: ['jobs', 'tasks', 'schedule', 'site visits', 'daywork tickets', 'change orders', 'RFIs', 'submittals', 'meeting minutes', 'daily logs', 'photos', 'documents', 'punch and closeout'],
     sourceEvidence: [
       'Procore lists project management, schedule, site diary, observations, submittals, photos, snag/punch and closeout-style execution tools.',
       'Buildertrend and Contractor Foreman emphasize schedules, change orders, daily logs, punch lists, work orders and document control.'
     ],
     serviceGroups: [
-      { name: 'Execution control', services: ['Job tasks', 'schedule plan', 'change control', 'RFI trail', 'submittal package', 'meeting minutes and actions'] },
+      { name: 'Execution control', services: ['Job tasks', 'schedule plan', 'daywork / meerwerk capture', 'change control', 'RFI trail', 'submittal package', 'meeting minutes and actions'] },
       { name: 'Evidence and closeout', services: ['Daily report', 'documents/photos', 'punch list', 'handover readiness'] }
     ]
   },
@@ -44,7 +44,7 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
       'Procore adds daywork sheets, resource tracking, timecards and equipment visibility.'
     ],
     serviceGroups: [
-      { name: 'Field capture', services: ['Progress update', 'daily field report', 'photo evidence', 'time log'] },
+      { name: 'Field capture', services: ['Progress update', 'daily field report', 'daywork / meerwerk quantities', 'photo evidence', 'time log'] },
       { name: 'Production resources', services: ['Material needs', 'tool/equipment reservation', 'equipment custody and return', 'worker availability', 'worker instruction', 'production variance'] }
     ]
   },
@@ -121,6 +121,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'job', label: 'Job package', table: 'jobs', detailKey: 'id' },
     { key: 'tasks', label: 'Tasks', table: 'job_tasks', detailKey: 'tasks' },
     { key: 'schedule', label: 'Route or schedule plan', table: 'route_plans', detailKey: 'routePlans' },
+    { key: 'daywork', label: 'Daywork / meerwerk tickets', table: 'daywork_tickets', detailKey: 'dayworkTickets' },
     { key: 'change_order', label: 'Change control', table: 'change_orders', detailKey: 'changeOrders' },
     { key: 'rfi', label: 'RFI trail', table: 'rfi_records', detailKey: 'rfis' },
     { key: 'submittal', label: 'Submittals', table: 'submittal_records', detailKey: 'submittals' },
@@ -135,6 +136,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'production_baseline', label: 'Approved production baseline', table: 'production_baselines', detailKey: 'productionBaselines', readyStatuses: ['approved'] },
     { key: 'production_output', label: 'Installed production output', table: 'production_entries', detailKey: 'productionEntries', readyStatuses: ['recorded'] },
     { key: 'field_report', label: 'Daily report', table: 'field_reports', detailKey: 'fieldReports' },
+    { key: 'daywork', label: 'Daywork / meerwerk quantities', table: 'daywork_tickets', detailKey: 'dayworkTickets' },
     { key: 'time', label: 'Time tracking', table: 'time_logs', detailKey: 'timeLogs' },
     { key: 'timesheet', label: 'Approved weekly timesheet', table: 'weekly_timesheets', readyStatuses: ['approved'], ledgerOnly: true },
     { key: 'attendance', label: 'Site attendance and labor map', table: 'attendance_sessions', detailKey: 'attendanceSessions', readyStatuses: ['checked_in', 'checked_out'] },
@@ -415,9 +417,58 @@ const BID_PARTICIPANT_STATUSES = new Set([
 const TAKEOFF_STATUSES = new Set(['draft', 'converted', 'cancelled']);
 const TAKEOFF_MEASUREMENT_TYPES = new Set(['count', 'linear', 'area', 'volume', 'manual']);
 const TAKEOFF_CATEGORIES = new Set(['material', 'labor', 'equipment', 'subcontract', 'other']);
+const DAYWORK_TICKET_FORMAT = 'contractor-ai-daywork-ticket/v1';
+const DAYWORK_LINE_TYPES = new Set(['labor', 'material', 'equipment', 'subcontract', 'other']);
 
 function roundQuantity(value) {
   return Math.round((Number(value) + Number.EPSILON) * 10_000) / 10_000;
+}
+
+function normalizeDayworkLines(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50) {
+    throw ledgerInputError('daywork_lines_required', 'Daywork capture requires between 1 and 50 observed quantity lines.');
+  }
+  const lineKeys = new Set();
+  return value.map((item, index) => {
+    const lineKey = normalizeText(item?.lineKey || item?.line_key, `line_${index + 1}`);
+    if (!/^[A-Za-z0-9._:-]{1,80}$/.test(lineKey) || lineKeys.has(lineKey)) {
+      throw ledgerInputError('daywork_line_key_invalid', 'Every daywork line requires a unique safe line key of 1 to 80 characters.');
+    }
+    lineKeys.add(lineKey);
+    const lineType = normalizeStatus(item?.lineType || item?.line_type || item?.type, 'labor');
+    if (!DAYWORK_LINE_TYPES.has(lineType)) {
+      throw ledgerInputError('daywork_line_type_invalid', `Daywork line type must be one of: ${[...DAYWORK_LINE_TYPES].join(', ')}.`);
+    }
+    const description = normalizeText(item?.description || item?.title || item?.name, '');
+    if (description.length < 2 || description.length > 240) {
+      throw ledgerInputError('daywork_line_description_invalid', 'Daywork line description must be between 2 and 240 characters.');
+    }
+    const quantity = roundQuantity(normalizeNumber(item?.quantity, 0));
+    if (!(quantity > 0) || quantity > 1_000_000_000) {
+      throw ledgerInputError('daywork_line_quantity_invalid', 'Daywork line quantity must be greater than zero and no more than 1,000,000,000.');
+    }
+    const unit = normalizeText(item?.unit, lineType === 'labor' || lineType === 'equipment' ? 'hour' : 'unit');
+    if (unit.length < 1 || unit.length > 24) {
+      throw ledgerInputError('daywork_line_unit_invalid', 'Daywork line unit must be between 1 and 24 characters.');
+    }
+    const costCode = normalizeText(item?.costCode || item?.cost_code, `DAYWORK_${lineType}`).toUpperCase();
+    if (costCode.length < 2 || costCode.length > 80) {
+      throw ledgerInputError('daywork_line_cost_code_invalid', 'Daywork line cost code must be between 2 and 80 characters.');
+    }
+    const sourceReference = normalizeText(item?.sourceReference || item?.source_reference, '');
+    if (sourceReference.length > 240) {
+      throw ledgerInputError('daywork_line_source_reference_invalid', 'Daywork line source reference must be 240 characters or fewer.');
+    }
+    return {
+      lineKey,
+      lineType,
+      description,
+      quantity,
+      unit,
+      costCode,
+      sourceReference: sourceReference || null
+    };
+  });
 }
 
 function takeoffNumber(value, label, options = {}) {
@@ -569,6 +620,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     job: 'job_update_form',
     tasks: 'task_form',
     schedule: 'route_plan_form',
+    daywork: 'daywork_form',
     change_order: 'change_order_form',
     rfi: 'rfi_form',
     submittal: 'submittal_form',
@@ -3280,6 +3332,63 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON work_permit_attendees(worker_id, status, updated_at DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_work_permit_attendees_job_entry_key
           ON work_permit_attendees(job_id, entry_key) WHERE entry_key IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '043_governed_daywork_tickets',
+    description: 'Retain replay-safe daywork and meerwerk quantity evidence, approval-backed acknowledgement, and source-bound change-order conversion.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS daywork_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS daywork_tickets (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          ticket_number TEXT NOT NULL,
+          work_date TEXT NOT NULL,
+          worker_id TEXT,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          evidence_reference TEXT NOT NULL,
+          evidence_document_id TEXT,
+          lines_json TEXT NOT NULL DEFAULT '[]',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL,
+          entry_fingerprint TEXT NOT NULL,
+          approval_id TEXT,
+          acknowledgement_approval_id TEXT,
+          acknowledgement_reference TEXT,
+          acknowledged_at TEXT,
+          acknowledged_by TEXT,
+          change_order_id TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          FOREIGN KEY(evidence_document_id) REFERENCES documents(id) ON DELETE SET NULL,
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          FOREIGN KEY(acknowledgement_approval_id) REFERENCES approvals(id),
+          FOREIGN KEY(change_order_id) REFERENCES change_orders(id) ON DELETE SET NULL,
+          UNIQUE(job_id, ticket_number),
+          UNIQUE(job_id, entry_key),
+          UNIQUE(change_order_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daywork_job_status_date
+          ON daywork_tickets(job_id, status, work_date DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_daywork_worker_date
+          ON daywork_tickets(worker_id, work_date DESC, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_daywork_pending_acknowledgement
+          ON daywork_tickets(acknowledgement_approval_id)
+          WHERE acknowledgement_approval_id IS NOT NULL AND acknowledgement_reference IS NULL;
       `);
     }
   }
@@ -13404,6 +13513,507 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
       return siteVisit;
+    });
+  }
+
+  allocateDayworkTicketNumber(workDate = nowIso()) {
+    const periodYear = new Date(workDate).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('daywork_date_invalid', 'Daywork date could not be used for durable numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO daywork_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE daywork_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw ledgerInputError('daywork_number_allocation_failed', 'A durable daywork ticket number could not be allocated.', null, 500);
+    }
+    return `DW-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  dayworkTicketFingerprint(payload = {}) {
+    return sha256Json({
+      jobId: normalizeText(payload.jobId, ''),
+      workerId: normalizeText(payload.workerId, '') || null,
+      workDate: normalizeText(payload.workDate, ''),
+      title: normalizeText(payload.title, ''),
+      description: normalizeText(payload.description, ''),
+      reason: normalizeText(payload.reason, ''),
+      evidenceReference: normalizeText(payload.evidenceReference, ''),
+      evidenceDocumentId: normalizeText(payload.evidenceDocumentId, '') || null,
+      lines: (payload.lines || []).map(line => ({
+        lineKey: line.lineKey,
+        lineType: line.lineType,
+        description: line.description,
+        quantity: roundQuantity(line.quantity),
+        unit: line.unit,
+        costCode: line.costCode,
+        sourceReference: line.sourceReference || null
+      })),
+      notes: normalizeText(payload.notes, '') || null
+    });
+  }
+
+  dayworkTicketSourceBasis(payload = {}) {
+    return {
+      format: DAYWORK_TICKET_FORMAT,
+      id: payload.id,
+      ticketNumber: payload.ticketNumber,
+      jobId: payload.jobId,
+      workerId: payload.workerId || null,
+      workerName: payload.workerName || null,
+      workDate: payload.workDate,
+      title: payload.title,
+      description: payload.description,
+      reason: payload.reason,
+      evidenceReference: payload.evidenceReference,
+      evidenceDocumentId: payload.evidenceDocumentId || null,
+      lines: (payload.lines || []).map(line => ({ ...line })),
+      notes: payload.notes || null,
+      entryFingerprint: payload.entryFingerprint
+    };
+  }
+
+  getDayworkTicket(ticketId, options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const row = this.db.prepare(`
+      SELECT daywork_tickets.*, workers.name AS retained_worker_name
+      FROM daywork_tickets
+      LEFT JOIN workers ON workers.id = daywork_tickets.worker_id
+      WHERE daywork_tickets.id = ? AND (? = '' OR daywork_tickets.job_id = ?)
+    `).get(String(ticketId || ''), jobId, jobId);
+    if (!row) throw ledgerInputError('daywork_ticket_not_found', 'Daywork ticket not found.', { ticketId }, 404);
+    return this.mapDayworkTicket(row);
+  }
+
+  listDayworkTickets(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const limit = safeLimit(filters.limit, 100, 5_000);
+    return this.db.prepare(`
+      SELECT daywork_tickets.*, workers.name AS retained_worker_name
+      FROM daywork_tickets
+      LEFT JOIN workers ON workers.id = daywork_tickets.worker_id
+      WHERE (? = '' OR daywork_tickets.job_id = ?)
+        AND (? = '' OR daywork_tickets.worker_id = ?)
+        AND (? = '' OR daywork_tickets.status = ?)
+      ORDER BY daywork_tickets.work_date DESC, daywork_tickets.created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, workerId, workerId, status, status, limit).map(row => this.mapDayworkTicket(row));
+  }
+
+  createDayworkTicket(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('daywork_entry_key_required', 'Daywork capture requires a stable entry key containing 8 to 200 safe characters.');
+      }
+      const retainedWorkDate = normalizeRetainedDate(payload.workDate || payload.work_date, {
+        required: true,
+        label: 'Daywork date',
+        code: 'daywork_date_required'
+      });
+      const workDate = retainedWorkDate.slice(0, 10);
+      const workTimestamp = Date.parse(`${workDate}T23:59:59.999Z`);
+      if (workTimestamp > Date.now() + 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('daywork_date_future', 'Daywork date cannot be in the future.');
+      }
+      if (workTimestamp < Date.now() - 366 * 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('daywork_date_too_old', 'Daywork older than one year requires a controlled historical import.');
+      }
+      const title = normalizeText(payload.title, '');
+      const description = normalizeText(payload.description || payload.workCompleted || payload.work_completed, '');
+      const reason = normalizeText(payload.reason || payload.cause, '');
+      if (title.length < 2 || title.length > 240) {
+        throw ledgerInputError('daywork_title_invalid', 'Daywork title must be between 2 and 240 characters.');
+      }
+      if (description.length < 3 || description.length > 4_000) {
+        throw ledgerInputError('daywork_description_invalid', 'Daywork description must be between 3 and 4,000 characters.');
+      }
+      if (reason.length < 3 || reason.length > 2_000) {
+        throw ledgerInputError('daywork_reason_invalid', 'Daywork reason must be between 3 and 2,000 characters.');
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('daywork_evidence_required', 'Daywork evidence reference must be between 3 and 500 characters.');
+      }
+      const notes = normalizeText(payload.notes, '');
+      if (notes.length > 2_000) throw ledgerInputError('daywork_notes_invalid', 'Daywork notes must be 2,000 characters or fewer.');
+      const lines = normalizeDayworkLines(payload.lines);
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '') || null;
+      let worker = null;
+      if (workerId) {
+        worker = this.getWorker(workerId);
+        if (!this.resolveCrewAssignment(jobId, { workerId })) {
+          throw ledgerInputError('daywork_worker_job_scope_required', 'Daywork worker must have an active retained assignment to this job.', { jobId, workerId }, 409);
+        }
+      }
+      const workerName = worker?.name || normalizeText(payload.workerName || payload.worker_name, '') || null;
+      const evidenceDocumentId = normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null;
+      if (evidenceDocumentId) {
+        const document = this.db.prepare('SELECT id, job_id, status FROM documents WHERE id = ?').get(evidenceDocumentId);
+        if (!document || document.job_id !== jobId || !['stored', 'approved', 'current'].includes(normalizeStatus(document.status, ''))) {
+          throw ledgerInputError('daywork_evidence_document_invalid', 'Daywork evidence document must be a current retained document on the same job.', { evidenceDocumentId }, 409);
+        }
+      }
+      const normalized = {
+        jobId,
+        workerId,
+        workDate,
+        title,
+        description,
+        reason,
+        evidenceReference,
+        evidenceDocumentId,
+        lines,
+        notes: notes || null
+      };
+      const entryFingerprint = this.dayworkTicketFingerprint(normalized);
+      const replay = this.db.prepare('SELECT * FROM daywork_tickets WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('daywork_entry_key_reused', 'This daywork retry key is already bound to different retained content.', { ticketId: replay.id }, 409);
+        }
+        return {
+          ticket: this.getDayworkTicket(replay.id),
+          approval: replay.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id)) : null,
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      const id = makeId('daywork');
+      const timestamp = nowIso();
+      const ticketNumber = this.allocateDayworkTicketNumber(`${workDate}T12:00:00.000Z`);
+      const sourceBasis = this.dayworkTicketSourceBasis({
+        id,
+        ticketNumber,
+        jobId,
+        workerId,
+        workerName,
+        workDate,
+        title,
+        description,
+        reason,
+        evidenceReference,
+        evidenceDocumentId,
+        lines,
+        notes: notes || null,
+        entryFingerprint
+      });
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = { ...sourceBasis, sourceHash, retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      this.db.prepare(`
+        INSERT INTO daywork_tickets (
+          id, job_id, ticket_number, work_date, worker_id, title, description, reason, status,
+          evidence_reference, evidence_document_id, lines_json, source_hash, snapshot_hash, snapshot_json,
+          entry_key, entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, ticketNumber, workDate, workerId, title, description, reason,
+        evidenceReference, evidenceDocumentId, toJson(lines, []), sourceHash, snapshotHash, toJson(snapshot),
+        entryKey, entryFingerprint, toJson({
+          workerName,
+          notes: notes || null,
+          submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+          source: normalizeText(payload.source, 'daywork_ticket'),
+          pricingControlledByOffice: true,
+          externalCommitments: 0,
+          fundsMoved: false
+        }), timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'daywork_ticket',
+        targetId: id,
+        jobId,
+        approvalType: 'daywork_record_review',
+        summary: `Review daywork ticket ${ticketNumber}: ${title}`,
+        reason: 'Observed work, quantities, job scope, responsible worker, and evidence must be verified before this ticket can support commercial change control.',
+        data: {
+          ticketNumber,
+          workDate,
+          workerId,
+          workerName,
+          title,
+          lineCount: lines.length,
+          sourceHash,
+          snapshotHash,
+          evidenceReference,
+          externalCommitments: 0,
+          fundsMoved: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE daywork_tickets SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const ticket = this.getDayworkTicket(id);
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'daywork_ticket', entityId: id, jobId, action: 'submit_daywork_ticket', actor, after: ticket,
+          metadata: { approvalId: approval.id, entryKey, entryFingerprint, sourceHash, snapshotHash, externalCommitments: 0, fundsMoved: false }
+        });
+      }
+      return { ticket, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyDayworkTicketApproval(ticketId, timestamp = nowIso()) {
+    const ticket = this.getDayworkTicket(ticketId);
+    if (ticket.status === 'approved' || ticket.status === 'acknowledged' || ticket.status === 'converted') return ticket;
+    if (ticket.status !== 'pending_approval') {
+      throw ledgerInputError('daywork_approval_state_conflict', `Daywork ticket cannot be approved from ${ticket.status}.`, { ticketId }, 409);
+    }
+    if (!ticket.integrityValid) {
+      throw ledgerInputError('daywork_integrity_failed', 'Daywork approval requires an intact immutable quantity snapshot.', { ticketId }, 409);
+    }
+    const approval = ticket.approvalId
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'daywork_ticket' AND target_id = ? AND status = 'approved'").get(ticket.approvalId, ticketId)
+      : null;
+    if (!approval) throw ledgerInputError('daywork_approval_missing', 'Daywork ticket requires its matching approved decision.', { ticketId }, 409);
+    const approvalData = fromJson(approval.data_json, {});
+    if (approvalData.sourceHash !== ticket.sourceHash || approvalData.snapshotHash !== ticket.snapshotHash) {
+      throw ledgerInputError('daywork_approval_source_changed', 'Daywork approval no longer matches the retained ticket source.', { ticketId }, 409);
+    }
+    this.db.prepare("UPDATE daywork_tickets SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'pending_approval'").run(timestamp, ticketId);
+    return this.getDayworkTicket(ticketId);
+  }
+
+  requestDayworkAcknowledgement(jobId, ticketId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const ticket = this.getDayworkTicket(ticketId, { jobId });
+      if (ticket.status === 'acknowledged' || ticket.status === 'converted') {
+        return { ticket, approval: ticket.acknowledgementApprovalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(ticket.acknowledgementApprovalId)) : null, replayed: true };
+      }
+      if (ticket.status !== 'approved') {
+        throw ledgerInputError('daywork_acknowledgement_state_conflict', 'Client acknowledgement evidence can be recorded only after internal daywork approval.', { ticketId, status: ticket.status }, 409);
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const acknowledgedBy = normalizeText(payload.acknowledgedBy || payload.acknowledged_by || payload.clientName || payload.client_name, '');
+      const acknowledgedAt = normalizeRetainedDate(payload.acknowledgedAt || payload.acknowledged_at, {
+        required: true,
+        label: 'Acknowledgement date',
+        code: 'daywork_acknowledgement_date_required'
+      });
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('daywork_acknowledgement_evidence_required', 'Daywork acknowledgement evidence reference must be between 3 and 500 characters.');
+      }
+      if (acknowledgedBy.length < 2 || acknowledgedBy.length > 160) {
+        throw ledgerInputError('daywork_acknowledgement_name_required', 'Daywork acknowledgement name must be between 2 and 160 characters.');
+      }
+      if (Date.parse(acknowledgedAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('daywork_acknowledgement_date_future', 'Daywork acknowledgement date cannot be in the future.');
+      }
+      const acknowledgementNotes = normalizeText(payload.notes, '') || null;
+      if (acknowledgementNotes && acknowledgementNotes.length > 2_000) {
+        throw ledgerInputError('daywork_acknowledgement_notes_invalid', 'Daywork acknowledgement notes must be 2,000 characters or fewer.');
+      }
+      const existing = ticket.acknowledgementApprovalId
+        ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(ticket.acknowledgementApprovalId)
+        : null;
+      if (existing?.status === 'pending') {
+        const retained = fromJson(existing.data_json, {});
+        if (
+          retained.evidenceReference !== evidenceReference
+          || retained.acknowledgedBy !== acknowledgedBy
+          || retained.acknowledgedAt !== acknowledgedAt
+          || (retained.notes || null) !== acknowledgementNotes
+        ) {
+          throw ledgerInputError(
+            'daywork_acknowledgement_pending_conflict',
+            'A different acknowledgement evidence review is already pending for this daywork ticket.',
+            { ticketId, approvalId: existing.id },
+            409
+          );
+        }
+        return { ticket, approval: this.mapApproval(existing), replayed: true, externalCommitments: 0 };
+      }
+      const actor = options.actor || 'Contractor.AI';
+      const approval = this.createApproval({
+        targetType: 'daywork_acknowledgement',
+        targetId: ticketId,
+        jobId,
+        approvalType: 'daywork_acknowledgement_review',
+        summary: `Verify acknowledgement evidence for ${ticket.ticketNumber}`,
+        reason: 'Acknowledgement confirms receipt of the retained site record only. It does not accept price, alter scope, or authorize work.',
+        data: {
+          ticketId,
+          ticketNumber: ticket.ticketNumber,
+          sourceHash: ticket.sourceHash,
+          snapshotHash: ticket.snapshotHash,
+          evidenceReference,
+          acknowledgedBy,
+          acknowledgedAt,
+          notes: acknowledgementNotes,
+          changesContractValue: false,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      const data = ticket.data || {};
+      this.db.prepare('UPDATE daywork_tickets SET acknowledgement_approval_id = ?, data_json = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, toJson({ ...data, pendingAcknowledgement: { approvalId: approval.id, requestedAt: nowIso(), requestedBy: actor } }), nowIso(), ticketId);
+      const after = this.getDayworkTicket(ticketId);
+      this.audit({
+        entityType: 'daywork_ticket', entityId: ticketId, jobId, action: 'request_daywork_acknowledgement_review', actor,
+        before: ticket, after, metadata: { approvalId: approval.id, evidenceReference, changesContractValue: false, externalCommitments: 0 }
+      });
+      return { ticket: after, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyDayworkAcknowledgementApproval(ticketId, timestamp = nowIso()) {
+    const ticket = this.getDayworkTicket(ticketId);
+    if (ticket.status === 'acknowledged' || ticket.status === 'converted') return ticket;
+    if (ticket.status !== 'approved' || !ticket.integrityValid) {
+      throw ledgerInputError('daywork_acknowledgement_state_conflict', 'Daywork acknowledgement requires a current approved ticket snapshot.', { ticketId, status: ticket.status }, 409);
+    }
+    const approval = ticket.acknowledgementApprovalId
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'daywork_acknowledgement' AND target_id = ? AND status = 'approved'").get(ticket.acknowledgementApprovalId, ticketId)
+      : null;
+    if (!approval) throw ledgerInputError('daywork_acknowledgement_approval_missing', 'Daywork acknowledgement requires its matching approved decision.', { ticketId }, 409);
+    const evidence = fromJson(approval.data_json, {});
+    if (evidence.sourceHash !== ticket.sourceHash || evidence.snapshotHash !== ticket.snapshotHash) {
+      throw ledgerInputError('daywork_acknowledgement_source_changed', 'Daywork acknowledgement no longer matches the retained ticket source.', { ticketId }, 409);
+    }
+    const data = ticket.data || {};
+    this.db.prepare(`
+      UPDATE daywork_tickets
+      SET status = 'acknowledged', acknowledgement_reference = ?, acknowledged_at = ?, acknowledged_by = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'approved'
+    `).run(
+      evidence.evidenceReference, evidence.acknowledgedAt, evidence.acknowledgedBy,
+      toJson({ ...data, acknowledgement: { ...evidence, approvalId: approval.id, verifiedAt: approval.resolved_at, verifiedBy: approval.resolved_by }, pendingAcknowledgement: null }),
+      timestamp, ticketId
+    );
+    return this.getDayworkTicket(ticketId);
+  }
+
+  convertDayworkTicketToChangeOrder(jobId, ticketId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const before = this.getDayworkTicket(ticketId, { jobId });
+      if (!before.integrityValid || (!before.changeOrderId && !['approved', 'acknowledged'].includes(before.status))) {
+        throw ledgerInputError('daywork_conversion_not_ready', 'Daywork conversion requires an intact approved ticket.', { ticketId, status: before.status }, 409);
+      }
+      const prices = Array.isArray(payload.prices || payload.linePrices || payload.line_prices)
+        ? (payload.prices || payload.linePrices || payload.line_prices)
+        : [];
+      const priceByKey = new Map();
+      for (const price of prices) {
+        const lineKey = normalizeText(price?.lineKey || price?.line_key, '');
+        if (!lineKey || priceByKey.has(lineKey)) {
+          throw ledgerInputError('daywork_price_line_invalid', 'Every daywork price must identify one unique retained line.');
+        }
+        const unitPrice = roundMoney(normalizeNumber(price?.unitPrice ?? price?.unit_price, -1));
+        if (unitPrice < 0 || unitPrice > 1_000_000_000) {
+          throw ledgerInputError('daywork_unit_price_invalid', 'Daywork unit price must be between zero and 1,000,000,000.');
+        }
+        priceByKey.set(lineKey, unitPrice);
+      }
+      const lineItems = before.lines.map(line => {
+        if (!priceByKey.has(line.lineKey)) {
+          throw ledgerInputError('daywork_price_missing', `Commercial pricing is missing for daywork line ${line.lineKey}.`, { lineKey: line.lineKey });
+        }
+        return {
+          description: `${line.lineType.charAt(0).toUpperCase()}${line.lineType.slice(1).replace(/_/g, ' ')}: ${line.description}`.slice(0, 240),
+          quantity: line.quantity,
+          unit: line.unit,
+          unitPrice: priceByKey.get(line.lineKey),
+          costCode: line.costCode,
+          sourceReference: line.sourceReference || before.evidenceReference
+        };
+      });
+      if (priceByKey.size !== before.lines.length) {
+        const retainedLineKeys = new Set(before.lines.map(line => line.lineKey));
+        const unknownLineKeys = [...priceByKey.keys()].filter(lineKey => !retainedLineKeys.has(lineKey));
+        throw ledgerInputError(
+          'daywork_price_line_unknown',
+          'Commercial pricing may only reference retained daywork lines.',
+          { unknownLineKeys }
+        );
+      }
+      const amount = roundMoney(lineItems.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0));
+      if (!(amount > 0)) throw ledgerInputError('daywork_price_total_invalid', 'Daywork commercial pricing must produce a positive net change.');
+      const actor = options.actor || 'Contractor.AI';
+      const generatedTitle = `${before.ticketNumber}: ${before.title}`.slice(0, 240);
+      const generatedScope = `${before.description}\nReason: ${before.reason}`.slice(0, 4_000);
+      const scheduleDeltaDays = normalizeNumber(payload.scheduleDeltaDays ?? payload.schedule_delta_days, 0);
+      if (!Number.isFinite(scheduleDeltaDays) || Math.abs(scheduleDeltaDays) > 3650) {
+        throw ledgerInputError('change_order_schedule_delta_invalid', 'Schedule impact must be between -3,650 and 3,650 days.');
+      }
+      const changeOrderPayload = {
+        title: normalizeText(payload.title, generatedTitle),
+        scopeDelta: normalizeText(payload.scopeDelta || payload.scope_delta, generatedScope),
+        lineItems,
+        taxRate: normalizeCommercialTaxRate(payload.taxRate ?? payload.tax_rate, 21),
+        currency: normalizeCommercialCurrency(payload.currency || 'EUR'),
+        scheduleDeltaDays,
+        status: 'submitted',
+        notes: normalizeText(payload.notes, '') || `Converted from approved daywork ticket ${before.ticketNumber}.`,
+        source: {
+          type: 'daywork_ticket',
+          id: before.id,
+          ticketNumber: before.ticketNumber,
+          sourceHash: before.sourceHash,
+          snapshotHash: before.snapshotHash,
+          acknowledged: Boolean(before.acknowledgementReference),
+          acknowledgementReference: before.acknowledgementReference || null
+        }
+      };
+      const requestHash = sha256Json(changeOrderPayload);
+      if (before.changeOrderId) {
+        const storedRequestHash = before.data?.conversion?.requestHash;
+        if (!storedRequestHash || storedRequestHash !== requestHash) {
+          throw ledgerInputError(
+            'daywork_conversion_conflict',
+            'Daywork ticket was already converted with a different commercial request.',
+            { ticketId, changeOrderId: before.changeOrderId },
+            409
+          );
+        }
+        const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(before.changeOrderId, jobId);
+        if (!row) throw ledgerInputError('daywork_change_order_missing', 'Daywork ticket references a missing change order.', { ticketId, changeOrderId: before.changeOrderId }, 409);
+        return { ticket: before, changeOrder: this.mapChangeOrder(row), replayed: true, externalCommitments: 0 };
+      }
+      const changeOrder = this.createChangeOrder(jobId, changeOrderPayload, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE daywork_tickets
+        SET status = 'converted', change_order_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND change_order_id IS NULL
+      `).run(changeOrder.id, toJson({
+        ...(before.data || {}),
+        conversion: {
+          changeOrderId: changeOrder.id,
+          convertedAt: timestamp,
+          convertedBy: actor,
+          netAmount: changeOrder.amount,
+          taxAmount: changeOrder.taxAmount,
+          total: changeOrder.total,
+          currency: changeOrder.currency,
+          pricingHash: sha256Json(lineItems),
+          requestHash
+        }
+      }), timestamp, ticketId);
+      const ticket = this.getDayworkTicket(ticketId);
+      this.audit({
+        entityType: 'daywork_ticket', entityId: ticketId, jobId, action: 'convert_daywork_to_change_order', actor,
+        before, after: ticket, metadata: { changeOrderId: changeOrder.id, approvalId: changeOrder.approvalId, netAmount: changeOrder.amount, externalCommitments: 0 }
+      });
+      this.audit({
+        entityType: 'change_order', entityId: changeOrder.id, jobId, action: 'create_change_order_from_daywork', actor,
+        after: changeOrder, metadata: { dayworkTicketId: ticketId, dayworkSourceHash: before.sourceHash, approvalId: changeOrder.approvalId, externalCommitments: 0 }
+      });
+      return { ticket, changeOrder, replayed: false, externalCommitments: 0 };
     });
   }
 
@@ -30641,6 +31251,43 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             }
           }), timestamp, before.target_id);
         }
+      } else if (before.target_type === 'daywork_ticket') {
+        const row = this.db.prepare('SELECT * FROM daywork_tickets WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE daywork_tickets
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            approvalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
+      } else if (before.target_type === 'daywork_acknowledgement') {
+        const row = this.db.prepare('SELECT * FROM daywork_tickets WHERE id = ?').get(before.target_id);
+        if (row && row.acknowledgement_approval_id === approvalId) {
+          this.db.prepare(`
+            UPDATE daywork_tickets
+            SET data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(toJson({
+            ...fromJson(row.data_json, {}),
+            pendingAcknowledgement: null,
+            acknowledgementDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'expense') {
         const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -31351,6 +31998,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         this.db.prepare('UPDATE jobs SET approval_state = ?, updated_at = ? WHERE id = ?')
           .run('change_order_approved', timestamp, changeOrder.job_id);
       }
+    } else if (targetType === 'daywork_ticket') {
+      this.applyDayworkTicketApproval(targetId, timestamp);
+    } else if (targetType === 'daywork_acknowledgement') {
+      this.applyDayworkAcknowledgementApproval(targetId, timestamp);
     } else if (targetType === 'change_order_acceptance') {
       const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId);
       const approval = this.db.prepare(`
@@ -35395,6 +36046,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       takeoffs: this.listTakeoffs(jobId),
       quotes: this.db.prepare('SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapQuote(row)),
       siteVisits: this.db.prepare('SELECT * FROM site_visits WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapSiteVisit(row)),
+      dayworkTickets: this.listDayworkTickets({ jobId, limit: 500 }),
       changeOrders: this.db.prepare('SELECT * FROM change_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapChangeOrder(row)),
       fieldReports: this.db.prepare('SELECT * FROM field_reports WHERE job_id = ? ORDER BY report_date DESC, created_at DESC').all(jobId).map(row => this.mapFieldReport(row)),
       rfis: this.db.prepare('SELECT * FROM rfi_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRfi(row)),
@@ -35533,6 +36185,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       job_tasks: 'status',
       route_plans: 'status',
       change_orders: 'status',
+      daywork_tickets: 'status',
       rfi_records: 'status',
       submittal_records: 'status',
       project_meetings: 'status',
@@ -36497,6 +37150,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       pendingSiteVisits: activeCount('site_visits', "records.status IN ('draft', 'scheduled', 'pending_approval')"),
       changeOrders: activeCount('change_orders'),
       pendingChangeOrders: activeCount('change_orders', "records.status IN ('draft', 'pending_approval', 'submitted', 'sent')"),
+      dayworkTickets: activeCount('daywork_tickets'),
+      pendingDayworkTickets: activeCount('daywork_tickets', "records.status IN ('pending_approval', 'approved', 'acknowledged')"),
       fieldReports: activeCount('field_reports'),
       openRfis: activeCount('rfi_records', "records.status IN ('open', 'pending', 'pending_approval')"),
       submittals: activeCount('submittal_records'),
@@ -41117,6 +41772,96 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Unconverted quantity takeoff ${takeoff.id} retains an invalid estimate or snapshot link.` });
       }
     }
+    const dayworkRows = this.db.prepare('SELECT * FROM daywork_tickets ORDER BY created_at').all();
+    const dayworkStatuses = new Set(['pending_approval', 'approved', 'acknowledged', 'converted', 'rejected', 'cancelled']);
+    for (const dayworkRow of dayworkRows) {
+      const ticket = this.mapDayworkTicket(dayworkRow);
+      if (!dayworkStatuses.has(ticket.status)) {
+        issues.push({ severity: 'error', message: `Daywork ticket ${ticket.ticketNumber} has an unsupported lifecycle status.` });
+      }
+      if (!ticket.integrityValid) {
+        issues.push({ severity: 'error', message: `Daywork ticket ${ticket.ticketNumber} failed retained source or snapshot integrity verification.` });
+      }
+      if (['approved', 'acknowledged', 'converted'].includes(ticket.status)) {
+        const approval = ticket.approvalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'daywork_ticket' AND target_id = ? AND status = 'approved'").get(ticket.approvalId, ticket.id)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (!approval || approvalData.sourceHash !== ticket.sourceHash || approvalData.snapshotHash !== ticket.snapshotHash) {
+          issues.push({ severity: 'error', message: `Daywork ticket ${ticket.ticketNumber} lacks its matching source-bound approval decision.` });
+        }
+      }
+      const hasAcknowledgement = Boolean(ticket.acknowledgementReference || ticket.acknowledgedAt || ticket.acknowledgedBy);
+      if (ticket.status === 'acknowledged' || (ticket.status === 'converted' && hasAcknowledgement)) {
+        const acknowledgementApproval = ticket.acknowledgementApprovalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'daywork_acknowledgement' AND target_id = ? AND status = 'approved'").get(ticket.acknowledgementApprovalId, ticket.id)
+          : null;
+        const acknowledgementData = fromJson(acknowledgementApproval?.data_json, {});
+        if (
+          !acknowledgementApproval
+          || !ticket.acknowledgementReference
+          || !ticket.acknowledgedAt
+          || !ticket.acknowledgedBy
+          || acknowledgementData.sourceHash !== ticket.sourceHash
+          || acknowledgementData.snapshotHash !== ticket.snapshotHash
+        ) {
+          issues.push({ severity: 'error', message: `Daywork ticket ${ticket.ticketNumber} has incomplete or unverified acknowledgement evidence.` });
+        }
+      }
+      if (ticket.status === 'converted') {
+        const changeOrder = ticket.changeOrderId
+          ? this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(ticket.changeOrderId, ticket.jobId)
+          : null;
+        const mappedChangeOrder = changeOrder ? this.mapChangeOrder(changeOrder) : null;
+        const changeOrderSource = mappedChangeOrder?.data?.source;
+        if (
+          !changeOrder
+          || changeOrderSource?.type !== 'daywork_ticket'
+          || changeOrderSource?.id !== ticket.id
+          || changeOrderSource?.sourceHash !== ticket.sourceHash
+          || changeOrderSource?.snapshotHash !== ticket.snapshotHash
+        ) {
+          issues.push({ severity: 'error', message: `Converted daywork ticket ${ticket.ticketNumber} lacks its same-job source-bound change order.` });
+        }
+        if (mappedChangeOrder) {
+          const conversionLineItems = ticket.lines.map((line, index) => ({
+            description: `${line.lineType.charAt(0).toUpperCase()}${line.lineType.slice(1).replace(/_/g, ' ')}: ${line.description}`.slice(0, 240),
+            quantity: line.quantity,
+            unit: line.unit,
+            unitPrice: mappedChangeOrder.lineItems[index]?.unitPrice,
+            costCode: line.costCode,
+            sourceReference: line.sourceReference || ticket.evidenceReference
+          }));
+          const expectedPricingHash = sha256Json(conversionLineItems);
+          const expectedRequestHash = sha256Json({
+            title: mappedChangeOrder.title,
+            scopeDelta: mappedChangeOrder.scopeDelta,
+            lineItems: conversionLineItems,
+            taxRate: mappedChangeOrder.taxRate,
+            currency: mappedChangeOrder.currency,
+            scheduleDeltaDays: mappedChangeOrder.scheduleDeltaDays,
+            status: 'submitted',
+            notes: mappedChangeOrder.data?.notes,
+            source: changeOrderSource
+          });
+          const conversion = ticket.data?.conversion;
+          if (
+            !conversion
+            || conversion.changeOrderId !== mappedChangeOrder.id
+            || conversion.pricingHash !== expectedPricingHash
+            || conversion.requestHash !== expectedRequestHash
+            || normalizeNumber(conversion.netAmount, Number.NaN) !== mappedChangeOrder.amount
+            || normalizeNumber(conversion.taxAmount, Number.NaN) !== mappedChangeOrder.taxAmount
+            || normalizeNumber(conversion.total, Number.NaN) !== mappedChangeOrder.total
+            || conversion.currency !== mappedChangeOrder.currency
+          ) {
+            issues.push({ severity: 'error', message: `Converted daywork ticket ${ticket.ticketNumber} failed retained commercial request integrity verification.` });
+          }
+        }
+      } else if (ticket.changeOrderId) {
+        issues.push({ severity: 'error', message: `Unconverted daywork ticket ${ticket.ticketNumber} retains an invalid change-order link.` });
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -41141,6 +41886,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvals: this.count('approvals'),
         siteVisits: this.count('site_visits'),
         changeOrders: this.count('change_orders'),
+        dayworkTickets: this.count('daywork_tickets'),
         fieldReports: this.count('field_reports'),
         rfiRecords: this.count('rfi_records'),
         submittals: this.count('submittal_records'),
@@ -41729,6 +42475,84 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       approvalId: row.approval_id,
       lineItems: fromJson(row.line_items_json, []),
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapDayworkTicket(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const lines = fromJson(row.lines_json, []);
+    const snapshot = fromJson(row.snapshot_json, null);
+    const workerName = data.workerName || row.retained_worker_name || null;
+    const entryFingerprint = this.dayworkTicketFingerprint({
+      jobId: row.job_id,
+      workerId: row.worker_id,
+      workDate: row.work_date,
+      title: row.title,
+      description: row.description,
+      reason: row.reason,
+      evidenceReference: row.evidence_reference,
+      evidenceDocumentId: row.evidence_document_id,
+      lines,
+      notes: data.notes
+    });
+    const sourceBasis = this.dayworkTicketSourceBasis({
+      id: row.id,
+      ticketNumber: row.ticket_number,
+      jobId: row.job_id,
+      workerId: row.worker_id,
+      workerName,
+      workDate: row.work_date,
+      title: row.title,
+      description: row.description,
+      reason: row.reason,
+      evidenceReference: row.evidence_reference,
+      evidenceDocumentId: row.evidence_document_id,
+      lines,
+      notes: data.notes,
+      entryFingerprint: row.entry_fingerprint
+    });
+    const sourceHash = sha256Json(sourceBasis);
+    const integrityValid = Boolean(
+      row.entry_fingerprint
+      && row.entry_fingerprint === entryFingerprint
+      && row.source_hash === sourceHash
+      && snapshot
+      && snapshot.format === DAYWORK_TICKET_FORMAT
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.entryFingerprint === row.entry_fingerprint
+      && sha256Json(snapshot) === row.snapshot_hash
+    );
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      ticketNumber: row.ticket_number,
+      workDate: row.work_date,
+      workerId: row.worker_id || null,
+      workerName,
+      title: row.title,
+      description: row.description,
+      reason: row.reason,
+      status: row.status,
+      evidenceReference: row.evidence_reference,
+      evidenceDocumentId: row.evidence_document_id || null,
+      lines,
+      lineCount: lines.length,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid,
+      approvalId: row.approval_id || null,
+      acknowledgementApprovalId: row.acknowledgement_approval_id || null,
+      acknowledgementReference: row.acknowledgement_reference || null,
+      acknowledgedAt: row.acknowledged_at || null,
+      acknowledgedBy: row.acknowledged_by || null,
+      changeOrderId: row.change_order_id || null,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -43423,6 +44247,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.currency = mapped?.currency || data.currency || 'EUR';
       preview.evidenceReference = data.evidenceReference || null;
       preview.acceptedAt = data.acceptedAt || null;
+    } else if (targetType === 'daywork_ticket') {
+      const row = this.db.prepare('SELECT * FROM daywork_tickets WHERE id = ?').get(approval.targetId || approval.target_id);
+      const ticket = row ? this.mapDayworkTicket(row) : null;
+      primaryEffect = `Approve retained daywork ticket ${ticket?.ticketNumber || data.ticketNumber || ''}.`;
+      addEffect(`Verify ${ticket?.lineCount ?? data.lineCount ?? 0} observed labor, material, equipment, or subcontract quantity line(s) as an internal site record.`);
+      addSafeguard('Approval does not accept a price, change contract value, authorize changed work, send a message, order materials, commit a schedule, issue an invoice, or move funds.');
+      addSafeguard('Any commercial conversion creates a separate change order with its own approval gate; client acknowledgement evidence is reviewed separately.');
+      riskLevel = 'high';
+      preview.ticketNumber = ticket?.ticketNumber || data.ticketNumber || null;
+      preview.workDate = ticket?.workDate || data.workDate || null;
+      preview.workerName = ticket?.workerName || data.workerName || null;
+      preview.title = ticket?.title || data.title || null;
+      preview.lines = ticket?.lines || [];
+      preview.evidenceReference = ticket?.evidenceReference || data.evidenceReference || null;
+      preview.sourceHash = ticket?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = ticket?.snapshotHash || data.snapshotHash || null;
+      preview.integrityValid = ticket?.integrityValid === true;
+    } else if (targetType === 'daywork_acknowledgement') {
+      const row = this.db.prepare('SELECT * FROM daywork_tickets WHERE id = ?').get(approval.targetId || approval.target_id);
+      const ticket = row ? this.mapDayworkTicket(row) : null;
+      primaryEffect = `Verify client acknowledgement evidence for ${ticket?.ticketNumber || data.ticketNumber || 'the daywork ticket'}.`;
+      addEffect('Retain evidence that the client or representative acknowledged receipt of the exact site record.');
+      addSafeguard('Acknowledgement confirms receipt only. It does not accept price or scope, change contract value, authorize work, send a message, issue an invoice, or move funds.');
+      addSafeguard('The evidence is rejected if it no longer matches the approved daywork source and snapshot hashes.');
+      riskLevel = 'high';
+      preview.ticketNumber = ticket?.ticketNumber || data.ticketNumber || null;
+      preview.evidenceReference = data.evidenceReference || null;
+      preview.acknowledgedBy = data.acknowledgedBy || null;
+      preview.acknowledgedAt = data.acknowledgedAt || null;
+      preview.notes = data.notes || null;
+      preview.sourceHash = data.sourceHash || null;
+      preview.snapshotHash = data.snapshotHash || null;
+      preview.sourceCurrent = Boolean(ticket && ticket.sourceHash === data.sourceHash && ticket.snapshotHash === data.snapshotHash);
     } else if (targetType === 'change_order_acceptance') {
       const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = changeOrder ? this.mapChangeOrder(changeOrder) : null;

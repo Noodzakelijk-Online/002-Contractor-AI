@@ -85,6 +85,7 @@ const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((modul
 const ClientsWorkspace = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.ClientsWorkspace })))
 const CloseoutRegister = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CloseoutRegister })))
 const CommercialControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CommercialControl })))
+const DayworkControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.DayworkControl })))
 const FieldAssuranceWorkspace = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.FieldAssuranceWorkspace })))
 const FieldRiskControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.FieldRiskControl })))
 const InspectionChecklistControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.InspectionChecklistControl })))
@@ -205,6 +206,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? `work-permits/${encodeURIComponent(workPermitId)}/acknowledgments`
       : type === 'production_entry'
         ? 'production-entries'
+      : type === 'daywork_ticket'
+        ? 'daywork-tickets'
       : type === 'material_receipt'
         ? 'material-receipts'
       : type === 'expense_receipt'
@@ -5534,6 +5537,102 @@ function App() {
           return false
         }
       }
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function recordDayworkTicket(payload) {
+    if (!selectedJobId || !payload?.entryKey) return false
+    const draft = {
+      id: payload.entryKey,
+      type: 'daywork_ticket',
+      jobId: selectedJobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        notify('Daywork quantities were saved locally and will be submitted for review after reconnection.')
+        return true
+      }
+      const result = await recordFieldOperation(draft)
+      if (result.job) setSelectedJob(result.job)
+      notify(
+        result.replayed
+          ? 'This daywork ticket was already retained; no duplicate was created.'
+          : `${result.dayworkTicket?.ticketNumber || 'Daywork ticket'} retained for quantity and evidence review. No price or external commitment was created.`,
+      )
+      await refreshSection(sectionRef.current)
+      return true
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          notify('Connection interrupted. Daywork quantities were saved locally for an exact retry.')
+          return true
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return false
+        }
+      }
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestDayworkAcknowledgement(ticketId, payload) {
+    if (!selectedJobId || !ticketId) return false
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/daywork-tickets/${encodeURIComponent(ticketId)}/acknowledgement`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      )
+      if (result.job) setSelectedJob(result.job)
+      notify(
+        result.replayed
+          ? 'This acknowledgement review is already pending.'
+          : 'Acknowledgement evidence was retained for review. It confirms receipt only and does not accept price or scope.',
+      )
+      await refreshSection(sectionRef.current)
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function convertDayworkTicket(ticketId, payload) {
+    if (!selectedJobId || !ticketId) return false
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/daywork-tickets/${encodeURIComponent(ticketId)}/convert`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      )
+      if (result.job) setSelectedJob(result.job)
+      notify(
+        result.replayed
+          ? 'This daywork ticket is already linked to its retained change order.'
+          : 'A source-bound change order was prepared for approval. Contract value and external commitments remain unchanged.',
+      )
+      await refreshSection(sectionRef.current)
+      return true
+    } catch (requestError) {
       setError(requestError.message)
       return false
     } finally {
@@ -13565,6 +13664,20 @@ function App() {
                     onRequestBaseline={requestProductionBaseline}
                     onRecordEntry={recordProductionOutput}
                     onRequestReversal={requestProductionReversal}
+                    onOpenApprovals={openApprovals}
+                    onSyncOutbox={() => syncFieldOutbox({ announce: true })}
+                  />
+                  <DayworkControl
+                    job={selectedJob}
+                    canReport={canCoordinate || capabilities.fieldEvidence === true}
+                    canCoordinate={canCoordinate}
+                    canApprove={capabilities.approvals === true}
+                    submitting={submitting}
+                    outboxPending={outboxPending}
+                    outboxSyncing={outboxSyncing}
+                    onSubmit={recordDayworkTicket}
+                    onRequestAcknowledgement={requestDayworkAcknowledgement}
+                    onConvert={convertDayworkTicket}
                     onOpenApprovals={openApprovals}
                     onSyncOutbox={() => syncFieldOutbox({ announce: true })}
                   />

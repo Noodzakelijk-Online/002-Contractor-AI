@@ -65,7 +65,7 @@ test('operator approves a production baseline, records output offline, and reque
   await entryForm.getByRole('button', { name: 'Save output offline' }).click();
   await expect(page.getByText('Production output was saved locally and will be recorded for this operator after reconnection.')).toBeVisible();
   await context.setOffline(false);
-  await expect(page.getByText('Outbox clear')).toBeVisible({ timeout: 15_000 });
+  await expect(entryForm.getByText('Outbox clear')).toBeVisible({ timeout: 15_000 });
   await expect.poll(async () => {
     const response = await request.get(`/api/ledger/jobs/${job.id}`);
     if (!response.ok()) return 0;

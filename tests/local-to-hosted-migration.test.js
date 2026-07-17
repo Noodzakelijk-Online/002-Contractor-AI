@@ -570,6 +570,37 @@ function createBackupFixture(t, suffix = 'success') {
   });
   const weeklyTimesheet = source.getWeeklyTimesheet(timesheetRequest.timesheet.id);
   const timesheetExport = source.prepareTimesheetExport({ periodStart: timesheetPeriodStart }, { actor: 'migration_fixture' }).export;
+  const dayworkRequest = source.createDayworkTicket(job.id, {
+    entryKey: `migration-daywork-${suffix}`,
+    workerId: attendanceWorker.id,
+    workDate: new Date().toISOString().slice(0, 10),
+    title: 'Migration additional support work',
+    description: 'Retained additional support installation for environment migration verification.',
+    reason: 'Existing site condition differed from the retained coordination basis.',
+    evidenceReference: `migration-daywork-evidence:${suffix}`,
+    lines: [
+      { lineKey: 'migration-daywork-labor', lineType: 'labor', description: 'Installation labor', quantity: 2, unit: 'hour', costCode: 'MIG-DW-LAB' },
+      { lineKey: 'migration-daywork-material', lineType: 'material', description: 'Support bracket', quantity: 4, unit: 'piece', costCode: 'MIG-DW-MAT' }
+    ]
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(dayworkRequest.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration daywork quantities and evidence verified.'
+  });
+  const dayworkAcknowledgement = source.requestDayworkAcknowledgement(job.id, dayworkRequest.ticket.id, {
+    evidenceReference: `migration-daywork-signed:${suffix}`,
+    acknowledgedBy: 'Migration client representative',
+    acknowledgedAt: new Date().toISOString()
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(dayworkAcknowledgement.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration daywork receipt evidence verified.'
+  });
+  const daywork = source.convertDayworkTicketToChangeOrder(job.id, dayworkRequest.ticket.id, {
+    prices: [
+      { lineKey: 'migration-daywork-labor', unitPrice: 75 },
+      { lineKey: 'migration-daywork-material', unitPrice: 25 }
+    ],
+    taxRate: 21
+  }, { actor: 'migration_fixture' });
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -595,7 +626,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -685,7 +716,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '042_governed_work_permits');
+  assert.equal(migration.migrationVersion, '043_governed_daywork_tickets');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -735,6 +766,12 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(detail.productionControl.lines[0].installedQuantity, 62.5);
     assert.equal(detail.productionControl.lines[0].crewHours, 48);
     assert.ok(detail.productionEntries.some(item => item.id === fixture.productionEntry.id && item.entryFingerprint === fixture.productionEntry.entryFingerprint));
+    const migratedDaywork = detail.dayworkTickets.find(item => item.id === fixture.daywork.ticket.id);
+    assert.equal(migratedDaywork.status, 'converted');
+    assert.equal(migratedDaywork.integrityValid, true);
+    assert.equal(migratedDaywork.sourceHash, fixture.daywork.ticket.sourceHash);
+    assert.equal(migratedDaywork.changeOrderId, fixture.daywork.changeOrder.id);
+    assert.ok(detail.changeOrders.some(item => item.id === fixture.daywork.changeOrder.id && item.data.source.id === migratedDaywork.id));
     const migratedAttendance = detail.attendanceSessions.find(item => item.id === fixture.attendanceSession.id);
     assert.equal(migratedAttendance.status, 'checked_out');
     assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);

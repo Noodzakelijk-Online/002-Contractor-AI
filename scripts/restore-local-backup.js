@@ -655,6 +655,50 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('043_governed_daywork_tickets')) {
+        for (const table of ['daywork_number_sequences', 'daywork_tickets']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed daywork schema is incomplete: ${table}.`);
+          }
+        }
+        const ticketColumns = new Set(database.prepare('PRAGMA table_info(daywork_tickets)').all().map(row => row.name));
+        for (const column of [
+          'ticket_number',
+          'work_date',
+          'worker_id',
+          'evidence_reference',
+          'lines_json',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint',
+          'approval_id',
+          'acknowledgement_approval_id',
+          'acknowledgement_reference',
+          'change_order_id'
+        ]) {
+          if (!ticketColumns.has(column)) {
+            throw new Error(`Backup governed daywork schema is incomplete: daywork_tickets.${column}.`);
+          }
+        }
+        const sequenceColumns = new Set(database.prepare('PRAGMA table_info(daywork_number_sequences)').all().map(row => row.name));
+        for (const column of ['period_year', 'last_value', 'updated_at']) {
+          if (!sequenceColumns.has(column)) {
+            throw new Error(`Backup governed daywork schema is incomplete: daywork_number_sequences.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_daywork_job_status_date',
+          'idx_daywork_worker_date',
+          'idx_daywork_pending_acknowledgement'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed daywork constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

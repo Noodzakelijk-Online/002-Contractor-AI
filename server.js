@@ -1191,6 +1191,7 @@ function allowsOperatorRequest(role, req) {
         || pathName === '/api/readiness'
         || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
          || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/daywork-tickets$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)
@@ -1213,6 +1214,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/check-out$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daywork-tickets$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/work-permits\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
@@ -1318,6 +1320,38 @@ function projectFieldEnvironmentalActivity(activity) {
   };
 }
 
+function projectFieldDayworkTicket(ticket) {
+  if (!ticket) return null;
+  return {
+    id: ticket.id,
+    jobId: ticket.jobId,
+    ticketNumber: ticket.ticketNumber,
+    workDate: ticket.workDate,
+    workerId: ticket.workerId,
+    workerName: ticket.workerName,
+    title: ticket.title,
+    description: ticket.description,
+    reason: ticket.reason,
+    status: ticket.status,
+    evidenceReference: ticket.evidenceReference,
+    evidenceDocumentId: ticket.evidenceDocumentId,
+    lines: (ticket.lines || []).map(line => ({
+      lineKey: line.lineKey,
+      lineType: line.lineType,
+      description: line.description,
+      quantity: line.quantity,
+      unit: line.unit,
+      costCode: line.costCode,
+      sourceReference: line.sourceReference || null
+    })),
+    lineCount: ticket.lineCount,
+    acknowledged: Boolean(ticket.acknowledgementReference),
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt,
+    fieldScoped: true
+  };
+}
+
 function projectFieldJobSummary(job = {}) {
   return {
     id: job.id,
@@ -1386,6 +1420,9 @@ function projectFieldJobDetail(req, detail) {
     productionBaselines: projectFieldRecords(detail.productionBaselines),
     productionEntries: projectFieldRecords(detail.productionEntries),
     productionControl: projectFieldRecord(detail.productionControl),
+    dayworkTickets: (detail.dayworkTickets || [])
+      .filter(ticket => scopeWorkerId && String(ticket.workerId || '') === String(scopeWorkerId))
+      .map(projectFieldDayworkTicket),
     attendanceSessions: projectFieldRecords(
       scopeWorkerId
         ? (detail.attendanceSessions || []).filter(session => String(session.workerId || '') === String(scopeWorkerId))
@@ -1451,6 +1488,27 @@ function expenseReceiptPayloadForOperator(req, payload = {}) {
     submittedBy: identity.workerName,
     submitted_by: identity.workerName,
     source: 'field_expense_receipt'
+  };
+}
+
+function dayworkTicketPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field daywork capture requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    submittedBy: identity.workerName,
+    submitted_by: identity.workerName,
+    source: 'field_daywork_ticket'
   };
 }
 
@@ -2699,6 +2757,84 @@ app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/acceptance', (req, r
       ...acceptance,
       job: operatingLedger.getJobDetail(req.params.id),
       dashboard: operatingLedger.dashboardSummary()
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/jobs/:id/daywork-tickets', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}), jobId: req.params.id };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    const dayworkTickets = operatingLedger.listDayworkTickets(filters);
+    return {
+      success: true,
+      dayworkTickets: req.operator?.role === 'field_worker'
+        ? dayworkTickets.map(projectFieldDayworkTicket)
+        : dayworkTickets,
+      policy: {
+        quantityCapture: 'observed_evidence_only',
+        internalApprovalRequired: true,
+        clientAcknowledgementMeansReceiptOnly: true,
+        commercialConversionApprovalRequired: true,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/daywork-tickets', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createDayworkTicket(
+      req.params.id,
+      dayworkTicketPayloadForOperator(req, req.body || {}),
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      dayworkTicket: req.operator?.role === 'field_worker' ? projectFieldDayworkTicket(result.ticket) : result.ticket,
+      approval: req.operator?.role === 'field_worker' ? undefined : result.approval,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/daywork-tickets/:ticketId/acknowledgement', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.requestDayworkAcknowledgement(
+      req.params.id,
+      req.params.ticketId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      dayworkTicket: result.ticket,
+      approval: result.approval,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/daywork-tickets/:ticketId/convert', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.convertDayworkTicketToChangeOrder(
+      req.params.id,
+      req.params.ticketId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...result,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
     };
   }, 201);
 });
@@ -5305,6 +5441,7 @@ function operationalExport() {
     costForecastSnapshots: operatingLedger.listAllCostForecastSnapshots({ limit: 5_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
+    dayworkTickets: operatingLedger.listDayworkTickets({ limit: 5_000 }),
     attendanceSessions: operatingLedger.listAttendanceSessions({ limit: 10_000 }),
     attendanceAdjustments: operatingLedger.listAttendanceAdjustments({ limit: 10_000 }),
     weeklyTimesheets: operatingLedger.listWeeklyTimesheets({ status: 'all', limit: 10_000 }),
@@ -5373,7 +5510,8 @@ function validateOperationalExport(snapshot) {
     'weeklyTimesheets',
     'timesheetExports',
     'inspectionTemplates',
-    'inspectionChecklistSubmissions'
+    'inspectionChecklistSubmissions',
+    'dayworkTickets'
   ]) {
     if (snapshot[key] !== undefined && !Array.isArray(snapshot[key])) {
       problems.push(`Export ${key} must be a collection when present.`);
@@ -5433,6 +5571,7 @@ function validateOperationalExport(snapshot) {
       costForecastSnapshots: Array.isArray(snapshot.costForecastSnapshots) ? snapshot.costForecastSnapshots.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
+      dayworkTickets: Array.isArray(snapshot.dayworkTickets) ? snapshot.dayworkTickets.length : 0,
       attendanceSessions: Array.isArray(snapshot.attendanceSessions) ? snapshot.attendanceSessions.length : 0,
       attendanceAdjustments: Array.isArray(snapshot.attendanceAdjustments) ? snapshot.attendanceAdjustments.length : 0,
       weeklyTimesheets: Array.isArray(snapshot.weeklyTimesheets) ? snapshot.weeklyTimesheets.length : 0,
@@ -6064,6 +6203,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         workPermitClosure: 'evidence_retained',
         workPermitActivationInference: false,
         workPermitAcknowledgementInference: false,
+        dayworkEntryKey: 'durable',
+        dayworkQuantitySnapshot: 'sha256_source_bound',
+        dayworkApproval: 'source_current_approval_gated',
+        dayworkAcknowledgement: 'receipt_only_separate_approval',
+        dayworkCommercialConversion: 'source_bound_change_order_approval_gated',
         materialReceiptEntryKey: 'durable',
         expenseReceiptEntryKey: 'durable',
         expenseReceiptDuplicateControl: 'vendor_reference_date_amount_currency',
@@ -6119,6 +6263,9 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       changeControl: {
         serverCalculatedTotals: true,
         durableNumbering: true,
+        dayworkTicketNumbering: true,
+        dayworkCommercialPricing: 'office_only_after_internal_approval',
+        dayworkAcknowledgementChangesContractValue: false,
         immutableHtmlPackage: true,
         deliveryApprovalRequired: true,
         verifiedProviderReceiptRequired: true,

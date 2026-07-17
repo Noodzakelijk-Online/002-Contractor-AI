@@ -1370,7 +1370,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '042_governed_work_permits');
+    assert.equal(migrations.currentVersion, '043_governed_daywork_tickets');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1451,7 +1451,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('042_governed_work_permits'));
+  assert.deepEqual(versions, Array(4).fill('043_governed_daywork_tickets'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -1988,7 +1988,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '042_governed_work_permits');
+    assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2341,7 +2341,80 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '042_governed_work_permits');
+    assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL governed daywork preserves replay, source approval, acknowledgement, and change-order parity', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    const job = ledger.createIntake({
+      title: `PostgreSQL daywork ${marker}`,
+      client: { name: `Hosted daywork client ${marker}` },
+      status: 'in_progress',
+      assignAutomatically: false
+    }, { actor: 'postgres_daywork_test' });
+    const worker = ledger.upsertWorker({
+      name: `Hosted daywork worker ${marker}`,
+      role: 'Site operative',
+      status: 'available'
+    }, { actor: 'postgres_daywork_test' });
+    ledger.addAssignment(job.id, {
+      workerId: worker.id,
+      workerName: worker.name,
+      role: worker.role,
+      status: 'assigned'
+    }, { actor: 'postgres_daywork_test' });
+    const payload = {
+      entryKey: `postgres-daywork-${marker}`,
+      workerId: worker.id,
+      workDate: new Date().toISOString().slice(0, 10),
+      title: 'Hosted additional containment support',
+      description: 'Installed additional containment support around an existing hosted service conflict.',
+      reason: 'The retained coordination basis did not show the existing service.',
+      evidenceReference: `postgres-daywork-evidence:${marker}`,
+      lines: [
+        { lineKey: 'hosted-labor', lineType: 'labor', description: 'Installation labor', quantity: 4, unit: 'hour', costCode: 'PG-LAB' },
+        { lineKey: 'hosted-material', lineType: 'material', description: 'Support bracket', quantity: 6, unit: 'piece', costCode: 'PG-MAT' }
+      ]
+    };
+    const created = ledger.createDayworkTicket(job.id, payload, { actor: 'postgres_field_worker' });
+    assert.equal(created.ticket.integrityValid, true);
+    assert.equal(ledger.createDayworkTicket(job.id, payload).replayed, true);
+    ledger.resolveApproval(created.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_daywork_approver',
+      reason: 'Hosted quantity source and evidence verified.'
+    });
+    const acknowledgement = ledger.requestDayworkAcknowledgement(job.id, created.ticket.id, {
+      evidenceReference: `postgres-signed-daywork:${marker}`,
+      acknowledgedBy: 'Hosted client representative',
+      acknowledgedAt: new Date().toISOString()
+    }, { actor: 'postgres_office' });
+    ledger.resolveApproval(acknowledgement.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_daywork_approver',
+      reason: 'Hosted acknowledgement receipt evidence verified.'
+    });
+    const converted = ledger.convertDayworkTicketToChangeOrder(job.id, created.ticket.id, {
+      prices: [
+        { lineKey: 'hosted-labor', unitPrice: 80 },
+        { lineKey: 'hosted-material', unitPrice: 20 }
+      ],
+      taxRate: 21
+    }, { actor: 'postgres_office' });
+    assert.equal(converted.ticket.status, 'converted');
+    assert.equal(converted.changeOrder.status, 'pending_approval');
+    assert.equal(converted.changeOrder.amount, 440);
+    assert.equal(converted.changeOrder.data.source.id, created.ticket.id);
+    assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
+    assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
+    assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
+    assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
