@@ -156,15 +156,20 @@
 .attendance-empty { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 84px; color: #6b7b75; font-size: 12px; }
 .attendance-policy { margin: 0; padding: 11px 22px; color: #687771; background: #f4f7f6; border-top: 1px solid #e4ebe8; font-size: 11px; line-height: 1.45; }
 
-.safety-briefing-control { border-bottom: 1px solid #dfe8e4; background: #fff; }
+.field-workspace > * { min-width: 0; max-width: 100%; }
+.safety-briefing-control { min-width: 0; border-bottom: 1px solid #dfe8e4; background: #fff; }
 .safety-briefing-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .safety-briefing-selector { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 14px; padding: 16px 22px; border-top: 1px solid #e7eeeb; }
 .safety-briefing-selector label,.safety-acknowledgement-form label,.safety-signoff-form label,.safety-briefing-create label { display: grid; gap: 6px; color: #40564e; font-size: 12px; font-weight: 700; }
-.safety-briefing-detail { border-top: 1px solid #dfe8e4; }
+.safety-briefing-selector > *,.safety-acknowledgement-form > *,.safety-signoff-form > *,.safety-briefing-create > * { min-width: 0; max-width: 100%; }
+.safety-briefing-selector input:not([type="checkbox"]),.safety-briefing-selector select,.safety-briefing-selector textarea,.safety-acknowledgement-form input:not([type="checkbox"]),.safety-acknowledgement-form select,.safety-acknowledgement-form textarea,.safety-signoff-form input:not([type="checkbox"]),.safety-signoff-form select,.safety-signoff-form textarea,.safety-briefing-create input:not([type="checkbox"]),.safety-briefing-create select,.safety-briefing-create textarea { width: 100%; min-width: 0; max-width: 100%; min-height: 38px; padding: 9px 10px; color: #20312b; background: #fff; border: 1px solid #cfded8; border-radius: 5px; outline: none; }
+.safety-briefing-selector textarea,.safety-acknowledgement-form textarea,.safety-signoff-form textarea,.safety-briefing-create textarea { min-height: 88px; resize: vertical; }
+.safety-briefing-selector input:not([type="checkbox"]):focus,.safety-briefing-selector select:focus,.safety-briefing-selector textarea:focus,.safety-acknowledgement-form input:not([type="checkbox"]):focus,.safety-acknowledgement-form select:focus,.safety-acknowledgement-form textarea:focus,.safety-signoff-form input:not([type="checkbox"]):focus,.safety-signoff-form select:focus,.safety-signoff-form textarea:focus,.safety-briefing-create input:not([type="checkbox"]):focus,.safety-briefing-create select:focus,.safety-briefing-create textarea:focus { border-color: #0a7b65; box-shadow: 0 0 0 3px #dff2eb; }
+.safety-briefing-detail { min-width: 0; border-top: 1px solid #dfe8e4; }
 .safety-briefing-context { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 22px; background: #f7faf8; }
 .safety-briefing-context > div { display: grid; min-width: 0; gap: 4px; }
-.safety-briefing-context strong { color: #23382f; font-size: 14px; }
-.safety-briefing-context small { color: #6d7d76; font-size: 11px; }
+.safety-briefing-context strong { overflow-wrap: anywhere; color: #23382f; font-size: 14px; }
+.safety-briefing-context small { overflow-wrap: anywhere; color: #6d7d76; font-size: 11px; }
 .safety-briefing-topics { display: grid; gap: 8px; padding: 14px 22px; border-top: 1px solid #e7eeeb; }
 .safety-briefing-topics > strong { color: #344c42; font-size: 12px; }
 .safety-briefing-topics ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px; margin: 0; padding-left: 18px; color: #526a61; font-size: 12px; line-height: 1.45; }
@@ -192,11 +197,14 @@
   .attendance-policy { padding: 11px 14px; }
   .safety-briefing-summary { width: 100%; justify-content: flex-start; }
   .safety-briefing-selector,.safety-acknowledgement-form,.safety-signoff-form,.safety-briefing-create { grid-template-columns: 1fr; padding: 14px; }
+  .safety-briefing-context { align-items: flex-start; flex-wrap: wrap; }
   .safety-briefing-context,.safety-briefing-topics { padding: 12px 14px; }
+  .safety-briefing-context .status { max-width: 100%; overflow-wrap: anywhere; }
   .safety-briefing-topics ul { grid-template-columns: 1fr; }
   .safety-attendee-row { grid-template-columns: 8px minmax(0, 1fr) auto; padding: 10px 14px; }
-  .safety-attendee-row .secondary-button { width: 100%; grid-column: 1 / -1; }
-  .safety-acknowledgement-form .primary-button,.safety-signoff-form .primary-button,.safety-briefing-create .secondary-button { width: 100%; min-height: 42px; }
+  .safety-attendee-row .status { max-width: 100%; overflow-wrap: anywhere; }
+  .safety-attendee-row .secondary-button { width: 100%; min-width: 0; grid-column: 1 / -1; white-space: normal; }
+  .safety-acknowledgement-form .primary-button,.safety-signoff-form .primary-button,.safety-briefing-create .secondary-button { width: 100%; min-width: 0; min-height: 42px; white-space: normal; }
   .safety-briefing-create .form-span { grid-column: auto; }
 }
 
@@ -278,29 +286,29 @@
   .client-directory-actions .secondary-button { width: 100%; }
   .client-editor-form { max-height: none; }
 }
-.field-assurance-workspace { border-top: 1px solid #e6ece9; border-bottom: 1px solid #e6ece9; }
+.field-assurance-workspace { min-width: 0; border-top: 1px solid #e6ece9; border-bottom: 1px solid #e6ece9; }
 .assurance-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px; }
 .assurance-heading h2 { margin: 0; color: #24372f; font-size: 15px; }
 .assurance-heading p { margin: 4px 0 0; color: #6c7a75; font-size: 12px; line-height: 1.45; }
 .assurance-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid #e6ece9; border-bottom: 1px solid #e6ece9; }
-.assurance-summary div { display: grid; gap: 4px; padding: 14px 18px; border-left: 1px solid #e6ece9; }
+.assurance-summary div { display: grid; min-width: 0; gap: 4px; padding: 14px 18px; border-left: 1px solid #e6ece9; }
 .assurance-summary div:first-child { border-left: 0; }
-.assurance-summary span { color: #74827d; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.assurance-summary span { overflow-wrap: anywhere; color: #74827d; font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .assurance-summary strong { color: #24372f; font-size: 18px; }
 .assurance-list { display: grid; }
-.assurance-item { display: flex; align-items: flex-start; gap: 16px; padding: 18px; border-bottom: 1px solid #e8eeeb; }
+.assurance-item { display: flex; min-width: 0; align-items: flex-start; gap: 16px; padding: 18px; border-bottom: 1px solid #e8eeeb; }
 .assurance-item:last-child { border-bottom: 0; }
 .assurance-copy { min-width: 0; flex: 1; }
-.assurance-title { display: flex; align-items: center; gap: 10px; }
+.assurance-title { display: flex; min-width: 0; align-items: center; gap: 10px; }
 .assurance-title h3 { min-width: 0; margin: 0; overflow: hidden; color: #26342f; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .assurance-title .status { flex: 0 0 auto; }
 .assurance-copy > p { margin: 6px 0 10px; color: #62736d; font-size: 13px; line-height: 1.45; }
 .assurance-values { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.assurance-values span { display: grid; gap: 3px; color: #7a8782; font-size: 11px; }
+.assurance-values span { display: grid; min-width: 0; gap: 3px; overflow-wrap: anywhere; color: #7a8782; font-size: 11px; }
 .assurance-values strong { color: #30443c; font-size: 12px; }
 .assurance-flags, .assurance-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .assurance-flags { margin-top: 10px; }
-.assurance-actions { flex: 0 0 min(470px, 40%); align-items: center; justify-content: flex-end; }
+.assurance-actions { min-width: 0; flex: 0 0 min(470px, 40%); align-items: center; justify-content: flex-end; }
 .finance-control-modal { width: min(760px, 100%); }
 .field-action-modal { width: min(700px, 100%); }
 .resource-control-modal { width: min(720px, 100%); }
@@ -309,7 +317,7 @@
 .field-record-context strong { color: #2b433a; font-size: 12px; text-transform: capitalize; }
 .field-record-context p { grid-column: 1 / -1; margin: 5px 0 0; font-size: 12px; line-height: 1.45; }
 @media (max-width: 1100px) { .assurance-item { display: grid; grid-template-columns: minmax(0, 1fr); }.assurance-actions { width: 100%; justify-content: stretch; }.assurance-actions .secondary-button { flex: 1; }.assurance-actions .table-action { flex: 0 0 34px; } }
-@media (max-width: 760px) { .assurance-heading { padding: 14px; }.assurance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.assurance-summary div:nth-child(3) { border-left: 0; border-top: 1px solid #e6ece9; }.assurance-summary div:nth-child(4) { border-top: 1px solid #e6ece9; }.assurance-item { padding: 14px; }.assurance-title { align-items: flex-start; flex-direction: column; }.assurance-title h3 { width: 100%; }.assurance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }.assurance-actions .secondary-button { min-width: min(100%, 160px); } }
+@media (max-width: 760px) { .assurance-heading { padding: 14px; }.assurance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.assurance-summary div:nth-child(3) { border-left: 0; border-top: 1px solid #e6ece9; }.assurance-summary div:nth-child(4) { border-top: 1px solid #e6ece9; }.assurance-item { padding: 14px; }.assurance-title { align-items: flex-start; flex-direction: column; }.assurance-title h3 { width: 100%; }.assurance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }.assurance-actions .secondary-button { min-width: 0; max-width: 100%; flex: 1 1 160px; white-space: normal; } }
 .automation-panel { grid-column: 1 / -1; }
 .automation-heading { align-items: center; }
 .automation-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid #e6ece9; }
