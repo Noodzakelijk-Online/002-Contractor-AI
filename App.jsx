@@ -79,6 +79,7 @@ import Empty from './components/EmptyState'
 import './App.css'
 
 const ResourcesWorkspace = lazy(() => import('./components/ResourcesWorkspace'))
+const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -194,6 +195,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const custodySessionId = type === 'equipment_return' ? String(payload?.custodySessionId || '') : ''
   const safetyMeetingId = type === 'safety_briefing_acknowledgement' ? String(payload?.meetingId || '') : ''
   const workPermitId = type === 'work_permit_acknowledgement' ? String(payload?.permitId || '') : ''
+  const preTaskPlanId = ['pre_task_plan_acknowledgement', 'pre_task_plan_suspension'].includes(type) ? String(payload?.planId || '') : ''
   const route =
     type === 'daily_log'
       ? 'daily-logs'
@@ -205,6 +207,10 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? `safety-meetings/${encodeURIComponent(safetyMeetingId)}/acknowledgments`
       : type === 'work_permit_acknowledgement' && workPermitId
         ? `work-permits/${encodeURIComponent(workPermitId)}/acknowledgments`
+      : type === 'pre_task_plan_acknowledgement' && preTaskPlanId
+        ? `pre-task-plans/${encodeURIComponent(preTaskPlanId)}/acknowledgments`
+      : type === 'pre_task_plan_suspension' && preTaskPlanId
+        ? `pre-task-plans/${encodeURIComponent(preTaskPlanId)}/suspend`
       : type === 'production_entry'
         ? 'production-entries'
       : type === 'daywork_ticket'
@@ -238,6 +244,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   delete requestPayload.sessionId
   delete requestPayload.custodySessionId
   delete requestPayload.meetingId
+  delete requestPayload.permitId
+  delete requestPayload.planId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
     body: JSON.stringify(requestPayload),
@@ -10413,6 +10421,20 @@ function App() {
                   ) : null}
                   <p className="attendance-policy">Acknowledgements prove only the retained briefing event. They do not certify legal compliance, worker competence, or unchanged site conditions.</p>
                 </section>
+                <LazyControlBoundary label="pre-task plan controls">
+                  <PreTaskPlanControl
+                    jobs={activeJobs}
+                    operator={operator}
+                    fieldScoped={fieldScoped}
+                    canCoordinate={canCoordinate}
+                    apiRequest={api}
+                    recordFieldOperation={recordFieldOperation}
+                    notify={notify}
+                    refresh={refresh}
+                    outboxScope={outboxScope}
+                    refreshOutboxState={refreshOutboxState}
+                  />
+                </LazyControlBoundary>
                 <section className="work-permit-control" data-testid="work-permit-control">
                   <div className="panel-heading">
                     <div>

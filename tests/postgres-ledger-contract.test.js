@@ -1370,7 +1370,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '044_governed_nonconformance_records');
+    assert.equal(migrations.currentVersion, '045_governed_pre_task_plans');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1451,12 +1451,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('044_governed_nonconformance_records'));
+  assert.deepEqual(versions, Array(4).fill('045_governed_pre_task_plans'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 44);
+    assert.equal(Number(migrationCount.count), 45);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1988,7 +1988,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
+    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2341,7 +2341,141 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
+    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL pre-task plan parity preserves source approval, exact crew acknowledgement, and restart integrity', { skip: !connectionString }, () => {
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let jobId;
+  let planId;
+  try {
+    const job = ledger.createIntake({
+      clientName: `Hosted pre-task client ${marker}`,
+      title: `Hosted pre-task plan ${marker}`,
+      status: 'in_progress',
+      riskLevel: 'high',
+      assignAutomatically: false
+    }, { actor: 'postgres_pre_task_test' });
+    jobId = job.id;
+    const workers = ['Lead installer', 'Site operative'].map(role => {
+      const worker = ledger.upsertWorker({
+        id: `postgres-pre-task-${role.toLowerCase().replaceAll(' ', '-')}-${marker}`,
+        name: `Hosted ${role} ${marker}`,
+        role,
+        status: 'available'
+      }, { actor: 'postgres_pre_task_test' });
+      ledger.addAssignment(job.id, {
+        workerId: worker.id,
+        workerName: worker.name,
+        role: worker.role,
+        status: 'assigned'
+      }, { actor: 'postgres_pre_task_test' });
+      return worker;
+    });
+    const jha = ledger.createJhaRecord(job.id, {
+      title: `Hosted approved JHA ${marker}`,
+      status: 'approved',
+      riskLevel: 'high',
+      hazards: ['Stored energy', 'Restricted access'],
+      controls: ['Isolation and lockout', 'Controlled access'],
+      stopWorkTriggers: ['Isolation boundary changes']
+    }, { actor: 'postgres_pre_task_test' });
+    ledger.resolveApproval(jha.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_pre_task_approver',
+      reason: 'Hosted JHA hazards and controls verified.'
+    });
+    const payload = {
+      entryKey: `postgres-pre-task-plan-${marker}`,
+      workDate: new Date().toISOString().slice(0, 10),
+      shiftLabel: 'Day shift',
+      title: 'Hosted distribution installation plan',
+      location: 'Hosted plant room',
+      preparedBy: 'Hosted site supervisor',
+      responsibleWorkerId: workers[0].id,
+      jhaId: jha.id,
+      evidenceReference: `postgres-method-statement:${marker}`,
+      emergencyArrangements: 'Use the east stair and report to the assembly point.',
+      stopWorkTriggers: ['Isolation boundary changes', 'Unplanned simultaneous operations'],
+      steps: [{
+        stepKey: 'isolate-and-install',
+        description: 'Isolate the supply and install the distribution equipment',
+        hazards: ['Stored electrical energy', 'Manual handling'],
+        controls: ['Lock, tag, test, and use the planned lifting aid']
+      }]
+    };
+    const created = ledger.createPreTaskPlan(job.id, payload, { actor: 'postgres_pre_task_test' });
+    planId = created.plan.id;
+    assert.equal(created.plan.status, 'pending_approval');
+    assert.equal(ledger.createPreTaskPlan(job.id, payload).replayed, true);
+    ledger.resolveApproval(created.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_pre_task_approver',
+      reason: 'Hosted plan sources, steps, controls, date, and frozen crew verified.'
+    });
+    const action = ledger.nextActions().find(candidate => (
+      candidate.type === 'review_pre_task_plan_readiness' && candidate.planId === created.plan.id
+    ));
+    assert.ok(action);
+    assert.equal(action.outstandingCount, 2);
+    const autonomous = ledger.runAutonomousCycle({
+      actionTypes: ['review_pre_task_plan_readiness'],
+      jobIds: [job.id]
+    });
+    assert.equal(autonomous.applied.length, 1);
+    assert.equal(autonomous.applied[0].externalCommitments, 0);
+    assert.equal(autonomous.applied[0].activationInferred, false);
+    workers.forEach((worker, index) => {
+      const acknowledgement = {
+        entryKey: `postgres-pre-task-ack-${index + 1}-${marker}`,
+        workerId: worker.id,
+        acknowledged: true,
+        evidenceReference: `postgres-worker-attestation:${index + 1}:${marker}`,
+        attestation: 'I reviewed the retained plan and stop-work triggers.'
+      };
+      const result = ledger.acknowledgePreTaskPlan(job.id, created.plan.id, acknowledgement, {
+        actor: 'postgres_field_worker',
+        workerId: worker.id
+      });
+      assert.equal(result.attendee.integrityValid, true);
+      assert.equal(ledger.acknowledgePreTaskPlan(job.id, created.plan.id, acknowledgement).replayed, true);
+    });
+    const active = ledger.getPreTaskPlan(created.plan.id);
+    assert.equal(active.status, 'active');
+    assert.equal(active.readyForWork, true);
+    assert.equal(active.attendanceSummary.acknowledged, 2);
+    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+
+  ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const retained = ledger.getPreTaskPlan(planId, { jobId });
+    assert.equal(retained.status, 'active');
+    assert.equal(retained.definitionIntegrityValid, true);
+    assert.equal(retained.prerequisitesCurrent, true);
+    assert.equal(retained.attendees.every(attendee => attendee.integrityValid), true);
+    const suspended = ledger.suspendPreTaskPlan(jobId, planId, {
+      entryKey: `postgres-pre-task-stop-${marker}`,
+      reason: 'Hosted isolation boundary changed during the planned work.',
+      evidenceReference: `postgres-stop-work:${marker}`
+    }, { actor: 'postgres_site_supervisor' });
+    assert.equal(suspended.stopWorkImmediate, true);
+    assert.equal(suspended.plan.status, 'suspended');
+    const closed = ledger.closePreTaskPlan(jobId, planId, {
+      entryKey: `postgres-pre-task-close-${marker}`,
+      note: 'Hosted work stopped safely and the area was formally handed back.',
+      evidenceReference: `postgres-plan-closeout:${marker}`
+    }, { actor: 'postgres_site_supervisor' });
+    assert.equal(closed.plan.status, 'closed');
+    assert.equal(closed.plan.definitionIntegrityValid, true);
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2414,7 +2548,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
+    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2501,7 +2635,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
+    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
   } finally {
     ledger?.close();
   }

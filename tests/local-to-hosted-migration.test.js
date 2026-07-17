@@ -400,6 +400,51 @@ function createBackupFixture(t, suffix = 'success') {
     });
     attendanceAssignment = source.getJobDetail(job.id).assignments.find(item => item.id === attendanceAssignment.id);
   }
+  const preTaskJha = source.createJhaRecord(job.id, {
+    title: `Migration approved installation JHA ${suffix}`,
+    status: 'approved',
+    riskLevel: 'high',
+    hazards: ['Stored energy', 'Restricted access'],
+    controls: ['Isolation and lockout', 'Controlled access'],
+    stopWorkTriggers: ['Isolation boundary changes']
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(preTaskJha.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration JHA hazards and controls verified.'
+  });
+  const preTaskRequest = source.createPreTaskPlan(job.id, {
+    entryKey: `migration-pre-task-plan-${suffix}`,
+    workDate: new Date().toISOString().slice(0, 10),
+    shiftLabel: 'Day shift',
+    title: 'Migration distribution installation plan',
+    location: 'Migration plant room',
+    preparedBy: 'Migration site supervisor',
+    responsibleWorkerId: attendanceWorker.id,
+    jhaId: preTaskJha.id,
+    evidenceReference: `migration-method-statement:${suffix}`,
+    emergencyArrangements: 'Use the retained emergency route and report to the assembly point.',
+    stopWorkTriggers: ['Isolation boundary changes', 'Unplanned simultaneous operations'],
+    steps: [{
+      stepKey: 'isolate-and-install',
+      description: 'Isolate the supply and install the distribution equipment',
+      hazards: ['Stored electrical energy', 'Manual handling'],
+      controls: ['Lock, tag, test, and use the planned lifting aid']
+    }]
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(preTaskRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration plan sources, steps, controls, and frozen crew verified.'
+  });
+  source.acknowledgePreTaskPlan(job.id, preTaskRequest.plan.id, {
+    entryKey: `migration-pre-task-ack-${suffix}`,
+    workerId: attendanceWorker.id,
+    acknowledged: true,
+    evidenceReference: `migration-worker-attestation:${suffix}`,
+    attestation: 'I reviewed the retained plan and stop-work triggers.'
+  }, { actor: 'migration_field_worker', workerId: attendanceWorker.id });
+  const preTaskPlan = source.getPreTaskPlan(preTaskRequest.plan.id);
   const expenseReceiptRequest = source.createExpenseReceipt(job.id, {
     entryKey: `migration-expense-${suffix}`,
     workerId: attendanceWorker.id,
@@ -662,7 +707,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -752,7 +797,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '044_governed_nonconformance_records');
+  assert.equal(migration.migrationVersion, '045_governed_pre_task_plans');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -815,6 +860,15 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedNonconformance.closureIntegrityValid, true);
     assert.equal(migratedNonconformance.sourceHash, fixture.nonconformance.sourceHash);
     assert.equal(migratedNonconformance.closureHash, fixture.nonconformance.closureHash);
+    const migratedPreTaskPlan = detail.preTaskPlans.find(item => item.id === fixture.preTaskPlan.id);
+    assert.equal(migratedPreTaskPlan.status, 'active');
+    assert.equal(migratedPreTaskPlan.definitionIntegrityValid, true);
+    assert.equal(migratedPreTaskPlan.prerequisitesCurrent, true);
+    assert.equal(migratedPreTaskPlan.sourceHash, fixture.preTaskPlan.sourceHash);
+    assert.equal(migratedPreTaskPlan.snapshotHash, fixture.preTaskPlan.snapshotHash);
+    assert.equal(migratedPreTaskPlan.attendanceSummary.acknowledged, 1);
+    assert.equal(migratedPreTaskPlan.attendees[0].entryFingerprint, fixture.preTaskPlan.attendees[0].entryFingerprint);
+    assert.equal(migratedPreTaskPlan.attendees[0].integrityValid, true);
     const migratedAttendance = detail.attendanceSessions.find(item => item.id === fixture.attendanceSession.id);
     assert.equal(migratedAttendance.status, 'checked_out');
     assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);

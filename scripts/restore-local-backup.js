@@ -747,6 +747,73 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('045_governed_pre_task_plans')) {
+        for (const table of ['pre_task_plan_number_sequences', 'pre_task_plans', 'pre_task_plan_attendees']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed pre-task plan schema is incomplete: ${table}.`);
+          }
+        }
+        const planColumns = new Set(database.prepare('PRAGMA table_info(pre_task_plans)').all().map(row => row.name));
+        for (const column of [
+          'plan_number',
+          'revision_number',
+          'supersedes_plan_id',
+          'work_date',
+          'jha_id',
+          'work_permit_id',
+          'sds_sheet_ids_json',
+          'steps_json',
+          'evidence_reference',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint',
+          'approval_id',
+          'activated_at',
+          'suspended_at',
+          'closed_at',
+          'closure_evidence_reference'
+        ]) {
+          if (!planColumns.has(column)) {
+            throw new Error(`Backup governed pre-task plan schema is incomplete: pre_task_plans.${column}.`);
+          }
+        }
+        const attendeeColumns = new Set(database.prepare('PRAGMA table_info(pre_task_plan_attendees)').all().map(row => row.name));
+        for (const column of [
+          'plan_id',
+          'job_id',
+          'assignment_id',
+          'worker_id',
+          'attendee_key',
+          'status',
+          'evidence_reference',
+          'entry_key',
+          'entry_fingerprint'
+        ]) {
+          if (!attendeeColumns.has(column)) {
+            throw new Error(`Backup governed pre-task plan schema is incomplete: pre_task_plan_attendees.${column}.`);
+          }
+        }
+        const sequenceColumns = new Set(database.prepare('PRAGMA table_info(pre_task_plan_number_sequences)').all().map(row => row.name));
+        for (const column of ['period_year', 'last_value', 'updated_at']) {
+          if (!sequenceColumns.has(column)) {
+            throw new Error(`Backup governed pre-task plan schema is incomplete: pre_task_plan_number_sequences.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_pre_task_plans_job_status_date',
+          'idx_pre_task_plans_approval',
+          'idx_pre_task_attendees_plan_status',
+          'idx_pre_task_attendees_worker_status',
+          'idx_pre_task_attendees_job_entry_key'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed pre-task plan constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

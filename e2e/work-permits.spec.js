@@ -80,7 +80,7 @@ test('permit approval, crew acceptance, stop work, closeout, and mobile layout s
   await expect(panel.locator('.work-permit-state .status')).toHaveText('active');
   await expect(panel.getByText('Stored electrical energy')).toBeVisible();
   await expect(panel.getByText(worker.name)).toBeVisible();
-  await expect(panel.getByText('1 assigned worker acknowledgement(s) are outstanding.')).toBeVisible();
+  await expect(panel.getByText('1 assigned worker acknowledgement is outstanding.')).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Suspend' })).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Close permit' })).toBeVisible();
 

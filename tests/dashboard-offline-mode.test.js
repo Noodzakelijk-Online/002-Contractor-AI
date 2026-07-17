@@ -111,7 +111,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);

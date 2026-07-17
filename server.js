@@ -1201,6 +1201,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
         || pathName === '/api/ledger/work-permits'
         || /^\/api\/ledger\/jobs\/[^/]+\/work-permits$/.test(pathName)
+        || pathName === '/api/ledger/pre-task-plans'
+        || /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans$/.test(pathName)
         || pathName === '/api/ledger/safety-briefings'
         || /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings$/.test(pathName)
         || pathName === '/api/ledger/attendance'
@@ -1219,6 +1221,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/nonconformances$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/work-permits\/[^/]+\/acknowledgments$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans\/[^/]+\/(acknowledgments|suspend)$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
@@ -1403,6 +1406,7 @@ function projectFieldJobDetail(req, detail) {
     rfis: projectFieldRecords(detail.rfis),
     submittals: projectFieldRecords(detail.submittals),
     permits: projectFieldRecords(detail.permits),
+    preTaskPlans: (detail.preTaskPlans || []).map(plan => preTaskPlanForOperator(req, plan)),
     inspections: projectFieldRecords(detail.inspections),
     nonconformances: projectFieldRecords(detail.nonconformances),
     observations: projectFieldRecords(detail.observations),
@@ -1638,6 +1642,48 @@ function workPermitForOperator(req, permit) {
       integrityFailures: attendees.filter(attendee => attendee.status === 'acknowledged' && attendee.integrityValid !== true).length
     },
     readyForWork: permit.readyForWork === true
+      && ownAcknowledgement?.status === 'acknowledged'
+      && ownAcknowledgement.integrityValid === true,
+    fieldScoped: true
+  });
+}
+
+function preTaskPlanAcknowledgementPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field pre-task acknowledgement requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    acknowledgedBy: identity.workerName,
+    acknowledged_by: identity.workerName,
+    source: 'field_pre_task_plan_acknowledgement'
+  };
+}
+
+function preTaskPlanForOperator(req, plan) {
+  if (req.operator?.role !== 'field_worker') return plan;
+  const workerId = req.operator.scope?.workerId || null;
+  const attendees = workerId
+    ? (plan.attendees || []).filter(attendee => String(attendee.workerId || '') === String(workerId))
+    : [];
+  const ownAcknowledgement = attendees[0] || null;
+  return projectFieldRecord({
+    ...plan,
+    attendees,
+    attendanceSummary: {
+      total: attendees.length,
+      expected: attendees.filter(attendee => attendee.status === 'expected').length,
+      acknowledged: attendees.filter(attendee => attendee.status === 'acknowledged').length,
+      integrityFailures: attendees.filter(attendee => attendee.status === 'acknowledged' && attendee.integrityValid !== true).length
+    },
+    readyForWork: plan.readyForWork === true
       && ownAcknowledgement?.status === 'acknowledged'
       && ownAcknowledgement.integrityValid === true,
     fieldScoped: true
@@ -2975,6 +3021,113 @@ app.post('/api/ledger/jobs/:id/permits', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.get('/api/ledger/pre-task-plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}) };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    const plans = operatingLedger.listPreTaskPlans(filters)
+      .filter(plan => fieldWorkerCanAccessJob(req, plan.jobId))
+      .map(plan => preTaskPlanForOperator(req, plan));
+    return {
+      success: true,
+      preTaskPlans: plans,
+      policy: {
+        approvalRequired: true,
+        sourceCurrentApproval: true,
+        exactWorkerAcknowledgementRequired: true,
+        immediateSafetySuspension: true,
+        revisionSupersession: true,
+        activationInference: false,
+        acknowledgementInference: false,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/pre-task-plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}), jobId: req.params.id };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    return {
+      success: true,
+      preTaskPlans: operatingLedger.listPreTaskPlans(filters).map(plan => preTaskPlanForOperator(req, plan))
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/pre-task-plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createPreTaskPlan(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      preTaskPlan: result.plan,
+      approval: result.approval,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/acknowledgments', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.acknowledgePreTaskPlan(
+      req.params.id,
+      req.params.planId,
+      preTaskPlanAcknowledgementPayloadForOperator(req, req.body || {}),
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      preTaskPlan: preTaskPlanForOperator(req, result.plan),
+      attendee: recordForOperator(req, result.attendee),
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/suspend', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const identity = req.operator?.role === 'field_worker' ? fieldWorkerIdentity(req) : { workerId: null };
+    const result = operatingLedger.suspendPreTaskPlan(req.params.id, req.params.planId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard'),
+      workerId: identity.workerId
+    });
+    return {
+      success: true,
+      preTaskPlan: preTaskPlanForOperator(req, result.plan),
+      replayed: result.replayed === true,
+      stopWorkImmediate: true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/close', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.closePreTaskPlan(req.params.id, req.params.planId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      preTaskPlan: result.plan,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  });
 });
 
 app.get('/api/ledger/work-permits', (req, res) => {
@@ -6298,6 +6451,15 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         workPermitClosure: 'evidence_retained',
         workPermitActivationInference: false,
         workPermitAcknowledgementInference: false,
+        preTaskPlanEntryKey: 'durable',
+        preTaskPlanRelease: 'source_current_approval_gated',
+        preTaskPlanAcknowledgement: 'worker_scoped_exact_replay',
+        preTaskPlanActivation: 'all_frozen_crew_acknowledged',
+        preTaskPlanRevision: 'explicit_supersession',
+        preTaskPlanSuspension: 'immediate_evidence_retained',
+        preTaskPlanClosure: 'evidence_retained',
+        preTaskPlanActivationInference: false,
+        preTaskPlanAcknowledgementInference: false,
         dayworkEntryKey: 'durable',
         dayworkQuantitySnapshot: 'sha256_source_bound',
         dayworkApproval: 'source_current_approval_gated',

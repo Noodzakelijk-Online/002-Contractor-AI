@@ -152,6 +152,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'qualification', label: 'Worker qualifications', table: 'job_qualification_requirements', detailKey: 'qualificationRequirements', readyStatuses: ['active', 'pending_retirement'] },
     { key: 'orientation', label: 'Worker orientation', table: 'worker_orientations', detailKey: 'orientations' },
     { key: 'safety_briefing', label: 'Approved safety briefing', table: 'safety_meetings', detailKey: 'safetyMeetings', readyStatuses: ['completed', 'approved', 'client_visible'] },
+    { key: 'pre_task_plan', label: 'Approved pre-task plan', table: 'pre_task_plans', detailKey: 'preTaskPlans', readyStatuses: ['active', 'closed'] },
     { key: 'jha', label: 'JHA / risk assessment', table: 'jha_records', detailKey: 'jhas' },
     { key: 'sds', label: 'SDS register', table: 'sds_sheets', detailKey: 'sdsSheets' },
     { key: 'permit', label: 'Permits', table: 'permit_records', detailKey: 'permits' },
@@ -1002,6 +1003,7 @@ const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
 const ENVIRONMENTAL_REPORT_FORMAT = 'contractor-ai-environmental-report/v1';
 const SAFETY_BRIEFING_FORMAT = 'contractor-ai-safety-briefing/v1';
 const WORK_PERMIT_FORMAT = 'contractor-ai-work-permit/v1';
+const PRE_TASK_PLAN_FORMAT = 'contractor-ai-pre-task-plan/v1';
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -3461,6 +3463,95 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE UNIQUE INDEX IF NOT EXISTS idx_nonconformance_pending_closure
           ON nonconformance_records(closure_approval_id)
           WHERE closure_approval_id IS NOT NULL AND closed_at IS NULL;
+      `);
+    }
+  },
+  {
+    version: '045_governed_pre_task_plans',
+    description: 'Retain approval-bound pre-task plans with source-current JHA, permit, SDS, frozen crew, worker acknowledgements, stop-work, revision, and closeout evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pre_task_plan_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pre_task_plans (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          plan_number TEXT NOT NULL,
+          revision_number INTEGER NOT NULL DEFAULT 1,
+          supersedes_plan_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          work_date TEXT NOT NULL,
+          shift_label TEXT NOT NULL,
+          title TEXT NOT NULL,
+          location TEXT NOT NULL,
+          prepared_by TEXT NOT NULL,
+          responsible_worker_id TEXT,
+          jha_id TEXT NOT NULL,
+          work_permit_id TEXT,
+          sds_sheet_ids_json TEXT NOT NULL DEFAULT '[]',
+          steps_json TEXT NOT NULL DEFAULT '[]',
+          evidence_reference TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL,
+          entry_fingerprint TEXT NOT NULL,
+          approval_id TEXT,
+          activated_at TEXT,
+          suspended_at TEXT,
+          closed_at TEXT,
+          closure_evidence_reference TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(supersedes_plan_id) REFERENCES pre_task_plans(id) ON DELETE SET NULL,
+          FOREIGN KEY(responsible_worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          FOREIGN KEY(jha_id) REFERENCES jha_records(id) ON DELETE RESTRICT,
+          FOREIGN KEY(work_permit_id) REFERENCES permit_records(id) ON DELETE SET NULL,
+          FOREIGN KEY(approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, plan_number),
+          UNIQUE(job_id, entry_key),
+          UNIQUE(supersedes_plan_id)
+        );
+        CREATE TABLE IF NOT EXISTS pre_task_plan_attendees (
+          id TEXT PRIMARY KEY,
+          plan_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          assignment_id TEXT,
+          worker_id TEXT NOT NULL,
+          attendee_key TEXT NOT NULL,
+          attendee_name TEXT NOT NULL,
+          company TEXT,
+          status TEXT NOT NULL DEFAULT 'expected',
+          acknowledged_at TEXT,
+          acknowledged_by TEXT,
+          evidence_reference TEXT,
+          entry_key TEXT,
+          entry_fingerprint TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(plan_id) REFERENCES pre_task_plans(id) ON DELETE CASCADE,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(assignment_id) REFERENCES assignments(id) ON DELETE SET NULL,
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE RESTRICT,
+          UNIQUE(plan_id, attendee_key),
+          UNIQUE(job_id, entry_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pre_task_plans_job_status_date
+          ON pre_task_plans(job_id, status, work_date DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_pre_task_plans_approval
+          ON pre_task_plans(approval_id);
+        CREATE INDEX IF NOT EXISTS idx_pre_task_attendees_plan_status
+          ON pre_task_plan_attendees(plan_id, status, attendee_name);
+        CREATE INDEX IF NOT EXISTS idx_pre_task_attendees_worker_status
+          ON pre_task_plan_attendees(worker_id, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pre_task_attendees_job_entry_key
+          ON pre_task_plan_attendees(job_id, entry_key) WHERE entry_key IS NOT NULL;
       `);
     }
   }
@@ -26131,7 +26222,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ...(expired ? [{ type: 'permit_expired', message: 'The permit validity window has expired.' }] : []),
       ...(!definitionIntegrityValid ? [{ type: 'permit_definition_integrity', message: 'The retained permit definition does not match its approved snapshot.' }] : []),
       ...(!attendanceSummary.total ? [{ type: 'permit_attendees_missing', message: 'No assigned worker is retained for this permit.' }] : []),
-      ...(attendanceSummary.expected ? [{ type: 'permit_acknowledgements_outstanding', count: attendanceSummary.expected, message: `${attendanceSummary.expected} assigned worker acknowledgement(s) are outstanding.` }] : []),
+      ...(attendanceSummary.expected ? [{ type: 'permit_acknowledgements_outstanding', count: attendanceSummary.expected, message: `${attendanceSummary.expected} assigned worker acknowledgement${attendanceSummary.expected === 1 ? '' : 's'} ${attendanceSummary.expected === 1 ? 'is' : 'are'} outstanding.` }] : []),
       ...(attendanceSummary.integrityFailures ? [{ type: 'permit_acknowledgement_integrity', count: attendanceSummary.integrityFailures, message: `${attendanceSummary.integrityFailures} acknowledgement record(s) failed integrity verification.` }] : [])
     ];
     return {
@@ -26409,6 +26500,569 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
       return { permit, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  allocatePreTaskPlanNumber(workDate = nowIso()) {
+    const periodYear = new Date(workDate).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('pre_task_plan_date_invalid', 'The work date could not be used for durable pre-task plan numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO pre_task_plan_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE pre_task_plan_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw ledgerInputError('pre_task_plan_number_allocation_failed', 'A durable pre-task plan number could not be allocated.', null, 500);
+    }
+    return `PTP-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  normalizePreTaskPlanSteps(rawSteps) {
+    if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > 25) {
+      throw ledgerInputError('pre_task_plan_steps_required', 'A pre-task plan requires between one and 25 ordered work steps.');
+    }
+    const keys = new Set();
+    return rawSteps.map((rawStep, index) => {
+      const step = rawStep && typeof rawStep === 'object' ? rawStep : { description: rawStep };
+      const stepKey = normalizeText(step.stepKey || step.step_key, `step_${index + 1}`);
+      if (!/^[A-Za-z0-9._:-]{1,80}$/.test(stepKey) || keys.has(stepKey)) {
+        throw ledgerInputError('pre_task_plan_step_key_invalid', 'Every pre-task step needs a unique safe key of up to 80 characters.', { stepKey });
+      }
+      keys.add(stepKey);
+      const description = normalizeText(step.description || step.task || step.title, '');
+      const hazards = [...new Set(normalizeList(step.hazards).map(value => normalizeText(value, '')).filter(Boolean))];
+      const controls = [...new Set(normalizeList(step.controls || step.mitigations).map(value => normalizeText(value, '')).filter(Boolean))];
+      if (description.length < 3 || description.length > 500) {
+        throw ledgerInputError('pre_task_plan_step_description_invalid', 'Every pre-task step needs a description between three and 500 characters.', { stepKey });
+      }
+      if (!hazards.length || hazards.length > 20 || hazards.some(value => value.length > 500)) {
+        throw ledgerInputError('pre_task_plan_step_hazards_invalid', 'Every pre-task step needs one to 20 retained hazards of up to 500 characters.', { stepKey });
+      }
+      if (!controls.length || controls.length > 20 || controls.some(value => value.length > 500)) {
+        throw ledgerInputError('pre_task_plan_step_controls_invalid', 'Every pre-task step needs one to 20 retained controls of up to 500 characters.', { stepKey });
+      }
+      return { stepKey, sequence: index + 1, description, hazards, controls };
+    });
+  }
+
+  preTaskPlanLinkedSources(jobId, payload = {}, options = {}) {
+    const validate = options.validate === true;
+    const blockers = [];
+    const jhaId = normalizeText(payload.jhaId || payload.jha_id, '');
+    const jhaRow = jhaId
+      ? this.db.prepare('SELECT * FROM jha_records WHERE id = ? AND job_id = ?').get(jhaId, jobId)
+      : null;
+    const jha = jhaRow ? this.mapJha(jhaRow) : null;
+    const jhaStatuses = new Set(['approved', 'issued', 'accepted', 'completed', 'signed_off', 'client_visible']);
+    const jhaApproval = jhaRow?.approval_id
+      ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'jha_record' AND target_id = ? AND status = 'approved'").get(jhaRow.approval_id, jhaRow.id)
+      : null;
+    if (!jha) blockers.push({ type: 'jha_missing', message: 'The linked JHA does not belong to this job.' });
+    else if (!jhaStatuses.has(jha.status) || !jhaApproval) blockers.push({ type: 'jha_not_approved', message: `JHA ${jha.title} is not backed by a current approved decision.` });
+
+    const workPermitId = normalizeText(payload.workPermitId || payload.work_permit_id, '') || null;
+    let permit = null;
+    if (workPermitId) {
+      try {
+        permit = this.getWorkPermit(workPermitId, { jobId });
+      } catch {
+        permit = null;
+      }
+      if (!permit) blockers.push({ type: 'work_permit_missing', message: 'The linked work permit does not belong to this job.' });
+      else if (permit.status !== 'active' || permit.expired || !permit.definitionIntegrityValid) {
+        blockers.push({ type: 'work_permit_not_current', message: `Work permit ${permit.title} is not active and source-current.` });
+      }
+    }
+
+    const sdsSheetIds = [...new Set(normalizeList(payload.sdsSheetIds || payload.sds_sheet_ids).map(String))].sort();
+    const sdsSheets = sdsSheetIds.map(id => {
+      const row = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ? AND job_id = ?').get(id, jobId);
+      return row ? this.mapSdsSheet(row) : null;
+    });
+    const sdsStatuses = new Set(['current', 'approved', 'accepted', 'active']);
+    for (let index = 0; index < sdsSheetIds.length; index += 1) {
+      const sheet = sdsSheets[index];
+      if (!sheet) {
+        blockers.push({ type: 'sds_missing', id: sdsSheetIds[index], message: 'A linked SDS sheet does not belong to this job.' });
+        continue;
+      }
+      const approval = sheet.approvalId
+        ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'sds_sheet' AND target_id = ? AND status = 'approved'").get(sheet.approvalId, sheet.id)
+        : null;
+      const expired = sheet.expiresAt && Date.parse(sheet.expiresAt) <= Date.now();
+      if (!sdsStatuses.has(sheet.status) || !approval || expired) {
+        blockers.push({ type: 'sds_not_current', id: sheet.id, message: `SDS ${sheet.material} is not current and approval-backed.` });
+      }
+    }
+
+    const basis = {
+      jha: jha ? {
+        id: jha.id, status: jha.status, riskLevel: jha.riskLevel, title: jha.title,
+        hazards: jha.hazards, controls: jha.controls, approvalId: jha.approvalId, updatedAt: jha.updatedAt
+      } : null,
+      workPermit: permit ? {
+        id: permit.id, status: permit.status, sourceHash: permit.sourceHash,
+        snapshotHash: permit.snapshotHash, expiresAt: permit.expiresAt, updatedAt: permit.updatedAt
+      } : null,
+      sdsSheets: sdsSheets.filter(Boolean).map(sheet => ({
+        id: sheet.id, material: sheet.material, status: sheet.status, expiresAt: sheet.expiresAt,
+        approvalId: sheet.approvalId, updatedAt: sheet.updatedAt
+      })).sort((left, right) => left.id.localeCompare(right.id))
+    };
+    if (validate && blockers.length) {
+      throw ledgerInputError('pre_task_plan_prerequisites_not_ready', 'Pre-task plan approval requires a current approved JHA and every linked permit or SDS source to be current.', { blockers }, 409);
+    }
+    return { ready: blockers.length === 0, blockers, basis, hash: sha256Json(basis), jha, permit, sdsSheets: sdsSheets.filter(Boolean) };
+  }
+
+  preTaskPlanDefinitionBasis(planRow, attendeeRows = null) {
+    const data = fromJson(planRow.data_json, {});
+    const rows = attendeeRows || this.db.prepare(`
+      SELECT * FROM pre_task_plan_attendees WHERE plan_id = ? ORDER BY attendee_key, created_at
+    `).all(planRow.id);
+    return {
+      format: PRE_TASK_PLAN_FORMAT,
+      planId: planRow.id,
+      jobId: planRow.job_id,
+      planNumber: planRow.plan_number,
+      revisionNumber: Number(planRow.revision_number || 1),
+      supersedesPlanId: planRow.supersedes_plan_id || null,
+      workDate: planRow.work_date,
+      shiftLabel: planRow.shift_label,
+      title: planRow.title,
+      location: planRow.location,
+      preparedBy: planRow.prepared_by,
+      responsibleWorkerId: planRow.responsible_worker_id || null,
+      jhaId: planRow.jha_id,
+      workPermitId: planRow.work_permit_id || null,
+      sdsSheetIds: normalizeList(fromJson(planRow.sds_sheet_ids_json, [])).sort(),
+      steps: fromJson(planRow.steps_json, []),
+      evidenceReference: planRow.evidence_reference,
+      emergencyArrangements: normalizeText(data.emergencyArrangements, '') || null,
+      stopWorkTriggers: normalizeList(data.stopWorkTriggers),
+      linkedSources: data.linkedSources || null,
+      linkedSourcesHash: data.linkedSourcesHash || null,
+      attendees: [...rows].sort((left, right) => String(left.attendee_key).localeCompare(String(right.attendee_key))).map(row => ({
+        attendeeKey: row.attendee_key,
+        assignmentId: row.assignment_id || null,
+        workerId: row.worker_id,
+        attendeeName: row.attendee_name,
+        company: row.company || null
+      }))
+    };
+  }
+
+  preTaskPlanAttendeeEvidenceBasis(record = {}) {
+    const data = record.data || fromJson(record.data_json, {});
+    return {
+      planId: record.planId || record.plan_id,
+      jobId: record.jobId || record.job_id,
+      assignmentId: record.assignmentId || record.assignment_id || null,
+      workerId: record.workerId || record.worker_id,
+      attendeeName: record.attendeeName || record.attendee_name,
+      acknowledged: normalizeStatus(record.status, 'expected') === 'acknowledged',
+      evidenceReference: record.evidenceReference || record.evidence_reference || null,
+      attestation: record.attestation || data.attestation || null,
+      planSourceHash: data.planSourceHash || null
+    };
+  }
+
+  seedPreTaskPlanAttendees(jobId, planId, payload = {}) {
+    const assignments = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, workers.data_json AS worker_data_json
+      FROM assignments
+      JOIN workers ON workers.id = assignments.worker_id
+      WHERE assignments.job_id = ?
+      ORDER BY assignments.created_at
+    `).all(jobId).filter(row => this.activeAssignmentStatus(row.status));
+    const assignmentIds = normalizeList(payload.assignmentIds || payload.assignment_ids);
+    const workerIds = normalizeList(payload.workerIds || payload.worker_ids);
+    const selected = assignmentIds.length || workerIds.length
+      ? assignments.filter(row => assignmentIds.includes(String(row.id)) || workerIds.includes(String(row.worker_id)))
+      : assignments;
+    const timestamp = nowIso();
+    for (const assignment of selected) {
+      const attendeeName = normalizeText(assignment.worker_name, '');
+      if (!attendeeName || !assignment.worker_id) continue;
+      const company = normalizeText(fromJson(assignment.worker_data_json, {}).company, '') || null;
+      this.db.prepare(`
+        INSERT INTO pre_task_plan_attendees (
+          id, plan_id, job_id, assignment_id, worker_id, attendee_key, attendee_name, company,
+          status, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expected', '{}', ?, ?)
+        ON CONFLICT(plan_id, attendee_key) DO NOTHING
+      `).run(
+        makeId('pre_task_attendee'), planId, jobId, assignment.id, assignment.worker_id,
+        `worker:${assignment.worker_id}`, attendeeName, company, timestamp, timestamp
+      );
+    }
+    return this.db.prepare('SELECT * FROM pre_task_plan_attendees WHERE plan_id = ? ORDER BY attendee_name, created_at').all(planId);
+  }
+
+  getPreTaskPlan(planId, options = {}) {
+    const row = this.db.prepare(`
+      SELECT pre_task_plans.*, jobs.title AS job_title
+      FROM pre_task_plans JOIN jobs ON jobs.id = pre_task_plans.job_id
+      WHERE pre_task_plans.id = ?
+    `).get(planId);
+    if (!row || (options.jobId && String(row.job_id) !== String(options.jobId))) {
+      throw ledgerInputError('pre_task_plan_not_found', 'Pre-task plan not found for this job.', {}, 404);
+    }
+    const attendeeRows = this.db.prepare('SELECT * FROM pre_task_plan_attendees WHERE plan_id = ? ORDER BY attendee_name, created_at').all(planId);
+    const attendees = attendeeRows.map(attendee => this.mapPreTaskPlanAttendee(attendee));
+    const snapshot = fromJson(row.snapshot_json, null);
+    const sourceCurrentHash = sha256Json(this.preTaskPlanDefinitionBasis(row, attendeeRows));
+    const definitionIntegrityValid = Boolean(
+      snapshot && snapshot.format === PRE_TASK_PLAN_FORMAT && row.source_hash && row.snapshot_hash
+      && snapshot.sourceHash === row.source_hash && sha256Json(snapshot) === row.snapshot_hash
+      && sourceCurrentHash === row.source_hash
+    );
+    const data = fromJson(row.data_json, {});
+    const linked = this.preTaskPlanLinkedSources(row.job_id, {
+      jhaId: row.jha_id,
+      workPermitId: row.work_permit_id,
+      sdsSheetIds: fromJson(row.sds_sheet_ids_json, [])
+    });
+    const prerequisitesCurrent = linked.ready && linked.hash === data.linkedSourcesHash;
+    const attendanceSummary = attendees.reduce((summary, attendee) => {
+      summary.total += 1;
+      summary[attendee.status] = (summary[attendee.status] || 0) + 1;
+      if (attendee.status === 'acknowledged' && attendee.integrityValid !== true) summary.integrityFailures += 1;
+      return summary;
+    }, { total: 0, expected: 0, acknowledged: 0, integrityFailures: 0 });
+    const today = nowIso().slice(0, 10);
+    const notStarted = row.work_date > today;
+    const expired = row.work_date < today;
+    const readyForWork = row.status === 'active' && !notStarted && !expired
+      && definitionIntegrityValid && prerequisitesCurrent && attendanceSummary.total > 0
+      && attendanceSummary.expected === 0 && attendanceSummary.integrityFailures === 0;
+    const blockers = [
+      ...(!['approved_waiting_acknowledgement', 'active'].includes(row.status) ? [{ type: 'plan_not_released', message: `Plan status is ${row.status}.` }] : []),
+      ...(notStarted ? [{ type: 'plan_not_started', message: 'The plan work date has not started.' }] : []),
+      ...(expired ? [{ type: 'plan_expired', message: 'The plan work date has passed; prepare a revision for current work.' }] : []),
+      ...(!definitionIntegrityValid ? [{ type: 'plan_definition_integrity', message: 'The retained plan no longer matches its approved snapshot.' }] : []),
+      ...(!prerequisitesCurrent ? linked.blockers.length ? linked.blockers : [{ type: 'plan_sources_changed', message: 'A linked JHA, permit, or SDS source changed after approval was requested.' }] : []),
+      ...(!attendanceSummary.total ? [{ type: 'plan_crew_missing', message: 'No assigned worker is retained for this plan.' }] : []),
+      ...(attendanceSummary.expected ? [{ type: 'plan_acknowledgements_outstanding', count: attendanceSummary.expected, message: `${attendanceSummary.expected} assigned worker acknowledgement${attendanceSummary.expected === 1 ? '' : 's'} ${attendanceSummary.expected === 1 ? 'is' : 'are'} outstanding.` }] : []),
+      ...(attendanceSummary.integrityFailures ? [{ type: 'plan_acknowledgement_integrity', count: attendanceSummary.integrityFailures, message: `${attendanceSummary.integrityFailures} acknowledgement record(s) failed integrity verification.` }] : [])
+    ];
+    return {
+      ...this.mapPreTaskPlan(row),
+      jobTitle: row.job_title,
+      attendees,
+      attendanceSummary,
+      definitionIntegrityValid,
+      sourceCurrentHash,
+      prerequisitesCurrent,
+      prerequisiteBlockers: linked.blockers,
+      notStarted,
+      expired,
+      readyForWork,
+      effectiveStatus: row.status === 'active' && notStarted ? 'approved_waiting_date' : row.status === 'active' && expired ? 'expired' : row.status,
+      blockers
+    };
+  }
+
+  listPreTaskPlans(filters = {}) {
+    const clauses = ['1 = 1'];
+    const params = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('plans.job_id = ?');
+      params.push(filters.jobId || filters.job_id);
+    }
+    if (filters.status) {
+      clauses.push('plans.status = ?');
+      params.push(normalizeStatus(filters.status, 'active'));
+    }
+    if (filters.workerId || filters.worker_id) {
+      clauses.push('EXISTS (SELECT 1 FROM pre_task_plan_attendees attendee WHERE attendee.plan_id = plans.id AND attendee.worker_id = ?)');
+      params.push(filters.workerId || filters.worker_id);
+    }
+    const limit = Math.max(1, Math.min(500, Number(filters.limit || 100)));
+    const rows = this.db.prepare(`
+      SELECT plans.id FROM pre_task_plans plans
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY plans.work_date DESC, plans.created_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+    return rows.map(row => this.getPreTaskPlan(row.id));
+  }
+
+  createPreTaskPlan(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const retainedWorkDate = normalizeRetainedDate(payload.workDate || payload.work_date, {
+        required: true, label: 'Pre-task work date', code: 'pre_task_plan_work_date_invalid'
+      });
+      const workDate = retainedWorkDate.slice(0, 10);
+      const today = timestamp.slice(0, 10);
+      const latestDate = new Date(Date.parse(`${today}T12:00:00.000Z`) + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      if (workDate < today || workDate > latestDate) {
+        throw ledgerInputError('pre_task_plan_work_date_out_of_range', 'Pre-task plans must cover today or a date within the next 90 days.', { workDate, latestDate });
+      }
+      const title = normalizeText(payload.title, '');
+      const location = normalizeText(payload.location || job.address || job.city, '');
+      const preparedBy = normalizeText(payload.preparedBy || payload.prepared_by, actor);
+      const shiftLabel = normalizeText(payload.shiftLabel || payload.shift_label, 'Day shift');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (title.length < 3 || title.length > 240) throw ledgerInputError('pre_task_plan_title_invalid', 'Pre-task plan title must contain three to 240 characters.');
+      if (location.length < 2 || location.length > 240) throw ledgerInputError('pre_task_plan_location_invalid', 'Pre-task plan location must contain two to 240 characters.');
+      if (preparedBy.length < 2 || preparedBy.length > 160) throw ledgerInputError('pre_task_plan_prepared_by_invalid', 'Pre-task plan preparer must contain two to 160 characters.');
+      if (shiftLabel.length < 2 || shiftLabel.length > 120) throw ledgerInputError('pre_task_plan_shift_invalid', 'Pre-task plan shift must contain two to 120 characters.');
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) throw ledgerInputError('pre_task_plan_evidence_invalid', 'Pre-task plan source evidence must contain three to 240 characters.');
+      const steps = this.normalizePreTaskPlanSteps(payload.steps);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('pre_task_plan_entry_key_invalid', 'Pre-task plan replay key must contain 8 to 200 safe characters.');
+      }
+      const jhaId = normalizeText(payload.jhaId || payload.jha_id, '');
+      if (!jhaId) throw ledgerInputError('pre_task_plan_jha_required', 'Pre-task plan approval requires a linked approved JHA.');
+      const workPermitId = normalizeText(payload.workPermitId || payload.work_permit_id, '') || null;
+      const sdsSheetIds = [...new Set(normalizeList(payload.sdsSheetIds || payload.sds_sheet_ids).map(String))].sort();
+      const assignmentIds = normalizeList(payload.assignmentIds || payload.assignment_ids).map(String).sort();
+      const workerIds = normalizeList(payload.workerIds || payload.worker_ids).map(String).sort();
+      const responsibleWorkerId = normalizeText(payload.responsibleWorkerId || payload.responsible_worker_id, '') || null;
+      const supersedesPlanId = normalizeText(payload.supersedesPlanId || payload.supersedes_plan_id, '') || null;
+      const emergencyArrangements = normalizeText(payload.emergencyArrangements || payload.emergency_arrangements, '');
+      const stopWorkTriggers = [...new Set(normalizeList(payload.stopWorkTriggers || payload.stop_work_triggers).map(value => normalizeText(value, '')).filter(Boolean))];
+      const notes = normalizeText(payload.notes || payload.note, '') || null;
+      const entryFingerprint = sha256Json({
+        jobId, workDate, shiftLabel, title, location, preparedBy, responsibleWorkerId,
+        jhaId, workPermitId, sdsSheetIds, steps, evidenceReference, assignmentIds, workerIds,
+        supersedesPlanId, emergencyArrangements, stopWorkTriggers, notes
+      });
+      const replay = this.db.prepare('SELECT * FROM pre_task_plans WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('pre_task_plan_entry_key_reused', 'Pre-task plan replay key was already used for different content.', { entryKey }, 409);
+        }
+        const approval = replay.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id) : null;
+        return { plan: this.getPreTaskPlan(replay.id, { jobId }), approval: approval ? this.mapApproval(approval) : null, replayed: true, externalCommitments: 0 };
+      }
+      const linked = this.preTaskPlanLinkedSources(jobId, { jhaId, workPermitId, sdsSheetIds }, { validate: true });
+      const superseded = supersedesPlanId
+        ? this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ? AND job_id = ?').get(supersedesPlanId, jobId)
+        : null;
+      if (supersedesPlanId && (!superseded || ['closed', 'superseded'].includes(superseded.status))) {
+        throw ledgerInputError('pre_task_plan_revision_source_invalid', 'Only a current non-closed plan can be superseded by a revision.', { supersedesPlanId }, 409);
+      }
+      if (superseded && this.db.prepare('SELECT id FROM pre_task_plans WHERE supersedes_plan_id = ?').get(superseded.id)) {
+        throw ledgerInputError('pre_task_plan_revision_exists', 'This pre-task plan already has a retained revision.', { supersedesPlanId }, 409);
+      }
+      const revisionNumber = superseded ? Number(superseded.revision_number || 1) + 1 : 1;
+      const id = makeId('pre_task_plan');
+      const planNumber = this.allocatePreTaskPlanNumber(`${workDate}T12:00:00.000Z`);
+      this.db.prepare(`
+        INSERT INTO pre_task_plans (
+          id, job_id, plan_number, revision_number, supersedes_plan_id, status, work_date, shift_label,
+          title, location, prepared_by, responsible_worker_id, jha_id, work_permit_id, sds_sheet_ids_json,
+          steps_json, evidence_reference, source_hash, snapshot_hash, snapshot_json, entry_key,
+          entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '{}', ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, planNumber, revisionNumber, supersedesPlanId, workDate, shiftLabel, title, location,
+        preparedBy, responsibleWorkerId, jhaId, workPermitId, toJson(sdsSheetIds), toJson(steps),
+        evidenceReference, entryKey, entryFingerprint,
+        toJson({
+          format: PRE_TASK_PLAN_FORMAT, linkedSources: linked.basis, linkedSourcesHash: linked.hash,
+          emergencyArrangements: emergencyArrangements || null, stopWorkTriggers, notes,
+          requestedStatus: 'approved_waiting_acknowledgement', externalCommitments: 0
+        }), timestamp, timestamp
+      );
+      const attendeeRows = this.seedPreTaskPlanAttendees(jobId, id, { assignmentIds, workerIds });
+      if (!attendeeRows.length) {
+        throw ledgerInputError('pre_task_plan_assigned_workers_required', 'Pre-task plan approval requires at least one active assigned worker.', {}, 409);
+      }
+      if (responsibleWorkerId && !attendeeRows.some(row => String(row.worker_id) === responsibleWorkerId)) {
+        throw ledgerInputError('pre_task_plan_responsible_worker_invalid', 'The responsible worker must be retained in the frozen assigned crew.', { responsibleWorkerId }, 409);
+      }
+      let planRow = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ?').get(id);
+      const sourceHash = sha256Json(this.preTaskPlanDefinitionBasis(planRow, attendeeRows));
+      const snapshot = { ...this.preTaskPlanDefinitionBasis(planRow, attendeeRows), sourceHash, requestedStatus: 'approved_waiting_acknowledgement', retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      const approval = this.createApproval({
+        targetType: 'pre_task_plan', targetId: id, jobId,
+        approvalType: 'pre_task_plan_activation',
+        summary: `Release pre-task plan ${planNumber}: ${title}`,
+        reason: 'The work steps, hazards, controls, linked safety sources, work date, and assigned crew must remain source-current before field acknowledgement.',
+        data: { sourceHash, snapshotHash, linkedSourcesHash: linked.hash, attendeeCount: attendeeRows.length, workDate, revisionNumber }
+      }, { actor, audit: false });
+      this.db.prepare(`
+        UPDATE pre_task_plans SET approval_id = ?, source_hash = ?, snapshot_hash = ?, snapshot_json = ?, updated_at = ? WHERE id = ?
+      `).run(approval.id, sourceHash, snapshotHash, toJson(snapshot), timestamp, id);
+      if (superseded) {
+        const supersededData = fromJson(superseded.data_json, {});
+        this.db.prepare(`
+          UPDATE pre_task_plans SET status = 'superseded', data_json = ?, updated_at = ? WHERE id = ?
+        `).run(toJson({ ...supersededData, supersededByPlanId: id, supersededAt: timestamp, supersededBy: actor }), timestamp, superseded.id);
+        if (superseded.approval_id) {
+          this.db.prepare(`
+            UPDATE approvals SET status = 'cancelled', resolved_by = ?, resolved_at = ?, reason = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending'
+          `).run(actor, timestamp, `Superseded by pre-task plan ${planNumber}.`, timestamp, superseded.approval_id);
+        }
+      }
+      planRow = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ?').get(id);
+      const plan = this.getPreTaskPlan(id, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'pre_task_plan', entityId: id, jobId, action: 'request_pre_task_plan_release', actor,
+          after: plan,
+          metadata: { approvalId: approval.id, planNumber, revisionNumber, supersedesPlanId, sourceHash, snapshotHash, linkedSourcesHash: linked.hash, attendeeCount: attendeeRows.length, externalCommitments: 0 }
+        });
+      }
+      return { plan, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  acknowledgePreTaskPlan(jobId, planId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ? AND job_id = ?').get(planId, jobId);
+      if (!row) throw ledgerInputError('pre_task_plan_not_found', 'Pre-task plan not found for this job.', {}, 404);
+      const plan = this.getPreTaskPlan(planId, { jobId });
+      if (!['approved_waiting_acknowledgement', 'active'].includes(plan.status) || plan.expired || !plan.definitionIntegrityValid || !plan.prerequisitesCurrent) {
+        throw ledgerInputError('pre_task_plan_not_acknowledgeable', 'Only a released, current, integrity-valid pre-task plan can be acknowledged.', { blockers: plan.blockers }, 409);
+      }
+      if (payload.acknowledged !== true) throw ledgerInputError('pre_task_plan_attestation_required', 'Pre-task plan acknowledgement requires an explicit positive attestation.');
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '');
+      if (!workerId) throw ledgerInputError('pre_task_plan_worker_required', 'Pre-task plan acknowledgement requires a retained worker identity.');
+      const attendeeRow = this.db.prepare('SELECT * FROM pre_task_plan_attendees WHERE plan_id = ? AND worker_id = ?').get(planId, workerId);
+      if (!attendeeRow) throw ledgerInputError('pre_task_plan_worker_not_expected', 'This worker is not retained in the approved pre-task crew.', { workerId }, 403);
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3) throw ledgerInputError('pre_task_plan_acknowledgement_evidence_required', 'Pre-task plan acknowledgement requires a retained evidence reference.');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) throw ledgerInputError('pre_task_plan_acknowledgement_entry_key_invalid', 'Pre-task acknowledgement replay key must contain 8 to 200 safe characters.');
+      const attestation = normalizeText(payload.attestation, 'I reviewed this plan, its hazards and controls, and will stop work if conditions change.');
+      const basis = this.preTaskPlanAttendeeEvidenceBasis({
+        planId, jobId, assignmentId: attendeeRow.assignment_id, workerId,
+        attendeeName: attendeeRow.attendee_name, status: 'acknowledged', evidenceReference,
+        attestation, data: { planSourceHash: row.source_hash }
+      });
+      const entryFingerprint = sha256Json(basis);
+      const replay = this.db.prepare('SELECT * FROM pre_task_plan_attendees WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint || replay.plan_id !== planId) {
+          throw ledgerInputError('pre_task_plan_acknowledgement_entry_key_reused', 'Pre-task acknowledgement replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { plan: this.getPreTaskPlan(planId, { jobId }), attendee: this.mapPreTaskPlanAttendee(replay), replayed: true, externalCommitments: 0 };
+      }
+      if (attendeeRow.status === 'acknowledged') throw ledgerInputError('pre_task_plan_already_acknowledged', 'This worker already acknowledged the retained pre-task plan.', { workerId }, 409);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE pre_task_plan_attendees
+        SET status = 'acknowledged', acknowledged_at = ?, acknowledged_by = ?, evidence_reference = ?,
+          entry_key = ?, entry_fingerprint = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'expected'
+      `).run(
+        timestamp, normalizeText(payload.acknowledgedBy || payload.acknowledged_by, actor), evidenceReference,
+        entryKey, entryFingerprint, toJson({ attestation, planSourceHash: row.source_hash }), timestamp, attendeeRow.id
+      );
+      const outstanding = Number(this.db.prepare("SELECT COUNT(*) AS count FROM pre_task_plan_attendees WHERE plan_id = ? AND status = 'expected'").get(planId).count || 0);
+      if (outstanding === 0) {
+        this.db.prepare(`
+          UPDATE pre_task_plans SET status = 'active', activated_at = COALESCE(activated_at, ?), updated_at = ?
+          WHERE id = ? AND status = 'approved_waiting_acknowledgement'
+        `).run(timestamp, timestamp, planId);
+      }
+      const attendee = this.mapPreTaskPlanAttendee(this.db.prepare('SELECT * FROM pre_task_plan_attendees WHERE id = ?').get(attendeeRow.id));
+      const updatedPlan = this.getPreTaskPlan(planId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'pre_task_plan_attendee', entityId: attendee.id, jobId, action: 'acknowledge_pre_task_plan', actor,
+          before: this.mapPreTaskPlanAttendee(attendeeRow), after: attendee,
+          metadata: { planId, entryKey, planSourceHash: row.source_hash, activated: updatedPlan.status === 'active', externalCommitments: 0 }
+        });
+      }
+      return { plan: updatedPlan, attendee, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  suspendPreTaskPlan(jobId, planId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ? AND job_id = ?').get(planId, jobId);
+      if (!row) throw ledgerInputError('pre_task_plan_not_found', 'Pre-task plan not found for this job.', {}, 404);
+      if (options.workerId && !this.db.prepare('SELECT id FROM pre_task_plan_attendees WHERE plan_id = ? AND worker_id = ?').get(planId, options.workerId)) {
+        throw ledgerInputError('pre_task_plan_worker_not_expected', 'Only a retained plan attendee can stop this field plan.', { workerId: options.workerId }, 403);
+      }
+      const reason = normalizeText(payload.reason, '');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (reason.length < 8) throw ledgerInputError('pre_task_plan_suspension_reason_required', 'Plan suspension requires a retained reason of at least eight characters.');
+      if (evidenceReference.length < 3) throw ledgerInputError('pre_task_plan_suspension_evidence_required', 'Plan suspension requires a retained evidence reference.');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) throw ledgerInputError('pre_task_plan_suspension_entry_key_invalid', 'Plan suspension replay key must contain 8 to 200 safe characters.');
+      const fingerprint = sha256Json({ planId, jobId, reason, evidenceReference });
+      const data = fromJson(row.data_json, {});
+      if (data.suspension?.entryKey === entryKey) {
+        if (data.suspension.fingerprint !== fingerprint) throw ledgerInputError('pre_task_plan_suspension_entry_key_reused', 'Plan suspension replay key was already used for different content.', { entryKey }, 409);
+        return { plan: this.getPreTaskPlan(planId, { jobId }), replayed: true, stopWorkImmediate: true, externalCommitments: 0 };
+      }
+      if (!['approved_waiting_acknowledgement', 'active'].includes(row.status)) {
+        throw ledgerInputError('pre_task_plan_not_suspensible', 'Only a released pre-task plan can be suspended.', { status: row.status }, 409);
+      }
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE pre_task_plans SET status = 'suspended', suspended_at = ?, data_json = ?, updated_at = ? WHERE id = ?
+      `).run(timestamp, toJson({ ...data, suspension: { entryKey, fingerprint, reason, evidenceReference, suspendedAt: timestamp, suspendedBy: actor } }), timestamp, planId);
+      const plan = this.getPreTaskPlan(planId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'pre_task_plan', entityId: planId, jobId, action: 'suspend_pre_task_plan', actor,
+          before: this.mapPreTaskPlan(row), after: plan,
+          metadata: { entryKey, reason, evidenceReference, workerId: options.workerId || null, stopWorkImmediate: true, externalCommitments: 0 }
+        });
+      }
+      return { plan, replayed: false, stopWorkImmediate: true, externalCommitments: 0 };
+    });
+  }
+
+  closePreTaskPlan(jobId, planId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ? AND job_id = ?').get(planId, jobId);
+      if (!row) throw ledgerInputError('pre_task_plan_not_found', 'Pre-task plan not found for this job.', {}, 404);
+      const note = normalizeText(payload.note || payload.reason, '');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (note.length < 8) throw ledgerInputError('pre_task_plan_closure_note_required', 'Plan closeout requires a retained note of at least eight characters.');
+      if (evidenceReference.length < 3) throw ledgerInputError('pre_task_plan_closure_evidence_required', 'Plan closeout requires a retained evidence reference.');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) throw ledgerInputError('pre_task_plan_closure_entry_key_invalid', 'Plan closeout replay key must contain 8 to 200 safe characters.');
+      const fingerprint = sha256Json({ planId, jobId, note, evidenceReference });
+      const data = fromJson(row.data_json, {});
+      if (data.closure?.entryKey === entryKey) {
+        if (data.closure.fingerprint !== fingerprint) throw ledgerInputError('pre_task_plan_closure_entry_key_reused', 'Plan closeout replay key was already used for different content.', { entryKey }, 409);
+        return { plan: this.getPreTaskPlan(planId, { jobId }), replayed: true, externalCommitments: 0 };
+      }
+      if (!['active', 'suspended'].includes(row.status)) {
+        throw ledgerInputError('pre_task_plan_not_closable', 'Only an active or suspended pre-task plan can be closed.', { status: row.status }, 409);
+      }
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE pre_task_plans
+        SET status = 'closed', closed_at = ?, closure_evidence_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, evidenceReference, toJson({ ...data, closure: { entryKey, fingerprint, note, evidenceReference, closedAt: timestamp, closedBy: actor } }), timestamp, planId);
+      const plan = this.getPreTaskPlan(planId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'pre_task_plan', entityId: planId, jobId, action: 'close_pre_task_plan', actor,
+          before: this.mapPreTaskPlan(row), after: plan,
+          metadata: { entryKey, evidenceReference, externalCommitments: 0 }
+        });
+      }
+      return { plan, replayed: false, externalCommitments: 0 };
     });
   }
 
@@ -31768,6 +32422,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'pre_task_plan') {
+        const row = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE pre_task_plans SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            approvalDecision: {
+              status, approvalId, resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'work_permit') {
         const row = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -32770,6 +33439,57 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         : 'approved';
       this.db.prepare('UPDATE client_selections SET status = ?, decided_at = COALESCE(decided_at, ?), updated_at = ? WHERE id = ?')
         .run(approvedStatus, timestamp, timestamp, targetId);
+    } else if (targetType === 'pre_task_plan') {
+      const plan = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ?').get(targetId);
+      if (!plan || !plan.source_hash || plan.status !== 'pending_approval') {
+        throw ledgerInputError('pre_task_plan_not_releasable', 'Pre-task plan approval target no longer exists in a releasable state.', {}, 409);
+      }
+      const attendeeRows = this.db.prepare('SELECT * FROM pre_task_plan_attendees WHERE plan_id = ? ORDER BY attendee_key, created_at').all(targetId);
+      const snapshot = fromJson(plan.snapshot_json, null);
+      const sourceCurrentHash = sha256Json(this.preTaskPlanDefinitionBasis(plan, attendeeRows));
+      const linked = this.preTaskPlanLinkedSources(plan.job_id, {
+        jhaId: plan.jha_id,
+        workPermitId: plan.work_permit_id,
+        sdsSheetIds: fromJson(plan.sds_sheet_ids_json, [])
+      }, { validate: true });
+      const approval = plan.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(plan.approval_id) : null;
+      const approvalData = fromJson(approval?.data_json, {});
+      const snapshotValid = Boolean(
+        snapshot && snapshot.format === PRE_TASK_PLAN_FORMAT && plan.snapshot_hash
+        && snapshot.sourceHash === plan.source_hash && sha256Json(snapshot) === plan.snapshot_hash
+        && sourceCurrentHash === plan.source_hash && linked.hash === fromJson(plan.data_json, {}).linkedSourcesHash
+        && approvalData.sourceHash === plan.source_hash && approvalData.snapshotHash === plan.snapshot_hash
+        && approvalData.linkedSourcesHash === linked.hash
+      );
+      if (!snapshotValid || !attendeeRows.length) {
+        throw ledgerInputError(
+          'pre_task_plan_integrity_failed',
+          'Pre-task steps, controls, linked safety sources, work date, or assigned crew changed after approval was requested. Reject it and prepare a current revision.',
+          { snapshotValid, attendeeCount: attendeeRows.length },
+          409
+        );
+      }
+      if (plan.work_date < nowIso().slice(0, 10)) {
+        throw ledgerInputError('pre_task_plan_expired_before_approval', 'The pre-task work date passed before approval. Prepare a current revision.', {}, 409);
+      }
+      const data = fromJson(plan.data_json, {});
+      this.db.prepare(`
+        UPDATE pre_task_plans
+        SET status = 'approved_waiting_acknowledgement', data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending_approval'
+      `).run(toJson({
+        ...data,
+        approvalDecision: {
+          status: 'approved', approvalId: plan.approval_id || null, resolvedAt: timestamp,
+          resolvedBy: approval?.resolved_by || 'approval'
+        }
+      }), timestamp, targetId);
+      this.audit({
+        entityType: 'pre_task_plan', entityId: targetId, jobId: plan.job_id,
+        action: 'release_pre_task_plan', actor: approval?.resolved_by || 'approval',
+        before: this.mapPreTaskPlan(plan), after: this.getPreTaskPlan(targetId, { jobId: plan.job_id }),
+        metadata: { approvalId: plan.approval_id || null, sourceHash: plan.source_hash, snapshotHash: plan.snapshot_hash, linkedSourcesHash: linked.hash, attendeeCount: attendeeRows.length, externalCommitments: 0 }
+      });
     } else if (targetType === 'work_permit') {
       const permit = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(targetId);
       if (!permit || !permit.source_hash) {
@@ -36649,6 +37369,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         .map(row => this.getProjectMeeting(row.id)),
       clientSelections: this.db.prepare('SELECT * FROM client_selections WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapClientSelection(row)),
       permits: this.db.prepare('SELECT * FROM permit_records WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapPermit(row)),
+      preTaskPlans: this.listPreTaskPlans({ jobId, limit: 500 }),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
       nonconformances: this.listNonconformances({ jobId, limit: 500 }),
       observations: this.db.prepare('SELECT * FROM observation_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapObservation(row)),
@@ -38768,6 +39489,47 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const preTaskPlanRows = this.db.prepare(`
+      SELECT plans.id, plans.job_id
+      FROM pre_task_plans plans
+      JOIN jobs ON jobs.id = plans.job_id
+      WHERE jobs.status IN ('scheduled', 'in_progress')
+        AND plans.status IN ('approved_waiting_acknowledgement', 'active')
+        AND plans.work_date <= ?
+      ORDER BY plans.work_date, plans.updated_at
+      LIMIT 25
+    `).all(nowIso().slice(0, 10));
+    for (const row of preTaskPlanRows) {
+      const plan = this.getPreTaskPlan(row.id, { jobId: row.job_id });
+      if (plan.readyForWork) continue;
+      const reasons = [...new Set(plan.blockers.map(blocker => blocker.type))];
+      const sourceHash = sha256Json({
+        planId: plan.id,
+        planSourceHash: plan.sourceHash,
+        status: plan.status,
+        workDate: plan.workDate,
+        prerequisitesCurrent: plan.prerequisitesCurrent,
+        attendeeCount: plan.attendanceSummary.total,
+        outstandingCount: plan.attendanceSummary.expected,
+        integrityFailures: plan.attendanceSummary.integrityFailures,
+        reasons,
+        updatedAt: plan.updatedAt
+      });
+      actions.push({
+        type: 'review_pre_task_plan_readiness',
+        planId: plan.id,
+        planNumber: plan.planNumber,
+        jobId: plan.jobId,
+        severity: plan.expired || !plan.prerequisitesCurrent || plan.attendanceSummary.integrityFailures > 0 ? 'high' : 'medium',
+        attendeeCount: plan.attendanceSummary.total,
+        outstandingCount: plan.attendanceSummary.expected,
+        reasons,
+        sourceHash,
+        taskId: `task_${sha256Text(`pre-task-plan-readiness:${plan.id}:${sourceHash}`).slice(0, 24)}`,
+        message: `${plan.jobTitle}: ${plan.planNumber} is not ready for field reliance (${reasons.join(', ')}).`
+      });
+    }
+
     const jobsWithoutOrientations = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.priority, jobs.risk_level
       FROM jobs
@@ -39637,7 +40399,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('nonconformance') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('pre_task') || type.includes('inspection') || type.includes('nonconformance') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -39661,6 +40423,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'schedule_safety_meeting',
       'review_safety_briefing_attendance',
       'review_work_permit_readiness',
+      'review_pre_task_plan_readiness',
       'schedule_orientation',
       'create_jha',
       'request_sds',
@@ -41250,6 +42013,40 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const preTaskPlanReviews = preview.filter(action => action.type === 'review_pre_task_plan_readiness').slice(0, 10);
+        for (const action of preTaskPlanReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0, activationInferred: false, acknowledgementsInferred: false });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review pre-task readiness: ${action.planNumber}`,
+            description: `${action.message} Review the retained JHA, permit, SDS sources, work steps, controls, and every worker acknowledgement. Suspend unsafe work or create a governed revision. Do not release, acknowledge, or reactivate a plan automatically.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(0),
+            source: 'pre_task_plan_monitor',
+            data: {
+              preTaskPlanId: action.planId,
+              planNumber: action.planNumber,
+              attendeeCount: action.attendeeCount,
+              outstandingCount: action.outstandingCount,
+              reasons: action.reasons,
+              sourceHash: action.sourceHash,
+              internalOnly: true,
+              externalCommitments: 0,
+              activationInferred: false,
+              acknowledgementsInferred: false
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, activationInferred: false, acknowledgementsInferred: false });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_pre_task_readiness_task', actor, after: task,
+            metadata: { preTaskPlanId: action.planId, sourceHash: action.sourceHash, externalCommitments: 0, activationInferred: false, acknowledgementsInferred: false }
+          });
+        }
+
         const materialReceiptReviews = preview.filter(action => action.type === 'review_material_receipt').slice(0, 10);
         for (const action of materialReceiptReviews) {
           const taskId = action.taskId || `task_${sha256Text(`material-receipt-review:${action.materialReceiptId || action.purchaseOrderId}:${action.sourceHash}`).slice(0, 24)}`;
@@ -42189,6 +42986,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Work permit attendee ${attendee.id} failed retained acknowledgement verification.` });
       }
     }
+    for (const row of this.db.prepare('SELECT * FROM pre_task_plans ORDER BY created_at').all()) {
+      const plan = this.getPreTaskPlan(row.id, { jobId: row.job_id });
+      if (plan.definitionIntegrityValid !== true) {
+        issues.push({ severity: 'error', message: `Pre-task plan ${plan.planNumber} failed retained definition snapshot verification.` });
+      }
+      const approval = plan.approvalId ? this.db.prepare('SELECT * FROM approvals WHERE id = ? AND target_type = ? AND target_id = ?').get(plan.approvalId, 'pre_task_plan', plan.id) : null;
+      const expectedApprovalStatus = plan.status === 'pending_approval'
+        ? 'pending'
+        : ['approved_waiting_acknowledgement', 'active', 'suspended', 'closed'].includes(plan.status)
+          ? 'approved'
+          : ['rejected', 'cancelled'].includes(plan.status) ? plan.status : null;
+      if (!approval || (expectedApprovalStatus && approval.status !== expectedApprovalStatus) || (plan.status === 'superseded' && approval.status === 'pending')) {
+        issues.push({ severity: 'error', message: `Pre-task plan ${plan.planNumber} lacks a matching retained approval decision.` });
+      }
+      if (['approved_waiting_acknowledgement', 'active'].includes(plan.status) && !plan.prerequisitesCurrent) {
+        issues.push({ severity: 'error', message: `Pre-task plan ${plan.planNumber} relies on a JHA, permit, or SDS source that is no longer current.` });
+      }
+      if (plan.status === 'active' && (plan.attendanceSummary.expected > 0 || plan.attendanceSummary.integrityFailures > 0)) {
+        issues.push({ severity: 'error', message: `Active pre-task plan ${plan.planNumber} has incomplete or invalid worker acknowledgement evidence.` });
+      }
+      if (plan.status === 'approved_waiting_acknowledgement' && plan.attendanceSummary.expected === 0) {
+        issues.push({ severity: 'error', message: `Pre-task plan ${plan.planNumber} is waiting for acknowledgements although its frozen crew is complete.` });
+      }
+      if (plan.status === 'active' && plan.expired) {
+        issues.push({ severity: 'warning', message: `Pre-task plan ${plan.planNumber} remains active after its retained work date.` });
+      }
+    }
+    for (const row of this.db.prepare("SELECT * FROM pre_task_plan_attendees WHERE status = 'acknowledged'").all()) {
+      const attendee = this.mapPreTaskPlanAttendee(row);
+      if (attendee.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `Pre-task plan attendee ${attendee.id} failed retained acknowledgement verification.` });
+      }
+    }
     const checklistInspectionRows = this.db.prepare("SELECT * FROM inspection_records WHERE data_json LIKE '%\"checklistSnapshot\"%'").all();
     for (const inspection of checklistInspectionRows) {
       const data = fromJson(inspection.data_json, {});
@@ -42640,6 +43470,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         permitRecords: this.count('permit_records'),
         governedWorkPermits: Number(this.db.prepare('SELECT COUNT(*) AS count FROM permit_records WHERE source_hash IS NOT NULL').get().count || 0),
         workPermitAttendees: this.count('work_permit_attendees'),
+        preTaskPlans: this.count('pre_task_plans'),
+        preTaskPlanAttendees: this.count('pre_task_plan_attendees'),
         inspectionTemplates: this.count('inspection_templates'),
         inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
         inspectionRecords: this.count('inspection_records'),
@@ -43636,6 +44468,77 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       entryFingerprint: row.entry_fingerprint || null,
       attestation: data.attestation || null,
       definitionSourceHash: data.definitionSourceHash || null,
+      integrityValid,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapPreTaskPlan(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      planNumber: row.plan_number,
+      revisionNumber: Number(row.revision_number || 1),
+      supersedesPlanId: row.supersedes_plan_id || null,
+      status: row.status,
+      workDate: row.work_date,
+      shiftLabel: row.shift_label,
+      title: row.title,
+      location: row.location,
+      preparedBy: row.prepared_by,
+      responsibleWorkerId: row.responsible_worker_id || null,
+      jhaId: row.jha_id,
+      workPermitId: row.work_permit_id || null,
+      sdsSheetIds: fromJson(row.sds_sheet_ids_json, []),
+      steps: fromJson(row.steps_json, []),
+      evidenceReference: row.evidence_reference,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot: fromJson(row.snapshot_json, null),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      approvalId: row.approval_id || null,
+      activatedAt: row.activated_at || null,
+      suspendedAt: row.suspended_at || null,
+      closedAt: row.closed_at || null,
+      closureEvidenceReference: row.closure_evidence_reference || null,
+      emergencyArrangements: data.emergencyArrangements || null,
+      stopWorkTriggers: normalizeList(data.stopWorkTriggers),
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapPreTaskPlanAttendee(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const status = normalizeStatus(row.status, 'expected');
+    const integrityValid = status !== 'acknowledged' || Boolean(
+      row.entry_fingerprint && data.planSourceHash
+      && row.entry_fingerprint === sha256Json(this.preTaskPlanAttendeeEvidenceBasis({ ...row, data }))
+    );
+    return {
+      id: row.id,
+      planId: row.plan_id,
+      jobId: row.job_id,
+      assignmentId: row.assignment_id || null,
+      workerId: row.worker_id,
+      attendeeKey: row.attendee_key,
+      attendeeName: row.attendee_name,
+      company: row.company || null,
+      status,
+      acknowledgedAt: row.acknowledged_at || null,
+      acknowledgedBy: row.acknowledged_by || null,
+      evidenceReference: row.evidence_reference || null,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      attestation: data.attestation || null,
+      planSourceHash: data.planSourceHash || null,
       integrityValid,
       data,
       createdAt: row.created_at,
