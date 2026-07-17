@@ -3,7 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const dashboardSource = fs.readFileSync(path.join(__dirname, '..', 'App.jsx'), 'utf8');
+const dashboardRootSource = fs.readFileSync(path.join(__dirname, '..', 'App.jsx'), 'utf8');
+const dashboardSource = [
+  dashboardRootSource,
+  fs.readFileSync(path.join(__dirname, '..', 'dashboard-format.js'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, '..', 'components', 'JobWorkspaceControls.jsx'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, '..', 'components', 'ResourcesWorkspace.jsx'), 'utf8'),
+].join('\n');
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
 
@@ -13,6 +19,15 @@ test('React dashboard uses ledger endpoints instead of cached or simulated contr
   assert.match(dashboardSource, /api\('\/api\/ledger\/approvals\?status=pending&limit=100'\)/);
   assert.match(dashboardSource, /api\('\/api\/session'\)/);
   assert.doesNotMatch(dashboardSource, /localStorage|sampleJobs|simulateClientRequest|innerHTML|onclick=/);
+});
+
+test('large navigation and job controls are loaded through local suspense boundaries', () => {
+  assert.match(dashboardRootSource, /lazy\(\(\) => import\('\.\/components\/ResourcesWorkspace'\)\)/);
+  assert.match(dashboardRootSource, /const loadJobWorkspaceControls = \(\) => import\('\.\/components\/JobWorkspaceControls'\)/);
+  assert.match(dashboardRootSource, /<LazyControlBoundary label="resource controls">/);
+  assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
+  assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
+  assert.match(dashboardRootSource, /<LazyControlBoundary label="job controls" mode="job">/);
 });
 
 test('portfolio schedule is role-gated, ledger-backed, rendered, and connected to operating workflows', () => {
