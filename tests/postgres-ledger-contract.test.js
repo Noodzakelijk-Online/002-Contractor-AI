@@ -1168,10 +1168,43 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.equal(controlledDocuments.find(document => document.revision === 'P02').data.isCurrent, true);
 
     const currentControlledDocument = controlledDocuments.find(document => document.revision === 'P02');
+    const drawingBytes = Buffer.from('%PDF-1.7\nPostgreSQL governed drawing\n%%EOF');
+    const drawingSource = ledger.addDocument(job.id, {
+      type: 'drawing_pdf',
+      title: 'PostgreSQL drawing source',
+      filename: 'PG-A-201-C01.pdf',
+      mimeType: 'application/pdf',
+      size: drawingBytes.length,
+      storageRef: 's3://postgres-contract/PG-A-201-C01.pdf',
+      status: 'stored',
+      analysis: { upload: { sha256: crypto.createHash('sha256').update(drawingBytes).digest('hex'), signatureVerified: true } }
+    }, { actor: 'postgres_contract_test' });
+    const drawingRequest = ledger.createDrawingRevision(job.id, {
+      entryKey: 'postgres-drawing-a201-c01',
+      sheetNumber: 'PG-A-201',
+      revision: 'C01',
+      title: 'PostgreSQL first-floor construction plan',
+      discipline: 'architecture',
+      purpose: 'for_construction',
+      issueDate: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+      scale: '1:50',
+      zone: 'First floor',
+      sourceDocumentId: drawingSource.id,
+      revisionReason: 'Initial PostgreSQL governed construction issue.',
+      reviewNotes: 'Hosted title block and issue purpose checked.'
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(drawingRequest.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted drawing PDF, title block, revision, and purpose verified.'
+    });
+    const currentDrawing = ledger.getDrawingRevision(drawingRequest.id);
+    assert.equal(currentDrawing.status, 'current');
+    assert.equal(currentDrawing.integrityValid, true);
     const hostedTransmittal = ledger.createDocumentTransmittal(job.id, {
       subject: 'PostgreSQL construction issue',
       purpose: 'for_construction',
-      documentIds: [currentControlledDocument.id],
+      documentIds: [currentControlledDocument.id, currentDrawing.id],
       recipients: [{ name: 'Hosted site supervisor', email: 'site@example.test' }]
     }, { actor: 'postgres_contract_test' });
     ledger.resolveApproval(hostedTransmittal.approval.id, {
@@ -1183,6 +1216,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       deliveryReference: 'hosted-provider:message-001'
     }, { actor: 'postgres_contract_test' });
     assert.equal(hostedIssuedTransmittal.status, 'issued');
+    assert.equal(hostedIssuedTransmittal.documents.some(document => document.id === currentDrawing.id && document.type === 'drawing_revision'), true);
     const hostedAcknowledgment = ledger.acknowledgeDocumentTransmittal(
       job.id,
       hostedIssuedTransmittal.id,
@@ -1371,7 +1405,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '046_governed_sds_revision_control');
+    assert.equal(migrations.currentVersion, '047_governed_drawing_revision_control');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1452,12 +1486,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('046_governed_sds_revision_control'));
+  assert.deepEqual(versions, Array(4).fill('047_governed_drawing_revision_control'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 46);
+    assert.equal(Number(migrationCount.count), 47);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1989,7 +2023,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2342,7 +2376,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2450,7 +2484,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2549,7 +2583,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2636,7 +2670,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
   } finally {
     ledger?.close();
   }
@@ -2741,7 +2775,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();

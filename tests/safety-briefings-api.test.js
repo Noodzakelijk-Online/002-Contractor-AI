@@ -156,7 +156,7 @@ test('safety briefing API scopes field identity, supports offline replay, and ke
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '046_governed_sds_revision_control');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '047_governed_drawing_revision_control');
   assert.equal(diagnostics.body.diagnostics.counts.safetyMeetingAttendees, 1);
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities', { token: tokens.owner });

@@ -129,6 +129,43 @@ function createBackupFixture(t, suffix = 'success') {
     reason: 'Migration SDS manufacturer PDF, product identity, dates, and field controls verified.'
   });
   const sdsRevision = source.getSdsSheet(sdsRequest.id);
+  const drawingEvidenceBytes = Buffer.from(`%PDF-1.7\nGoverned hosted migration drawing ${suffix}\n%%EOF`);
+  const drawingStorageRef = `data/uploads/${suffix}-drawing-A-201-C01.pdf`;
+  const drawingDocument = source.addDocument(job.id, {
+    type: 'drawing_pdf',
+    title: 'Migration construction drawing source',
+    filename: `${suffix}-drawing-A-201-C01.pdf`,
+    mimeType: 'application/pdf',
+    size: drawingEvidenceBytes.length,
+    storageRef: drawingStorageRef,
+    status: 'stored',
+    analysis: {
+      upload: {
+        sha256: crypto.createHash('sha256').update(drawingEvidenceBytes).digest('hex'),
+        signatureVerified: true
+      }
+    }
+  }, { actor: 'migration_fixture' });
+  const drawingRequest = source.createDrawingRevision(job.id, {
+    entryKey: `migration-drawing-revision-${suffix}`,
+    sheetNumber: 'MIG-A-201',
+    revision: 'C01',
+    title: 'Migration first-floor construction plan',
+    discipline: 'architecture',
+    purpose: 'for_construction',
+    issueDate: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+    scale: '1:50',
+    zone: 'First floor',
+    sourceDocumentId: drawingDocument.id,
+    revisionReason: 'Migration drawing source and revision controls retained for hosted verification.',
+    reviewNotes: 'Migration title block and issue purpose checked.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(drawingRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration drawing PDF, title block, revision, and issue purpose verified.'
+  });
+  const drawingRevision = source.getDrawingRevision(drawingRequest.id);
   const controlledDocument = source.createControlledDocumentRevision(job.id, {
     documentNumber: 'MIG-A-101',
     revision: 'P01',
@@ -733,14 +770,17 @@ function createBackupFixture(t, suffix = 'success') {
   const backupLedger = path.join(backupDir, 'contractor-ledger.sqlite');
   const backupEvidence = path.join(backupDir, 'evidence', `${suffix}-site-proof.jpg`);
   const backupSdsEvidence = path.join(backupDir, 'evidence', `${suffix}-manufacturer-sds.pdf`);
+  const backupDrawingEvidence = path.join(backupDir, 'evidence', `${suffix}-drawing-A-201-C01.pdf`);
   fs.mkdirSync(path.dirname(backupEvidence), { recursive: true });
   fs.copyFileSync(sourceFile, backupLedger);
   fs.writeFileSync(backupEvidence, evidenceBytes);
   fs.writeFileSync(backupSdsEvidence, sdsEvidenceBytes);
+  fs.writeFileSync(backupDrawingEvidence, drawingEvidenceBytes);
   const files = [
     { file: 'contractor-ledger.sqlite', target: backupLedger },
     { file: `evidence/${suffix}-site-proof.jpg`, target: backupEvidence },
-    { file: `evidence/${suffix}-manufacturer-sds.pdf`, target: backupSdsEvidence }
+    { file: `evidence/${suffix}-manufacturer-sds.pdf`, target: backupSdsEvidence },
+    { file: `evidence/${suffix}-drawing-A-201-C01.pdf`, target: backupDrawingEvidence }
   ].map(entry => ({
     file: entry.file,
     bytes: fs.statSync(entry.target).size,
@@ -751,10 +791,10 @@ function createBackupFixture(t, suffix = 'success') {
     backupId,
     createdAt: '2026-07-13T12:00:00.000Z',
     databaseMode: 'sqlite',
-    evidence: { included: true, fileCount: 2 },
+    evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -789,7 +829,7 @@ test('backup verifier requires an intact v2 SQLite ledger and evidence set', t =
   const fixture = createBackupFixture(t, 'verify');
   const verified = verifyBackupDirectory(fixture.backupDir);
   assert.equal(verified.manifest.backupId, fixture.backupId);
-  assert.equal(verified.evidenceFiles.length, 2);
+  assert.equal(verified.evidenceFiles.length, 3);
   fs.appendFileSync(path.join(fixture.backupDir, 'evidence', 'verify-site-proof.jpg'), 'tampered');
   assert.throws(() => verifyBackupDirectory(fixture.backupDir), /checksum failed/i);
 });
@@ -827,7 +867,7 @@ test('hosted migration orders self-referential follow-up rows without treating t
   }
 });
 
-test('hosted evidence rewrites preserve immutable governed SDS source and snapshot JSON', () => {
+test('hosted evidence rewrites preserve immutable governed SDS and drawing source snapshots', () => {
   const originalData = JSON.stringify({
     documentReference: 'manufacturer-sds.pdf',
     documentChecksum: 'retained-checksum',
@@ -847,6 +887,22 @@ test('hosted evidence rewrites preserve immutable governed SDS source and snapsh
   ]));
   assert.equal(rewritten.data_json, originalData);
   assert.equal(rewritten.snapshot_json, originalSnapshot);
+
+  const drawingData = JSON.stringify({ sourceDocumentReference: 'drawing-A-201-C01.pdf', sourceDocumentChecksum: 'drawing-checksum' });
+  const drawingSnapshot = JSON.stringify({ format: 'contractor-ai-drawing-revision/v1', sourceDocumentReference: 'drawing-A-201-C01.pdf' });
+  const rewrittenDrawing = rewriteRowReferences('documents', {
+    id: 'drawing_migration_fixture',
+    type: 'drawing_revision',
+    storage_ref: 'data/uploads/drawing-A-201-C01.pdf',
+    data_json: drawingData,
+    snapshot_json: drawingSnapshot
+  }, ['id', 'type', 'storage_ref', 'data_json', 'snapshot_json'], new Map([
+    ['data/uploads/drawing-A-201-C01.pdf', 'hosted/drawing-A-201-C01.pdf'],
+    ['drawing-A-201-C01.pdf', 'migrated-drawing-A-201-C01.pdf']
+  ]));
+  assert.equal(rewrittenDrawing.storage_ref, 'hosted/drawing-A-201-C01.pdf');
+  assert.equal(rewrittenDrawing.data_json, drawingData);
+  assert.equal(rewrittenDrawing.snapshot_json, drawingSnapshot);
 });
 
 test('verified local backup migrates losslessly to empty PostgreSQL and private object storage', { skip: !connectionString }, async t => {
@@ -862,18 +918,19 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
 
   assert.equal(migration.success, true);
   assert.equal(migration.backupId, fixture.backupId);
-  assert.equal(migration.evidenceFiles, 2);
+  assert.equal(migration.evidenceFiles, 3);
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '046_governed_sds_revision_control');
+  assert.equal(migration.migrationVersion, '047_governed_drawing_revision_control');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
   assert.equal(migration.diagnostics.valid, true);
-  assert.equal(storage.objects.size, 2);
+  assert.equal(storage.objects.size, 3);
   assert.ok([...storage.objects.values()].some(value => value.equals(fixture.evidenceBytes)));
   assert.ok([...storage.objects.values()].some(value => value.equals(fixture.sdsEvidenceBytes)));
+  assert.ok([...storage.objects.values()].some(value => value.equals(fixture.drawingEvidenceBytes)));
 
   const hosted = new ContractorOperatingLedger({ databaseUrl: targetUrl });
   try {
@@ -890,6 +947,13 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
       && document.status === 'approved'
       && document.data.isCurrent === true
     ));
+    const migratedDrawing = detail.drawings.find(item => item.id === fixture.drawingRevision.id);
+    assert.equal(migratedDrawing.status, 'current');
+    assert.equal(migratedDrawing.current, true);
+    assert.equal(migratedDrawing.integrityValid, true);
+    assert.equal(migratedDrawing.sourceHash, fixture.drawingRevision.sourceHash);
+    assert.equal(migratedDrawing.snapshotHash, fixture.drawingRevision.snapshotHash);
+    assert.equal(migratedDrawing.sourceDocumentId, fixture.drawingDocument.id);
     assert.equal(detail.estimatedHours, 123.123456789);
     const migratedTakeoff = detail.takeoffs.find(item => item.id === fixture.takeoff.id);
     assert.equal(migratedTakeoff.status, 'converted');
@@ -1066,7 +1130,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     migrateLocalBackupToHosted({ backupDir: fixture.backupDir, databaseUrl: targetUrl, storage }),
     /target is not empty/i
   );
-  assert.equal(storage.objects.size, 2);
+  assert.equal(storage.objects.size, 3);
 });
 
 test('failed evidence verification rolls back PostgreSQL and removes uploaded objects', { skip: !connectionString }, async t => {

@@ -125,6 +125,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'change_order', label: 'Change control', table: 'change_orders', detailKey: 'changeOrders' },
     { key: 'rfi', label: 'RFI trail', table: 'rfi_records', detailKey: 'rfis' },
     { key: 'submittal', label: 'Submittals', table: 'submittal_records', detailKey: 'submittals' },
+    { key: 'drawing', label: 'Current governed drawings', table: 'documents', detailKey: 'drawings', readyStatuses: ['current'] },
     { key: 'transmittal', label: 'Document transmittals', table: 'document_transmittals', detailKey: 'transmittals' },
     { key: 'meeting', label: 'Meeting minutes and actions', table: 'project_meetings', detailKey: 'projectMeetings' },
     { key: 'field_report', label: 'Daily field report', table: 'field_reports', detailKey: 'fieldReports' },
@@ -146,6 +147,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'equipment_custody', label: 'Equipment custody and return', table: 'equipment_custody_sessions', detailKey: 'equipmentCustody', readyStatuses: ['checked_out', 'returned', 'exception'] },
     { key: 'availability', label: 'Worker availability', table: 'worker_availability_periods', readyStatuses: ['active', 'pending_cancellation'], ledgerOnly: true },
     { key: 'evidence', label: 'Photo evidence', table: 'documents', detailKey: 'documents' },
+    { key: 'drawing', label: 'Current field drawings', table: 'documents', detailKey: 'drawings', readyStatuses: ['current'] },
     { key: 'instructions', label: 'Worker instructions', table: 'worker_instructions', detailKey: 'workerInstructions' }
   ],
   'safety-quality': [
@@ -1006,6 +1008,8 @@ const WORK_PERMIT_FORMAT = 'contractor-ai-work-permit/v1';
 const PRE_TASK_PLAN_FORMAT = 'contractor-ai-pre-task-plan/v1';
 const SDS_REVISION_FORMAT = 'contractor-ai-sds-revision/v1';
 const SDS_CURRENT_STATUSES = new Set(['current', 'approved', 'accepted', 'active']);
+const DRAWING_REVISION_FORMAT = 'contractor-ai-drawing-revision/v1';
+const DRAWING_CURRENT_STATUSES = new Set(['current']);
 
 function sdsProductKey(material, manufacturer, productCode = '') {
   const identity = [
@@ -1045,6 +1049,31 @@ function sdsRevisionSourceBasis(values = {}) {
     disposal: normalizeText(values.disposal || data.disposal, '') || null,
     emergencyContact: normalizeText(values.emergencyContact || data.emergencyContact, '') || null,
     revisionReason: normalizeText(values.revisionReason || data.revisionReason, '') || null
+  };
+}
+
+function drawingRevisionSourceBasis(values = {}) {
+  const data = values.data && typeof values.data === 'object'
+    ? values.data
+    : fromJson(values.data_json, {});
+  return {
+    format: DRAWING_REVISION_FORMAT,
+    drawingRevisionId: values.id,
+    jobId: values.jobId || values.job_id,
+    sheetNumber: values.sheetNumber || values.document_number,
+    revision: values.revision,
+    title: values.title,
+    discipline: values.discipline || 'general',
+    purpose: values.purpose || data.purpose || 'for_construction',
+    issueDate: values.issueDate || values.effective_at || data.issueDate || null,
+    scale: values.scale || data.scale || null,
+    zone: values.zone || data.zone || null,
+    sourceDocumentId: values.sourceDocumentId || values.source_document_id || data.sourceDocumentId || null,
+    sourceDocumentReference: values.sourceDocumentReference || data.sourceDocumentReference || data.sourceReference || null,
+    sourceDocumentChecksum: normalizeText(values.sourceDocumentChecksum || data.sourceDocumentChecksum, '') || null,
+    supersedesDrawingId: values.supersedesDrawingId || values.supersedes_document_id || null,
+    revisionReason: normalizeText(values.revisionReason || data.revisionReason, '') || null,
+    reviewNotes: normalizeText(values.reviewNotes || data.reviewNotes, '') || null
   };
 }
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
@@ -3704,6 +3733,40 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON sds_sheets(job_id, status, expires_at, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_sds_document
           ON sds_sheets(document_id, status) WHERE document_id IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '047_governed_drawing_revision_control',
+    description: 'Retain checksum-bound drawing revisions with immutable snapshots, approval-backed current status, explicit supersession, and controlled distribution.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE documents ADD COLUMN source_document_id TEXT;
+        ALTER TABLE documents ADD COLUMN source_hash TEXT;
+        ALTER TABLE documents ADD COLUMN snapshot_hash TEXT;
+        ALTER TABLE documents ADD COLUMN snapshot_json TEXT;
+        ALTER TABLE documents ADD COLUMN entry_key TEXT;
+        ALTER TABLE documents ADD COLUMN entry_fingerprint TEXT;
+        ALTER TABLE documents ADD COLUMN reviewed_at TEXT;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_drawing_job_entry_key
+          ON documents(job_id, entry_key)
+          WHERE type = 'drawing_revision' AND entry_key IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_drawing_job_sheet_revision
+          ON documents(job_id, document_number, revision)
+          WHERE type = 'drawing_revision';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_drawing_one_current_sheet
+          ON documents(job_id, document_number)
+          WHERE type = 'drawing_revision' AND status = 'current';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_drawing_pending_supersession
+          ON documents(supersedes_document_id)
+          WHERE type = 'drawing_revision' AND status = 'pending_approval' AND supersedes_document_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_drawing_job_status_discipline
+          ON documents(job_id, status, discipline, effective_at DESC)
+          WHERE type = 'drawing_revision';
+        CREATE INDEX IF NOT EXISTS idx_drawing_source_document
+          ON documents(source_document_id, status)
+          WHERE type = 'drawing_revision' AND source_document_id IS NOT NULL;
       `);
     }
   }
@@ -20044,7 +20107,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const discipline = normalizeStatus(payload.discipline, '') || null;
     const effectiveAt = payload.effectiveAt || payload.effective_at || null;
     const supersedesDocumentId = payload.supersedesDocumentId || payload.supersedes_document_id || null;
-    if (options.controlledRevision !== true && (documentType === 'controlled_document' || documentNumber || revision || supersedesDocumentId)) {
+    if (options.controlledRevision !== true && (['controlled_document', 'drawing_revision'].includes(documentType) || documentNumber || revision || supersedesDocumentId)) {
       const error = new Error('Controlled document metadata must use the controlled revision workflow');
       error.statusCode = 400;
       error.code = 'controlled_document_workflow_required';
@@ -20232,6 +20295,237 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  getDrawingRevision(drawingRevisionId, options = {}) {
+    const row = this.db.prepare("SELECT * FROM documents WHERE id = ? AND type = 'drawing_revision'")
+      .get(String(drawingRevisionId || ''));
+    if (!row || (options.jobId && row.job_id !== options.jobId)) {
+      throw ledgerInputError('drawing_revision_not_found', 'The requested drawing revision was not found.', { drawingRevisionId }, 404);
+    }
+    return this.mapDocument(row);
+  }
+
+  listDrawingRevisions(filters = {}) {
+    const limit = Math.max(1, Math.min(Number(filters.limit || 250), 500));
+    const rows = filters.jobId
+      ? this.db.prepare(`
+          SELECT * FROM documents
+          WHERE job_id = ? AND type = 'drawing_revision'
+          ORDER BY document_number, created_at DESC LIMIT ?
+        `).all(filters.jobId, limit)
+      : this.db.prepare(`
+          SELECT * FROM documents
+          WHERE type = 'drawing_revision'
+          ORDER BY updated_at DESC, created_at DESC LIMIT ?
+        `).all(limit);
+    const status = normalizeStatus(filters.status, '');
+    const discipline = normalizeStatus(filters.discipline, '');
+    const query = normalizeText(filters.query || filters.search, '').toLowerCase();
+    return rows.map(row => this.mapDocument(row)).filter(drawing => {
+      if (status && drawing.status !== status) return false;
+      if (discipline && drawing.discipline !== discipline) return false;
+      if (normalizeBoolean(filters.currentOnly || filters.current_only, false) && drawing.current !== true) return false;
+      if (query && ![
+        drawing.documentNumber,
+        drawing.revision,
+        drawing.title,
+        drawing.discipline,
+        drawing.purpose,
+        drawing.zone
+      ].some(value => String(value || '').toLowerCase().includes(query))) return false;
+      return true;
+    });
+  }
+
+  createDrawingRevision(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('drawing_revision_entry_key_invalid', 'Drawing revision replay key must contain 8 to 200 safe characters.');
+      }
+      const sheetNumber = normalizeText(payload.sheetNumber || payload.sheet_number || payload.documentNumber || payload.document_number, '').toUpperCase();
+      const revision = normalizeText(payload.revision, '').toUpperCase();
+      const title = normalizeText(payload.title, '');
+      const discipline = normalizeStatus(payload.discipline, 'general');
+      const purpose = normalizeStatus(payload.purpose, 'for_construction');
+      const allowedPurposes = new Set(['for_construction', 'for_coordination', 'for_information', 'for_review', 'as_built']);
+      const scale = normalizeText(payload.scale, '') || null;
+      const zone = normalizeText(payload.zone || payload.area, '') || null;
+      const revisionReason = normalizeText(payload.revisionReason || payload.revision_reason, '');
+      const reviewNotes = normalizeText(payload.reviewNotes || payload.review_notes, '');
+      if (sheetNumber.length < 2 || sheetNumber.length > 80) {
+        throw ledgerInputError('drawing_sheet_number_invalid', 'Drawing sheet number must contain 2 to 80 characters.');
+      }
+      if (revision.length < 1 || revision.length > 40) {
+        throw ledgerInputError('drawing_revision_invalid', 'Drawing revision must contain 1 to 40 characters.');
+      }
+      if (title.length < 2 || title.length > 180) {
+        throw ledgerInputError('drawing_title_invalid', 'Drawing title must contain 2 to 180 characters.');
+      }
+      if (!allowedPurposes.has(purpose)) {
+        throw ledgerInputError('drawing_purpose_invalid', `Drawing purpose must be one of: ${[...allowedPurposes].join(', ')}.`);
+      }
+      if (scale && scale.length > 80) throw ledgerInputError('drawing_scale_invalid', 'Drawing scale must be 80 characters or fewer.');
+      if (zone && zone.length > 120) throw ledgerInputError('drawing_zone_invalid', 'Drawing zone must be 120 characters or fewer.');
+      if (revisionReason.length < 3 || revisionReason.length > 1000) {
+        throw ledgerInputError('drawing_revision_reason_invalid', 'Drawing revision reason must be between three and 1,000 characters.');
+      }
+      if (reviewNotes.length > 2000) throw ledgerInputError('drawing_review_notes_invalid', 'Drawing review notes must be 2,000 characters or fewer.');
+
+      const issueInput = normalizeText(payload.issueDate || payload.issue_date || payload.issuedOn || payload.issued_on, '');
+      const issueTime = Date.parse(issueInput);
+      if (!issueInput || !Number.isFinite(issueTime) || issueTime > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('drawing_issue_date_invalid', 'Drawing issue date must be valid and cannot be in the future.');
+      }
+      const issueDate = new Date(issueTime).toISOString().slice(0, 10);
+      const sourceDocumentId = normalizeText(payload.sourceDocumentId || payload.source_document_id || payload.documentId || payload.document_id, '');
+      const sourceDocument = sourceDocumentId
+        ? this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(sourceDocumentId, jobId)
+        : null;
+      if (!sourceDocument || sourceDocument.type === 'drawing_revision' || ['cancelled', 'rejected', 'superseded', 'void'].includes(normalizeStatus(sourceDocument.status, 'stored'))) {
+        throw ledgerInputError('drawing_source_document_invalid', 'A current job-owned drawing source document is required.', { sourceDocumentId }, 409);
+      }
+      if (normalizeStatus(sourceDocument.mime_type, '') !== 'application/pdf') {
+        throw ledgerInputError('drawing_source_document_type_invalid', 'Governed drawing revisions require a retained PDF document.', { sourceDocumentId }, 409);
+      }
+      const sourceDocumentData = fromJson(sourceDocument.data_json, {});
+      const sourceDocumentChecksum = normalizeText(sourceDocumentData.analysis?.upload?.sha256 || sourceDocumentData.contentHash, '');
+      if (!sourceDocumentChecksum) {
+        throw ledgerInputError('drawing_source_document_checksum_missing', 'The retained drawing document has no upload checksum and cannot be frozen as a governed revision.', { sourceDocumentId }, 409);
+      }
+      const sourceDocumentReference = normalizeText(
+        payload.sourceDocumentReference || payload.source_document_reference || sourceDocument.filename || sourceDocument.title,
+        ''
+      );
+      const supersedesDrawingId = normalizeText(
+        payload.supersedesDrawingId || payload.supersedes_drawing_id || payload.supersedesDocumentId || payload.supersedes_document_id,
+        ''
+      ) || null;
+      const supersedesRow = supersedesDrawingId
+        ? this.db.prepare("SELECT * FROM documents WHERE id = ? AND job_id = ? AND type = 'drawing_revision'").get(supersedesDrawingId, jobId)
+        : null;
+      if (supersedesDrawingId && !supersedesRow) {
+        throw ledgerInputError('drawing_supersedes_invalid', 'The superseded drawing revision does not belong to this job.', { supersedesDrawingId }, 409);
+      }
+      if (supersedesRow && supersedesRow.document_number !== sheetNumber) {
+        throw ledgerInputError('drawing_sheet_mismatch', 'A revision must retain the same drawing sheet number as the source revision.', { supersedesDrawingId }, 409);
+      }
+
+      const existing = this.db.prepare("SELECT * FROM documents WHERE job_id = ? AND type = 'drawing_revision' AND entry_key = ?")
+        .get(jobId, entryKey);
+      const fingerprintBasis = {
+        jobId, sheetNumber, revision, title, discipline, purpose, issueDate, scale, zone,
+        sourceDocumentId, sourceDocumentChecksum, supersedesDrawingId, revisionReason, reviewNotes: reviewNotes || null
+      };
+      const entryFingerprint = sha256Json(fingerprintBasis);
+      if (existing) {
+        if (existing.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('drawing_revision_entry_key_conflict', 'This drawing replay key is already bound to different revision evidence.', { entryKey }, 409);
+        }
+        const approvalRow = existing.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existing.approval_id) : null;
+        return { ...this.mapDocument(existing), approval: approvalRow ? this.mapApproval(approvalRow) : null, replayed: true };
+      }
+      const duplicate = this.db.prepare(`
+        SELECT id FROM documents
+        WHERE job_id = ? AND type = 'drawing_revision' AND document_number = ? AND revision = ?
+        LIMIT 1
+      `).get(jobId, sheetNumber, revision);
+      if (duplicate) {
+        throw ledgerInputError('drawing_revision_exists', `Revision ${revision} already exists for drawing ${sheetNumber}.`, { drawingRevisionId: duplicate.id }, 409);
+      }
+      if (supersedesRow && !DRAWING_CURRENT_STATUSES.has(normalizeStatus(supersedesRow.status, ''))) {
+        throw ledgerInputError('drawing_revision_source_not_current', 'Only the current drawing revision can be replaced.', { supersedesDrawingId }, 409);
+      }
+      const currentRow = this.db.prepare(`
+        SELECT * FROM documents
+        WHERE job_id = ? AND type = 'drawing_revision' AND document_number = ? AND status = 'current'
+        LIMIT 1
+      `).get(jobId, sheetNumber);
+      if (currentRow && currentRow.id !== supersedesDrawingId) {
+        throw ledgerInputError('drawing_supersession_required', 'Select the current drawing revision before replacing this sheet.', { currentDrawingId: currentRow.id }, 409);
+      }
+      const pendingRow = this.db.prepare(`
+        SELECT id FROM documents
+        WHERE job_id = ? AND type = 'drawing_revision' AND document_number = ? AND status = 'pending_approval'
+        LIMIT 1
+      `).get(jobId, sheetNumber);
+      if (pendingRow) {
+        throw ledgerInputError('drawing_revision_pending_exists', 'This drawing sheet already has a pending replacement revision.', { drawingRevisionId: pendingRow.id }, 409);
+      }
+
+      const timestamp = nowIso();
+      const data = {
+        ...(payload.data || {}),
+        controlledDocument: true,
+        governedDrawingRevision: true,
+        requestedStatus: 'current',
+        candidateCurrent: true,
+        isCurrent: false,
+        purpose,
+        issueDate,
+        scale,
+        zone,
+        sourceReference: sourceDocumentReference,
+        sourceDocumentReference,
+        sourceDocumentChecksum,
+        revisionReason,
+        reviewNotes: reviewNotes || null,
+        createdBy: actor,
+        externalCommitments: 0
+      };
+      const document = this.addDocument(jobId, {
+        type: 'drawing_revision',
+        title,
+        filename: sourceDocument.filename,
+        mimeType: sourceDocument.mime_type,
+        sizeBytes: sourceDocument.size_bytes,
+        storageRef: sourceDocument.storage_ref,
+        status: 'pending_approval',
+        documentNumber: sheetNumber,
+        revision,
+        discipline,
+        effectiveAt: issueDate,
+        supersedesDocumentId: supersedesDrawingId,
+        data
+      }, { actor, audit: false, controlledRevision: true });
+      this.db.prepare(`
+        UPDATE documents
+        SET source_document_id = ?, entry_key = ?, entry_fingerprint = ?, updated_at = ?
+        WHERE id = ?
+      `).run(sourceDocumentId, entryKey, entryFingerprint, timestamp, document.id);
+      const row = this.db.prepare('SELECT * FROM documents WHERE id = ?').get(document.id);
+      const sourceBasis = drawingRevisionSourceBasis(row);
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = { ...sourceBasis, sourceHash, requestedStatus: 'current', retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      this.db.prepare(`
+        UPDATE documents SET source_hash = ?, snapshot_hash = ?, snapshot_json = ?, updated_at = ? WHERE id = ?
+      `).run(sourceHash, snapshotHash, toJson(snapshot), timestamp, document.id);
+      const approval = this.createApproval({
+        targetType: 'document',
+        targetId: document.id,
+        jobId,
+        approvalType: 'drawing_revision_publication',
+        summary: `Approve drawing ${sheetNumber} revision ${revision}`,
+        reason: 'Current drawing status controls field access and formal distribution. The exact source PDF and revision lineage require human verification.',
+        data: {
+          requestedStatus: 'current', sheetNumber, revision, purpose, issueDate,
+          sourceDocumentId, sourceDocumentChecksum, supersedesDrawingId, sourceHash, snapshotHash, externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE documents SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, timestamp, document.id);
+      const drawing = this.getDrawingRevision(document.id, { jobId });
+      this.audit({
+        entityType: 'document', entityId: drawing.id, jobId, action: 'create_drawing_revision', actor,
+        after: drawing,
+        metadata: { sheetNumber, revision, supersedesDrawingId, sourceDocumentId, sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { ...drawing, approval, replayed: false };
+    });
+  }
+
   allocateTransmittalReference(preparedAt = nowIso()) {
     const periodYear = new Date(preparedAt).getUTCFullYear();
     if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
@@ -20324,7 +20618,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           .filter(Boolean)
       )];
       if (documentIds.length < 1 || documentIds.length > 100) {
-        throw ledgerInputError('transmittal_documents_invalid', 'A transmittal requires between 1 and 100 controlled document revisions.');
+        throw ledgerInputError('transmittal_documents_invalid', 'A transmittal requires between 1 and 100 current controlled document or drawing revisions.');
       }
       const placeholders = documentIds.map(() => '?').join(',');
       const rows = this.db.prepare(`
@@ -20336,20 +20630,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       const documents = rows.map(row => {
         const data = fromJson(row.data_json, {});
-        if (row.type !== 'controlled_document' || row.status !== 'approved' || data.isCurrent !== true) {
+        const mapped = this.mapDocument(row);
+        const controlledCurrent = row.type === 'controlled_document' && row.status === 'approved' && data.isCurrent === true;
+        const drawingCurrent = row.type === 'drawing_revision' && row.status === 'current' && mapped.integrityValid === true;
+        if (!controlledCurrent && !drawingCurrent) {
           throw ledgerInputError(
             'transmittal_document_not_current',
-            `${row.document_number || row.title} revision ${row.revision || '-'} is not the current approved controlled revision.`
+            `${row.document_number || row.title} revision ${row.revision || '-'} is not a current approved controlled document or governed drawing revision.`
           );
         }
         return {
           id: row.id,
+          type: row.type,
           title: row.title,
           documentNumber: row.document_number,
           revision: row.revision,
           discipline: row.discipline || null,
           effectiveAt: row.effective_at || null,
-          sourceReferenceHash: sha256Text(data.sourceReference || row.storage_ref || row.id)
+          sourceReferenceHash: row.type === 'drawing_revision'
+            ? row.source_hash
+            : sha256Text(data.sourceReference || row.storage_ref || row.id)
         };
       }).sort((left, right) => (
         String(left.documentNumber || '').localeCompare(String(right.documentNumber || ''))
@@ -20481,8 +20781,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         throw error;
       }
       for (const document of before.documents) {
-        const current = this.db.prepare('SELECT status, data_json FROM documents WHERE id = ? AND job_id = ?').get(document.id, jobId);
-        if (!current || current.status !== 'approved' || fromJson(current.data_json, {}).isCurrent !== true) {
+        const current = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(document.id, jobId);
+        const currentData = fromJson(current?.data_json, {});
+        const mapped = current ? this.mapDocument(current) : null;
+        const controlledCurrent = current?.type === 'controlled_document' && current.status === 'approved' && currentData.isCurrent === true;
+        const drawingCurrent = current?.type === 'drawing_revision' && current.status === 'current' && mapped?.integrityValid === true;
+        if (!controlledCurrent && !drawingCurrent) {
           const error = new Error(`${document.documentNumber || document.title} revision ${document.revision || '-'} is no longer current. Prepare a new transmittal.`);
           error.statusCode = 409;
           error.code = 'transmittal_documents_stale';
@@ -30198,6 +30502,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvalStatuses: new Set(['approved']),
         terminalStatuses: new Set(['approved', 'rejected', 'archived', 'superseded']),
         validate(row, requestedStatus) {
+          if (row.type === 'drawing_revision') {
+            throw ledgerInputError(
+              'drawing_revision_workflow_required',
+              'Governed drawing status can change only through its source-bound publication approval and explicit supersession workflow.',
+              { drawingRevisionId: row.id, requestedStatus },
+              409
+            );
+          }
           if (requestedStatus !== 'approved') return;
           const reference = payload.verificationReference || payload.verification_reference || payload.reference;
           if (!normalizeText(reference, '') || !normalizeText(payload.notes || payload.note, '')) {
@@ -32900,6 +33212,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'document' && before.approval_type === 'drawing_revision_publication') {
+        const row = this.db.prepare("SELECT * FROM documents WHERE id = ? AND type = 'drawing_revision'").get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE documents SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            candidateCurrent: false,
+            isCurrent: false,
+            approvalDecision: {
+              status, approvalId, resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'sds_sheet') {
         const row = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -34304,6 +34633,85 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const before = this.db.prepare('SELECT * FROM documents WHERE id = ?').get(targetId);
       if (before) {
         const data = fromJson(before.data_json, {});
+        if (before.type === 'drawing_revision') {
+          if (before.status !== 'pending_approval') {
+            throw ledgerInputError('drawing_revision_state_conflict', `Drawing revision cannot become current from ${before.status}.`, { drawingRevisionId: targetId }, 409);
+          }
+          const mapped = this.mapDocument(before);
+          if (mapped.integrityValid !== true) {
+            throw ledgerInputError('drawing_revision_integrity_failed', 'The retained drawing source, PDF, or immutable revision snapshot changed after approval was requested.', { drawingRevisionId: targetId }, 409);
+          }
+          const approval = before.approval_id
+            ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'document'").get(before.approval_id)
+            : null;
+          const approvalData = fromJson(approval?.data_json, {});
+          if (
+            !approval
+            || approval.status !== 'approved'
+            || approval.approval_type !== 'drawing_revision_publication'
+            || approvalData.sourceHash !== before.source_hash
+            || approvalData.snapshotHash !== before.snapshot_hash
+          ) {
+            throw ledgerInputError('drawing_revision_approval_invalid', 'The retained drawing approval is missing or does not match the immutable revision.', { drawingRevisionId: targetId }, 409);
+          }
+          const superseded = before.supersedes_document_id
+            ? this.db.prepare("SELECT * FROM documents WHERE id = ? AND job_id = ? AND type = 'drawing_revision'")
+              .get(before.supersedes_document_id, before.job_id)
+            : null;
+          if (before.supersedes_document_id && (
+            !superseded
+            || superseded.document_number !== before.document_number
+            || superseded.status !== 'current'
+          )) {
+            throw ledgerInputError('drawing_revision_source_changed', 'The drawing revision being replaced is no longer the current record for this sheet.', { drawingRevisionId: targetId }, 409);
+          }
+          const competingCurrent = this.db.prepare(`
+            SELECT id FROM documents
+            WHERE job_id = ? AND type = 'drawing_revision' AND document_number = ? AND status = 'current' AND id <> ?
+            LIMIT 1
+          `).get(before.job_id, before.document_number, before.supersedes_document_id || targetId);
+          if (competingCurrent) {
+            throw ledgerInputError('drawing_revision_current_conflict', 'Another current drawing revision exists for this sheet. Create a replacement from that exact revision.', { currentDrawingId: competingCurrent.id }, 409);
+          }
+          if (superseded) {
+            const supersededBefore = this.mapDocument(superseded);
+            this.db.prepare(`
+              UPDATE documents SET status = 'superseded', data_json = ?, updated_at = ? WHERE id = ?
+            `).run(toJson({
+              ...fromJson(superseded.data_json, {}),
+              candidateCurrent: false,
+              isCurrent: false,
+              supersededByDocumentId: targetId,
+              supersededAt: timestamp
+            }), timestamp, superseded.id);
+            this.audit({
+              entityType: 'document', entityId: superseded.id, jobId: superseded.job_id,
+              action: 'supersede_drawing_revision', actor: approval.resolved_by || approval.requested_by || 'approval',
+              before: supersededBefore,
+              after: this.mapDocument(this.db.prepare('SELECT * FROM documents WHERE id = ?').get(superseded.id)),
+              metadata: { supersededByDocumentId: targetId, approvalId: approval.id, externalCommitments: 0 }
+            });
+          }
+          this.db.prepare(`
+            UPDATE documents
+            SET status = 'current', reviewed_at = COALESCE(reviewed_at, ?), data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(timestamp, toJson({
+            ...data,
+            candidateCurrent: false,
+            isCurrent: true,
+            approvedAt: timestamp,
+            approvalDecision: { status: 'approved', approvalId: approval.id, resolvedAt: timestamp }
+          }), timestamp, targetId);
+          const after = this.mapDocument(this.db.prepare('SELECT * FROM documents WHERE id = ?').get(targetId));
+          this.audit({
+            entityType: 'document', entityId: targetId, jobId: before.job_id,
+            action: 'publish_drawing_revision', actor: approval.resolved_by || approval.requested_by || 'approval',
+            before: mapped, after,
+            metadata: { approvalId: approval.id, sourceHash: before.source_hash, snapshotHash: before.snapshot_hash, externalCommitments: 0 }
+          });
+          return;
+        }
         const nextData = data.controlledDocument === true
           ? {
               ...data,
@@ -37913,6 +38321,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       orientations: this.db.prepare('SELECT * FROM worker_orientations WHERE job_id = ? ORDER BY due_at DESC, created_at DESC').all(jobId).map(row => this.mapWorkerOrientation(row)),
       jhas: this.db.prepare('SELECT * FROM jha_records WHERE job_id = ? ORDER BY due_at DESC, created_at DESC').all(jobId).map(row => this.mapJha(row)),
       sdsSheets: this.db.prepare('SELECT * FROM sds_sheets WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapSdsSheet(row)),
+      drawings: this.listDrawingRevisions({ jobId, limit: 500 }),
       siteAccessLogs: this.db.prepare('SELECT * FROM site_access_logs WHERE job_id = ? ORDER BY checked_in_at DESC, created_at DESC').all(jobId).map(row => this.mapSiteAccessLog(row)),
       qualificationRequirements: this.db.prepare("SELECT * FROM job_qualification_requirements WHERE job_id = ? ORDER BY credential_type ASC, role_key ASC").all(jobId).map(row => this.mapQualificationRequirement(row)),
       assignments: this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapAssignment(row)),
@@ -39014,6 +39423,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       openRfis: activeCount('rfi_records', "records.status IN ('open', 'pending', 'pending_approval')"),
       submittals: activeCount('submittal_records'),
       openSubmittals: activeCount('submittal_records', "records.status NOT IN ('approved', 'accepted', 'closed', 'cancelled', 'rejected')"),
+      currentDrawings: activeCount('documents', "records.type = 'drawing_revision' AND records.status = 'current'"),
+      pendingDrawingApprovals: activeCount('documents', "records.type = 'drawing_revision' AND records.status = 'pending_approval'"),
       documentTransmittals: activeCount('document_transmittals'),
       pendingDocumentTransmittals: activeCount('document_transmittals', "records.status IN ('pending_approval', 'approved')"),
       pendingTransmittalAcknowledgments: Number(this.db.prepare(`
@@ -40165,6 +40576,54 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const drawingReviewRows = this.db.prepare(`
+      SELECT drawings.*, jobs.title AS job_title
+      FROM documents drawings
+      JOIN jobs ON jobs.id = drawings.job_id
+      WHERE drawings.type = 'drawing_revision'
+        AND drawings.status = 'current'
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY drawings.updated_at DESC
+      LIMIT 50
+    `).all();
+    for (const row of drawingReviewRows) {
+      const drawing = this.mapDocument(row);
+      const issuedTransmittals = this.db.prepare(`
+        SELECT documents_json FROM document_transmittals
+        WHERE job_id = ? AND status IN ('issued', 'partially_acknowledged', 'acknowledged')
+      `).all(drawing.jobId);
+      const distributed = issuedTransmittals.some(transmittal => (
+        fromJson(transmittal.documents_json, []).some(document => document.id === drawing.id)
+      ));
+      const reasons = [];
+      if (drawing.integrityValid !== true) reasons.push('integrity failure');
+      if (drawing.purpose === 'for_construction' && !distributed) reasons.push('not issued through a controlled transmittal');
+      if (!reasons.length) continue;
+      const reviewHash = sha256Json({
+        drawingRevisionId: drawing.id,
+        status: drawing.status,
+        sourceHash: drawing.sourceHash,
+        snapshotHash: drawing.snapshotHash,
+        distributed,
+        reasons
+      });
+      const taskId = `task_${sha256Text(`drawing-distribution-review:${drawing.id}:${reviewHash}`).slice(0, 24)}`;
+      if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+      actions.push({
+        type: 'review_drawing_distribution',
+        drawingRevisionId: drawing.id,
+        jobId: drawing.jobId,
+        severity: drawing.integrityValid !== true ? 'high' : 'medium',
+        sheetNumber: drawing.sheetNumber,
+        revision: drawing.revision,
+        purpose: drawing.purpose,
+        reasons,
+        sourceHash: reviewHash,
+        taskId,
+        message: `${row.job_title}: drawing ${drawing.sheetNumber} revision ${drawing.revision} requires internal review (${reasons.join(', ')}).`
+      });
+    }
+
     const jobsWithoutSiteAccess = this.db.prepare(`
       SELECT jobs.id, jobs.title
       FROM jobs
@@ -40975,6 +41434,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   commandPlanStreamForAction(actionType = '') {
     const type = normalizeStatus(actionType, 'review');
     if (type.includes('approval')) return 'approval';
+    if (type.includes('drawing')) return 'field_assurance';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
     if (type.includes('safety') || type.includes('permit') || type.includes('pre_task') || type.includes('inspection') || type.includes('nonconformance') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
@@ -41006,6 +41466,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_jha',
       'request_sds',
       'review_sds_revision',
+      'review_drawing_distribution',
       'create_site_access_gate',
       'create_budget_line',
       'prepare_cost_forecast',
@@ -41640,6 +42101,40 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             entityType: 'task', entityId: task.id, jobId: action.jobId,
             action: 'autonomous_create_sds_revision_review_task', actor, after: task,
             metadata: { sdsSheetId: action.sdsSheetId, sourceHash: action.sourceHash, externalCommitments: 0, revisionInferred: false }
+          });
+        }
+
+        const drawingReviews = preview.filter(action => action.type === 'review_drawing_distribution').slice(0, 10);
+        for (const action of drawingReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0, distributionInferred: false });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review drawing ${action.sheetNumber} ${action.revision}`,
+            description: `${action.message} Verify the checksum-bound PDF, revision lineage, current approval, and real recipient delivery evidence. Prepare a controlled transmittal when needed; do not infer design approval, field receipt, or external delivery.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(action.severity === 'high' ? 0 : 2),
+            source: 'drawing_revision_monitor',
+            data: {
+              drawingRevisionId: action.drawingRevisionId,
+              sheetNumber: action.sheetNumber,
+              revision: action.revision,
+              purpose: action.purpose,
+              reasons: action.reasons,
+              sourceHash: action.sourceHash,
+              internalOnly: true,
+              externalCommitments: 0,
+              distributionInferred: false,
+              designApprovalInferred: false
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, distributionInferred: false });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_drawing_distribution_review_task', actor, after: task,
+            metadata: { drawingRevisionId: action.drawingRevisionId, sourceHash: action.sourceHash, externalCommitments: 0, distributionInferred: false }
           });
         }
 
@@ -43467,6 +43962,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         )
     `).get().count || 0);
     if (invalidDocumentSupersession) issues.push({ severity: 'error', message: `${invalidDocumentSupersession} controlled document supersession link(s) are invalid.` });
+    for (const row of this.db.prepare("SELECT * FROM documents WHERE type = 'drawing_revision' ORDER BY job_id, document_number, created_at").all()) {
+      const drawing = this.mapDocument(row);
+      if (drawing.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `Drawing ${drawing.documentNumber} revision ${drawing.revision} failed retained source, PDF, or snapshot verification.` });
+      }
+      const expectedApprovalStatus = drawing.status === 'pending_approval'
+        ? 'pending'
+        : ['current', 'superseded'].includes(drawing.status)
+          ? 'approved'
+          : ['rejected', 'cancelled'].includes(drawing.status) ? drawing.status : null;
+      const approval = drawing.approvalId
+        ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'document' AND target_id = ? AND approval_type = 'drawing_revision_publication'")
+          .get(drawing.approvalId, drawing.id)
+        : null;
+      if (!approval || (expectedApprovalStatus && approval.status !== expectedApprovalStatus)) {
+        issues.push({ severity: 'error', message: `Governed drawing ${drawing.documentNumber} revision ${drawing.revision} lacks its matching retained publication decision.` });
+      }
+      if (!drawing.sourceDocumentId || !drawing.data?.sourceDocumentChecksum) {
+        issues.push({ severity: 'error', message: `Governed drawing ${drawing.documentNumber} revision ${drawing.revision} lacks its job-owned checksum-bound PDF source.` });
+      }
+      if (drawing.supersedesDocumentId) {
+        const prior = this.db.prepare("SELECT * FROM documents WHERE id = ? AND type = 'drawing_revision'").get(drawing.supersedesDocumentId);
+        if (!prior || prior.job_id !== drawing.jobId || prior.document_number !== drawing.documentNumber || prior.revision === drawing.revision) {
+          issues.push({ severity: 'error', message: `Drawing ${drawing.documentNumber} revision ${drawing.revision} has invalid supersession lineage.` });
+        }
+      }
+      if (drawing.status === 'current' && drawing.current !== true) {
+        issues.push({ severity: 'error', message: `Drawing ${drawing.documentNumber} revision ${drawing.revision} is marked current but is not safe for field reliance.` });
+      }
+    }
     const transmittalRows = this.db.prepare('SELECT * FROM document_transmittals ORDER BY created_at').all();
     for (const transmittal of transmittalRows) {
       if (sha256Json(this.documentTransmittalSnapshot(transmittal)) !== transmittal.snapshot_hash) {
@@ -44105,6 +44630,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         fieldReports: this.count('field_reports'),
         rfiRecords: this.count('rfi_records'),
         submittals: this.count('submittal_records'),
+        governedDrawingRevisions: Number(this.db.prepare("SELECT COUNT(*) AS count FROM documents WHERE type = 'drawing_revision'").get().count || 0),
         documentTransmittals: this.count('document_transmittals'),
         transmittalReceipts: this.count('transmittal_receipts'),
         projectMeetings: this.count('project_meetings'),
@@ -45732,7 +46258,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   mapDocument(row) {
-    return {
+    const data = fromJson(row.data_json);
+    const document = {
       id: row.id,
       jobId: row.job_id,
       type: row.type,
@@ -45748,9 +46275,69 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       effectiveAt: row.effective_at || null,
       supersedesDocumentId: row.supersedes_document_id || null,
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
+    };
+    if (row.type !== 'drawing_revision') return document;
+
+    const snapshot = fromJson(row.snapshot_json, null);
+    const sourceBasis = drawingRevisionSourceBasis(row);
+    const sourceHashValid = Boolean(row.source_hash && sha256Json(sourceBasis) === row.source_hash);
+    const snapshotHashValid = Boolean(
+      snapshot
+      && snapshot.format === DRAWING_REVISION_FORMAT
+      && snapshot.drawingRevisionId === row.id
+      && snapshot.jobId === row.job_id
+      && snapshot.sourceHash === row.source_hash
+      && sha256Json(snapshot) === row.snapshot_hash
+    );
+    const sourceDocumentRow = row.source_document_id
+      ? this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(row.source_document_id, row.job_id)
+      : null;
+    const sourceDocumentData = fromJson(sourceDocumentRow?.data_json, {});
+    const retainedDocumentChecksum = normalizeText(data.sourceDocumentChecksum, '');
+    const currentDocumentChecksum = normalizeText(
+      sourceDocumentData.analysis?.upload?.sha256 || sourceDocumentData.contentHash,
+      ''
+    );
+    const documentIntegrityValid = Boolean(
+      sourceDocumentRow
+      && normalizeStatus(sourceDocumentRow.mime_type, '') === 'application/pdf'
+      && retainedDocumentChecksum
+      && currentDocumentChecksum === retainedDocumentChecksum
+    );
+    const integrityValid = sourceHashValid && snapshotHashValid && documentIntegrityValid;
+    return {
+      ...document,
+      sheetNumber: row.document_number,
+      purpose: data.purpose || 'for_construction',
+      issueDate: data.issueDate || row.effective_at || null,
+      scale: data.scale || null,
+      zone: data.zone || null,
+      revisionReason: data.revisionReason || null,
+      reviewNotes: data.reviewNotes || null,
+      sourceDocumentId: row.source_document_id || null,
+      sourceDocumentReference: data.sourceDocumentReference || data.sourceReference || null,
+      sourceDocument: sourceDocumentRow ? {
+        id: sourceDocumentRow.id,
+        title: sourceDocumentRow.title,
+        filename: sourceDocumentRow.filename,
+        mimeType: sourceDocumentRow.mime_type,
+        status: sourceDocumentRow.status
+      } : null,
+      supersededByDrawingId: data.supersededByDocumentId || null,
+      sourceHash: row.source_hash || null,
+      snapshotHash: row.snapshot_hash || null,
+      snapshot,
+      sourceHashValid,
+      snapshotHashValid,
+      documentIntegrityValid,
+      integrityValid,
+      current: DRAWING_CURRENT_STATUSES.has(normalizeStatus(row.status, '')) && integrityValid,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      reviewedAt: row.reviewed_at || null
     };
   }
 
@@ -46549,6 +47136,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       if (Array.isArray(data.warnings) && data.warnings.length) preview.warnings = data.warnings.slice(0, 6);
       addSafeguard('Does not send client messages, publish crew instructions, order materials, clear site access, or approve safety evidence.');
+    } else if (targetType === 'document' && approvalType === 'drawing_revision_publication') {
+      const row = this.db.prepare("SELECT * FROM documents WHERE id = ? AND type = 'drawing_revision'")
+        .get(approval.targetId || approval.target_id);
+      const drawing = row ? this.mapDocument(row) : null;
+      primaryEffect = `Publish drawing ${drawing?.sheetNumber || data.sheetNumber || ''} revision ${drawing?.revision || data.revision || ''} as the current field revision.`;
+      addEffect('Make the checksum-bound PDF available as the current drawing for assigned field operators and controlled transmittals.');
+      if (drawing?.supersedesDocumentId || data.supersedesDrawingId) {
+        addEffect('Supersede the exact prior current revision while retaining its source, history, and distribution evidence.');
+      }
+      addSafeguard('Approval does not certify design adequacy, regulatory acceptance, or constructability and does not send the drawing externally.');
+      addSafeguard('The PDF checksum, immutable revision snapshot, sheet identity, and exact supersession are rechecked when approval resolves.');
+      riskLevel = 'high';
+      preview.sheetNumber = drawing?.sheetNumber || data.sheetNumber || null;
+      preview.revision = drawing?.revision || data.revision || null;
+      preview.title = drawing?.title || null;
+      preview.discipline = drawing?.discipline || null;
+      preview.purpose = drawing?.purpose || data.purpose || null;
+      preview.issueDate = drawing?.issueDate || data.issueDate || null;
+      preview.sourceDocumentId = drawing?.sourceDocumentId || data.sourceDocumentId || null;
+      preview.supersedesDrawingId = drawing?.supersedesDocumentId || data.supersedesDrawingId || null;
+      preview.integrityValid = drawing?.integrityValid === true;
+      preview.sourceHash = drawing?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = drawing?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'document_transmittal') {
       const row = this.db.prepare('SELECT * FROM document_transmittals WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapDocumentTransmittal(row) : null;

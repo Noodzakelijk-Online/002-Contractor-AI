@@ -1684,7 +1684,11 @@ function ProjectControls({
   const rfis = job.rfis || EMPTY_LIST
   const submittals = job.submittals || EMPTY_LIST
   const documents = (job.documents || EMPTY_LIST).filter((document) => document.type === 'controlled_document')
-  const currentDocumentOptions = documents.filter((record) => record.status === 'approved' && record.data?.isCurrent === true)
+  const drawings = job.drawings || EMPTY_LIST
+  const currentDocumentOptions = [
+    ...documents.filter((record) => record.status === 'approved' && record.data?.isCurrent === true),
+    ...drawings.filter((record) => record.current === true),
+  ]
   const transmittals = job.transmittals || EMPTY_LIST
   const meetings = job.projectMeetings || EMPTY_LIST
   const pendingApprovals = job.approvals?.filter((approval) => approval.status === 'pending') || EMPTY_LIST
@@ -1938,7 +1942,7 @@ function ProjectControls({
           <label>Acknowledgment due<input required type="date" value={transmittalDraft.dueAt} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, dueAt: event.target.value })} /></label>
           <label className="form-span">Recipients<textarea required minLength="5" value={transmittalDraft.recipients} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, recipients: event.target.value })} placeholder={'One recipient per line: Name <name@example.eu>'} /></label>
           <fieldset className="form-span document-selection">
-            <legend>Current controlled revisions</legend>
+            <legend>Current documents and drawings</legend>
             {currentDocumentOptions.length ? currentDocumentOptions.map((document) => (
               <label className="checkbox-label" key={document.id}>
                 <input
@@ -1953,7 +1957,7 @@ function ProjectControls({
                 />
                 <span><strong>{document.documentNumber} / rev {document.revision}</strong><small>{document.title}</small></span>
               </label>
-            )) : <p className="workflow-note">Approve a controlled revision before preparing a transmittal.</p>}
+            )) : <p className="workflow-note">Approve a controlled document or drawing revision before preparing a transmittal.</p>}
           </fieldset>
           <label className="form-span">Message<textarea value={transmittalDraft.message} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, message: event.target.value })} placeholder="Purpose, requested action, and response instructions" /></label>
           <div className="form-actions form-span"><button className="primary-button" disabled={submitting || !currentDocumentOptions.length || !transmittalDraft.documentIds.length}><Send size={15} />Prepare transmittal</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>

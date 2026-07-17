@@ -853,6 +853,35 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('047_governed_drawing_revision_control')) {
+        const documentColumns = new Set(database.prepare('PRAGMA table_info(documents)').all().map(row => row.name));
+        for (const column of [
+          'source_document_id',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint',
+          'reviewed_at'
+        ]) {
+          if (!documentColumns.has(column)) {
+            throw new Error(`Backup governed drawing revision schema is incomplete: documents.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_drawing_job_entry_key',
+          'idx_drawing_job_sheet_revision',
+          'idx_drawing_one_current_sheet',
+          'idx_drawing_pending_supersession',
+          'idx_drawing_job_status_discipline',
+          'idx_drawing_source_document'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed drawing revision constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

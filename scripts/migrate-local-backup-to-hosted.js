@@ -235,7 +235,8 @@ const IMMUTABLE_ISSUE_PACKAGE_TYPES = new Set([
   'purchase_order_issue_package',
   'purchase_order_ubl_package',
   'change_order_issue_package',
-  'handover_issue_package'
+  'handover_issue_package',
+  'drawing_revision'
 ]);
 
 const IMMUTABLE_SOURCE_JSON_COLUMNS = new Map([

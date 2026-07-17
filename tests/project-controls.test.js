@@ -349,7 +349,7 @@ test('project-control API retains approval-gated document revisions and enforces
   const diagnostics = await request(baseUrl, '/api/readiness', tokens.owner);
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.ledger.valid, true);
-  assert.equal(diagnostics.body.ledger.migrations.currentVersion, '046_governed_sds_revision_control');
+  assert.equal(diagnostics.body.ledger.migrations.currentVersion, '047_governed_drawing_revision_control');
 });
 
 test('controlled document migration upgrades a 021 ledger without losing existing documents', t => {
@@ -364,22 +364,36 @@ test('controlled document migration upgrades a 021 ledger without losing existin
 
   const oldSchema = new DatabaseSync(dbFile);
   oldSchema.exec(`
+    DROP INDEX IF EXISTS idx_drawing_job_entry_key;
+    DROP INDEX IF EXISTS idx_drawing_job_sheet_revision;
+    DROP INDEX IF EXISTS idx_drawing_one_current_sheet;
+    DROP INDEX IF EXISTS idx_drawing_pending_supersession;
+    DROP INDEX IF EXISTS idx_drawing_job_status_discipline;
+    DROP INDEX IF EXISTS idx_drawing_source_document;
     DROP INDEX IF EXISTS idx_documents_job_number_revision;
     DROP INDEX IF EXISTS idx_documents_controlled_current;
     DROP INDEX IF EXISTS idx_documents_single_candidate;
     DROP INDEX IF EXISTS idx_documents_supersedes;
+    ALTER TABLE documents DROP COLUMN reviewed_at;
+    ALTER TABLE documents DROP COLUMN entry_fingerprint;
+    ALTER TABLE documents DROP COLUMN entry_key;
+    ALTER TABLE documents DROP COLUMN snapshot_json;
+    ALTER TABLE documents DROP COLUMN snapshot_hash;
+    ALTER TABLE documents DROP COLUMN source_hash;
+    ALTER TABLE documents DROP COLUMN source_document_id;
     ALTER TABLE documents DROP COLUMN supersedes_document_id;
     ALTER TABLE documents DROP COLUMN effective_at;
     ALTER TABLE documents DROP COLUMN discipline;
     ALTER TABLE documents DROP COLUMN revision;
     ALTER TABLE documents DROP COLUMN document_number;
     DELETE FROM ledger_schema_migrations WHERE version = '022_controlled_document_revisions';
+    DELETE FROM ledger_schema_migrations WHERE version = '047_governed_drawing_revision_control';
   `);
   oldSchema.close();
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(upgraded.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
     const columns = new Set(upgraded.db.prepare('PRAGMA table_info(documents)').all().map(column => column.name));
     for (const column of ['document_number', 'revision', 'discipline', 'effective_at', 'supersedes_document_id']) {

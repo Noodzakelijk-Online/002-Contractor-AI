@@ -1205,6 +1205,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans$/.test(pathName)
         || pathName === '/api/ledger/sds-sheets'
         || /^\/api\/ledger\/jobs\/[^/]+\/sds-sheets$/.test(pathName)
+        || pathName === '/api/ledger/drawings'
+        || /^\/api\/ledger\/jobs\/[^/]+\/drawings$/.test(pathName)
         || pathName === '/api/ledger/safety-briefings'
         || /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings$/.test(pathName)
         || pathName === '/api/ledger/attendance'
@@ -1417,6 +1419,7 @@ function projectFieldJobDetail(req, detail) {
     orientations: projectFieldRecords(detail.orientations),
     jhas: projectFieldRecords(detail.jhas),
     sdsSheets: projectFieldRecords((detail.sdsSheets || []).filter(sheet => sheet.current === true)),
+    drawings: projectFieldRecords((detail.drawings || []).filter(drawing => drawing.current === true)),
     siteAccessLogs: projectFieldRecords(detail.siteAccessLogs),
     qualificationRequirements: projectFieldRecords(detail.qualificationRequirements),
     assignments: projectFieldRecords(detail.assignments),
@@ -1424,7 +1427,9 @@ function projectFieldJobDetail(req, detail) {
     equipmentCustody: projectFieldRecords(detail.equipmentCustody),
     materials: projectFieldRecords(detail.materials),
     materialReceipts: projectFieldRecords(detail.materialReceipts),
-    documents: projectFieldRecords(detail.documents),
+    documents: projectFieldRecords((detail.documents || []).filter(document => (
+      document.type !== 'drawing_revision' || document.current === true
+    ))),
     progress: projectFieldRecords(detail.progress),
     productionBaselines: projectFieldRecords(detail.productionBaselines),
     productionEntries: projectFieldRecords(detail.productionEntries),
@@ -2245,6 +2250,21 @@ app.get('/api/ledger/documents/:id/content', async (req, res) => {
     }
     if (!evidenceStorage) throw evidenceStorageInitError || new EvidenceStorageError('storage_unavailable', 'Evidence storage is unavailable.');
     const evidence = await evidenceStorage.read(document.storageRef);
+    const expectedChecksum = String(
+      document.data?.sourceDocumentChecksum
+      || document.data?.analysis?.upload?.sha256
+      || document.data?.contentHash
+      || ''
+    ).trim().toLowerCase();
+    if (expectedChecksum) {
+      const actualChecksum = crypto.createHash('sha256').update(evidence).digest('hex');
+      if (actualChecksum !== expectedChecksum) {
+        const error = new Error('The retained evidence bytes no longer match the upload checksum.');
+        error.statusCode = 409;
+        error.code = 'evidence_content_integrity_failed';
+        throw error;
+      }
+    }
     operatingLedger.audit({
       entityType: 'document',
       entityId: document.id,
@@ -3450,6 +3470,41 @@ app.post('/api/ledger/jobs/:id/sds-revisions', (req, res) => {
     return {
       success: true,
       sdsSheet: revision,
+      approval: revision.approval,
+      replayed: revision.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/drawings', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    drawings: operatingLedger.listDrawingRevisions(req.query || {})
+      .filter(drawing => fieldWorkerCanAccessJob(req, drawing.jobId))
+      .filter(drawing => req.operator?.role !== 'field_worker' || drawing.current === true)
+      .map(drawing => recordForOperator(req, drawing))
+  }));
+});
+
+app.get('/api/ledger/jobs/:id/drawings', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    drawings: operatingLedger.listDrawingRevisions({ ...(req.query || {}), jobId: req.params.id })
+      .filter(drawing => req.operator?.role !== 'field_worker' || drawing.current === true)
+      .map(drawing => recordForOperator(req, drawing))
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/drawing-revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const revision = operatingLedger.createDrawingRevision(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      drawing: revision,
       approval: revision.approval,
       replayed: revision.replayed === true,
       job: jobForOperator(req, req.params.id),
@@ -6503,6 +6558,14 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         sdsRevisionSupersession: 'atomic_single_current_product',
         sdsRevisionAutonomy: 'internal_review_task_only',
         sdsCurrentStatusInference: false,
+        drawingRevisionEntryKey: 'durable',
+        drawingRevisionSourceIntegrity: 'sheet_document_snapshot_sha256',
+        drawingRevisionApproval: 'source_current_approval_gated',
+        drawingRevisionSupersession: 'atomic_single_current_sheet',
+        drawingRevisionDistribution: 'approval_gated_transmittal_with_receipts',
+        drawingRevisionAutonomy: 'internal_review_task_only',
+        drawingPublicationInference: false,
+        drawingDeliveryInference: false,
         dayworkEntryKey: 'durable',
         dayworkQuantitySnapshot: 'sha256_source_bound',
         dayworkApproval: 'source_current_approval_gated',

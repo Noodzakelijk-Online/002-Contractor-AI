@@ -368,6 +368,20 @@ test('backup verification rejects a migration 046 ledger with missing governed S
   );
 });
 
+test('backup verification rejects a migration 047 ledger with missing governed drawing revision constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-drawing-revision-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Drawing revision schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_drawing_one_current_sheet');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /governed drawing revision constraints are incomplete: idx_drawing_one_current_sheet/i
+  );
+});
+
 test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-restore safety copy', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
