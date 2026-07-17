@@ -1370,7 +1370,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '043_governed_daywork_tickets');
+    assert.equal(migrations.currentVersion, '044_governed_nonconformance_records');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1451,12 +1451,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('043_governed_daywork_tickets'));
+  assert.deepEqual(versions, Array(4).fill('044_governed_nonconformance_records'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 43);
+    assert.equal(Number(migrationCount.count), 44);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1988,7 +1988,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
+    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2341,7 +2341,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
+    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2414,9 +2414,95 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
+    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
+  }
+});
+
+test('PostgreSQL governed nonconformance preserves replay, dual approval, integrity, and restart parity', { skip: !connectionString }, () => {
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let jobId;
+  let recordId;
+  try {
+    const job = ledger.createIntake({
+      title: `PostgreSQL NCR ${marker}`,
+      client: { name: `Hosted NCR client ${marker}` },
+      status: 'in_progress',
+      assignAutomatically: false
+    }, { actor: 'postgres_ncr_test' });
+    jobId = job.id;
+    const worker = ledger.upsertWorker({
+      name: `Hosted NCR worker ${marker}`,
+      role: 'Site operative',
+      status: 'available'
+    }, { actor: 'postgres_ncr_test' });
+    ledger.addAssignment(job.id, {
+      workerId: worker.id,
+      workerName: worker.name,
+      role: worker.role,
+      status: 'assigned'
+    }, { actor: 'postgres_ncr_test' });
+    const payload = {
+      entryKey: `postgres-ncr-${marker}`,
+      workerId: worker.id,
+      workerName: worker.name,
+      severity: 'high',
+      discipline: 'structural',
+      title: 'Hosted anchor spacing deviation',
+      description: 'Retained hosted survey measurements show two anchors outside the approved spacing.',
+      location: 'Hosted facade bay P4',
+      detectedAt: new Date().toISOString(),
+      raisedBy: worker.name,
+      requirementReference: 'Hosted detail STR-421 revision C',
+      immediateContainment: 'Held covering work and marked the affected bay pending correction.',
+      responsibleParty: 'Hosted facade supervisor',
+      dueAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    };
+    const created = ledger.createNonconformance(job.id, payload, { actor: 'postgres_field_worker' });
+    recordId = created.nonconformance.id;
+    assert.equal(created.nonconformance.integrityValid, true);
+    assert.equal(ledger.createNonconformance(job.id, payload).replayed, true);
+    const correction = ledger.requestNonconformanceCorrectiveAction(job.id, recordId, {
+      rootCause: 'A superseded workshop sketch was used for setting out.',
+      correctiveAction: 'Install approved supplementary anchors and repeat the retained pull tests.',
+      responsibleParty: 'Hosted facade supervisor',
+      dueAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      evidenceReference: `postgres-ncr-correction:${marker}`
+    }, { actor: 'postgres_office' });
+    ledger.resolveApproval(correction.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_ncr_approver',
+      reason: 'Hosted corrective action and evidence basis verified.'
+    });
+    const closure = ledger.requestNonconformanceClosure(job.id, recordId, {
+      verificationResult: 'passed',
+      verificationEvidence: `postgres-ncr-verification:${marker}`,
+      verifiedBy: 'Hosted independent quality lead',
+      verifiedAt: new Date().toISOString()
+    }, { actor: 'postgres_office' });
+    ledger.resolveApproval(closure.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_ncr_approver',
+      reason: 'Hosted independent verification matches the retained correction.'
+    });
+    const closed = ledger.getNonconformance(recordId);
+    assert.equal(closed.status, 'closed');
+    assert.equal(closed.correctionIntegrityValid, true);
+    assert.equal(closed.closureIntegrityValid, true);
+    assert.equal(ledger.dashboardSummary().metrics.nonconformances >= 1, true);
+    assert.equal(ledger.diagnose().valid, true);
+    ledger.close();
+    ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+    const retained = ledger.getJobDetail(jobId).nonconformances.find(record => record.id === recordId);
+    assert.equal(retained.status, 'closed');
+    assert.equal(retained.integrityValid, true);
+    assert.equal(retained.correctionIntegrityValid, true);
+    assert.equal(retained.closureIntegrityValid, true);
+    assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
+  } finally {
+    ledger?.close();
   }
 });

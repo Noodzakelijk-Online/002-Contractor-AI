@@ -96,7 +96,7 @@ test('invoice drafts use server-calculated totals and retain structured export r
   assert.equal(invoice.data.structuredReadiness.transportConfigured, false);
   assert.equal(invoice.data.lineItems.length, 1);
   assert.ok(invoice.approvalId);
-  assert.equal(ledger.migrationStatus().currentVersion, '043_governed_daywork_tickets');
+  assert.equal(ledger.migrationStatus().currentVersion, '044_governed_nonconformance_records');
 });
 
 test('approved invoices create numbered immutable HTML and UBL packages behind delivery approval', t => {

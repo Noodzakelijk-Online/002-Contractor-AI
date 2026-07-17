@@ -89,6 +89,7 @@ const DayworkControl = lazy(() => loadJobWorkspaceControls().then((module) => ({
 const FieldAssuranceWorkspace = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.FieldAssuranceWorkspace })))
 const FieldRiskControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.FieldRiskControl })))
 const InspectionChecklistControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.InspectionChecklistControl })))
+const NonconformanceControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.NonconformanceControl })))
 const ProductionControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.ProductionControl })))
 const ProjectControls = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.ProjectControls })))
 const TakeoffControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.TakeoffControl })))
@@ -208,6 +209,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? 'production-entries'
       : type === 'daywork_ticket'
         ? 'daywork-tickets'
+      : type === 'nonconformance'
+        ? 'nonconformances'
       : type === 'material_receipt'
         ? 'material-receipts'
       : type === 'expense_receipt'
@@ -6608,6 +6611,92 @@ function App() {
           return null
         }
       }
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function createNonconformance(values) {
+    if (!selectedJobId || !values?.entryKey) return null
+    const { entryKey, ...payload } = values
+    const draft = {
+      id: entryKey,
+      type: 'nonconformance',
+      jobId: selectedJobId,
+      payload: { ...payload, source: 'job_nonconformance_register' },
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        notify('NCR saved locally for this operator and scheduled for exact retry after reconnection.')
+        return { queued: true }
+      }
+      const result = await recordFieldOperation(draft)
+      setSelectedJob(result.job)
+      setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
+      notify(result.replayed ? 'This NCR was already retained; no duplicate record was created.' : `${result.nonconformance?.ncrNumber || 'NCR'} retained with immutable source evidence.`)
+      await refresh()
+      return result
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          notify('Connection interrupted. The NCR was saved locally for an exact retry.')
+          return { queued: true }
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return null
+        }
+      }
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestNonconformanceCorrection(recordId, payload) {
+    if (!selectedJobId || !recordId || !canCoordinate || navigator.onLine === false) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/nonconformances/${encodeURIComponent(recordId)}/corrective-action`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      notify(result.replayed ? 'This corrective-action review is already pending.' : 'Corrective action retained for source-current approval. The NCR remains open.')
+      await refresh()
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestNonconformanceClosure(recordId, payload) {
+    if (!selectedJobId || !recordId || !canCoordinate || navigator.onLine === false) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/nonconformances/${encodeURIComponent(recordId)}/closure`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      notify(result.replayed ? 'This NCR closure review is already pending.' : 'Independent closure evidence retained for approval. Related inspection and closeout records remain unchanged.')
+      await refresh()
+      return result
+    } catch (requestError) {
       setError(requestError.message)
       return null
     } finally {
@@ -13747,6 +13836,19 @@ function App() {
                     onCreateTemplate={createInspectionTemplate}
                     onSchedule={scheduleInspectionChecklist}
                     onSubmit={submitInspectionChecklist}
+                    onOpenApprovals={openApprovals}
+                  />
+                  <NonconformanceControl
+                    job={selectedJob}
+                    canReport={canCoordinate || capabilities.fieldEvidence === true}
+                    canCoordinate={canCoordinate}
+                    canApprove={capabilities.approvals === true}
+                    fieldScoped={fieldScoped}
+                    operator={operator}
+                    submitting={submitting}
+                    onCreate={createNonconformance}
+                    onRequestCorrection={requestNonconformanceCorrection}
+                    onRequestClosure={requestNonconformanceClosure}
                     onOpenApprovals={openApprovals}
                   />
                   <FieldRiskControl

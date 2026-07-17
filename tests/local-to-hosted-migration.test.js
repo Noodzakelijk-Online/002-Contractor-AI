@@ -601,6 +601,42 @@ function createBackupFixture(t, suffix = 'success') {
     ],
     taxRate: 21
   }, { actor: 'migration_fixture' });
+  const nonconformanceRequest = source.createNonconformance(job.id, {
+    entryKey: `migration-ncr-${suffix}`,
+    workerId: attendanceWorker.id,
+    workerName: attendanceWorker.name,
+    severity: 'high',
+    discipline: 'structural',
+    title: 'Migration anchor spacing deviation',
+    description: 'Retained measurements show anchor spacing outside the approved detail.',
+    location: 'Migration facade bay M4',
+    detectedAt: new Date().toISOString(),
+    raisedBy: attendanceWorker.name,
+    requirementReference: 'Migration detail STR-421 revision C',
+    immediateContainment: 'Held covering work and marked the affected bay.',
+    responsibleParty: 'Migration facade supervisor',
+    dueAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  }, { actor: 'migration_fixture' });
+  const nonconformanceCorrection = source.requestNonconformanceCorrectiveAction(job.id, nonconformanceRequest.nonconformance.id, {
+    rootCause: 'Setting-out reference came from a superseded workshop sketch.',
+    correctiveAction: 'Install supplementary anchors and retain repeat test evidence.',
+    responsibleParty: 'Migration facade supervisor',
+    dueAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    evidenceReference: `migration-ncr-correction:${suffix}`
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(nonconformanceCorrection.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration correction basis verified.'
+  });
+  const nonconformanceClosure = source.requestNonconformanceClosure(job.id, nonconformanceRequest.nonconformance.id, {
+    verificationResult: 'passed',
+    verificationEvidence: `migration-ncr-verification:${suffix}`,
+    verifiedBy: 'Migration independent quality lead',
+    verifiedAt: new Date().toISOString()
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(nonconformanceClosure.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration independent verification matched the correction.'
+  });
+  const nonconformance = source.getNonconformance(nonconformanceRequest.nonconformance.id);
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -626,7 +662,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 1 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -716,7 +752,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '043_governed_daywork_tickets');
+  assert.equal(migration.migrationVersion, '044_governed_nonconformance_records');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -772,6 +808,13 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedDaywork.sourceHash, fixture.daywork.ticket.sourceHash);
     assert.equal(migratedDaywork.changeOrderId, fixture.daywork.changeOrder.id);
     assert.ok(detail.changeOrders.some(item => item.id === fixture.daywork.changeOrder.id && item.data.source.id === migratedDaywork.id));
+    const migratedNonconformance = detail.nonconformances.find(item => item.id === fixture.nonconformance.id);
+    assert.equal(migratedNonconformance.status, 'closed');
+    assert.equal(migratedNonconformance.integrityValid, true);
+    assert.equal(migratedNonconformance.correctionIntegrityValid, true);
+    assert.equal(migratedNonconformance.closureIntegrityValid, true);
+    assert.equal(migratedNonconformance.sourceHash, fixture.nonconformance.sourceHash);
+    assert.equal(migratedNonconformance.closureHash, fixture.nonconformance.closureHash);
     const migratedAttendance = detail.attendanceSessions.find(item => item.id === fixture.attendanceSession.id);
     assert.equal(migratedAttendance.status, 'checked_out');
     assert.equal(migratedAttendance.checkInEntryFingerprint, fixture.attendanceSession.checkInEntryFingerprint);

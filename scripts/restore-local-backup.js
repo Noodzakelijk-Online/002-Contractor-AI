@@ -699,6 +699,54 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('044_governed_nonconformance_records')) {
+        for (const table of ['nonconformance_number_sequences', 'nonconformance_records']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed nonconformance schema is incomplete: ${table}.`);
+          }
+        }
+        const recordColumns = new Set(database.prepare('PRAGMA table_info(nonconformance_records)').all().map(row => row.name));
+        for (const column of [
+          'ncr_number',
+          'detected_at',
+          'requirement_reference',
+          'immediate_containment',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint',
+          'corrective_action_json',
+          'corrective_action_hash',
+          'correction_approval_id',
+          'closure_json',
+          'closure_hash',
+          'closure_approval_id',
+          'closed_at',
+          'closed_by'
+        ]) {
+          if (!recordColumns.has(column)) {
+            throw new Error(`Backup governed nonconformance schema is incomplete: nonconformance_records.${column}.`);
+          }
+        }
+        const sequenceColumns = new Set(database.prepare('PRAGMA table_info(nonconformance_number_sequences)').all().map(row => row.name));
+        for (const column of ['period_year', 'last_value', 'updated_at']) {
+          if (!sequenceColumns.has(column)) {
+            throw new Error(`Backup governed nonconformance schema is incomplete: nonconformance_number_sequences.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_nonconformance_job_status_due',
+          'idx_nonconformance_worker_detected',
+          'idx_nonconformance_pending_correction',
+          'idx_nonconformance_pending_closure'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed nonconformance constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

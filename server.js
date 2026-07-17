@@ -1190,8 +1190,9 @@ function allowsOperatorRequest(role, req) {
       return pathName === '/api/health'
         || pathName === '/api/readiness'
         || /^\/api\/ledger\/jobs(?:\/[^/]+)?$/.test(pathName)
-         || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/production$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/daywork-tickets$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/nonconformances$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)
@@ -1215,6 +1216,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daywork-tickets$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/nonconformances$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/work-permits\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
@@ -1250,7 +1252,7 @@ function scopedLedgerJobs(req, filters = {}) {
 }
 
 const FIELD_RECORD_PRIVATE_KEYS = new Set([
-  'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'conflicts', 'cost', 'currency',
+  'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'closureApprovalId', 'closureHash', 'conflicts', 'correctionApprovalId', 'correctiveActionHash', 'cost', 'currency',
   'checkoutEntryKey', 'checkoutFingerprint', 'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
   'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
   'returnEntryKey', 'returnFingerprint', 'snapshot', 'snapshotHash', 'sourceCurrentHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
@@ -1402,6 +1404,7 @@ function projectFieldJobDetail(req, detail) {
     submittals: projectFieldRecords(detail.submittals),
     permits: projectFieldRecords(detail.permits),
     inspections: projectFieldRecords(detail.inspections),
+    nonconformances: projectFieldRecords(detail.nonconformances),
     observations: projectFieldRecords(detail.observations),
     incidents: projectFieldRecords(detail.incidents),
     safetyMeetings: (detail.safetyMeetings || []).map(meeting => safetyMeetingForOperator(req, meeting)),
@@ -1509,6 +1512,27 @@ function dayworkTicketPayloadForOperator(req, payload = {}) {
     submittedBy: identity.workerName,
     submitted_by: identity.workerName,
     source: 'field_daywork_ticket'
+  };
+}
+
+function nonconformancePayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field NCR capture requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    raisedBy: identity.workerName,
+    raised_by: identity.workerName,
+    source: 'field_nonconformance_register'
   };
 }
 
@@ -2826,6 +2850,75 @@ app.post('/api/ledger/jobs/:id/daywork-tickets/:ticketId/convert', (req, res) =>
     const result = operatingLedger.convertDayworkTicketToChangeOrder(
       req.params.id,
       req.params.ticketId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...result,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/jobs/:id/nonconformances', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    nonconformances: req.operator?.role === 'field_worker'
+      ? operatingLedger.listNonconformances({ jobId: req.params.id, limit: req.query.limit }).map(projectFieldRecord)
+      : operatingLedger.listNonconformances({ ...(req.query || {}), jobId: req.params.id }),
+    policy: {
+      fieldCapture: true,
+      correctiveActionApprovalRequired: true,
+      independentClosureApprovalRequired: true,
+      externalCommitments: 0
+    }
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/nonconformances', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createNonconformance(
+      req.params.id,
+      nonconformancePayloadForOperator(req, req.body || {}),
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      nonconformance: recordForOperator(req, result.nonconformance),
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/nonconformances/:recordId/corrective-action', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.requestNonconformanceCorrectiveAction(
+      req.params.id,
+      req.params.recordId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      ...result,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/nonconformances/:recordId/closure', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.requestNonconformanceClosure(
+      req.params.id,
+      req.params.recordId,
       req.body || {},
       { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
     );
@@ -5442,6 +5535,7 @@ function operationalExport() {
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     dayworkTickets: operatingLedger.listDayworkTickets({ limit: 5_000 }),
+    nonconformances: operatingLedger.listNonconformances({ limit: 5_000 }),
     attendanceSessions: operatingLedger.listAttendanceSessions({ limit: 10_000 }),
     attendanceAdjustments: operatingLedger.listAttendanceAdjustments({ limit: 10_000 }),
     weeklyTimesheets: operatingLedger.listWeeklyTimesheets({ status: 'all', limit: 10_000 }),
@@ -5511,7 +5605,8 @@ function validateOperationalExport(snapshot) {
     'timesheetExports',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
-    'dayworkTickets'
+    'dayworkTickets',
+    'nonconformances'
   ]) {
     if (snapshot[key] !== undefined && !Array.isArray(snapshot[key])) {
       problems.push(`Export ${key} must be a collection when present.`);
@@ -6208,6 +6303,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         dayworkApproval: 'source_current_approval_gated',
         dayworkAcknowledgement: 'receipt_only_separate_approval',
         dayworkCommercialConversion: 'source_bound_change_order_approval_gated',
+        nonconformanceEntryKey: 'durable',
+        nonconformanceSnapshot: 'sha256_source_bound',
+        nonconformanceCorrectiveAction: 'source_current_approval_gated',
+        nonconformanceClosure: 'independent_source_current_approval_gated',
+        nonconformanceAutonomy: 'internal_review_task_only',
         materialReceiptEntryKey: 'durable',
         expenseReceiptEntryKey: 'durable',
         expenseReceiptDuplicateControl: 'vendor_reference_date_amount_currency',
@@ -6271,6 +6371,17 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         verifiedProviderReceiptRequired: true,
         acceptanceBoundToIssuedPackage: true,
         contractValueChange: 'verified_acceptance_only'
+      },
+      qualityControl: {
+        nonconformanceRegister: true,
+        fieldCapture: true,
+        offlineExactReplay: true,
+        requirementAndContainmentEvidence: true,
+        correctiveActionApprovalRequired: true,
+        independentClosureApprovalRequired: true,
+        handoverBlockedWhileOpen: true,
+        statutoryCertificationClaimed: false,
+        externalCommitments: 0
       },
       costForecasting: {
         sourceLinked: true,

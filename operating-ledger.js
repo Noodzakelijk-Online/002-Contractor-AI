@@ -52,14 +52,14 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'safety-quality',
     label: 'Safety, quality, and site access',
     vendors: ['HammerTech', 'Raken', 'Contractor Foreman', 'Procore'],
-    capabilities: ['orientations', 'JHAs', 'SDS', 'pre-task plans', 'permits', 'inspections', 'incidents', 'site access'],
+    capabilities: ['orientations', 'JHAs', 'SDS', 'pre-task plans', 'permits', 'inspections', 'nonconformances', 'incidents', 'site access'],
     sourceEvidence: [
       'HammerTech centers on safety platform operations: orientations, JHAs, SDS, pre-task plans, permits, safety meetings, incidents, inspections and site access.',
       'Raken and Contractor Foreman add managed checklists, observations, incidents, toolbox talks, quality management and compliance proof.'
     ],
     serviceGroups: [
       { name: 'Mobilization safety', services: ['Orientation', 'JHA', 'SDS register', 'site access gate'] },
-      { name: 'Quality assurance', services: ['Permit', 'inspection', 'observation', 'incident', 'safety talk'] }
+      { name: 'Quality assurance', services: ['Permit', 'inspection', 'nonconformance and corrective action', 'observation', 'incident', 'safety talk'] }
     ]
   },
   {
@@ -156,6 +156,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'sds', label: 'SDS register', table: 'sds_sheets', detailKey: 'sdsSheets' },
     { key: 'permit', label: 'Permits', table: 'permit_records', detailKey: 'permits' },
     { key: 'inspection', label: 'Inspections', table: 'inspection_records', detailKey: 'inspections' },
+    { key: 'nonconformance', label: 'Nonconformance and corrective action', table: 'nonconformance_records', detailKey: 'nonconformances' },
     { key: 'observation', label: 'Observations', table: 'observation_records', detailKey: 'observations' },
     { key: 'incident', label: 'Incidents', table: 'incident_records', detailKey: 'incidents' },
     { key: 'site_access', label: 'Site access gate', table: 'site_access_logs', detailKey: 'siteAccessLogs' }
@@ -419,6 +420,8 @@ const TAKEOFF_MEASUREMENT_TYPES = new Set(['count', 'linear', 'area', 'volume', 
 const TAKEOFF_CATEGORIES = new Set(['material', 'labor', 'equipment', 'subcontract', 'other']);
 const DAYWORK_TICKET_FORMAT = 'contractor-ai-daywork-ticket/v1';
 const DAYWORK_LINE_TYPES = new Set(['labor', 'material', 'equipment', 'subcontract', 'other']);
+const NONCONFORMANCE_FORMAT = 'contractor-ai-nonconformance/v1';
+const NONCONFORMANCE_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 
 function roundQuantity(value) {
   return Math.round((Number(value) + Number.EPSILON) * 10_000) / 10_000;
@@ -3389,6 +3392,75 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE UNIQUE INDEX IF NOT EXISTS idx_daywork_pending_acknowledgement
           ON daywork_tickets(acknowledgement_approval_id)
           WHERE acknowledgement_approval_id IS NOT NULL AND acknowledgement_reference IS NULL;
+      `);
+    }
+  },
+  {
+    version: '044_governed_nonconformance_records',
+    description: 'Retain replay-safe quality nonconformances with source-bound corrective-action and independent closure approvals.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nonconformance_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS nonconformance_records (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          ncr_number TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          severity TEXT NOT NULL DEFAULT 'medium',
+          discipline TEXT NOT NULL DEFAULT 'quality',
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          location TEXT,
+          detected_at TEXT NOT NULL,
+          raised_by TEXT NOT NULL,
+          worker_id TEXT,
+          requirement_reference TEXT NOT NULL,
+          immediate_containment TEXT NOT NULL,
+          responsible_party TEXT NOT NULL,
+          due_at TEXT NOT NULL,
+          source_inspection_id TEXT,
+          source_observation_id TEXT,
+          evidence_document_id TEXT,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL,
+          entry_fingerprint TEXT NOT NULL,
+          corrective_action_json TEXT,
+          corrective_action_hash TEXT,
+          correction_approval_id TEXT,
+          closure_json TEXT,
+          closure_hash TEXT,
+          closure_approval_id TEXT,
+          closed_at TEXT,
+          closed_by TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          FOREIGN KEY(source_inspection_id) REFERENCES inspection_records(id) ON DELETE SET NULL,
+          FOREIGN KEY(source_observation_id) REFERENCES observation_records(id) ON DELETE SET NULL,
+          FOREIGN KEY(evidence_document_id) REFERENCES documents(id) ON DELETE SET NULL,
+          FOREIGN KEY(correction_approval_id) REFERENCES approvals(id),
+          FOREIGN KEY(closure_approval_id) REFERENCES approvals(id),
+          UNIQUE(job_id, ncr_number),
+          UNIQUE(job_id, entry_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_nonconformance_job_status_due
+          ON nonconformance_records(job_id, status, due_at, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_nonconformance_worker_detected
+          ON nonconformance_records(worker_id, detected_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nonconformance_pending_correction
+          ON nonconformance_records(correction_approval_id)
+          WHERE correction_approval_id IS NOT NULL AND corrective_action_json IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nonconformance_pending_closure
+          ON nonconformance_records(closure_approval_id)
+          WHERE closure_approval_id IS NOT NULL AND closed_at IS NULL;
       `);
     }
   }
@@ -11476,6 +11548,8 @@ class ContractorOperatingLedger {
     if (openIncidents.length) blockers.push({ code: 'open_incidents', label: `${openIncidents.length} incident(s) remain unresolved`, recordIds: openIncidents.map(item => item.id) });
     const openObservations = (detail.observations || []).filter(item => !closed(item, ['resolved', 'closed', 'cancelled', 'canceled', 'rejected', 'void']));
     if (openObservations.length) blockers.push({ code: 'open_observations', label: `${openObservations.length} observation(s) remain unresolved`, recordIds: openObservations.map(item => item.id) });
+    const openNonconformances = (detail.nonconformances || []).filter(item => !closed(item, ['closed', 'cancelled', 'canceled', 'rejected', 'void']));
+    if (openNonconformances.length) blockers.push({ code: 'open_nonconformances', label: `${openNonconformances.length} NCR(s) remain unresolved`, recordIds: openNonconformances.map(item => item.id) });
     const openPunch = (detail.punchItems || []).filter(item => !closed(item, ['resolved', 'verified', 'closed', 'completed', 'cancelled', 'canceled', 'rejected', 'void']));
     if (openPunch.length) blockers.push({ code: 'open_punch_items', label: `${openPunch.length} punch item(s) remain unresolved`, recordIds: openPunch.map(item => item.id) });
     const openInspections = (detail.inspections || []).filter(item => !closed(item, ['approved', 'passed', 'completed', 'closed', 'verified', 'cancelled', 'canceled', 'rejected', 'void']));
@@ -13514,6 +13588,467 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       return siteVisit;
     });
+  }
+
+  allocateNonconformanceNumber(detectedAt = nowIso()) {
+    const periodYear = new Date(detectedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('nonconformance_date_invalid', 'The detected date could not be used for durable NCR numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO nonconformance_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE nonconformance_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw ledgerInputError('nonconformance_number_allocation_failed', 'A durable NCR number could not be allocated.', null, 500);
+    }
+    return `NCR-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  nonconformanceFingerprint(payload = {}) {
+    return sha256Json({
+      jobId: normalizeText(payload.jobId, ''),
+      workerId: normalizeText(payload.workerId, '') || null,
+      severity: normalizeStatus(payload.severity, 'medium'),
+      discipline: normalizeStatus(payload.discipline, 'quality'),
+      title: normalizeText(payload.title, ''),
+      description: normalizeText(payload.description, ''),
+      location: normalizeText(payload.location, '') || null,
+      detectedAt: normalizeText(payload.detectedAt, ''),
+      raisedBy: normalizeText(payload.raisedBy, ''),
+      requirementReference: normalizeText(payload.requirementReference, ''),
+      immediateContainment: normalizeText(payload.immediateContainment, ''),
+      responsibleParty: normalizeText(payload.responsibleParty, ''),
+      dueAt: normalizeText(payload.dueAt, ''),
+      sourceInspectionId: normalizeText(payload.sourceInspectionId, '') || null,
+      sourceObservationId: normalizeText(payload.sourceObservationId, '') || null,
+      evidenceDocumentId: normalizeText(payload.evidenceDocumentId, '') || null,
+      notes: normalizeText(payload.notes, '') || null
+    });
+  }
+
+  nonconformanceSourceBasis(payload = {}) {
+    return {
+      format: NONCONFORMANCE_FORMAT,
+      id: payload.id,
+      ncrNumber: payload.ncrNumber,
+      jobId: payload.jobId,
+      workerId: payload.workerId || null,
+      workerName: payload.workerName || null,
+      severity: payload.severity,
+      discipline: payload.discipline,
+      title: payload.title,
+      description: payload.description,
+      location: payload.location || null,
+      detectedAt: payload.detectedAt,
+      raisedBy: payload.raisedBy,
+      requirementReference: payload.requirementReference,
+      immediateContainment: payload.immediateContainment,
+      responsibleParty: payload.responsibleParty,
+      dueAt: payload.dueAt,
+      sourceInspectionId: payload.sourceInspectionId || null,
+      sourceObservationId: payload.sourceObservationId || null,
+      evidenceDocumentId: payload.evidenceDocumentId || null,
+      notes: payload.notes || null,
+      entryFingerprint: payload.entryFingerprint
+    };
+  }
+
+  getNonconformance(recordId, options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const row = this.db.prepare(`
+      SELECT nonconformance_records.*, workers.name AS retained_worker_name
+      FROM nonconformance_records
+      LEFT JOIN workers ON workers.id = nonconformance_records.worker_id
+      WHERE nonconformance_records.id = ? AND (? = '' OR nonconformance_records.job_id = ?)
+    `).get(String(recordId || ''), jobId, jobId);
+    if (!row) throw ledgerInputError('nonconformance_not_found', 'Nonconformance record not found.', { recordId }, 404);
+    return this.mapNonconformance(row);
+  }
+
+  listNonconformances(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const workerId = normalizeText(filters.workerId || filters.worker_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const limit = safeLimit(filters.limit, 100, 5_000);
+    return this.db.prepare(`
+      SELECT nonconformance_records.*, workers.name AS retained_worker_name
+      FROM nonconformance_records
+      LEFT JOIN workers ON workers.id = nonconformance_records.worker_id
+      WHERE (? = '' OR nonconformance_records.job_id = ?)
+        AND (? = '' OR nonconformance_records.worker_id = ?)
+        AND (? = '' OR nonconformance_records.status = ?)
+      ORDER BY nonconformance_records.detected_at DESC, nonconformance_records.created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, workerId, workerId, status, status, limit).map(row => this.mapNonconformance(row));
+  }
+
+  requireNonconformanceEvidenceDocument(jobId, documentId, code = 'nonconformance_evidence_document_invalid') {
+    const normalizedId = normalizeText(documentId, '') || null;
+    if (!normalizedId) return null;
+    const document = this.db.prepare('SELECT id, job_id, status FROM documents WHERE id = ?').get(normalizedId);
+    if (!document || document.job_id !== jobId || !['stored', 'approved', 'current'].includes(normalizeStatus(document.status, ''))) {
+      throw ledgerInputError(code, 'NCR evidence must be a current retained document on the same job.', { documentId: normalizedId }, 409);
+    }
+    return normalizedId;
+  }
+
+  createNonconformance(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('nonconformance_entry_key_required', 'NCR capture requires a stable entry key containing 8 to 200 safe characters.');
+      }
+      const detectedAt = normalizeRetainedDate(payload.detectedAt || payload.detected_at, {
+        required: true,
+        label: 'Detected date',
+        code: 'nonconformance_detected_at_required'
+      });
+      if (Date.parse(detectedAt) > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('nonconformance_detected_at_future', 'NCR detected date cannot be in the future.');
+      }
+      if (Date.parse(detectedAt) < Date.now() - 366 * 24 * 60 * 60 * 1000) {
+        throw ledgerInputError('nonconformance_detected_at_too_old', 'NCRs older than one year require a controlled historical import.');
+      }
+      const dueAt = normalizeRetainedDate(payload.dueAt || payload.due_at, {
+        required: true,
+        label: 'Corrective due date',
+        code: 'nonconformance_due_at_required'
+      }).slice(0, 10);
+      if (Date.parse(`${dueAt}T23:59:59.999Z`) < Date.parse(detectedAt)) {
+        throw ledgerInputError('nonconformance_due_at_invalid', 'Corrective due date cannot precede the detected date.');
+      }
+      const severity = normalizeStatus(payload.severity, 'medium');
+      if (!NONCONFORMANCE_SEVERITIES.has(severity)) {
+        throw ledgerInputError('nonconformance_severity_invalid', 'NCR severity must be low, medium, high, or critical.');
+      }
+      const discipline = normalizeStatus(payload.discipline, 'quality');
+      const title = normalizeText(payload.title, '');
+      const description = normalizeText(payload.description, '');
+      const location = normalizeText(payload.location, '') || null;
+      const raisedBy = normalizeText(payload.raisedBy || payload.raised_by || payload.reportedBy || payload.reported_by, '');
+      const requirementReference = normalizeText(payload.requirementReference || payload.requirement_reference, '');
+      const immediateContainment = normalizeText(payload.immediateContainment || payload.immediate_containment, '');
+      const responsibleParty = normalizeText(payload.responsibleParty || payload.responsible_party || payload.responsible, '');
+      const notes = normalizeText(payload.notes, '') || null;
+      const boundedFields = [
+        [title, 3, 240, 'nonconformance_title_invalid', 'NCR title'],
+        [description, 4, 4_000, 'nonconformance_description_invalid', 'NCR description'],
+        [raisedBy, 2, 160, 'nonconformance_raised_by_invalid', 'Raised by'],
+        [requirementReference, 3, 500, 'nonconformance_requirement_invalid', 'Requirement reference'],
+        [immediateContainment, 4, 4_000, 'nonconformance_containment_invalid', 'Immediate containment'],
+        [responsibleParty, 2, 160, 'nonconformance_responsible_party_invalid', 'Responsible party']
+      ];
+      for (const [value, min, max, code, label] of boundedFields) {
+        if (value.length < min || value.length > max) throw ledgerInputError(code, `${label} must be between ${min} and ${max.toLocaleString('en-US')} characters.`);
+      }
+      if (location && location.length > 500) throw ledgerInputError('nonconformance_location_invalid', 'NCR location must be 500 characters or fewer.');
+      if (notes && notes.length > 2_000) throw ledgerInputError('nonconformance_notes_invalid', 'NCR notes must be 2,000 characters or fewer.');
+
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '') || null;
+      let worker = null;
+      if (workerId) {
+        worker = this.getWorker(workerId);
+        if (!this.resolveCrewAssignment(jobId, { workerId })) {
+          throw ledgerInputError('nonconformance_worker_job_scope_required', 'The NCR worker must have an active retained assignment to this job.', { jobId, workerId }, 409);
+        }
+      }
+      const workerName = worker?.name || normalizeText(payload.workerName || payload.worker_name, '') || null;
+      const sourceInspectionId = normalizeText(payload.sourceInspectionId || payload.source_inspection_id, '') || null;
+      if (sourceInspectionId && !this.db.prepare('SELECT id FROM inspection_records WHERE id = ? AND job_id = ?').get(sourceInspectionId, jobId)) {
+        throw ledgerInputError('nonconformance_inspection_invalid', 'The source inspection must belong to the same job.', { sourceInspectionId }, 409);
+      }
+      const sourceObservationId = normalizeText(payload.sourceObservationId || payload.source_observation_id, '') || null;
+      if (sourceObservationId && !this.db.prepare('SELECT id FROM observation_records WHERE id = ? AND job_id = ?').get(sourceObservationId, jobId)) {
+        throw ledgerInputError('nonconformance_observation_invalid', 'The source observation must belong to the same job.', { sourceObservationId }, 409);
+      }
+      const evidenceDocumentId = this.requireNonconformanceEvidenceDocument(jobId, payload.evidenceDocumentId || payload.evidence_document_id);
+      const normalized = {
+        jobId, workerId, severity, discipline, title, description, location, detectedAt, raisedBy,
+        requirementReference, immediateContainment, responsibleParty, dueAt, sourceInspectionId,
+        sourceObservationId, evidenceDocumentId, notes
+      };
+      const entryFingerprint = this.nonconformanceFingerprint(normalized);
+      const replay = this.db.prepare('SELECT * FROM nonconformance_records WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('nonconformance_entry_key_reused', 'This NCR retry key is already bound to different retained content.', { recordId: replay.id }, 409);
+        }
+        return { nonconformance: this.getNonconformance(replay.id), replayed: true, externalCommitments: 0 };
+      }
+
+      const id = makeId('ncr');
+      const timestamp = nowIso();
+      const ncrNumber = this.allocateNonconformanceNumber(detectedAt);
+      const sourceBasis = this.nonconformanceSourceBasis({
+        id, ncrNumber, ...normalized, workerName, entryFingerprint
+      });
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = { ...sourceBasis, sourceHash, retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      this.db.prepare(`
+        INSERT INTO nonconformance_records (
+          id, job_id, ncr_number, status, severity, discipline, title, description, location, detected_at,
+          raised_by, worker_id, requirement_reference, immediate_containment, responsible_party, due_at,
+          source_inspection_id, source_observation_id, evidence_document_id, source_hash, snapshot_hash,
+          snapshot_json, entry_key, entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, ncrNumber, severity, discipline, title, description, location, detectedAt,
+        raisedBy, workerId, requirementReference, immediateContainment, responsibleParty, dueAt,
+        sourceInspectionId, sourceObservationId, evidenceDocumentId, sourceHash, snapshotHash, toJson(snapshot),
+        entryKey, entryFingerprint, toJson({ workerName, notes, source: normalizeText(payload.source, 'nonconformance_register'), externalCommitments: 0 }),
+        timestamp, timestamp
+      );
+      const nonconformance = this.getNonconformance(id);
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'nonconformance_record', entityId: id, jobId, action: 'create_nonconformance', actor,
+          after: nonconformance,
+          metadata: { entryKey, entryFingerprint, sourceHash, snapshotHash, externalCommitments: 0 }
+        });
+      }
+      return { nonconformance, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  requestNonconformanceCorrectiveAction(jobId, recordId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const before = this.getNonconformance(recordId, { jobId });
+      if (!before.integrityValid) throw ledgerInputError('nonconformance_integrity_failed', 'Corrective action requires an intact retained NCR snapshot.', { recordId }, 409);
+      if (!['open', 'correction_rejected'].includes(before.status)) {
+        if (before.status === 'pending_correction_approval' && before.correctionApprovalId) {
+            const existing = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(before.correctionApprovalId);
+            if (existing?.status === 'pending') {
+              const retained = fromJson(existing.data_json, {});
+              const requestedDueAt = normalizeRetainedDate(payload.dueAt || payload.due_at, {
+                required: true, label: 'Corrective due date', code: 'nonconformance_due_at_required'
+              }).slice(0, 10);
+              const requestedHash = sha256Json({
+                rootCause: normalizeText(payload.rootCause || payload.root_cause, ''),
+                correctiveAction: normalizeText(payload.correctiveAction || payload.corrective_action, ''),
+                responsibleParty: normalizeText(payload.responsibleParty || payload.responsible_party, before.responsibleParty),
+                dueAt: requestedDueAt,
+              evidenceReference: normalizeText(payload.evidenceReference || payload.evidence_reference, ''),
+              evidenceDocumentId: normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null,
+              notes: normalizeText(payload.notes, '') || null
+            });
+            if (retained.requestFingerprint === requestedHash) return { nonconformance: before, approval: this.mapApproval(existing), replayed: true, externalCommitments: 0 };
+            throw ledgerInputError('nonconformance_correction_pending_conflict', 'A different corrective-action request is already pending approval.', { recordId, approvalId: existing.id }, 409);
+          }
+        }
+        throw ledgerInputError('nonconformance_correction_state_conflict', `Corrective action cannot be requested from ${before.status}.`, { recordId, status: before.status }, 409);
+      }
+      const rootCause = normalizeText(payload.rootCause || payload.root_cause, '');
+      const correctiveAction = normalizeText(payload.correctiveAction || payload.corrective_action, '');
+      const responsibleParty = normalizeText(payload.responsibleParty || payload.responsible_party, before.responsibleParty);
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const notes = normalizeText(payload.notes, '') || null;
+      if (rootCause.length < 4 || rootCause.length > 4_000) throw ledgerInputError('nonconformance_root_cause_invalid', 'Root cause must be between 4 and 4,000 characters.');
+      if (correctiveAction.length < 4 || correctiveAction.length > 4_000) throw ledgerInputError('nonconformance_corrective_action_invalid', 'Corrective action must be between 4 and 4,000 characters.');
+      if (responsibleParty.length < 2 || responsibleParty.length > 160) throw ledgerInputError('nonconformance_responsible_party_invalid', 'Responsible party must be between 2 and 160 characters.');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) throw ledgerInputError('nonconformance_correction_evidence_required', 'Corrective-action evidence reference must be between 3 and 500 characters.');
+      if (notes && notes.length > 2_000) throw ledgerInputError('nonconformance_notes_invalid', 'Corrective-action notes must be 2,000 characters or fewer.');
+      const dueAt = normalizeRetainedDate(payload.dueAt || payload.due_at, {
+        required: true, label: 'Corrective due date', code: 'nonconformance_due_at_required'
+      }).slice(0, 10);
+      if (Date.parse(`${dueAt}T23:59:59.999Z`) < Date.parse(before.detectedAt)) {
+        throw ledgerInputError('nonconformance_due_at_invalid', 'Corrective due date cannot precede the detected date.');
+      }
+      const evidenceDocumentId = this.requireNonconformanceEvidenceDocument(jobId, payload.evidenceDocumentId || payload.evidence_document_id, 'nonconformance_correction_document_invalid');
+      const actor = options.actor || 'Contractor.AI';
+      const requestFingerprint = sha256Json({ rootCause, correctiveAction, responsibleParty, dueAt, evidenceReference, evidenceDocumentId, notes });
+      const correction = {
+        rootCause, correctiveAction, responsibleParty, dueAt, evidenceReference, evidenceDocumentId, notes,
+        sourceHash: before.sourceHash, snapshotHash: before.snapshotHash,
+        requestedAt: nowIso(), requestedBy: actor
+      };
+      const correctionHash = sha256Json(correction);
+      const approval = this.createApproval({
+        targetType: 'nonconformance_correction',
+        targetId: recordId,
+        jobId,
+        approvalType: 'nonconformance_corrective_action_review',
+        summary: `Approve corrective action for ${before.ncrNumber}: ${before.title}`,
+        reason: 'Root cause, containment, responsibility, due date, and correction evidence require explicit review before the plan becomes the controlled NCR response.',
+        data: {
+          recordId, ncrNumber: before.ncrNumber, sourceHash: before.sourceHash, snapshotHash: before.snapshotHash,
+          requestFingerprint, correctionHash, correction, externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE nonconformance_records
+        SET status = 'pending_correction_approval', correction_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(
+        approval.id,
+        toJson({ ...(before.data || {}), pendingCorrection: { approvalId: approval.id, correctionHash, requestedAt: timestamp, requestedBy: actor } }),
+        timestamp, recordId, jobId
+      );
+      const after = this.getNonconformance(recordId, { jobId });
+      this.audit({
+        entityType: 'nonconformance_record', entityId: recordId, jobId, action: 'request_nonconformance_corrective_action', actor,
+        before, after, metadata: { approvalId: approval.id, correctionHash, externalCommitments: 0 }
+      });
+      return { nonconformance: after, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyNonconformanceCorrectiveAction(recordId, timestamp = nowIso()) {
+    const before = this.getNonconformance(recordId);
+    if (before.status === 'correction_approved' || before.status === 'pending_closure_approval' || before.status === 'closed') return before;
+    if (before.status !== 'pending_correction_approval' || !before.integrityValid) {
+      throw ledgerInputError('nonconformance_correction_state_conflict', 'Corrective-action approval requires a current intact NCR.', { recordId, status: before.status }, 409);
+    }
+    const approval = before.correctionApprovalId
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'nonconformance_correction' AND target_id = ? AND status = 'approved'").get(before.correctionApprovalId, recordId)
+      : null;
+    if (!approval) throw ledgerInputError('nonconformance_correction_approval_missing', 'Corrective action requires its matching approved decision.', { recordId }, 409);
+    const approvalData = fromJson(approval.data_json, {});
+    const correction = approvalData.correction;
+    if (!correction || approvalData.sourceHash !== before.sourceHash || approvalData.snapshotHash !== before.snapshotHash || sha256Json(correction) !== approvalData.correctionHash) {
+      throw ledgerInputError('nonconformance_correction_source_changed', 'Corrective-action approval no longer matches the retained NCR source.', { recordId }, 409);
+    }
+    this.db.prepare(`
+      UPDATE nonconformance_records
+      SET status = 'correction_approved', corrective_action_json = ?, corrective_action_hash = ?,
+        data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_correction_approval'
+    `).run(
+      toJson(correction), approvalData.correctionHash,
+      toJson({ ...(before.data || {}), pendingCorrection: null, correctionDecision: { approvalId: approval.id, resolvedAt: approval.resolved_at, resolvedBy: approval.resolved_by } }),
+      timestamp, recordId
+    );
+    return this.getNonconformance(recordId);
+  }
+
+  requestNonconformanceClosure(jobId, recordId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const before = this.getNonconformance(recordId, { jobId });
+      if (before.status === 'pending_closure_approval' && before.closureApprovalId) {
+        const existing = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(before.closureApprovalId);
+        if (existing?.status === 'pending') {
+          const retained = fromJson(existing.data_json, {});
+          const requestedVerifiedAt = normalizeRetainedDate(payload.verifiedAt || payload.verified_at, {
+            required: true, label: 'Verification date', code: 'nonconformance_verified_at_required'
+          });
+          const requestedHash = sha256Json({
+            verificationResult: normalizeStatus(payload.verificationResult || payload.verification_result, ''),
+            verificationEvidence: normalizeText(payload.verificationEvidence || payload.verification_evidence || payload.evidenceReference || payload.evidence_reference, ''),
+            evidenceDocumentId: normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null,
+            verifiedBy: normalizeText(payload.verifiedBy || payload.verified_by, ''),
+            verifiedAt: requestedVerifiedAt,
+            notes: normalizeText(payload.notes, '') || null
+          });
+          if (retained.requestFingerprint === requestedHash) return { nonconformance: before, approval: this.mapApproval(existing), replayed: true, externalCommitments: 0 };
+          throw ledgerInputError('nonconformance_closure_pending_conflict', 'A different closure request is already pending approval.', { recordId, approvalId: existing.id }, 409);
+        }
+      }
+      if (before.status !== 'correction_approved' || !before.integrityValid || !before.correctionIntegrityValid) {
+        throw ledgerInputError('nonconformance_closure_state_conflict', 'Closure review requires an approved, intact corrective action.', { recordId, status: before.status }, 409);
+      }
+      const verificationResult = normalizeStatus(payload.verificationResult || payload.verification_result, '');
+      if (verificationResult !== 'passed') throw ledgerInputError('nonconformance_verification_result_invalid', 'NCR closure requires an independently verified passed result.');
+      const verificationEvidence = normalizeText(payload.verificationEvidence || payload.verification_evidence || payload.evidenceReference || payload.evidence_reference, '');
+      const verifiedBy = normalizeText(payload.verifiedBy || payload.verified_by, '');
+      const verifiedAt = normalizeRetainedDate(payload.verifiedAt || payload.verified_at, {
+        required: true, label: 'Verification date', code: 'nonconformance_verified_at_required'
+      });
+      const notes = normalizeText(payload.notes, '') || null;
+      if (verificationEvidence.length < 3 || verificationEvidence.length > 500) throw ledgerInputError('nonconformance_verification_evidence_required', 'Verification evidence reference must be between 3 and 500 characters.');
+      if (verifiedBy.length < 2 || verifiedBy.length > 160) throw ledgerInputError('nonconformance_verified_by_invalid', 'Verifier name must be between 2 and 160 characters.');
+      if (verifiedBy.toLocaleLowerCase('en-US') === normalizeText(before.correctiveAction?.responsibleParty, '').toLocaleLowerCase('en-US')) {
+        throw ledgerInputError('nonconformance_independent_verifier_required', 'NCR closure must be verified by someone other than the responsible party.', { recordId }, 409);
+      }
+      if (Date.parse(verifiedAt) > Date.now() + 5 * 60 * 1000 || Date.parse(verifiedAt) < Date.parse(before.detectedAt)) {
+        throw ledgerInputError('nonconformance_verified_at_invalid', 'Verification date must be after detection and cannot be in the future.');
+      }
+      if (notes && notes.length > 2_000) throw ledgerInputError('nonconformance_notes_invalid', 'Verification notes must be 2,000 characters or fewer.');
+      const evidenceDocumentId = this.requireNonconformanceEvidenceDocument(jobId, payload.evidenceDocumentId || payload.evidence_document_id, 'nonconformance_closure_document_invalid');
+      const actor = options.actor || 'Contractor.AI';
+      const requestFingerprint = sha256Json({ verificationResult, verificationEvidence, evidenceDocumentId, verifiedBy, verifiedAt, notes });
+      const closure = {
+        verificationResult, verificationEvidence, evidenceDocumentId, verifiedBy, verifiedAt, notes,
+        sourceHash: before.sourceHash, snapshotHash: before.snapshotHash, correctiveActionHash: before.correctiveActionHash,
+        requestedAt: nowIso(), requestedBy: actor
+      };
+      const closureHash = sha256Json(closure);
+      const approval = this.createApproval({
+        targetType: 'nonconformance_closure',
+        targetId: recordId,
+        jobId,
+        approvalType: 'nonconformance_closure_review',
+        summary: `Verify closure of ${before.ncrNumber}: ${before.title}`,
+        reason: 'Independent verification evidence must match the retained NCR and approved corrective action before closure.',
+        data: {
+          recordId, ncrNumber: before.ncrNumber, sourceHash: before.sourceHash, snapshotHash: before.snapshotHash,
+          correctiveActionHash: before.correctiveActionHash, requestFingerprint, closureHash, closure, externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE nonconformance_records
+        SET status = 'pending_closure_approval', closure_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ? AND status = 'correction_approved'
+      `).run(
+        approval.id,
+        toJson({ ...(before.data || {}), pendingClosure: { approvalId: approval.id, closureHash, requestedAt: timestamp, requestedBy: actor } }),
+        timestamp, recordId, jobId
+      );
+      const after = this.getNonconformance(recordId, { jobId });
+      this.audit({
+        entityType: 'nonconformance_record', entityId: recordId, jobId, action: 'request_nonconformance_closure', actor,
+        before, after, metadata: { approvalId: approval.id, closureHash, correctiveActionHash: before.correctiveActionHash, externalCommitments: 0 }
+      });
+      return { nonconformance: after, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyNonconformanceClosure(recordId, timestamp = nowIso()) {
+    const before = this.getNonconformance(recordId);
+    if (before.status === 'closed') return before;
+    if (before.status !== 'pending_closure_approval' || !before.integrityValid || !before.correctionIntegrityValid) {
+      throw ledgerInputError('nonconformance_closure_state_conflict', 'NCR closure requires current source and corrective-action integrity.', { recordId, status: before.status }, 409);
+    }
+    const approval = before.closureApprovalId
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'nonconformance_closure' AND target_id = ? AND status = 'approved'").get(before.closureApprovalId, recordId)
+      : null;
+    if (!approval) throw ledgerInputError('nonconformance_closure_approval_missing', 'NCR closure requires its matching approved decision.', { recordId }, 409);
+    const approvalData = fromJson(approval.data_json, {});
+    const closure = approvalData.closure;
+    if (
+      !closure
+      || closure.verificationResult !== 'passed'
+      || approvalData.sourceHash !== before.sourceHash
+      || approvalData.snapshotHash !== before.snapshotHash
+      || approvalData.correctiveActionHash !== before.correctiveActionHash
+      || sha256Json(closure) !== approvalData.closureHash
+    ) {
+      throw ledgerInputError('nonconformance_closure_source_changed', 'NCR closure approval no longer matches the retained source and corrective action.', { recordId }, 409);
+    }
+    this.db.prepare(`
+      UPDATE nonconformance_records
+      SET status = 'closed', closure_json = ?, closure_hash = ?, closed_at = ?, closed_by = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_closure_approval'
+    `).run(
+      toJson(closure), approvalData.closureHash, closure.verifiedAt, closure.verifiedBy,
+      toJson({ ...(before.data || {}), pendingClosure: null, closureDecision: { approvalId: approval.id, resolvedAt: approval.resolved_at, resolvedBy: approval.resolved_by } }),
+      timestamp, recordId
+    );
+    return this.getNonconformance(recordId);
   }
 
   allocateDayworkTicketNumber(workDate = nowIso()) {
@@ -31288,6 +31823,44 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             }
           }), timestamp, before.target_id);
         }
+      } else if (before.target_type === 'nonconformance_correction') {
+        const row = this.db.prepare('SELECT * FROM nonconformance_records WHERE id = ?').get(before.target_id);
+        if (row && row.correction_approval_id === approvalId && row.status === 'pending_correction_approval') {
+          this.db.prepare(`
+            UPDATE nonconformance_records
+            SET status = 'correction_rejected', correction_approval_id = NULL, data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(toJson({
+            ...fromJson(row.data_json, {}),
+            pendingCorrection: null,
+            correctionDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
+      } else if (before.target_type === 'nonconformance_closure') {
+        const row = this.db.prepare('SELECT * FROM nonconformance_records WHERE id = ?').get(before.target_id);
+        if (row && row.closure_approval_id === approvalId && row.status === 'pending_closure_approval') {
+          this.db.prepare(`
+            UPDATE nonconformance_records
+            SET status = 'correction_approved', closure_approval_id = NULL, data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(toJson({
+            ...fromJson(row.data_json, {}),
+            pendingClosure: null,
+            closureDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'expense') {
         const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -32002,6 +32575,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyDayworkTicketApproval(targetId, timestamp);
     } else if (targetType === 'daywork_acknowledgement') {
       this.applyDayworkAcknowledgementApproval(targetId, timestamp);
+    } else if (targetType === 'nonconformance_correction') {
+      this.applyNonconformanceCorrectiveAction(targetId, timestamp);
+    } else if (targetType === 'nonconformance_closure') {
+      this.applyNonconformanceClosure(targetId, timestamp);
     } else if (targetType === 'change_order_acceptance') {
       const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId);
       const approval = this.db.prepare(`
@@ -35600,6 +36177,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       permitReviews: 0,
       expiringPermits: 0,
       inspectionReviews: 0,
+      openNonconformances: 0,
       openObservations: 0,
       openIncidents: 0,
       openSafetyRecords: 0,
@@ -35630,6 +36208,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.permitReviews += normalizeNumber(row.counts?.permitReviews, 0);
       summary.expiringPermits += normalizeNumber(row.counts?.expiringPermits, 0);
       summary.inspectionReviews += normalizeNumber(row.counts?.inspectionReviews, 0);
+      summary.openNonconformances += normalizeNumber(row.counts?.openNonconformances, 0);
       summary.openObservations += normalizeNumber(row.counts?.openObservations, 0);
       summary.openIncidents += normalizeNumber(row.counts?.openIncidents, 0);
       summary.openSafetyRecords += normalizeNumber(row.counts?.openSafetyRecords, 0);
@@ -35658,6 +36237,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'submittal_record',
       'permit_record',
       'inspection_record',
+      'nonconformance_correction',
+      'nonconformance_closure',
       'observation_record',
       'incident_record',
       'safety_meeting',
@@ -35718,6 +36299,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             || ['scheduled', 'pending_approval', 'failed'].includes(statusOfRecord(item, 'scheduled'))
             || defects.length > 0;
         });
+        const openNonconformances = (detail.nonconformances || []).filter(recordOpen);
         const openObservations = (detail.observations || []).filter(recordOpen);
         const openIncidents = (detail.incidents || []).filter(recordOpen);
         const safetyMeetings = (detail.safetyMeetings || []).filter(recordOpen);
@@ -35771,6 +36353,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           || safetyOpen.some(item => ['high', 'critical'].includes(severityOf(item)))
           || siteAccessBlocks.length > 0;
         const qualityReview = inspectionReviews.length > 0
+          || openNonconformances.length > 0
           || openObservations.length > 0
           || qualityOpen.length > 0
           || punchOpen.length > 0;
@@ -35867,6 +36450,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           inspectionId: inspectionReviews[0].id,
           requiresApproval: true
         });
+        if (openNonconformances.length) nextActions.push({
+          type: openNonconformances[0].status === 'correction_approved' ? 'verify_nonconformance' : 'review_nonconformance',
+          label: openNonconformances[0].status === 'correction_approved' ? 'Verify NCR correction before closure' : 'Control NCR corrective action',
+          nonconformanceId: openNonconformances[0].id,
+          requiresApproval: true
+        });
         if (openObservations.length) nextActions.push({
           type: 'resolve_observation',
           label: 'Close safety or quality observation',
@@ -35935,6 +36524,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             expiringPermits: expiringPermits.length,
             inspections: (detail.inspections || []).length,
             inspectionReviews: inspectionReviews.length,
+            nonconformances: (detail.nonconformances || []).length,
+            openNonconformances: openNonconformances.length,
             observations: (detail.observations || []).length,
             openObservations: openObservations.length,
             incidents: (detail.incidents || []).length,
@@ -35963,6 +36554,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             submittal: submittalReviews[0] || null,
             permit: permitReviews[0] || expiringPermits[0] || null,
             inspection: inspectionReviews[0] || null,
+            nonconformance: openNonconformances[0] || null,
             observation: openObservations[0] || null,
             incident: openIncidents[0] || null,
             safetyMeeting: safetyMeetings[0] || null,
@@ -36058,6 +36650,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       clientSelections: this.db.prepare('SELECT * FROM client_selections WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapClientSelection(row)),
       permits: this.db.prepare('SELECT * FROM permit_records WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapPermit(row)),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
+      nonconformances: this.listNonconformances({ jobId, limit: 500 }),
       observations: this.db.prepare('SELECT * FROM observation_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapObservation(row)),
       incidents: this.db.prepare('SELECT * FROM incident_records WHERE job_id = ? ORDER BY occurred_at DESC, created_at DESC').all(jobId).map(row => this.mapIncident(row)),
       safetyMeetings: this.db.prepare('SELECT id FROM safety_meetings WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.getSafetyMeeting(row.id, { jobId })),
@@ -36203,6 +36796,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       sds_sheets: 'status',
       permit_records: 'status',
       inspection_records: 'status',
+      nonconformance_records: 'status',
       observation_records: 'status',
       incident_records: 'status',
       site_access_logs: 'status',
@@ -37125,6 +37719,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const opportunityPipeline = this.opportunityForecast();
     const activeCount = (table, condition = '1 = 1', params = []) => this.countActiveRecords(table, condition, params);
     const activeSum = (table, column, condition = '1 = 1', params = []) => this.sumActiveRecords(table, column, condition, params);
+    const activeNonconformances = this.db.prepare(`
+      SELECT records.*
+      FROM nonconformance_records records
+      JOIN jobs ON jobs.id = records.job_id
+      WHERE ${this.operationalJobStatusSql('jobs')}
+    `).all().map(row => this.mapNonconformance(row));
+    const openNonconformances = activeNonconformances.filter(record => record.status !== 'closed');
+    const today = nowIso().slice(0, 10);
     const metrics = {
       clients: this.count('clients'),
       opportunities: opportunityPipeline.summary.total,
@@ -37174,6 +37776,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       permitRecords: activeCount('permit_records'),
       expiringPermits: activeCount('permit_records', "records.status NOT IN ('closed', 'expired', 'cancelled', 'rejected') AND records.expires_at IS NOT NULL AND records.expires_at <= ?", [futureIsoDate(7)]),
       inspections: activeCount('inspection_records'),
+      nonconformances: activeNonconformances.length,
+      openNonconformances: openNonconformances.length,
+      overdueNonconformances: openNonconformances.filter(record => (record.correctiveAction?.dueAt || record.dueAt) < today).length,
+      pendingNonconformanceApprovals: activeCount('approvals', "records.status = 'pending' AND records.target_type IN ('nonconformance_correction', 'nonconformance_closure')"),
       openObservations: activeCount('observation_records', "records.status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')"),
       openIncidents: activeCount('incident_records', "records.status NOT IN ('closed', 'resolved', 'approved', 'cancelled', 'rejected')"),
       safetyMeetings: activeCount('safety_meetings'),
@@ -38235,6 +38841,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'create_site_access_gate', jobId: job.id, severity: 'medium', message: `${job.title} needs a site-access gate tied to orientation validity.` });
     }
 
+    const openNonconformances = this.db.prepare(`
+      SELECT records.*
+      FROM nonconformance_records records
+      JOIN jobs ON jobs.id = records.job_id
+      WHERE records.status <> 'closed'
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY CASE WHEN records.severity IN ('critical', 'high') THEN 0 ELSE 1 END, records.due_at ASC, records.created_at DESC
+      LIMIT 10
+    `).all().map(row => this.mapNonconformance(row));
+    for (const record of openNonconformances) {
+      const reviewBasis = `${record.id}:${record.status}:${record.sourceHash}:${record.correctiveActionHash || ''}`;
+      const taskId = `task_${sha256Text(`nonconformance-review:${reviewBasis}`).slice(0, 24)}`;
+      const existingTask = this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId);
+      if (existingTask) continue;
+      const dueAt = record.correctiveAction?.dueAt || record.dueAt;
+      const overdue = Boolean(dueAt && dueAt < nowIso().slice(0, 10));
+      actions.push({
+        type: 'review_nonconformance',
+        nonconformanceId: record.id,
+        ncrNumber: record.ncrNumber,
+        jobId: record.jobId,
+        taskId,
+        dueAt,
+        severity: ['critical', 'high'].includes(record.severity) || overdue ? 'high' : 'medium',
+        message: `${record.ncrNumber} ${record.title} is ${record.status.replace(/_/g, ' ')}${overdue ? ' and overdue' : ''}. Review containment, corrective action, responsibility, and verification without changing the NCR status.`
+      });
+    }
+
     const openObservations = this.db.prepare(`
       SELECT id, job_id, title, severity, due_at
       FROM observation_records
@@ -39003,7 +39637,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('approval')) return 'approval';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
-    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
+    if (type.includes('safety') || type.includes('permit') || type.includes('inspection') || type.includes('nonconformance') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
     if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
@@ -39046,6 +39680,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'payment_follow_up',
       'client_reply_follow_up',
       'renew_permit',
+      'review_nonconformance',
       'resolve_observation',
       'review_incident',
       'safety_review',
@@ -40300,6 +40935,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }, { actor, audit: false });
           applied.push({ ...action, taskId: task.id, status: 'task_created' });
           this.audit({ entityType: 'task', entityId: task.id, jobId: action.jobId, action: 'autonomous_create_permit_renewal_task', actor, after: task });
+        }
+
+        const nonconformanceReviews = preview.filter(action => action.type === 'review_nonconformance').slice(0, 5);
+        for (const action of nonconformanceReviews) {
+          const taskId = action.taskId || `task_${sha256Text(`nonconformance-review:${action.nonconformanceId}`).slice(0, 24)}`;
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(taskId);
+          if (existing) {
+            applied.push({ ...action, taskId, status: 'replayed' });
+            continue;
+          }
+          const record = this.db.prepare('SELECT * FROM nonconformance_records WHERE id = ? AND job_id = ?').get(action.nonconformanceId, action.jobId);
+          if (!record || record.status === 'closed') {
+            blocked.push({ ...action, status: 'blocked', reason: 'The NCR is no longer open for internal review.' });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review ${record.ncr_number}: ${record.title}`,
+            description: `${action.message} Retain root cause, evidence, responsible party, approval-backed correction, and independent closure verification. Do not contact external parties, authorize spend, or change scope or schedule.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: fromJson(record.corrective_action_json, {})?.dueAt || record.due_at || futureIsoDate(1),
+            source: 'nonconformance_monitor',
+            data: {
+              nonconformanceId: record.id,
+              ncrNumber: record.ncr_number,
+              sourceHash: record.source_hash,
+              correctiveActionHash: record.corrective_action_hash || null,
+              internalOnly: true,
+              externalCommitments: 0
+            }
+          }, { id: taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0 });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_nonconformance_review_task', actor, after: task,
+            metadata: { nonconformanceId: record.id, sourceHash: record.source_hash, externalCommitments: 0 }
+          });
         }
 
         const observationReviews = preview.filter(action => action.type === 'resolve_observation').slice(0, 3);
@@ -41862,6 +42533,77 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Unconverted daywork ticket ${ticket.ticketNumber} retains an invalid change-order link.` });
       }
     }
+    const nonconformanceRows = this.db.prepare('SELECT * FROM nonconformance_records ORDER BY created_at').all();
+    const nonconformanceStatuses = new Set([
+      'open', 'pending_correction_approval', 'correction_approved', 'pending_closure_approval', 'closed', 'correction_rejected'
+    ]);
+    for (const nonconformanceRow of nonconformanceRows) {
+      const record = this.mapNonconformance(nonconformanceRow);
+      if (!nonconformanceStatuses.has(record.status)) {
+        issues.push({ severity: 'error', message: `NCR ${record.ncrNumber} has an unsupported lifecycle status.` });
+      }
+      if (!record.integrityValid) {
+        issues.push({ severity: 'error', message: `NCR ${record.ncrNumber} failed retained source or snapshot integrity verification.` });
+      }
+      if (record.status === 'pending_correction_approval') {
+        const approval = record.correctionApprovalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'nonconformance_correction' AND target_id = ? AND status = 'pending'").get(record.correctionApprovalId, record.id)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (!approval || !approvalData.correction || approvalData.sourceHash !== record.sourceHash || approvalData.snapshotHash !== record.snapshotHash || sha256Json(approvalData.correction) !== approvalData.correctionHash) {
+          issues.push({ severity: 'error', message: `NCR ${record.ncrNumber} has an invalid pending corrective-action review.` });
+        }
+      }
+      if (['correction_approved', 'pending_closure_approval', 'closed'].includes(record.status)) {
+        const approval = record.correctionApprovalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'nonconformance_correction' AND target_id = ? AND status = 'approved'").get(record.correctionApprovalId, record.id)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (
+          !record.correctiveAction
+          || !record.correctionIntegrityValid
+          || !approval
+          || approvalData.sourceHash !== record.sourceHash
+          || approvalData.snapshotHash !== record.snapshotHash
+          || approvalData.correctionHash !== record.correctiveActionHash
+        ) {
+          issues.push({ severity: 'error', message: `NCR ${record.ncrNumber} lacks its matching approved corrective action.` });
+        }
+      }
+      if (record.status === 'pending_closure_approval') {
+        const approval = record.closureApprovalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'nonconformance_closure' AND target_id = ? AND status = 'pending'").get(record.closureApprovalId, record.id)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (
+          !approval
+          || !approvalData.closure
+          || approvalData.sourceHash !== record.sourceHash
+          || approvalData.snapshotHash !== record.snapshotHash
+          || approvalData.correctiveActionHash !== record.correctiveActionHash
+          || sha256Json(approvalData.closure) !== approvalData.closureHash
+        ) {
+          issues.push({ severity: 'error', message: `NCR ${record.ncrNumber} has an invalid pending closure review.` });
+        }
+      }
+      if (record.status === 'closed') {
+        const approval = record.closureApprovalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'nonconformance_closure' AND target_id = ? AND status = 'approved'").get(record.closureApprovalId, record.id)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (
+          !record.closure
+          || record.closure.verificationResult !== 'passed'
+          || !record.closureIntegrityValid
+          || !record.closedAt
+          || !record.closedBy
+          || !approval
+          || approvalData.closureHash !== record.closureHash
+        ) {
+          issues.push({ severity: 'error', message: `Closed NCR ${record.ncrNumber} lacks source-bound verification and approval evidence.` });
+        }
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -41901,6 +42643,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         inspectionTemplates: this.count('inspection_templates'),
         inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
         inspectionRecords: this.count('inspection_records'),
+        nonconformanceRecords: this.count('nonconformance_records'),
+        openNonconformances: Number(this.db.prepare("SELECT COUNT(*) AS count FROM nonconformance_records WHERE status <> 'closed'").get().count || 0),
         observationRecords: this.count('observation_records'),
         incidentRecords: this.count('incident_records'),
         safetyMeetings: this.count('safety_meetings'),
@@ -42475,6 +43219,115 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       approvalId: row.approval_id,
       lineItems: fromJson(row.line_items_json, []),
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapNonconformance(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const snapshot = fromJson(row.snapshot_json, null);
+    const correctiveAction = fromJson(row.corrective_action_json, null);
+    const closure = fromJson(row.closure_json, null);
+    const workerName = data.workerName || row.retained_worker_name || null;
+    const entryFingerprint = this.nonconformanceFingerprint({
+      jobId: row.job_id,
+      workerId: row.worker_id,
+      severity: row.severity,
+      discipline: row.discipline,
+      title: row.title,
+      description: row.description,
+      location: row.location,
+      detectedAt: row.detected_at,
+      raisedBy: row.raised_by,
+      requirementReference: row.requirement_reference,
+      immediateContainment: row.immediate_containment,
+      responsibleParty: row.responsible_party,
+      dueAt: row.due_at,
+      sourceInspectionId: row.source_inspection_id,
+      sourceObservationId: row.source_observation_id,
+      evidenceDocumentId: row.evidence_document_id,
+      notes: data.notes
+    });
+    const sourceBasis = this.nonconformanceSourceBasis({
+      id: row.id,
+      ncrNumber: row.ncr_number,
+      jobId: row.job_id,
+      workerId: row.worker_id,
+      workerName,
+      severity: row.severity,
+      discipline: row.discipline,
+      title: row.title,
+      description: row.description,
+      location: row.location,
+      detectedAt: row.detected_at,
+      raisedBy: row.raised_by,
+      requirementReference: row.requirement_reference,
+      immediateContainment: row.immediate_containment,
+      responsibleParty: row.responsible_party,
+      dueAt: row.due_at,
+      sourceInspectionId: row.source_inspection_id,
+      sourceObservationId: row.source_observation_id,
+      evidenceDocumentId: row.evidence_document_id,
+      notes: data.notes,
+      entryFingerprint: row.entry_fingerprint
+    });
+    const sourceHash = sha256Json(sourceBasis);
+    const integrityValid = Boolean(
+      row.entry_fingerprint
+      && row.entry_fingerprint === entryFingerprint
+      && row.source_hash === sourceHash
+      && snapshot
+      && snapshot.format === NONCONFORMANCE_FORMAT
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.entryFingerprint === row.entry_fingerprint
+      && sha256Json(snapshot) === row.snapshot_hash
+    );
+    const correctionIntegrityValid = !correctiveAction
+      ? row.corrective_action_hash === null || row.corrective_action_hash === undefined
+      : Boolean(row.corrective_action_hash && sha256Json(correctiveAction) === row.corrective_action_hash);
+    const closureIntegrityValid = !closure
+      ? row.closure_hash === null || row.closure_hash === undefined
+      : Boolean(row.closure_hash && sha256Json(closure) === row.closure_hash);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      ncrNumber: row.ncr_number,
+      status: row.status,
+      severity: row.severity,
+      discipline: row.discipline,
+      title: row.title,
+      description: row.description,
+      location: row.location || null,
+      detectedAt: row.detected_at,
+      raisedBy: row.raised_by,
+      workerId: row.worker_id || null,
+      workerName,
+      requirementReference: row.requirement_reference,
+      immediateContainment: row.immediate_containment,
+      responsibleParty: row.responsible_party,
+      dueAt: row.due_at,
+      sourceInspectionId: row.source_inspection_id || null,
+      sourceObservationId: row.source_observation_id || null,
+      evidenceDocumentId: row.evidence_document_id || null,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid,
+      correctiveAction,
+      correctiveActionHash: row.corrective_action_hash || null,
+      correctionIntegrityValid,
+      correctionApprovalId: row.correction_approval_id || null,
+      closure,
+      closureHash: row.closure_hash || null,
+      closureIntegrityValid,
+      closureApprovalId: row.closure_approval_id || null,
+      closedAt: row.closed_at || null,
+      closedBy: row.closed_by || null,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -44280,6 +45133,48 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.sourceHash = data.sourceHash || null;
       preview.snapshotHash = data.snapshotHash || null;
       preview.sourceCurrent = Boolean(ticket && ticket.sourceHash === data.sourceHash && ticket.snapshotHash === data.snapshotHash);
+    } else if (targetType === 'nonconformance_correction') {
+      const row = this.db.prepare('SELECT * FROM nonconformance_records WHERE id = ?').get(approval.targetId || approval.target_id);
+      const record = row ? this.mapNonconformance(row) : null;
+      const correction = data.correction || {};
+      primaryEffect = `Approve the controlled corrective action for ${record?.ncrNumber || data.ncrNumber || 'the NCR'}.`;
+      addEffect(`Retain the reviewed root cause, responsible party, evidence, and corrective due date for ${record?.title || 'the nonconformance'}.`);
+      addSafeguard('Does not close the NCR, certify the correction, notify an external party, authorize supplier spend, change scope, or commit schedule dates.');
+      addSafeguard('Independent verification evidence and a separate closure approval remain required. Source and snapshot hashes are rechecked when this decision resolves.');
+      riskLevel = ['high', 'critical'].includes(record?.severity) ? 'critical' : 'high';
+      preview.ncrNumber = record?.ncrNumber || data.ncrNumber || null;
+      preview.title = record?.title || null;
+      preview.severity = record?.severity || null;
+      preview.rootCause = correction.rootCause || null;
+      preview.correctiveAction = correction.correctiveAction || null;
+      preview.responsibleParty = correction.responsibleParty || null;
+      preview.dueAt = correction.dueAt || null;
+      preview.evidenceReference = correction.evidenceReference || null;
+      preview.sourceCurrent = Boolean(record && record.integrityValid && record.sourceHash === data.sourceHash && record.snapshotHash === data.snapshotHash);
+    } else if (targetType === 'nonconformance_closure') {
+      const row = this.db.prepare('SELECT * FROM nonconformance_records WHERE id = ?').get(approval.targetId || approval.target_id);
+      const record = row ? this.mapNonconformance(row) : null;
+      const closure = data.closure || {};
+      primaryEffect = `Verify closure of ${record?.ncrNumber || data.ncrNumber || 'the NCR'}.`;
+      addEffect(`Close ${record?.title || 'the nonconformance'} only against the approved corrective action and retained passed verification evidence.`);
+      addSafeguard('Does not certify statutory compliance, accept the completed contract works, release retention, notify the client, or close related punch, inspection, safety, finance, or schedule records.');
+      addSafeguard('The original NCR snapshot, corrective-action hash, and closure evidence hash are rechecked when this decision resolves.');
+      riskLevel = ['high', 'critical'].includes(record?.severity) ? 'critical' : 'high';
+      preview.ncrNumber = record?.ncrNumber || data.ncrNumber || null;
+      preview.title = record?.title || null;
+      preview.severity = record?.severity || null;
+      preview.verifiedBy = closure.verifiedBy || null;
+      preview.verifiedAt = closure.verifiedAt || null;
+      preview.verificationEvidence = closure.verificationEvidence || null;
+      preview.verificationResult = closure.verificationResult || null;
+      preview.sourceCurrent = Boolean(
+        record
+        && record.integrityValid
+        && record.correctionIntegrityValid
+        && record.sourceHash === data.sourceHash
+        && record.snapshotHash === data.snapshotHash
+        && record.correctiveActionHash === data.correctiveActionHash
+      );
     } else if (targetType === 'change_order_acceptance') {
       const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = changeOrder ? this.mapChangeOrder(changeOrder) : null;
