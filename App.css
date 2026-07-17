@@ -188,6 +188,44 @@
 .safety-briefing-create-heading span { color: #6d7d76; font-size: 11px; }
 .safety-briefing-create .form-span { grid-column: 1 / 3; }
 
+.work-permit-control { min-width: 0; border-bottom: 1px solid #dfe8e4; background: #fff; }
+.work-permit-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.work-permit-selector { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 14px; padding: 16px 22px; border-top: 1px solid #e7eeeb; }
+.work-permit-selector label,.work-permit-acknowledgement label,.work-permit-actions label,.work-permit-create label { display: grid; gap: 6px; min-width: 0; color: #40564e; font-size: 12px; font-weight: 700; }
+.work-permit-selector > *,.work-permit-acknowledgement > *,.work-permit-actions > *,.work-permit-create > * { min-width: 0; max-width: 100%; }
+.work-permit-selector input:not([type="checkbox"]),.work-permit-selector select,.work-permit-selector textarea,.work-permit-acknowledgement input:not([type="checkbox"]),.work-permit-acknowledgement select,.work-permit-acknowledgement textarea,.work-permit-actions input:not([type="checkbox"]),.work-permit-actions select,.work-permit-actions textarea,.work-permit-create input:not([type="checkbox"]),.work-permit-create select,.work-permit-create textarea { width: 100%; min-width: 0; max-width: 100%; min-height: 38px; padding: 9px 10px; color: #20312b; background: #fff; border: 1px solid #cfded8; border-radius: 5px; outline: none; }
+.work-permit-create textarea { min-height: 88px; resize: vertical; }
+.work-permit-selector input:not([type="checkbox"]):focus,.work-permit-selector select:focus,.work-permit-selector textarea:focus,.work-permit-acknowledgement input:not([type="checkbox"]):focus,.work-permit-acknowledgement select:focus,.work-permit-acknowledgement textarea:focus,.work-permit-actions input:not([type="checkbox"]):focus,.work-permit-actions select:focus,.work-permit-actions textarea:focus,.work-permit-create input:not([type="checkbox"]):focus,.work-permit-create select:focus,.work-permit-create textarea:focus { border-color: #0a7b65; box-shadow: 0 0 0 3px #dff2eb; }
+.work-permit-detail { min-width: 0; border-top: 1px solid #dfe8e4; }
+.work-permit-context { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 22px; background: #f7faf8; }
+.work-permit-context > div:first-child { display: grid; min-width: 0; gap: 4px; }
+.work-permit-context strong { overflow-wrap: anywhere; color: #23382f; font-size: 14px; }
+.work-permit-context small { overflow-wrap: anywhere; color: #6d7d76; font-size: 11px; }
+.work-permit-state { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.work-permit-validity { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #e7eeeb; }
+.work-permit-validity span { display: grid; min-width: 0; gap: 4px; padding: 11px 22px; overflow-wrap: anywhere; color: #65766f; font-size: 11px; }
+.work-permit-validity span + span { border-left: 1px solid #e7eeeb; }
+.work-permit-validity strong { color: #344c42; font-size: 11px; }
+.work-permit-definition { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #e7eeeb; }
+.work-permit-definition > div { min-width: 0; padding: 14px 22px; }
+.work-permit-definition > div + div { border-left: 1px solid #e7eeeb; }
+.work-permit-definition strong { color: #344c42; font-size: 12px; }
+.work-permit-definition ul { display: grid; gap: 5px; margin: 8px 0 0; padding-left: 18px; color: #526a61; font-size: 12px; line-height: 1.45; }
+.work-permit-blockers { display: flex; align-items: flex-start; gap: 10px; padding: 13px 22px; color: #8e5410; background: #fff8e8; border-top: 1px solid #f0dfba; }
+.work-permit-blockers svg { flex: 0 0 auto; margin-top: 1px; }
+.work-permit-blockers ul { display: grid; gap: 3px; margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.45; }
+.work-permit-acknowledgement { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(300px, 1.4fr) auto; align-items: end; gap: 14px; padding: 16px 22px; border-top: 1px solid #dfe8e4; background: #fbfcfc; }
+.work-permit-acknowledgement .checkbox-label { align-self: center; grid-template-columns: auto minmax(0, 1fr); font-weight: 500; line-height: 1.45; }
+.work-permit-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid #dfe8e4; }
+.work-permit-actions > form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 12px; min-width: 0; padding: 16px 22px; }
+.work-permit-actions > form + form { border-left: 1px solid #dfe8e4; }
+.work-permit-action-heading { display: grid; grid-column: 1 / -1; gap: 3px; }
+.work-permit-action-heading strong,.work-permit-create-heading strong { color: #263a31; font-size: 13px; }
+.work-permit-action-heading span,.work-permit-create-heading span { color: #6d7d76; font-size: 11px; }
+.work-permit-create { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; gap: 14px; padding: 16px 22px; border-top: 1px solid #dfe8e4; }
+.work-permit-create-heading { display: grid; grid-column: 1 / -1; gap: 3px; }
+.work-permit-create > button { justify-self: start; }
+
 @media (max-width: 760px) {
   .attendance-summary { width: 100%; justify-content: flex-start; }
   .attendance-form .modal-actions { padding: 0 16px 16px; }
@@ -206,6 +244,17 @@
   .safety-attendee-row .secondary-button { width: 100%; min-width: 0; grid-column: 1 / -1; white-space: normal; }
   .safety-acknowledgement-form .primary-button,.safety-signoff-form .primary-button,.safety-briefing-create .secondary-button { width: 100%; min-width: 0; min-height: 42px; white-space: normal; }
   .safety-briefing-create .form-span { grid-column: auto; }
+  .work-permit-summary { width: 100%; justify-content: flex-start; }
+  .work-permit-selector,.work-permit-acknowledgement,.work-permit-create { grid-template-columns: 1fr; padding: 14px; }
+  .work-permit-context { align-items: flex-start; flex-wrap: wrap; padding: 12px 14px; }
+  .work-permit-state { width: 100%; justify-content: flex-start; }
+  .work-permit-validity,.work-permit-definition,.work-permit-actions { grid-template-columns: 1fr; }
+  .work-permit-validity span,.work-permit-definition > div,.work-permit-blockers { padding: 11px 14px; }
+  .work-permit-validity span + span,.work-permit-definition > div + div { border-top: 1px solid #e7eeeb; border-left: 0; }
+  .work-permit-actions > form { grid-template-columns: 1fr; padding: 14px; }
+  .work-permit-actions > form + form { border-top: 1px solid #dfe8e4; border-left: 0; }
+  .work-permit-acknowledgement .primary-button,.work-permit-actions button,.work-permit-create .secondary-button { width: 100%; min-width: 0; min-height: 42px; white-space: normal; }
+  .work-permit-create > button { justify-self: stretch; }
 }
 
 .production-control { display: grid; gap: 15px; min-width: 0; overflow: hidden; }

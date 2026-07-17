@@ -96,7 +96,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -133,6 +133,19 @@ test('governed safety briefings connect office scheduling, worker-scoped offline
   assert.match(dashboardSource, /I attended this briefing, understood the retained topics/);
   assert.match(dashboardSource, /Request signoff approval/);
   assert.match(dashboardSource, /do not certify legal compliance/i);
+});
+
+test('governed work permits connect approval, scoped offline acknowledgement, stop work, and closeout', () => {
+  assert.match(dashboardSource, /fieldScoped \? Promise\.resolve\(\{ rows: \[\], summary: \{\} \}\) : api\('\/api\/ledger\/field-assurance\?limit=100'\)/);
+  assert.match(dashboardSource, /api\('\/api\/ledger\/work-permits\?limit=100'\)/);
+  assert.match(dashboardSource, /data-testid="work-permit-control"/);
+  assert.match(dashboardSource, /type: 'work_permit_acknowledgement'/);
+  assert.match(dashboardSource, /work-permits\/\$\{encodeURIComponent\(workPermitId\)\}\/acknowledgments/);
+  assert.match(dashboardSource, /\/work-permits\/\$\{encodeURIComponent\(selectedWorkPermit\.id\)\}\/suspend/);
+  assert.match(dashboardSource, /\/work-permits\/\$\{encodeURIComponent\(selectedWorkPermit\.id\)\}\/close/);
+  assert.match(dashboardSource, /I reviewed this permit, understand the hazards and controls/);
+  assert.match(dashboardSource, /Stop work until the live ledger confirms readiness/);
+  assert.match(dashboardSource, /Request permit activation/);
 });
 
 test('material receiving connects purchasing, field readiness, approvals, and supplier invoice matching', () => {

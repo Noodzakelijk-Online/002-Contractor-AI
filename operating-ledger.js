@@ -946,6 +946,7 @@ const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
 const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
 const ENVIRONMENTAL_REPORT_FORMAT = 'contractor-ai-environmental-report/v1';
 const SAFETY_BRIEFING_FORMAT = 'contractor-ai-safety-briefing/v1';
+const WORK_PERMIT_FORMAT = 'contractor-ai-work-permit/v1';
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -3227,6 +3228,59 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           WHERE id = ?
         `).run(acknowledgedAt, evidenceReference, sourceHash, sha256Json(snapshot), toJson(snapshot), meeting.id);
       }
+    }
+  },
+  {
+    version: '042_governed_work_permits',
+    description: 'Retain source-current permit-to-work definitions, assigned-worker acknowledgements, immediate safety suspension, and evidence-backed closure.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE permit_records ADD COLUMN valid_from TEXT;
+        ALTER TABLE permit_records ADD COLUMN evidence_reference TEXT;
+        ALTER TABLE permit_records ADD COLUMN source_hash TEXT;
+        ALTER TABLE permit_records ADD COLUMN snapshot_hash TEXT;
+        ALTER TABLE permit_records ADD COLUMN snapshot_json TEXT;
+        ALTER TABLE permit_records ADD COLUMN entry_key TEXT;
+        ALTER TABLE permit_records ADD COLUMN entry_fingerprint TEXT;
+        ALTER TABLE permit_records ADD COLUMN suspended_at TEXT;
+        ALTER TABLE permit_records ADD COLUMN closed_at TEXT;
+        ALTER TABLE permit_records ADD COLUMN closure_evidence_reference TEXT;
+        CREATE TABLE IF NOT EXISTS work_permit_attendees (
+          id TEXT PRIMARY KEY,
+          permit_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          assignment_id TEXT,
+          worker_id TEXT,
+          attendee_key TEXT NOT NULL,
+          attendee_name TEXT NOT NULL,
+          company TEXT,
+          status TEXT NOT NULL DEFAULT 'expected',
+          acknowledged_at TEXT,
+          acknowledged_by TEXT,
+          evidence_reference TEXT,
+          entry_key TEXT,
+          entry_fingerprint TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(permit_id) REFERENCES permit_records(id) ON DELETE CASCADE,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(assignment_id) REFERENCES assignments(id) ON DELETE SET NULL,
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE SET NULL,
+          UNIQUE(permit_id, attendee_key),
+          UNIQUE(job_id, entry_key)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_work_permits_job_entry_key
+          ON permit_records(job_id, entry_key) WHERE entry_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_work_permits_job_status_validity
+          ON permit_records(job_id, status, valid_from, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_work_permit_attendees_permit_status
+          ON work_permit_attendees(permit_id, status, attendee_name);
+        CREATE INDEX IF NOT EXISTS idx_work_permit_attendees_worker_status
+          ON work_permit_attendees(worker_id, status, updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_work_permit_attendees_job_entry_key
+          ON work_permit_attendees(job_id, entry_key) WHERE entry_key IS NOT NULL;
+      `);
     }
   }
 ];
@@ -24788,6 +24842,431 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  workPermitAttendeeKey({ workerId = null, attendeeName = '', company = '' } = {}) {
+    if (workerId) return `worker:${workerId}`;
+    return `person:${sha256Json({ name: normalizeText(attendeeName, '').toLowerCase(), company: normalizeText(company, '').toLowerCase() }).slice(0, 24)}`;
+  }
+
+  workPermitAttendeeEvidenceBasis(record = {}) {
+    const data = record.data || fromJson(record.data_json, {});
+    return {
+      permitId: record.permitId || record.permit_id,
+      jobId: record.jobId || record.job_id,
+      assignmentId: record.assignmentId || record.assignment_id || null,
+      workerId: record.workerId || record.worker_id || null,
+      attendeeName: record.attendeeName || record.attendee_name,
+      company: record.company || null,
+      acknowledged: normalizeStatus(record.status, 'expected') === 'acknowledged',
+      evidenceReference: record.evidenceReference || record.evidence_reference || null,
+      attestation: record.attestation || data.attestation || null,
+      definitionSourceHash: data.definitionSourceHash || null
+    };
+  }
+
+  workPermitDefinitionBasis(permitRow, attendeeRows = null) {
+    const data = fromJson(permitRow.data_json, {});
+    const rows = attendeeRows || this.db.prepare(`
+      SELECT * FROM work_permit_attendees
+      WHERE permit_id = ?
+      ORDER BY attendee_key, created_at
+    `).all(permitRow.id);
+    const canonicalRows = [...rows].sort((left, right) => {
+      const leftKey = String(left.attendee_key || '');
+      const rightKey = String(right.attendee_key || '');
+      if (leftKey < rightKey) return -1;
+      if (leftKey > rightKey) return 1;
+      return String(left.created_at || '').localeCompare(String(right.created_at || ''));
+    });
+    return {
+      format: WORK_PERMIT_FORMAT,
+      permitId: permitRow.id,
+      jobId: permitRow.job_id,
+      permitType: permitRow.permit_type,
+      title: permitRow.title,
+      holder: permitRow.holder,
+      location: permitRow.location,
+      validFrom: permitRow.valid_from,
+      expiresAt: permitRow.expires_at,
+      evidenceReference: permitRow.evidence_reference,
+      hazards: normalizeList(data.hazards),
+      controls: normalizeList(data.controls),
+      conditions: normalizeList(data.conditions),
+      attendees: canonicalRows.map(row => ({
+        attendeeKey: row.attendee_key,
+        assignmentId: row.assignment_id || null,
+        workerId: row.worker_id || null,
+        attendeeName: row.attendee_name,
+        company: row.company || null
+      }))
+    };
+  }
+
+  seedWorkPermitAttendees(jobId, permitId, payload = {}) {
+    const assignments = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, workers.data_json AS worker_data_json
+      FROM assignments
+      LEFT JOIN workers ON workers.id = assignments.worker_id
+      WHERE assignments.job_id = ?
+      ORDER BY assignments.created_at
+    `).all(jobId).filter(row => this.activeAssignmentStatus(row.status));
+    const assignmentIds = normalizeList(payload.assignmentIds || payload.assignment_ids);
+    const workerIds = normalizeList(payload.workerIds || payload.worker_ids);
+    const selected = assignmentIds.length || workerIds.length
+      ? assignments.filter(row => assignmentIds.includes(String(row.id)) || workerIds.includes(String(row.worker_id || '')))
+      : assignments;
+    const timestamp = nowIso();
+    for (const assignment of selected) {
+      const attendeeName = normalizeText(assignment.worker_name, '');
+      if (!attendeeName || !assignment.worker_id) continue;
+      const workerData = fromJson(assignment.worker_data_json, {});
+      const company = normalizeText(workerData.company, '') || null;
+      const attendeeKey = this.workPermitAttendeeKey({ workerId: assignment.worker_id, attendeeName, company });
+      this.db.prepare(`
+        INSERT INTO work_permit_attendees (
+          id, permit_id, job_id, assignment_id, worker_id, attendee_key, attendee_name, company,
+          status, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expected', '{}', ?, ?)
+        ON CONFLICT(permit_id, attendee_key) DO NOTHING
+      `).run(
+        makeId('permit_attendee'), permitId, jobId, assignment.id, assignment.worker_id,
+        attendeeKey, attendeeName, company, timestamp, timestamp
+      );
+    }
+    return this.db.prepare('SELECT * FROM work_permit_attendees WHERE permit_id = ? ORDER BY attendee_name, created_at').all(permitId);
+  }
+
+  getWorkPermit(permitId, options = {}) {
+    const row = this.db.prepare(`
+      SELECT permit_records.*, jobs.title AS job_title
+      FROM permit_records
+      JOIN jobs ON jobs.id = permit_records.job_id
+      WHERE permit_records.id = ? AND permit_records.source_hash IS NOT NULL
+    `).get(permitId);
+    if (!row || (options.jobId && String(row.job_id) !== String(options.jobId))) {
+      throw ledgerInputError('work_permit_not_found', 'Governed work permit not found for this job.', {}, 404);
+    }
+    const attendeeRows = this.db.prepare(`
+      SELECT * FROM work_permit_attendees
+      WHERE permit_id = ?
+      ORDER BY attendee_name, created_at
+    `).all(permitId);
+    const attendees = attendeeRows.map(item => this.mapWorkPermitAttendee(item));
+    const sourceCurrentHash = sha256Json(this.workPermitDefinitionBasis(row, attendeeRows));
+    const snapshot = fromJson(row.snapshot_json, null);
+    const definitionIntegrityValid = Boolean(
+      snapshot
+      && row.source_hash
+      && row.snapshot_hash
+      && snapshot.format === WORK_PERMIT_FORMAT
+      && snapshot.sourceHash === row.source_hash
+      && sha256Json(snapshot) === row.snapshot_hash
+      && sourceCurrentHash === row.source_hash
+    );
+    const timestamp = Date.now();
+    const startsAt = Date.parse(row.valid_from || '');
+    const expiresAt = Date.parse(row.expires_at || '');
+    const notStarted = Number.isFinite(startsAt) && startsAt > timestamp;
+    const expired = Number.isFinite(expiresAt) && expiresAt <= timestamp;
+    const attendanceSummary = attendees.reduce((summary, attendee) => {
+      summary.total += 1;
+      summary[attendee.status] = (summary[attendee.status] || 0) + 1;
+      if (attendee.status === 'acknowledged' && attendee.integrityValid !== true) summary.integrityFailures += 1;
+      return summary;
+    }, { total: 0, expected: 0, acknowledged: 0, integrityFailures: 0 });
+    const readyForWork = row.status === 'active'
+      && !notStarted
+      && !expired
+      && definitionIntegrityValid
+      && attendanceSummary.total > 0
+      && attendanceSummary.expected === 0
+      && attendanceSummary.integrityFailures === 0;
+    const blockers = [
+      ...(row.status !== 'active' ? [{ type: 'permit_not_active', message: `Permit status is ${row.status}.` }] : []),
+      ...(notStarted ? [{ type: 'permit_not_started', message: 'The permit validity window has not started.' }] : []),
+      ...(expired ? [{ type: 'permit_expired', message: 'The permit validity window has expired.' }] : []),
+      ...(!definitionIntegrityValid ? [{ type: 'permit_definition_integrity', message: 'The retained permit definition does not match its approved snapshot.' }] : []),
+      ...(!attendanceSummary.total ? [{ type: 'permit_attendees_missing', message: 'No assigned worker is retained for this permit.' }] : []),
+      ...(attendanceSummary.expected ? [{ type: 'permit_acknowledgements_outstanding', count: attendanceSummary.expected, message: `${attendanceSummary.expected} assigned worker acknowledgement(s) are outstanding.` }] : []),
+      ...(attendanceSummary.integrityFailures ? [{ type: 'permit_acknowledgement_integrity', count: attendanceSummary.integrityFailures, message: `${attendanceSummary.integrityFailures} acknowledgement record(s) failed integrity verification.` }] : [])
+    ];
+    return {
+      ...this.mapPermit(row),
+      jobTitle: row.job_title,
+      attendees,
+      attendanceSummary,
+      definitionIntegrityValid,
+      sourceCurrentHash,
+      notStarted,
+      expired,
+      effectiveStatus: row.status === 'active' && expired ? 'expired' : row.status === 'active' && notStarted ? 'approved_waiting' : row.status,
+      readyForWork,
+      blockers
+    };
+  }
+
+  listWorkPermits(filters = {}) {
+    const clauses = ['permit_records.source_hash IS NOT NULL'];
+    const params = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('permit_records.job_id = ?');
+      params.push(filters.jobId || filters.job_id);
+    }
+    if (filters.status) {
+      clauses.push('permit_records.status = ?');
+      params.push(normalizeStatus(filters.status, 'active'));
+    }
+    if (filters.workerId || filters.worker_id) {
+      clauses.push('EXISTS (SELECT 1 FROM work_permit_attendees attendee WHERE attendee.permit_id = permit_records.id AND attendee.worker_id = ?)');
+      params.push(filters.workerId || filters.worker_id);
+    }
+    const limit = Math.max(1, Math.min(500, Number(filters.limit || 100)));
+    const rows = this.db.prepare(`
+      SELECT permit_records.id
+      FROM permit_records
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY permit_records.valid_from DESC, permit_records.created_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+    return rows.map(row => this.getWorkPermit(row.id));
+  }
+
+  createWorkPermit(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const permitType = normalizeStatus(payload.permitType || payload.permit_type, 'general_work');
+      const allowedTypes = new Set(['general_work', 'hot_work', 'confined_space', 'electrical_isolation', 'excavation', 'lifting', 'work_at_height']);
+      if (!allowedTypes.has(permitType)) {
+        throw ledgerInputError('work_permit_type_invalid', 'Work permit type must be general work, hot work, confined space, electrical isolation, excavation, lifting, or work at height.');
+      }
+      const title = normalizeText(payload.title, '');
+      if (title.length < 3) throw ledgerInputError('work_permit_title_required', 'Work permit title must contain at least three characters.');
+      const hazards = [...new Set(normalizeList(payload.hazards).map(item => normalizeText(item, '')).filter(Boolean))];
+      const controls = [...new Set(normalizeList(payload.controls).map(item => normalizeText(item, '')).filter(Boolean))];
+      const conditions = [...new Set(normalizeList(payload.conditions).map(item => normalizeText(item, '')).filter(Boolean))];
+      if (!hazards.length) throw ledgerInputError('work_permit_hazards_required', 'Work permit activation requires at least one retained hazard.');
+      if (!controls.length) throw ledgerInputError('work_permit_controls_required', 'Work permit activation requires at least one retained control.');
+      const validFrom = normalizeScheduleTimestamp(payload.validFrom || payload.valid_from || timestamp, {
+        required: true, label: 'Permit valid-from time', code: 'work_permit_valid_from_invalid'
+      });
+      const expiresAt = normalizeScheduleTimestamp(payload.expiresAt || payload.expires_at || payload.validUntil || payload.valid_until, {
+        required: true, label: 'Permit expiry time', code: 'work_permit_expiry_invalid'
+      });
+      if (Date.parse(expiresAt) <= Date.parse(validFrom)) {
+        throw ledgerInputError('work_permit_validity_invalid', 'Work permit expiry must be after its valid-from time.');
+      }
+      if (Date.parse(expiresAt) <= Date.now()) {
+        throw ledgerInputError('work_permit_already_expired', 'A new work permit must expire in the future.');
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3) throw ledgerInputError('work_permit_evidence_required', 'Work permit activation requires a retained source evidence reference.');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('work_permit_entry_key_invalid', 'Work permit replay key must contain 8 to 200 safe characters.');
+      }
+      const holder = normalizeText(payload.holder || payload.assignee, 'Project team');
+      const location = normalizeText(payload.location || job.address || job.city, 'Jobsite');
+      const assignmentIds = normalizeList(payload.assignmentIds || payload.assignment_ids).sort();
+      const workerIds = normalizeList(payload.workerIds || payload.worker_ids).sort();
+      const entryFingerprint = sha256Json({
+        jobId, permitType, title, holder, location, validFrom, expiresAt,
+        hazards, controls, conditions, evidenceReference, assignmentIds, workerIds
+      });
+      const replay = this.db.prepare('SELECT * FROM permit_records WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint || !replay.source_hash) {
+          throw ledgerInputError('work_permit_entry_key_reused', 'Work permit replay key was already used for different content.', { entryKey }, 409);
+        }
+        const permit = this.getWorkPermit(replay.id, { jobId });
+        const approval = replay.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id) : null;
+        return { permit, approval: approval ? this.mapApproval(approval) : null, replayed: true, externalCommitments: 0 };
+      }
+      const id = makeId('work_permit');
+      this.db.prepare(`
+        INSERT INTO permit_records (
+          id, job_id, permit_type, title, status, holder, location, issued_at, expires_at, approval_id,
+          data_json, valid_from, evidence_reference, entry_key, entry_fingerprint, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending_approval', ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, permitType, title, holder, location, expiresAt,
+        toJson({ format: WORK_PERMIT_FORMAT, hazards, controls, conditions, requestedStatus: 'active', source: payload.source || 'governed_work_permit' }),
+        validFrom, evidenceReference, entryKey, entryFingerprint, timestamp, timestamp
+      );
+      const attendeeRows = this.seedWorkPermitAttendees(jobId, id, { assignmentIds, workerIds });
+      if (!attendeeRows.length) {
+        throw ledgerInputError('work_permit_assigned_workers_required', 'Work permit activation requires at least one active assigned worker.', {}, 409);
+      }
+      let permitRow = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(id);
+      const sourceHash = sha256Json(this.workPermitDefinitionBasis(permitRow, attendeeRows));
+      const snapshot = { ...this.workPermitDefinitionBasis(permitRow, attendeeRows), sourceHash, requestedStatus: 'active', retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      const approval = this.createApproval({
+        targetType: 'work_permit', targetId: id, jobId,
+        approvalType: 'work_permit_activation',
+        summary: `Approve work permit ${title}`,
+        reason: 'Permit hazards, controls, validity, source evidence, and assigned crew must remain source-current before field reliance.',
+        data: { requestedStatus: 'active', sourceHash, snapshotHash, attendeeCount: attendeeRows.length, expiresAt }
+      }, { actor, audit: false });
+      this.db.prepare(`
+        UPDATE permit_records
+        SET approval_id = ?, source_hash = ?, snapshot_hash = ?, snapshot_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(approval.id, sourceHash, snapshotHash, toJson(snapshot), timestamp, id);
+      permitRow = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(id);
+      const permit = this.getWorkPermit(id, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'work_permit', entityId: id, jobId, action: 'request_work_permit_activation', actor,
+          after: permit,
+          metadata: { approvalId: approval.id, entryKey, sourceHash, snapshotHash, attendeeCount: attendeeRows.length, externalCommitments: 0 }
+        });
+      }
+      return { permit, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  acknowledgeWorkPermit(jobId, permitId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const permitRow = this.db.prepare('SELECT * FROM permit_records WHERE id = ? AND job_id = ? AND source_hash IS NOT NULL').get(permitId, jobId);
+      if (!permitRow) throw ledgerInputError('work_permit_not_found', 'Governed work permit not found for this job.', {}, 404);
+      const permit = this.getWorkPermit(permitId, { jobId });
+      if (permit.status !== 'active' || permit.expired || permit.notStarted || !permit.definitionIntegrityValid) {
+        throw ledgerInputError('work_permit_not_acknowledgeable', 'Only an active, current, integrity-valid work permit can be acknowledged.', { blockers: permit.blockers }, 409);
+      }
+      if (payload.acknowledged !== true) {
+        throw ledgerInputError('work_permit_attestation_required', 'Work permit acknowledgement requires an explicit positive attestation.');
+      }
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '');
+      if (!workerId) throw ledgerInputError('work_permit_worker_required', 'Work permit acknowledgement requires a retained worker identity.');
+      const attendeeRow = this.db.prepare('SELECT * FROM work_permit_attendees WHERE permit_id = ? AND worker_id = ?').get(permitId, workerId);
+      if (!attendeeRow) throw ledgerInputError('work_permit_worker_not_expected', 'This worker is not retained in the approved permit crew.', { workerId }, 403);
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3) throw ledgerInputError('work_permit_acknowledgement_evidence_required', 'Work permit acknowledgement requires a retained evidence reference.');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('work_permit_acknowledgement_entry_key_invalid', 'Permit acknowledgement replay key must contain 8 to 200 safe characters.');
+      }
+      const attestation = normalizeText(payload.attestation, 'I reviewed the permit hazards and controls and will stop work if conditions change.');
+      const basis = this.workPermitAttendeeEvidenceBasis({
+        permitId, jobId, assignmentId: attendeeRow.assignment_id, workerId,
+        attendeeName: attendeeRow.attendee_name, company: attendeeRow.company,
+        status: 'acknowledged', evidenceReference, attestation,
+        data: { definitionSourceHash: permitRow.source_hash }
+      });
+      const entryFingerprint = sha256Json(basis);
+      const replay = this.db.prepare('SELECT * FROM work_permit_attendees WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint || replay.permit_id !== permitId) {
+          throw ledgerInputError('work_permit_acknowledgement_entry_key_reused', 'Permit acknowledgement replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { permit: this.getWorkPermit(permitId, { jobId }), attendee: this.mapWorkPermitAttendee(replay), replayed: true, externalCommitments: 0 };
+      }
+      if (attendeeRow.status === 'acknowledged') {
+        throw ledgerInputError('work_permit_already_acknowledged', 'This worker already acknowledged the retained permit definition.', { workerId }, 409);
+      }
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE work_permit_attendees
+        SET status = 'acknowledged', acknowledged_at = ?, acknowledged_by = ?, evidence_reference = ?,
+          entry_key = ?, entry_fingerprint = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'expected'
+      `).run(
+        timestamp, normalizeText(payload.acknowledgedBy || payload.acknowledged_by, actor), evidenceReference,
+        entryKey, entryFingerprint, toJson({ attestation, definitionSourceHash: permitRow.source_hash }), timestamp, attendeeRow.id
+      );
+      const attendee = this.mapWorkPermitAttendee(this.db.prepare('SELECT * FROM work_permit_attendees WHERE id = ?').get(attendeeRow.id));
+      const updatedPermit = this.getWorkPermit(permitId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'work_permit_attendee', entityId: attendee.id, jobId,
+          action: 'acknowledge_work_permit', actor, before: this.mapWorkPermitAttendee(attendeeRow), after: attendee,
+          metadata: { permitId, entryKey, definitionSourceHash: permitRow.source_hash, externalCommitments: 0 }
+        });
+      }
+      return { permit: updatedPermit, attendee, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  suspendWorkPermit(jobId, permitId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM permit_records WHERE id = ? AND job_id = ? AND source_hash IS NOT NULL').get(permitId, jobId);
+      if (!row) throw ledgerInputError('work_permit_not_found', 'Governed work permit not found for this job.', {}, 404);
+      const reason = normalizeText(payload.reason, '');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (reason.length < 8) throw ledgerInputError('work_permit_suspension_reason_required', 'Permit suspension requires a retained reason of at least eight characters.');
+      if (evidenceReference.length < 3) throw ledgerInputError('work_permit_suspension_evidence_required', 'Permit suspension requires a retained evidence reference.');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) throw ledgerInputError('work_permit_suspension_entry_key_invalid', 'Permit suspension replay key must contain 8 to 200 safe characters.');
+      const fingerprint = sha256Json({ permitId, jobId, reason, evidenceReference });
+      const data = fromJson(row.data_json, {});
+      if (data.suspension?.entryKey === entryKey) {
+        if (data.suspension.fingerprint !== fingerprint) throw ledgerInputError('work_permit_suspension_entry_key_reused', 'Permit suspension replay key was already used for different content.', { entryKey }, 409);
+        return { permit: this.getWorkPermit(permitId, { jobId }), replayed: true, externalCommitments: 0 };
+      }
+      if (row.status !== 'active') throw ledgerInputError('work_permit_not_active', 'Only an active work permit can be suspended.', { status: row.status }, 409);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE permit_records SET status = 'suspended', suspended_at = ?, data_json = ?, updated_at = ? WHERE id = ?
+      `).run(timestamp, toJson({
+        ...data,
+        suspension: { entryKey, fingerprint, reason, evidenceReference, suspendedAt: timestamp, suspendedBy: actor }
+      }), timestamp, permitId);
+      const permit = this.getWorkPermit(permitId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'work_permit', entityId: permitId, jobId, action: 'suspend_work_permit', actor,
+          before: this.mapPermit(row), after: permit,
+          metadata: { entryKey, reason, evidenceReference, stopWorkImmediate: true, externalCommitments: 0 }
+        });
+      }
+      return { permit, replayed: false, stopWorkImmediate: true, externalCommitments: 0 };
+    });
+  }
+
+  closeWorkPermit(jobId, permitId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM permit_records WHERE id = ? AND job_id = ? AND source_hash IS NOT NULL').get(permitId, jobId);
+      if (!row) throw ledgerInputError('work_permit_not_found', 'Governed work permit not found for this job.', {}, 404);
+      const note = normalizeText(payload.note || payload.reason, '');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (note.length < 8) throw ledgerInputError('work_permit_closure_note_required', 'Permit closure requires a retained completion note of at least eight characters.');
+      if (evidenceReference.length < 3) throw ledgerInputError('work_permit_closure_evidence_required', 'Permit closure requires a retained evidence reference.');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) throw ledgerInputError('work_permit_closure_entry_key_invalid', 'Permit closure replay key must contain 8 to 200 safe characters.');
+      const fingerprint = sha256Json({ permitId, jobId, note, evidenceReference });
+      const data = fromJson(row.data_json, {});
+      if (data.closure?.entryKey === entryKey) {
+        if (data.closure.fingerprint !== fingerprint) throw ledgerInputError('work_permit_closure_entry_key_reused', 'Permit closure replay key was already used for different content.', { entryKey }, 409);
+        return { permit: this.getWorkPermit(permitId, { jobId }), replayed: true, externalCommitments: 0 };
+      }
+      if (!['active', 'suspended'].includes(row.status)) {
+        throw ledgerInputError('work_permit_not_closable', 'Only an active or suspended work permit can be closed.', { status: row.status }, 409);
+      }
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE permit_records
+        SET status = 'closed', closed_at = ?, closure_evidence_reference = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(timestamp, evidenceReference, toJson({
+        ...data,
+        closure: { entryKey, fingerprint, note, evidenceReference, closedAt: timestamp, closedBy: actor }
+      }), timestamp, permitId);
+      const permit = this.getWorkPermit(permitId, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'work_permit', entityId: permitId, jobId, action: 'close_work_permit', actor,
+          before: this.mapPermit(row), after: permit,
+          metadata: { entryKey, evidenceReference, externalCommitments: 0 }
+        });
+      }
+      return { permit, replayed: false, externalCommitments: 0 };
+    });
+  }
+
   safetyMeetingAttendeeKey({ workerId = null, attendeeName = '', company = '' } = {}) {
     if (workerId) return `worker:${workerId}`;
     return `person:${sha256Json({ name: normalizeText(attendeeName, '').toLowerCase(), company: normalizeText(company, '').toLowerCase() }).slice(0, 24)}`;
@@ -30144,6 +30623,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'work_permit') {
+        const row = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE permit_records
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            approvalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'expense') {
         const row = this.db.prepare('SELECT * FROM expenses WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -31045,6 +31542,57 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         : 'approved';
       this.db.prepare('UPDATE client_selections SET status = ?, decided_at = COALESCE(decided_at, ?), updated_at = ? WHERE id = ?')
         .run(approvedStatus, timestamp, timestamp, targetId);
+    } else if (targetType === 'work_permit') {
+      const permit = this.db.prepare('SELECT * FROM permit_records WHERE id = ?').get(targetId);
+      if (!permit || !permit.source_hash) {
+        throw ledgerInputError('work_permit_not_found', 'Work permit approval target no longer exists.', {}, 409);
+      }
+      const attendeeRows = this.db.prepare(`
+        SELECT * FROM work_permit_attendees WHERE permit_id = ? ORDER BY attendee_key, created_at
+      `).all(targetId);
+      const snapshot = fromJson(permit.snapshot_json, null);
+      const sourceCurrentHash = sha256Json(this.workPermitDefinitionBasis(permit, attendeeRows));
+      const snapshotValid = Boolean(
+        snapshot
+        && snapshot.format === WORK_PERMIT_FORMAT
+        && permit.snapshot_hash
+        && permit.source_hash
+        && snapshot.sourceHash === permit.source_hash
+        && sha256Json(snapshot) === permit.snapshot_hash
+        && sourceCurrentHash === permit.source_hash
+      );
+      if (!snapshotValid || !attendeeRows.length) {
+        throw ledgerInputError(
+          'work_permit_integrity_failed',
+          'Work permit hazards, controls, validity, evidence, or assigned crew changed after approval was requested. Reject it and prepare a current permit.',
+          { snapshotValid, attendeeCount: attendeeRows.length },
+          409
+        );
+      }
+      if (Date.parse(permit.expires_at || '') <= Date.now()) {
+        throw ledgerInputError('work_permit_expired_before_approval', 'Work permit expired before approval. Prepare a current permit with a valid work window.', {}, 409);
+      }
+      const approval = permit.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(permit.approval_id) : null;
+      const data = fromJson(permit.data_json, {});
+      this.db.prepare(`
+        UPDATE permit_records
+        SET status = 'active', issued_at = COALESCE(issued_at, ?), data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending_approval'
+      `).run(timestamp, toJson({
+        ...data,
+        approvalDecision: {
+          status: 'approved',
+          approvalId: permit.approval_id || null,
+          resolvedAt: timestamp,
+          resolvedBy: approval?.resolved_by || 'approval'
+        }
+      }), timestamp, targetId);
+      this.audit({
+        entityType: 'work_permit', entityId: targetId, jobId: permit.job_id,
+        action: 'activate_work_permit', actor: approval?.resolved_by || 'approval',
+        before: this.mapPermit(permit), after: this.getWorkPermit(targetId, { jobId: permit.job_id }),
+        metadata: { approvalId: permit.approval_id || null, sourceHash: permit.source_hash, snapshotHash: permit.snapshot_hash, attendeeCount: attendeeRows.length, externalCommitments: 0 }
+      });
     } else if (targetType === 'permit_record') {
       const permit = this.db.prepare('SELECT data_json FROM permit_records WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(permit?.data_json, {}).requestedStatus, 'active');
@@ -36901,6 +37449,64 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const permitReviewHorizon = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const workPermitReadinessGaps = this.db.prepare(`
+      SELECT permits.id, permits.job_id, permits.title, permits.status, permits.expires_at,
+        permits.source_hash, permits.updated_at, jobs.title AS job_title,
+        COUNT(attendees.id) AS attendee_count,
+        SUM(CASE WHEN attendees.status = 'expected' THEN 1 ELSE 0 END) AS outstanding_count,
+        SUM(CASE WHEN attendees.status = 'acknowledged' THEN 1 ELSE 0 END) AS acknowledged_count
+      FROM permit_records permits
+      JOIN jobs ON jobs.id = permits.job_id
+      LEFT JOIN work_permit_attendees attendees ON attendees.permit_id = permits.id
+      WHERE jobs.status IN ('scheduled', 'in_progress')
+        AND permits.source_hash IS NOT NULL
+        AND permits.status = 'active'
+      GROUP BY permits.id, permits.job_id, permits.title, permits.status, permits.expires_at,
+        permits.source_hash, permits.updated_at, jobs.title
+      HAVING permits.expires_at <= ?
+        OR COUNT(attendees.id) = 0
+        OR SUM(CASE WHEN attendees.status = 'expected' THEN 1 ELSE 0 END) > 0
+      ORDER BY permits.expires_at, permits.updated_at
+      LIMIT 10
+    `).all(permitReviewHorizon);
+    for (const permit of workPermitReadinessGaps) {
+      const outstandingCount = Number(permit.outstanding_count || 0);
+      const attendeeCount = Number(permit.attendee_count || 0);
+      const acknowledgedCount = Number(permit.acknowledged_count || 0);
+      const expired = Date.parse(permit.expires_at || '') <= Date.now();
+      const reasons = [
+        ...(expired ? ['expired'] : Date.parse(permit.expires_at || '') <= Date.parse(permitReviewHorizon) ? ['expiring'] : []),
+        ...(!attendeeCount ? ['crew_missing'] : []),
+        ...(outstandingCount ? ['acknowledgements_outstanding'] : [])
+      ];
+      const sourceHash = sha256Json({
+        permitId: permit.id,
+        permitSourceHash: permit.source_hash,
+        status: permit.status,
+        expiresAt: permit.expires_at,
+        attendeeCount,
+        outstandingCount,
+        acknowledgedCount,
+        reasons,
+        updatedAt: permit.updated_at
+      });
+      actions.push({
+        type: 'review_work_permit_readiness',
+        permitId: permit.id,
+        jobId: permit.job_id,
+        severity: expired || outstandingCount > 0 ? 'high' : 'medium',
+        attendeeCount,
+        outstandingCount,
+        acknowledgedCount,
+        expiresAt: permit.expires_at,
+        reasons,
+        sourceHash,
+        taskId: `task_${sha256Text(`work-permit-readiness:${permit.id}:${sourceHash}`).slice(0, 24)}`,
+        message: `${permit.job_title}: ${permit.title} needs an internal permit readiness review (${reasons.join(', ')}).`
+      });
+    }
+
     const jobsWithoutOrientations = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.priority, jobs.risk_level
       FROM jobs
@@ -37765,6 +38371,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_inspection_review',
       'schedule_safety_meeting',
       'review_safety_briefing_attendance',
+      'review_work_permit_readiness',
       'schedule_orientation',
       'create_jha',
       'request_sds',
@@ -39276,6 +39883,47 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const workPermitReviews = preview.filter(action => action.type === 'review_work_permit_readiness').slice(0, 10);
+        for (const action of workPermitReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0, activationInferred: false, acknowledgementsInferred: false });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review work permit readiness: ${action.permitId}`,
+            description: `${action.message} Review current hazards, controls, validity, and each assigned worker acknowledgement. Suspend unsafe work or create a replacement permit through the governed workflow. Do not activate a permit, acknowledge for a worker, or publish a compliance claim automatically.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(action.reasons?.includes('expired') ? 0 : 1),
+            source: 'work_permit_monitor',
+            data: {
+              workPermitId: action.permitId,
+              attendeeCount: action.attendeeCount,
+              outstandingCount: action.outstandingCount,
+              acknowledgedCount: action.acknowledgedCount,
+              expiresAt: action.expiresAt,
+              reasons: action.reasons,
+              sourceHash: action.sourceHash,
+              internalOnly: true,
+              externalCommitments: 0,
+              activationInferred: false,
+              acknowledgementsInferred: false
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, activationInferred: false, acknowledgementsInferred: false });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_work_permit_readiness_task', actor, after: task,
+            metadata: {
+              workPermitId: action.permitId,
+              sourceHash: action.sourceHash,
+              externalCommitments: 0,
+              activationInferred: false,
+              acknowledgementsInferred: false
+            }
+          });
+        }
+
         const materialReceiptReviews = preview.filter(action => action.type === 'review_material_receipt').slice(0, 10);
         for (const action of materialReceiptReviews) {
           const taskId = action.taskId || `task_${sha256Text(`material-receipt-review:${action.materialReceiptId || action.purchaseOrderId}:${action.sourceHash}`).slice(0, 24)}`;
@@ -40187,6 +40835,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (selectionsWithoutApproval) issues.push({ severity: 'warning', message: `${selectionsWithoutApproval} locked client selection(s) have no approval gate.` });
     const permitsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM permit_records WHERE status IN ('active', 'approved', 'issued', 'submitted') AND approval_id IS NULL").get().count || 0);
     if (permitsWithoutApproval) issues.push({ severity: 'warning', message: `${permitsWithoutApproval} active permit/compliance record(s) have no approval gate.` });
+    for (const row of this.db.prepare('SELECT * FROM permit_records WHERE source_hash IS NOT NULL ORDER BY created_at').all()) {
+      const permit = this.getWorkPermit(row.id, { jobId: row.job_id });
+      if (permit.definitionIntegrityValid !== true) {
+        issues.push({ severity: 'error', message: `Work permit ${permit.id} failed retained definition snapshot verification.` });
+      }
+      const expectedApprovalStatus = permit.status === 'pending_approval'
+        ? 'pending'
+        : ['active', 'suspended', 'closed'].includes(permit.status) ? 'approved' : permit.status;
+      const approval = permit.approvalId
+        ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'work_permit' AND target_id = ? AND status = ?")
+          .get(permit.approvalId, permit.id, expectedApprovalStatus)
+        : null;
+      if (!approval) {
+        issues.push({ severity: 'error', message: `Work permit ${permit.id} lacks its matching ${expectedApprovalStatus} activation decision.` });
+      }
+      if (permit.status === 'active' && permit.expired) {
+        issues.push({ severity: 'warning', message: `Work permit ${permit.id} is still active after its retained expiry time.` });
+      }
+      if (permit.status === 'active' && permit.attendanceSummary.expected > 0) {
+        issues.push({ severity: 'warning', message: `Work permit ${permit.id} has ${permit.attendanceSummary.expected} outstanding worker acknowledgement(s).` });
+      }
+    }
+    for (const row of this.db.prepare("SELECT * FROM work_permit_attendees WHERE status = 'acknowledged'").all()) {
+      const attendee = this.mapWorkPermitAttendee(row);
+      if (attendee.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `Work permit attendee ${attendee.id} failed retained acknowledgement verification.` });
+      }
+    }
     const checklistInspectionRows = this.db.prepare("SELECT * FROM inspection_records WHERE data_json LIKE '%\"checklistSnapshot\"%'").all();
     for (const inspection of checklistInspectionRows) {
       const data = fromJson(inspection.data_json, {});
@@ -40474,6 +41150,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         meetingActionItems: this.count('meeting_action_items'),
         clientSelections: this.count('client_selections'),
         permitRecords: this.count('permit_records'),
+        governedWorkPermits: Number(this.db.prepare('SELECT COUNT(*) AS count FROM permit_records WHERE source_hash IS NOT NULL').get().count || 0),
+        workPermitAttendees: this.count('work_permit_attendees'),
         inspectionTemplates: this.count('inspection_templates'),
         inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
         inspectionRecords: this.count('inspection_records'),
@@ -41223,6 +41901,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   mapPermit(row) {
+    const data = fromJson(row.data_json, {});
     return {
       id: row.id,
       jobId: row.job_id,
@@ -41232,9 +41911,56 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       holder: row.holder,
       location: row.location,
       issuedAt: row.issued_at,
+      validFrom: row.valid_from || null,
       expiresAt: row.expires_at,
+      evidenceReference: row.evidence_reference || null,
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      sourceHash: row.source_hash || null,
+      snapshotHash: row.snapshot_hash || null,
+      snapshot: fromJson(row.snapshot_json, null),
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      suspendedAt: row.suspended_at || null,
+      closedAt: row.closed_at || null,
+      closureEvidenceReference: row.closure_evidence_reference || null,
+      format: data.format || null,
+      hazards: normalizeList(data.hazards),
+      controls: normalizeList(data.controls),
+      conditions: normalizeList(data.conditions),
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapWorkPermitAttendee(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const status = normalizeStatus(row.status, 'expected');
+    const integrityValid = status !== 'acknowledged' || Boolean(
+      row.entry_fingerprint
+      && data.definitionSourceHash
+      && row.entry_fingerprint === sha256Json(this.workPermitAttendeeEvidenceBasis({ ...row, data }))
+    );
+    return {
+      id: row.id,
+      permitId: row.permit_id,
+      jobId: row.job_id,
+      assignmentId: row.assignment_id || null,
+      workerId: row.worker_id || null,
+      attendeeKey: row.attendee_key,
+      attendeeName: row.attendee_name,
+      company: row.company || null,
+      status,
+      acknowledgedAt: row.acknowledged_at || null,
+      acknowledgedBy: row.acknowledged_by || null,
+      evidenceReference: row.evidence_reference || null,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      attestation: data.attestation || null,
+      definitionSourceHash: data.definitionSourceHash || null,
+      integrityValid,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

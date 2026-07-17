@@ -603,6 +603,58 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('042_governed_work_permits')) {
+        for (const table of ['permit_records', 'work_permit_attendees']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed work-permit schema is incomplete: ${table}.`);
+          }
+        }
+        const permitColumns = new Set(database.prepare('PRAGMA table_info(permit_records)').all().map(row => row.name));
+        for (const column of [
+          'valid_from',
+          'evidence_reference',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint',
+          'suspended_at',
+          'closed_at',
+          'closure_evidence_reference'
+        ]) {
+          if (!permitColumns.has(column)) {
+            throw new Error(`Backup governed work-permit schema is incomplete: permit_records.${column}.`);
+          }
+        }
+        const attendeeColumns = new Set(database.prepare('PRAGMA table_info(work_permit_attendees)').all().map(row => row.name));
+        for (const column of [
+          'permit_id',
+          'job_id',
+          'assignment_id',
+          'worker_id',
+          'attendee_key',
+          'status',
+          'evidence_reference',
+          'entry_key',
+          'entry_fingerprint'
+        ]) {
+          if (!attendeeColumns.has(column)) {
+            throw new Error(`Backup governed work-permit schema is incomplete: work_permit_attendees.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_work_permits_job_entry_key',
+          'idx_work_permits_job_status_validity',
+          'idx_work_permit_attendees_permit_status',
+          'idx_work_permit_attendees_worker_status',
+          'idx_work_permit_attendees_job_entry_key'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed work-permit constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

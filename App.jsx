@@ -193,6 +193,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const attendanceSessionId = type === 'attendance_check_out' ? String(payload?.sessionId || '') : ''
   const custodySessionId = type === 'equipment_return' ? String(payload?.custodySessionId || '') : ''
   const safetyMeetingId = type === 'safety_briefing_acknowledgement' ? String(payload?.meetingId || '') : ''
+  const workPermitId = type === 'work_permit_acknowledgement' ? String(payload?.permitId || '') : ''
   const route =
     type === 'daily_log'
       ? 'daily-logs'
@@ -202,6 +203,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
           ? `attendance/${encodeURIComponent(attendanceSessionId)}/check-out`
       : type === 'safety_briefing_acknowledgement' && safetyMeetingId
         ? `safety-meetings/${encodeURIComponent(safetyMeetingId)}/acknowledgments`
+      : type === 'work_permit_acknowledgement' && workPermitId
+        ? `work-permits/${encodeURIComponent(workPermitId)}/acknowledgments`
       : type === 'production_entry'
         ? 'production-entries'
       : type === 'material_receipt'
@@ -428,6 +431,29 @@ function emptySafetyBriefingDraft() {
     acknowledged: false,
     completionEvidence: '',
     excusalReason: '',
+  }
+}
+
+function emptyWorkPermitDraft() {
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    jobId: '',
+    permitId: '',
+    permitType: 'general_work',
+    title: '',
+    location: '',
+    validFrom: toLocalDateTimeInput(new Date()),
+    expiresAt: toLocalDateTimeInput(new Date(Date.now() + 8 * 60 * 60 * 1000)),
+    hazards: '',
+    controls: '',
+    conditions: '',
+    sourceEvidence: '',
+    acknowledgementEvidence: '',
+    acknowledged: false,
+    suspensionReason: '',
+    suspensionEvidence: '',
+    closureNote: '',
+    closureEvidence: '',
   }
 }
 
@@ -1228,16 +1254,18 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'field') {
-    const [field, attendance, safetyBriefings, workers] = await Promise.all([
-      api('/api/ledger/field-assurance?limit=100'),
+    const [field, attendance, safetyBriefings, workPermits, workers] = await Promise.all([
+      fieldScoped ? Promise.resolve({ rows: [], summary: {} }) : api('/api/ledger/field-assurance?limit=100'),
       api('/api/ledger/attendance?limit=250'),
       api('/api/ledger/safety-briefings?limit=100'),
+      api('/api/ledger/work-permits?limit=100'),
       fieldScoped ? Promise.resolve(null) : api('/api/ledger/workers?limit=500'),
     ])
     return {
       field,
       attendance: attendance.attendance || { rows: [], summary: {} },
       safetyMeetings: safetyBriefings.safetyMeetings || [],
+      workPermits: workPermits.workPermits || [],
       ...(workers
         ? { workers: workers.workers || [], workerSummary: workers.summary || {} }
         : {}),
@@ -7905,6 +7933,7 @@ function App() {
   const [fieldEquipmentCustody, setFieldEquipmentCustody] = useState([])
   const [attendanceDraft, setAttendanceDraft] = useState(emptyAttendanceDraft)
   const [safetyBriefingDraft, setSafetyBriefingDraft] = useState(emptySafetyBriefingDraft)
+  const [workPermitDraft, setWorkPermitDraft] = useState(emptyWorkPermitDraft)
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
   const [outboxSyncing, setOutboxSyncing] = useState(false)
@@ -7972,6 +8001,7 @@ function App() {
           field: { rows: [] },
           attendance: { rows: [], summary: {} },
           safetyMeetings: [],
+          workPermits: [],
           inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
@@ -8015,6 +8045,7 @@ function App() {
           field: { rows: [] },
           attendance: { rows: [], summary: {} },
           safetyMeetings: [],
+          workPermits: [],
           inspectionTemplates: [],
           health: healthResult,
           readiness: readinessResult,
@@ -8116,6 +8147,7 @@ function App() {
   const inspectionTemplates = data?.inspectionTemplates ?? EMPTY_LIST
   const attendance = data?.attendance || { rows: EMPTY_LIST, summary: {} }
   const safetyMeetings = data?.safetyMeetings ?? EMPTY_LIST
+  const workPermits = data?.workPermits ?? EMPTY_LIST
   const visibleApprovals = useMemo(() => {
     if (!approvalFocus) return approvals
     if (approvalFocus.approvalId) return approvals.filter((approval) => approval.id === approvalFocus.approvalId)
@@ -8139,6 +8171,8 @@ function App() {
   )
   const selectedSafetyMeeting = safetyMeetings.find((meeting) => meeting.id === safetyBriefingDraft.meetingId) || null
   const selectedJobSafetyMeetings = safetyMeetings.filter((meeting) => meeting.jobId === safetyBriefingDraft.jobId)
+  const selectedWorkPermit = workPermits.find((permit) => permit.id === workPermitDraft.permitId) || null
+  const selectedJobWorkPermits = workPermits.filter((permit) => permit.jobId === workPermitDraft.jobId)
   const taskAssigneeOptions = Array.from(
     new Map(
       (selectedJob?.assignments || [])
@@ -8476,6 +8510,24 @@ function App() {
         : current
     ))
   }, [safetyBriefingDraft.jobId, safetyBriefingDraft.meetingId, safetyMeetings])
+
+  useEffect(() => {
+    const jobId = workPermitDraft.jobId
+    if (!jobId) return
+    const currentIsValid = workPermits.some((permit) => (
+      permit.id === workPermitDraft.permitId && permit.jobId === jobId
+    ))
+    if (currentIsValid) return
+    const firstPermit = workPermits.find((permit) => (
+      permit.jobId === jobId && ['active', 'pending_approval', 'suspended'].includes(permit.status)
+    )) || workPermits.find((permit) => permit.jobId === jobId)
+    if (!firstPermit) return
+    setWorkPermitDraft((current) => (
+      current.jobId === jobId && current.permitId !== firstPermit.id
+        ? { ...current, permitId: firstPermit.id }
+        : current
+    ))
+  }, [workPermitDraft.jobId, workPermitDraft.permitId, workPermits])
 
   useEffect(() => {
     if (authState !== 'active' || !fieldOutboxAvailable()) return undefined
@@ -10046,6 +10098,205 @@ function App() {
       retainSafetyMeeting(result.safetyMeeting)
       setSafetyBriefingDraft((current) => ({ ...current, excusalReason: '' }))
       notify(`${attendee.attendeeName} was explicitly excused with the retained reason.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function retainWorkPermit(permit) {
+    if (!permit?.id) return
+    setData((current) => current ? {
+      ...current,
+      workPermits: [permit, ...(current.workPermits || []).filter((item) => item.id !== permit.id)],
+    } : current)
+  }
+
+  function selectWorkPermitJob(jobId) {
+    const firstPermit = workPermits.find((permit) => (
+      permit.jobId === jobId && ['active', 'pending_approval', 'suspended'].includes(permit.status)
+    )) || workPermits.find((permit) => permit.jobId === jobId) || null
+    setWorkPermitDraft({
+      ...emptyWorkPermitDraft(),
+      jobId,
+      permitId: firstPermit?.id || '',
+    })
+  }
+
+  async function createWorkPermit(event) {
+    event.preventDefault()
+    const hazards = workPermitDraft.hazards.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
+    const controls = workPermitDraft.controls.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
+    const conditions = workPermitDraft.conditions.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
+    if (
+      !canCoordinate
+      || !workPermitDraft.jobId
+      || workPermitDraft.title.trim().length < 3
+      || !hazards.length
+      || !controls.length
+      || workPermitDraft.sourceEvidence.trim().length < 3
+    ) {
+      setError('Choose a job and retain the permit title, hazards, controls, validity, and source evidence.')
+      return
+    }
+    if (navigator.onLine === false) {
+      setError('Reconnect before requesting a permit so the current assigned crew and approval snapshot can be frozen from the ledger.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(workPermitDraft.jobId)}/work-permits`, {
+        method: 'POST',
+        body: JSON.stringify({
+          entryKey: workPermitDraft.entryKey,
+          permitType: workPermitDraft.permitType,
+          title: workPermitDraft.title.trim(),
+          location: workPermitDraft.location.trim(),
+          validFrom: toIsoDateTime(workPermitDraft.validFrom),
+          expiresAt: toIsoDateTime(workPermitDraft.expiresAt),
+          hazards,
+          controls,
+          conditions,
+          evidenceReference: workPermitDraft.sourceEvidence.trim(),
+          source: 'field_dashboard',
+        }),
+      })
+      retainWorkPermit(result.workPermit)
+      setWorkPermitDraft({
+        ...emptyWorkPermitDraft(),
+        jobId: workPermitDraft.jobId,
+        permitId: result.workPermit.id,
+      })
+      notify(result.replayed
+        ? 'This permit request was already retained; no duplicate approval was created.'
+        : 'Permit definition and assigned crew were frozen for approval.')
+      await refresh()
+      if (capabilities.approvals && result.approval?.id) {
+        openApprovals({ jobId: result.workPermit.jobId, jobTitle: result.workPermit.jobTitle, approvalId: result.approval.id })
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function acknowledgeWorkPermit(event) {
+    event.preventDefault()
+    if (!fieldScoped || !selectedWorkPermit || !workPermitDraft.acknowledged || workPermitDraft.acknowledgementEvidence.trim().length < 3) {
+      setError('Select an active assigned permit, confirm the attestation, and retain an evidence reference.')
+      return
+    }
+    const draft = {
+      id: workPermitDraft.entryKey,
+      type: 'work_permit_acknowledgement',
+      jobId: selectedWorkPermit.jobId,
+      payload: {
+        permitId: selectedWorkPermit.id,
+        acknowledged: true,
+        acknowledgedAt: new Date().toISOString(),
+        evidenceReference: workPermitDraft.acknowledgementEvidence.trim(),
+        attestation: 'I reviewed this permit, understand the retained hazards and controls, and will stop work if conditions change.',
+      },
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setWorkPermitDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), acknowledgementEvidence: '', acknowledged: false }))
+        notify('Permit acknowledgement was saved locally for an exact worker-scoped retry. Stop work until the live ledger confirms readiness.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      retainWorkPermit(result.workPermit)
+      setWorkPermitDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), acknowledgementEvidence: '', acknowledged: false }))
+      notify(result.replayed
+        ? 'This permit acknowledgement was already retained; no duplicate evidence was created.'
+        : result.workPermit.readyForWork
+          ? 'Your acknowledgement was retained and this permit is ready for the assigned work.'
+          : 'Your acknowledgement was retained. Other permit blockers remain.')
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setWorkPermitDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), acknowledgementEvidence: '', acknowledged: false }))
+          notify('Connection interrupted. The permit acknowledgement was saved locally for an exact retry. Stop work until the live ledger confirms readiness.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function suspendWorkPermit(event) {
+    event.preventDefault()
+    if (!canCoordinate || !selectedWorkPermit || workPermitDraft.suspensionReason.trim().length < 8 || workPermitDraft.suspensionEvidence.trim().length < 3) {
+      setError('Retain a specific suspension reason and evidence reference before stopping this permit.')
+      return
+    }
+    if (navigator.onLine === false) {
+      setError('The permit cannot be synchronized while offline. Stop work on site now and reconnect to retain the suspension.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedWorkPermit.jobId)}/work-permits/${encodeURIComponent(selectedWorkPermit.id)}/suspend`, {
+        method: 'POST',
+        body: JSON.stringify({
+          entryKey: createFieldEvidenceDraftId(),
+          reason: workPermitDraft.suspensionReason.trim(),
+          evidenceReference: workPermitDraft.suspensionEvidence.trim(),
+        }),
+      })
+      retainWorkPermit(result.permit)
+      setWorkPermitDraft((current) => ({ ...current, suspensionReason: '', suspensionEvidence: '' }))
+      notify(result.replayed ? 'This stop-work suspension was already retained.' : 'Permit suspended. Work must remain stopped until a new approved permit is issued.')
+      await refresh()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function closeWorkPermit(event) {
+    event.preventDefault()
+    if (!canCoordinate || !selectedWorkPermit || workPermitDraft.closureNote.trim().length < 8 || workPermitDraft.closureEvidence.trim().length < 3) {
+      setError('Retain a completion note and closeout evidence reference before closing this permit.')
+      return
+    }
+    if (navigator.onLine === false) {
+      setError('Reconnect before closing the permit so closeout evidence is retained in the ledger.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedWorkPermit.jobId)}/work-permits/${encodeURIComponent(selectedWorkPermit.id)}/close`, {
+        method: 'POST',
+        body: JSON.stringify({
+          entryKey: createFieldEvidenceDraftId(),
+          note: workPermitDraft.closureNote.trim(),
+          evidenceReference: workPermitDraft.closureEvidence.trim(),
+        }),
+      })
+      retainWorkPermit(result.permit)
+      setWorkPermitDraft((current) => ({ ...current, closureNote: '', closureEvidence: '' }))
+      notify(result.replayed ? 'This permit closure was already retained.' : 'Permit closed with retained closeout evidence.')
+      await refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -14893,6 +15144,228 @@ function App() {
                     </form>
                   ) : null}
                   <p className="attendance-policy">Acknowledgements prove only the retained briefing event. They do not certify legal compliance, worker competence, or unchanged site conditions.</p>
+                </section>
+                <section className="work-permit-control" data-testid="work-permit-control">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Work permits</h2>
+                      <p>Approved hazards, controls, validity, and assigned-worker acceptance</p>
+                    </div>
+                    <div className="work-permit-summary" aria-label="Work permit summary">
+                      <span className="tag">{workPermits.filter((permit) => permit.status === 'active').length} active</span>
+                      {workPermits.some((permit) => permit.status === 'active' && permit.attendanceSummary?.expected > 0) ? <span className="tag tag-amber">Crew action</span> : null}
+                      {workPermits.some((permit) => permit.status === 'suspended') ? <span className="tag tag-red">Stop work</span> : null}
+                    </div>
+                  </div>
+                  <div className="work-permit-selector">
+                    <label>
+                      Job
+                      <select required value={workPermitDraft.jobId} onChange={(event) => selectWorkPermitJob(event.target.value)}>
+                        <option value="">Select an assigned job</option>
+                        {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      Permit
+                      <select
+                        value={workPermitDraft.permitId}
+                        disabled={!workPermitDraft.jobId || !selectedJobWorkPermits.length}
+                        onChange={(event) => setWorkPermitDraft({
+                          ...workPermitDraft,
+                          permitId: event.target.value,
+                          acknowledgementEvidence: '',
+                          acknowledged: false,
+                          suspensionReason: '',
+                          suspensionEvidence: '',
+                          closureNote: '',
+                          closureEvidence: '',
+                        })}
+                      >
+                        <option value="">{selectedJobWorkPermits.length ? 'Select a permit' : 'No retained permit'}</option>
+                        {selectedJobWorkPermits.map((permit) => (
+                          <option key={permit.id} value={permit.id}>{permit.title} / {formatStatus(permit.effectiveStatus || permit.status)}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  {selectedWorkPermit ? (
+                    <div className="work-permit-detail" aria-live="polite">
+                      <div className="work-permit-context">
+                        <div>
+                          <strong>{selectedWorkPermit.title}</strong>
+                          <small>{formatStatus(selectedWorkPermit.permitType)} / {selectedWorkPermit.location || 'Jobsite'} / {selectedWorkPermit.holder || 'Project team'}</small>
+                        </div>
+                        <div className="work-permit-state">
+                          {selectedWorkPermit.readyForWork ? <span className="tag tag-green"><Check size={13} /> Ready</span> : null}
+                          <span className={`status status-${selectedWorkPermit.status}`}>{formatStatus(selectedWorkPermit.effectiveStatus || selectedWorkPermit.status)}</span>
+                        </div>
+                      </div>
+                      <div className="work-permit-validity">
+                        <span><strong>Valid from</strong>{formatDateTime(selectedWorkPermit.validFrom)}</span>
+                        <span><strong>Expires</strong>{formatDateTime(selectedWorkPermit.expiresAt)}</span>
+                        <span><strong>Source</strong>{selectedWorkPermit.evidenceReference || 'Not retained'}</span>
+                      </div>
+                      <div className="work-permit-definition">
+                        <div>
+                          <strong>Hazards</strong>
+                          <ul>{(selectedWorkPermit.hazards || []).map((hazard) => <li key={hazard}>{hazard}</li>)}</ul>
+                        </div>
+                        <div>
+                          <strong>Controls</strong>
+                          <ul>{(selectedWorkPermit.controls || []).map((control) => <li key={control}>{control}</li>)}</ul>
+                        </div>
+                        {selectedWorkPermit.conditions?.length ? (
+                          <div>
+                            <strong>Conditions</strong>
+                            <ul>{selectedWorkPermit.conditions.map((condition) => <li key={condition}>{condition}</li>)}</ul>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="safety-attendee-list" aria-label="Permit crew acknowledgements">
+                        {(selectedWorkPermit.attendees || []).map((attendee) => (
+                          <div className="safety-attendee-row" key={attendee.id}>
+                            <span className={`attendance-presence ${attendee.status === 'acknowledged' ? 'attendance-present' : ''}`} aria-hidden="true" />
+                            <div>
+                              <strong>{attendee.attendeeName}</strong>
+                              <small>{attendee.company || 'Assigned crew'}{attendee.acknowledgedAt ? ` / ${formatDateTime(attendee.acknowledgedAt)}` : ''}</small>
+                            </div>
+                            <span className={`status status-${attendee.status}`}>{formatStatus(attendee.status)}</span>
+                          </div>
+                        ))}
+                        {!selectedWorkPermit.attendees?.length ? <div className="attendance-empty"><Users size={20} /><span>No assigned permit worker is retained.</span></div> : null}
+                      </div>
+                      {selectedWorkPermit.blockers?.length ? (
+                        <div className="work-permit-blockers" role="status">
+                          <TriangleAlert size={17} />
+                          <ul>{selectedWorkPermit.blockers.map((blocker) => <li key={blocker.type}>{blocker.message}</li>)}</ul>
+                        </div>
+                      ) : null}
+                      {fieldScoped && selectedWorkPermit.status === 'active' ? (
+                        <form className="work-permit-acknowledgement" onSubmit={acknowledgeWorkPermit}>
+                          <label>
+                            Evidence reference
+                            <input
+                              required
+                              minLength="3"
+                              maxLength="240"
+                              value={workPermitDraft.acknowledgementEvidence}
+                              onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, acknowledgementEvidence: event.target.value })}
+                              placeholder="Device, badge, signature, or retained field record"
+                            />
+                          </label>
+                          <label className="checkbox-label">
+                            <input
+                              type="checkbox"
+                              checked={workPermitDraft.acknowledged}
+                              onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, acknowledged: event.target.checked })}
+                            />
+                            I reviewed this permit, understand the hazards and controls, and will stop work if conditions change.
+                          </label>
+                          <button
+                            className="primary-button"
+                            disabled={submitting || selectedWorkPermit.attendees?.[0]?.status === 'acknowledged' || selectedWorkPermit.notStarted || selectedWorkPermit.expired}
+                          >
+                            <ShieldCheck size={16} />
+                            {selectedWorkPermit.attendees?.[0]?.status === 'acknowledged'
+                              ? 'Acknowledged'
+                              : navigator.onLine === false ? 'Save acknowledgement offline' : 'Acknowledge permit'}
+                          </button>
+                        </form>
+                      ) : null}
+                      {canCoordinate && ['active', 'suspended'].includes(selectedWorkPermit.status) ? (
+                        <div className="work-permit-actions">
+                          {selectedWorkPermit.status === 'active' ? (
+                            <form onSubmit={suspendWorkPermit}>
+                              <div className="work-permit-action-heading">
+                                <strong>Suspend permit</strong>
+                                <span>Stops reliance on this permit immediately.</span>
+                              </div>
+                              <label>
+                                Stop-work reason
+                                <input required minLength="8" maxLength="500" value={workPermitDraft.suspensionReason} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, suspensionReason: event.target.value })} />
+                              </label>
+                              <label>
+                                Evidence reference
+                                <input required minLength="3" maxLength="240" value={workPermitDraft.suspensionEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, suspensionEvidence: event.target.value })} />
+                              </label>
+                              <button className="secondary-button danger-button" disabled={submitting}><Ban size={15} /> Suspend</button>
+                            </form>
+                          ) : null}
+                          <form onSubmit={closeWorkPermit}>
+                            <div className="work-permit-action-heading">
+                              <strong>Close permit</strong>
+                              <span>Retains completion and hand-back evidence.</span>
+                            </div>
+                            <label>
+                              Completion note
+                              <input required minLength="8" maxLength="500" value={workPermitDraft.closureNote} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, closureNote: event.target.value })} />
+                            </label>
+                            <label>
+                              Closeout evidence
+                              <input required minLength="3" maxLength="240" value={workPermitDraft.closureEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, closureEvidence: event.target.value })} />
+                            </label>
+                            <button className="secondary-button" disabled={submitting}><Check size={15} /> Close permit</button>
+                          </form>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : workPermitDraft.jobId ? (
+                    <div className="attendance-empty"><LockKeyhole size={20} /><span>No governed work permit is retained for this job.</span></div>
+                  ) : null}
+                  {canCoordinate ? (
+                    <form className="work-permit-create" onSubmit={createWorkPermit}>
+                      <div className="work-permit-create-heading">
+                        <strong>Request permit activation</strong>
+                        <span>Current assigned crew are frozen into the approval snapshot.</span>
+                      </div>
+                      <label>
+                        Permit type
+                        <select value={workPermitDraft.permitType} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, permitType: event.target.value })}>
+                          <option value="general_work">General work</option>
+                          <option value="hot_work">Hot work</option>
+                          <option value="confined_space">Confined space</option>
+                          <option value="electrical_isolation">Electrical isolation</option>
+                          <option value="excavation">Excavation</option>
+                          <option value="lifting">Lifting</option>
+                          <option value="work_at_height">Work at height</option>
+                        </select>
+                      </label>
+                      <label>
+                        Title
+                        <input required minLength="3" maxLength="240" value={workPermitDraft.title} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, title: event.target.value })} />
+                      </label>
+                      <label>
+                        Location
+                        <input maxLength="240" value={workPermitDraft.location} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, location: event.target.value })} />
+                      </label>
+                      <label>
+                        Valid from
+                        <input required type="datetime-local" value={workPermitDraft.validFrom} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, validFrom: event.target.value })} />
+                      </label>
+                      <label>
+                        Expires
+                        <input required type="datetime-local" value={workPermitDraft.expiresAt} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, expiresAt: event.target.value })} />
+                      </label>
+                      <label>
+                        Source evidence
+                        <input required minLength="3" maxLength="240" value={workPermitDraft.sourceEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, sourceEvidence: event.target.value })} />
+                      </label>
+                      <label>
+                        Hazards
+                        <textarea required minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, hazards: event.target.value })} placeholder="One retained hazard per line" />
+                      </label>
+                      <label>
+                        Controls
+                        <textarea required minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, controls: event.target.value })} placeholder="One retained control per line" />
+                      </label>
+                      <label>
+                        Conditions
+                        <textarea maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, conditions: event.target.value })} placeholder="One stop or revalidation condition per line" />
+                      </label>
+                      <button className="secondary-button" disabled={submitting || !workPermitDraft.jobId}><Plus size={16} /> Request approval</button>
+                    </form>
+                  ) : null}
+                  <p className="attendance-policy">Permit readiness is derived from approval, validity, retained integrity, and every assigned worker acknowledgement. Changed conditions require stop work and a current permit.</p>
                 </section>
                 <section className="equipment-handoff-control" data-testid="field-equipment-custody">
                   <div className="panel-heading">

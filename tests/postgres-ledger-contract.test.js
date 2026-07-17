@@ -1370,7 +1370,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '041_governed_safety_briefings');
+    assert.equal(migrations.currentVersion, '042_governed_work_permits');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1451,12 +1451,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('041_governed_safety_briefings'));
+  assert.deepEqual(versions, Array(4).fill('042_governed_work_permits'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 41);
+    assert.equal(Number(migrationCount.count), 42);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1988,7 +1988,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '041_governed_safety_briefings');
+    assert.equal(ledger.migrationStatus().currentVersion, '042_governed_work_permits');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2256,6 +2256,92 @@ test('PostgreSQL production control parity preserves approved baselines, replay,
     assert.equal(recorded.production.summary.crewHours, 24);
     assert.equal(recorded.production.summary.performanceFactor, 0.6667);
     assert.equal(ledger.getProductionBaseline(requested.baseline.id).integrityValid, true);
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL work permit parity preserves source-current approval, worker acknowledgement, and autonomous review', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const marker = Date.now();
+    const job = ledger.createIntake({
+      clientName: `Hosted permit client ${marker}`,
+      title: `Hosted work permit ${marker}`,
+      status: 'in_progress',
+      riskLevel: 'high',
+      assignAutomatically: false
+    }, { actor: 'postgres_permit_test' });
+    const worker = ledger.upsertWorker({
+      id: `postgres-permit-worker-${marker}`,
+      name: `Hosted permit worker ${marker}`,
+      role: 'Site operative',
+      status: 'available'
+    }, { actor: 'postgres_permit_test' });
+    ledger.addAssignment(job.id, {
+      workerId: worker.id,
+      workerName: worker.name,
+      role: worker.role,
+      status: 'assigned'
+    }, { actor: 'postgres_permit_test' });
+    const payload = {
+      entryKey: `postgres-work-permit-${marker}`,
+      permitType: 'electrical_isolation',
+      title: 'Hosted electrical isolation permit',
+      location: 'Hosted switch room',
+      validFrom: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      hazards: ['Stored electrical energy', 'Unexpected re-energization'],
+      controls: ['Isolation locked and tagged', 'Prove dead before work'],
+      conditions: ['Suspend if the isolation boundary changes'],
+      evidenceReference: `hosted-isolation-plan:${marker}`
+    };
+    const created = ledger.createWorkPermit(job.id, payload, { actor: 'postgres_permit_test' });
+    assert.equal(created.permit.status, 'pending_approval');
+    assert.equal(ledger.createWorkPermit(job.id, payload).replayed, true);
+    ledger.resolveApproval(created.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_permit_approver',
+      reason: 'Hosted permit hazards, controls, source evidence, and assigned worker verified.'
+    });
+    const action = ledger.nextActions().find(candidate => (
+      candidate.type === 'review_work_permit_readiness' && candidate.permitId === created.permit.id
+    ));
+    assert.ok(action);
+    assert.equal(action.outstandingCount, 1);
+    const autonomous = ledger.runAutonomousCycle({
+      actionTypes: ['review_work_permit_readiness'],
+      jobIds: [job.id]
+    });
+    assert.equal(autonomous.applied.length, 1);
+    assert.equal(autonomous.applied[0].externalCommitments, 0);
+    assert.equal(autonomous.applied[0].acknowledgementsInferred, false);
+
+    const acknowledgement = {
+      entryKey: `postgres-permit-ack-${marker}`,
+      workerId: worker.id,
+      acknowledged: true,
+      evidenceReference: `hosted-worker-attestation:${marker}`
+    };
+    const acknowledged = ledger.acknowledgeWorkPermit(job.id, created.permit.id, acknowledgement, { actor: 'postgres_field_worker' });
+    assert.equal(acknowledged.permit.readyForWork, true);
+    assert.equal(ledger.acknowledgeWorkPermit(job.id, created.permit.id, acknowledgement).replayed, true);
+    const suspended = ledger.suspendWorkPermit(job.id, created.permit.id, {
+      entryKey: `postgres-permit-suspend-${marker}`,
+      reason: 'Isolation boundary changed during hosted test.',
+      evidenceReference: `hosted-stop-work:${marker}`
+    }, { actor: 'postgres_site_supervisor' });
+    assert.equal(suspended.stopWorkImmediate, true);
+    assert.equal(suspended.permit.status, 'suspended');
+    const closed = ledger.closeWorkPermit(job.id, created.permit.id, {
+      entryKey: `postgres-permit-close-${marker}`,
+      note: 'Hosted work ended and the isolation was formally handed back.',
+      evidenceReference: `hosted-permit-closeout:${marker}`
+    }, { actor: 'postgres_site_supervisor' });
+    assert.equal(closed.permit.status, 'closed');
+    assert.equal(closed.permit.definitionIntegrityValid, true);
+    assert.equal(ledger.migrationStatus().currentVersion, '042_governed_work_permits');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();

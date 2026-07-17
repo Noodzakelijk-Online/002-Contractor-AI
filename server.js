@@ -1197,6 +1197,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
+        || pathName === '/api/ledger/work-permits'
+        || /^\/api\/ledger\/jobs\/[^/]+\/work-permits$/.test(pathName)
         || pathName === '/api/ledger/safety-briefings'
         || /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings$/.test(pathName)
         || pathName === '/api/ledger/attendance'
@@ -1212,6 +1214,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/work-permits\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
@@ -1513,6 +1516,48 @@ function safetyMeetingForOperator(req, meeting) {
       outstanding: attendeeRecords.filter(attendee => attendee.status === 'expected').length,
       readyForSignoff: false
     },
+    fieldScoped: true
+  });
+}
+
+function workPermitAcknowledgementPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field permit acknowledgement requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    acknowledgedBy: identity.workerName,
+    acknowledged_by: identity.workerName,
+    source: 'field_work_permit_acknowledgement'
+  };
+}
+
+function workPermitForOperator(req, permit) {
+  if (req.operator?.role !== 'field_worker') return permit;
+  const workerId = req.operator.scope?.workerId || null;
+  const attendees = workerId
+    ? (permit.attendees || []).filter(attendee => String(attendee.workerId || '') === String(workerId))
+    : [];
+  const ownAcknowledgement = attendees[0] || null;
+  return projectFieldRecord({
+    ...permit,
+    attendees,
+    attendanceSummary: {
+      total: attendees.length,
+      expected: attendees.filter(attendee => attendee.status === 'expected').length,
+      acknowledged: attendees.filter(attendee => attendee.status === 'acknowledged').length,
+      integrityFailures: attendees.filter(attendee => attendee.status === 'acknowledged' && attendee.integrityValid !== true).length
+    },
+    readyForWork: permit.readyForWork === true
+      && ownAcknowledgement?.status === 'acknowledged'
+      && ownAcknowledgement.integrityValid === true,
     fieldScoped: true
   });
 }
@@ -2701,6 +2746,97 @@ app.post('/api/ledger/jobs/:id/permits', (req, res) => {
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
+});
+
+app.get('/api/ledger/work-permits', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}) };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    const permits = operatingLedger.listWorkPermits(filters)
+      .filter(permit => fieldWorkerCanAccessJob(req, permit.jobId))
+      .map(permit => workPermitForOperator(req, permit));
+    return {
+      success: true,
+      workPermits: permits,
+      policy: {
+        approvalRequired: true,
+        sourceCurrentApproval: true,
+        workerAcknowledgementRequired: true,
+        immediateSafetySuspension: true,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/work-permits', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}), jobId: req.params.id };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    return {
+      success: true,
+      workPermits: operatingLedger.listWorkPermits(filters).map(permit => workPermitForOperator(req, permit))
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/work-permits', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createWorkPermit(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      workPermit: result.permit,
+      approval: result.approval,
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/work-permits/:permitId/acknowledgments', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.acknowledgeWorkPermit(
+      req.params.id,
+      req.params.permitId,
+      workPermitAcknowledgementPayloadForOperator(req, req.body || {}),
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    );
+    return {
+      success: true,
+      workPermit: workPermitForOperator(req, result.permit),
+      attendee: recordForOperator(req, result.attendee),
+      replayed: result.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/work-permits/:permitId/suspend', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.suspendWorkPermit(req.params.id, req.params.permitId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/work-permits/:permitId/close', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.closeWorkPermit(req.params.id, req.params.permitId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }));
 });
 
 app.get('/api/ledger/inspection-templates', (req, res) => {
@@ -5921,6 +6057,13 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
         safetyBriefingSignoff: 'source_current_approval_gated',
         safetyBriefingAttendanceInference: false,
+        workPermitEntryKey: 'durable',
+        workPermitActivation: 'source_current_approval_gated',
+        workPermitAcknowledgement: 'worker_scoped_exact_replay',
+        workPermitSuspension: 'immediate_evidence_retained',
+        workPermitClosure: 'evidence_retained',
+        workPermitActivationInference: false,
+        workPermitAcknowledgementInference: false,
         materialReceiptEntryKey: 'durable',
         expenseReceiptEntryKey: 'durable',
         expenseReceiptDuplicateControl: 'vendor_reference_date_amount_currency',
