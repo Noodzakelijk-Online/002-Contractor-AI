@@ -192,6 +192,7 @@
 .work-permit-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .work-permit-selector { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 14px; padding: 16px 22px; border-top: 1px solid #e7eeeb; }
 .work-permit-selector label,.work-permit-acknowledgement label,.work-permit-actions label,.work-permit-create label { display: grid; gap: 6px; min-width: 0; color: #40564e; font-size: 12px; font-weight: 700; }
+.work-permit-field { display: grid; gap: 6px; min-width: 0; }
 .work-permit-selector > *,.work-permit-acknowledgement > *,.work-permit-actions > *,.work-permit-create > * { min-width: 0; max-width: 100%; }
 .work-permit-selector input:not([type="checkbox"]),.work-permit-selector select,.work-permit-selector textarea,.work-permit-acknowledgement input:not([type="checkbox"]),.work-permit-acknowledgement select,.work-permit-acknowledgement textarea,.work-permit-actions input:not([type="checkbox"]),.work-permit-actions select,.work-permit-actions textarea,.work-permit-create input:not([type="checkbox"]),.work-permit-create select,.work-permit-create textarea { width: 100%; min-width: 0; max-width: 100%; min-height: 38px; padding: 9px 10px; color: #20312b; background: #fff; border: 1px solid #cfded8; border-radius: 5px; outline: none; }
 .work-permit-create textarea { min-height: 88px; resize: vertical; }

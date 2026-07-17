@@ -15318,9 +15318,9 @@ function App() {
                         <strong>Request permit activation</strong>
                         <span>Current assigned crew are frozen into the approval snapshot.</span>
                       </div>
-                      <label>
-                        Permit type
-                        <select value={workPermitDraft.permitType} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, permitType: event.target.value })}>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-type">Permit type</label>
+                        <select id="work-permit-type" value={workPermitDraft.permitType} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, permitType: event.target.value })}>
                           <option value="general_work">General work</option>
                           <option value="hot_work">Hot work</option>
                           <option value="confined_space">Confined space</option>
@@ -15329,39 +15329,39 @@ function App() {
                           <option value="lifting">Lifting</option>
                           <option value="work_at_height">Work at height</option>
                         </select>
-                      </label>
-                      <label>
-                        Title
-                        <input required minLength="3" maxLength="240" value={workPermitDraft.title} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, title: event.target.value })} />
-                      </label>
-                      <label>
-                        Location
-                        <input maxLength="240" value={workPermitDraft.location} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, location: event.target.value })} />
-                      </label>
-                      <label>
-                        Valid from
-                        <input required type="datetime-local" value={workPermitDraft.validFrom} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, validFrom: event.target.value })} />
-                      </label>
-                      <label>
-                        Expires
-                        <input required type="datetime-local" value={workPermitDraft.expiresAt} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, expiresAt: event.target.value })} />
-                      </label>
-                      <label>
-                        Source evidence
-                        <input required minLength="3" maxLength="240" value={workPermitDraft.sourceEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, sourceEvidence: event.target.value })} />
-                      </label>
-                      <label>
-                        Hazards
-                        <textarea required minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, hazards: event.target.value })} placeholder="One retained hazard per line" />
-                      </label>
-                      <label>
-                        Controls
-                        <textarea required minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, controls: event.target.value })} placeholder="One retained control per line" />
-                      </label>
-                      <label>
-                        Conditions
-                        <textarea maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, conditions: event.target.value })} placeholder="One stop or revalidation condition per line" />
-                      </label>
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-title">Title</label>
+                        <input id="work-permit-title" required minLength="3" maxLength="240" value={workPermitDraft.title} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, title: event.target.value })} />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-location">Location</label>
+                        <input id="work-permit-location" maxLength="240" value={workPermitDraft.location} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, location: event.target.value })} />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-valid-from">Valid from</label>
+                        <input id="work-permit-valid-from" required type="datetime-local" value={workPermitDraft.validFrom} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, validFrom: event.target.value })} />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-expires-at">Expires</label>
+                        <input id="work-permit-expires-at" required type="datetime-local" value={workPermitDraft.expiresAt} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, expiresAt: event.target.value })} />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-source-evidence">Source evidence</label>
+                        <input id="work-permit-source-evidence" required minLength="3" maxLength="240" value={workPermitDraft.sourceEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, sourceEvidence: event.target.value })} />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-hazards">Hazards</label>
+                        <textarea id="work-permit-hazards" required minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, hazards: event.target.value })} placeholder="One retained hazard per line" />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-controls">Controls</label>
+                        <textarea id="work-permit-controls" required minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, controls: event.target.value })} placeholder="One retained control per line" />
+                      </div>
+                      <div className="work-permit-field">
+                        <label htmlFor="work-permit-conditions">Conditions</label>
+                        <textarea id="work-permit-conditions" maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, conditions: event.target.value })} placeholder="One stop or revalidation condition per line" />
+                      </div>
                       <button className="secondary-button" disabled={submitting || !workPermitDraft.jobId}><Plus size={16} /> Request approval</button>
                     </form>
                   ) : null}

@@ -51,15 +51,15 @@ test('permit approval, crew acceptance, stop work, closeout, and mobile layout s
   await page.goto('/');
   let panel = await openPermit(page, job.id);
   const permitTitle = `Distribution isolation permit ${suffix}`;
-  await panel.getByLabel('Permit type').selectOption('electrical_isolation');
-  await panel.getByLabel('Title').fill(permitTitle);
-  await panel.getByLabel('Location').fill('Main plant room');
-  await panel.getByLabel('Valid from').fill(new Date(Date.now() - 5 * 60 * 1000).toISOString().slice(0, 16));
-  await panel.getByLabel('Expires').fill(new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString().slice(0, 16));
-  await panel.getByLabel('Source evidence').fill(`browser-risk-assessment:${suffix}`);
-  await panel.getByLabel('Hazards').fill('Stored electrical energy\nUnexpected re-energization');
-  await panel.getByLabel('Controls').fill('Lock and tag isolation\nProve dead before work');
-  await panel.getByLabel('Conditions').fill('Suspend if the isolation boundary changes');
+  await panel.getByLabel('Permit type', { exact: true }).selectOption('electrical_isolation');
+  await panel.getByLabel('Title', { exact: true }).fill(permitTitle);
+  await panel.getByLabel('Location', { exact: true }).fill('Main plant room');
+  await panel.getByLabel('Valid from', { exact: true }).fill(new Date(Date.now() - 5 * 60 * 1000).toISOString().slice(0, 16));
+  await panel.getByLabel('Expires', { exact: true }).fill(new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString().slice(0, 16));
+  await panel.getByLabel('Source evidence', { exact: true }).fill(`browser-risk-assessment:${suffix}`);
+  await panel.getByLabel('Hazards', { exact: true }).fill('Stored electrical energy\nUnexpected re-energization');
+  await panel.getByLabel('Controls', { exact: true }).fill('Lock and tag isolation\nProve dead before work');
+  await panel.getByLabel('Conditions', { exact: true }).fill('Suspend if the isolation boundary changes');
   await panel.getByRole('button', { name: 'Request approval' }).click();
   await expect(page.getByText('Permit definition and assigned crew were frozen for approval.')).toBeVisible();
 
@@ -109,15 +109,15 @@ test('permit approval, crew acceptance, stop work, closeout, and mobile layout s
   expect(geometry.panelWidth).toBeLessThanOrEqual(geometry.panelClientWidth + 1);
 
   const suspendForm = panel.locator('.work-permit-actions form').filter({ hasText: 'Suspend permit' });
-  await suspendForm.getByLabel('Stop-work reason').fill('Isolation boundary changed during the planned work.');
-  await suspendForm.getByLabel('Evidence reference').fill(`browser-stop-work:${suffix}`);
+  await suspendForm.getByLabel('Stop-work reason', { exact: true }).fill('Isolation boundary changed during the planned work.');
+  await suspendForm.getByLabel('Evidence reference', { exact: true }).fill(`browser-stop-work:${suffix}`);
   await suspendForm.getByRole('button', { name: 'Suspend' }).click();
   await expect(page.getByText('Permit suspended. Work must remain stopped until a new approved permit is issued.')).toBeVisible();
   await expect(panel.locator('.work-permit-state .status')).toHaveText('suspended');
 
   const closeForm = panel.locator('.work-permit-actions form').filter({ hasText: 'Close permit' });
-  await closeForm.getByLabel('Completion note').fill('Isolation work ended and the plant room was handed back.');
-  await closeForm.getByLabel('Closeout evidence').fill(`browser-handback:${suffix}`);
+  await closeForm.getByLabel('Completion note', { exact: true }).fill('Isolation work ended and the plant room was handed back.');
+  await closeForm.getByLabel('Closeout evidence', { exact: true }).fill(`browser-handback:${suffix}`);
   await closeForm.getByRole('button', { name: 'Close permit' }).click();
   await expect(page.getByText('Permit closed with retained closeout evidence.')).toBeVisible();
   await expect(panel.locator('.work-permit-state .status')).toHaveText('closed');
