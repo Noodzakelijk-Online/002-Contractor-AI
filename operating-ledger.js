@@ -44097,6 +44097,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (permitsWithoutApproval) issues.push({ severity: 'warning', message: `${permitsWithoutApproval} active permit/compliance record(s) have no approval gate.` });
     for (const row of this.db.prepare('SELECT * FROM permit_records WHERE source_hash IS NOT NULL ORDER BY created_at').all()) {
       const permit = this.getWorkPermit(row.id, { jobId: row.job_id });
+      const job = this.db.prepare('SELECT status FROM jobs WHERE id = ?').get(row.job_id);
+      const jobOperational = Boolean(job && this.jobAllowsOperations(job.status));
       if (permit.definitionIntegrityValid !== true) {
         issues.push({ severity: 'error', message: `Work permit ${permit.id} failed retained definition snapshot verification.` });
       }
@@ -44110,10 +44112,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (!approval) {
         issues.push({ severity: 'error', message: `Work permit ${permit.id} lacks its matching ${expectedApprovalStatus} activation decision.` });
       }
-      if (permit.status === 'active' && permit.expired) {
+      if (jobOperational && permit.status === 'active' && permit.expired) {
         issues.push({ severity: 'warning', message: `Work permit ${permit.id} is still active after its retained expiry time.` });
       }
-      if (permit.status === 'active' && permit.attendanceSummary.expected > 0) {
+      if (jobOperational && permit.status === 'active' && permit.attendanceSummary.expected > 0) {
         issues.push({ severity: 'warning', message: `Work permit ${permit.id} has ${permit.attendanceSummary.expected} outstanding worker acknowledgement(s).` });
       }
     }

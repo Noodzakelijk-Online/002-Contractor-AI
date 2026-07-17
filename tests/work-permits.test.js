@@ -153,6 +153,35 @@ test('work permits require approval and every assigned worker acknowledgement be
   assert.equal(diagnostics.counts.workPermitAttendees, 2);
 });
 
+test('archived jobs retain permit integrity without operational expiry warnings', async t => {
+  const { ledger, job } = fixture(t, 'archived-diagnostics');
+  const created = ledger.createWorkPermit(job.id, {
+    ...permitPayload('archived-diagnostics-001'),
+    validFrom: new Date(Date.now() - 60 * 1000).toISOString(),
+    expiresAt: new Date(Date.now() + 500).toISOString()
+  }, { actor: 'office_operator' });
+
+  ledger.resolveApproval(created.approval.id, {
+    status: 'approved',
+    resolvedBy: 'permit_approver',
+    reason: 'Retained expired permit approved for archived diagnostics coverage.'
+  });
+  await new Promise(resolve => setTimeout(resolve, 600));
+  const operationalIssues = ledger.diagnose().issues;
+  assert.equal(operationalIssues.some(issue => issue.message.includes('retained expiry time')), true);
+  assert.equal(operationalIssues.some(issue => issue.message.includes('outstanding worker acknowledgement')), true);
+
+  ledger.updateJob(job.id, {
+    status: 'archived',
+    phase: 'archived',
+    data: { archiveReason: 'Regression fixture lifecycle complete.' }
+  }, { actor: 'archive_test' });
+
+  const archivedDiagnostics = ledger.diagnose();
+  assert.equal(archivedDiagnostics.valid, true, JSON.stringify(archivedDiagnostics.issues));
+  assert.equal(archivedDiagnostics.issues.some(issue => issue.message.includes(created.permit.id)), false);
+});
+
 test('work permit approval fails atomically when retained hazards are changed', t => {
   const { ledger, job } = fixture(t, 'tamper');
   const created = ledger.createWorkPermit(job.id, permitPayload('tamper-001'));
