@@ -238,6 +238,10 @@ const IMMUTABLE_ISSUE_PACKAGE_TYPES = new Set([
   'handover_issue_package'
 ]);
 
+const IMMUTABLE_SOURCE_JSON_COLUMNS = new Map([
+  ['sds_sheets', new Set(['data_json', 'snapshot_json'])]
+]);
+
 function rewriteRowReferences(table, row, columns, replacements) {
   const rewritten = { ...row };
   if (typeof rewritten.storage_ref === 'string' && replacements.has(rewritten.storage_ref)) {
@@ -245,7 +249,8 @@ function rewriteRowReferences(table, row, columns, replacements) {
   }
   const immutablePayload = table === 'documents' && IMMUTABLE_ISSUE_PACKAGE_TYPES.has(String(rewritten.type || '').toLowerCase());
   if (immutablePayload) return rewritten;
-  for (const column of columns.filter(name => name.endsWith('_json'))) {
+  const immutableColumns = IMMUTABLE_SOURCE_JSON_COLUMNS.get(table) || new Set();
+  for (const column of columns.filter(name => name.endsWith('_json') && !immutableColumns.has(name))) {
     if (typeof rewritten[column] !== 'string' || !rewritten[column].trim()) continue;
     try {
       rewritten[column] = JSON.stringify(replaceRetainedReferences(JSON.parse(rewritten[column]), replacements));
@@ -680,6 +685,7 @@ module.exports = {
   migrateLocalBackupToHosted,
   orderedSelfReferentialRows,
   orderedSourceTables,
+  rewriteRowReferences,
   tableDigest,
   verifyBackupDirectory
 };

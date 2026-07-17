@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const test = require('node:test');
@@ -1370,7 +1371,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '045_governed_pre_task_plans');
+    assert.equal(migrations.currentVersion, '046_governed_sds_revision_control');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1451,12 +1452,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('045_governed_pre_task_plans'));
+  assert.deepEqual(versions, Array(4).fill('046_governed_sds_revision_control'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 45);
+    assert.equal(Number(migrationCount.count), 46);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1988,7 +1989,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2341,7 +2342,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2449,7 +2450,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2548,7 +2549,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2635,8 +2636,127 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '045_governed_pre_task_plans');
+    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
   } finally {
     ledger?.close();
+  }
+});
+
+test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersession, and restart integrity', { skip: !connectionString }, () => {
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let jobId;
+  let firstId;
+  let secondId;
+  const addPdf = suffix => {
+    const bytes = Buffer.from(`%PDF-1.7\nHosted SDS ${marker} ${suffix}\n%%EOF`);
+    return ledger.addDocument(jobId, {
+      type: 'sds_pdf',
+      title: `Hosted manufacturer SDS ${suffix}`,
+      filename: `hosted-sds-${marker}-${suffix}.pdf`,
+      mimeType: 'application/pdf',
+      size: bytes.length,
+      storageRef: `s3://postgres-contract/${marker}-${suffix}.pdf`,
+      status: 'stored',
+      analysis: { upload: { sha256: crypto.createHash('sha256').update(bytes).digest('hex') } }
+    }, { actor: 'postgres_sds_test' });
+  };
+  const payload = (documentId, entryKey, overrides = {}) => ({
+    entryKey,
+    material: `Hosted chemical coating ${marker}`,
+    manufacturer: `Hosted Coatings Europe ${marker}`,
+    productCode: `PG-SDS-${marker}`,
+    language: 'nl',
+    issuedOn: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+    expiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString(),
+    documentId,
+    hazardClasses: ['H315 - Causes skin irritation'],
+    requiredPpe: ['Chemical-resistant gloves', 'Safety goggles'],
+    firstAidMeasures: 'Rinse exposed skin or eyes and obtain medical advice when symptoms persist.',
+    fireMeasures: 'Use foam, dry powder, or carbon dioxide and control contaminated run-off.',
+    handlingStorage: 'Keep sealed in a ventilated area away from heat and incompatible materials.',
+    spillResponse: 'Ventilate, contain with inert absorbent, and prevent entry into drains.',
+    disposal: 'Use an authorized waste contractor for product and contaminated absorbent.',
+    emergencyContact: 'Hosted Coatings emergency line +31 20 555 0199.',
+    revisionReason: 'Hosted manufacturer source and operational controls verified.',
+    ...overrides
+  });
+  const approve = approvalId => ledger.resolveApproval(approvalId, {
+    status: 'approved',
+    resolvedBy: 'postgres_sds_approver',
+    reason: 'Hosted manufacturer PDF, product identity, dates, hazards, PPE, and emergency controls verified.'
+  });
+
+  try {
+    const job = ledger.createIntake({
+      title: `PostgreSQL governed SDS ${marker}`,
+      client: { name: `Hosted SDS client ${marker}` },
+      status: 'in_progress',
+      riskLevel: 'high',
+      assignAutomatically: false
+    }, { actor: 'postgres_sds_test' });
+    jobId = job.id;
+
+    const firstPayload = payload(addPdf('r1').id, `postgres-sds-r1-${marker}`);
+    const first = ledger.createSdsRevision(jobId, firstPayload, { actor: 'postgres_sds_test' });
+    firstId = first.id;
+    assert.equal(first.integrityValid, true);
+    assert.equal(first.revisionNumber, 1);
+    assert.equal(ledger.createSdsRevision(jobId, firstPayload).replayed, true);
+    approve(first.approval.id);
+    assert.equal(ledger.getSdsSheet(firstId).current, true);
+    assert.equal(ledger.createSdsRevision(jobId, firstPayload).replayed, true);
+
+    const secondPayload = payload(addPdf('r2').id, `postgres-sds-r2-${marker}`, {
+      supersedesSdsId: firstId,
+      revisionReason: 'Hosted manufacturer replacement adds updated spill-response controls.',
+      spillResponse: 'Evacuate, ventilate, contain with inert absorbent, and protect all drains.'
+    });
+    const second = ledger.createSdsRevision(jobId, secondPayload, { actor: 'postgres_sds_test' });
+    secondId = second.id;
+    assert.equal(second.revisionNumber, 2);
+    assert.equal(ledger.createSdsRevision(jobId, secondPayload).replayed, true);
+    approve(second.approval.id);
+    assert.equal(ledger.getSdsSheet(firstId).status, 'superseded');
+    assert.equal(ledger.getSdsSheet(secondId).current, true);
+    assert.equal(ledger.listSdsSheets({ jobId, currentOnly: true }).length, 1);
+    assert.equal(ledger.createSdsRevision(jobId, secondPayload).replayed, true);
+
+    assert.throws(() => ledger.db.prepare(`
+      INSERT INTO sds_sheets (
+        id, job_id, material, supplier, status, expires_at, data_json, created_at, updated_at,
+        product_key, revision_number, manufacturer, language
+      ) VALUES (?, ?, ?, ?, 'current', ?, '{}', ?, ?, ?, 99, ?, 'nl')
+    `).run(
+      `sds-duplicate-${marker}`, jobId, second.material, second.manufacturer,
+      new Date(Date.now() + 365 * 86_400_000).toISOString(), new Date().toISOString(), new Date().toISOString(),
+      second.productKey, second.manufacturer
+    ), /idx_sds_one_current_product|duplicate key|unique constraint/i);
+
+    const sdsIndexes = ledger.db.prepare(`
+      SELECT COUNT(*) AS count FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname IN (
+        'idx_sds_job_entry_key', 'idx_sds_job_product_revision', 'idx_sds_supersedes',
+        'idx_sds_one_current_product', 'idx_sds_job_status_expiry', 'idx_sds_document'
+      )
+    `).get();
+    assert.equal(Number(sdsIndexes.count), 6);
+    assert.equal(ledger.migrationStatus().currentVersion, '046_governed_sds_revision_control');
+    assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
+  } finally {
+    ledger.close();
+  }
+
+  ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    assert.equal(ledger.getSdsSheet(firstId, { jobId }).status, 'superseded');
+    const retained = ledger.getSdsSheet(secondId, { jobId });
+    assert.equal(retained.status, 'current');
+    assert.equal(retained.integrityValid, true);
+    assert.equal(retained.revisionNumber, 2);
+    assert.equal(ledger.listSdsSheets({ jobId, currentOnly: true })[0].id, secondId);
+    assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
+  } finally {
+    ledger.close();
   }
 });

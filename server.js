@@ -1203,6 +1203,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/work-permits$/.test(pathName)
         || pathName === '/api/ledger/pre-task-plans'
         || /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans$/.test(pathName)
+        || pathName === '/api/ledger/sds-sheets'
+        || /^\/api\/ledger\/jobs\/[^/]+\/sds-sheets$/.test(pathName)
         || pathName === '/api/ledger/safety-briefings'
         || /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings$/.test(pathName)
         || pathName === '/api/ledger/attendance'
@@ -1414,7 +1416,7 @@ function projectFieldJobDetail(req, detail) {
     safetyMeetings: (detail.safetyMeetings || []).map(meeting => safetyMeetingForOperator(req, meeting)),
     orientations: projectFieldRecords(detail.orientations),
     jhas: projectFieldRecords(detail.jhas),
-    sdsSheets: projectFieldRecords(detail.sdsSheets),
+    sdsSheets: projectFieldRecords((detail.sdsSheets || []).filter(sheet => sheet.current === true)),
     siteAccessLogs: projectFieldRecords(detail.siteAccessLogs),
     qualificationRequirements: projectFieldRecords(detail.qualificationRequirements),
     assignments: projectFieldRecords(detail.assignments),
@@ -3406,19 +3408,54 @@ app.post('/api/ledger/jobs/:id/orientations', (req, res) => {
 app.post('/api/ledger/jobs/:id/jhas', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    jha: operatingLedger.createJhaRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    jha: operatingLedger.createJhaRecord(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
 app.post('/api/ledger/jobs/:id/sds-sheets', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    sdsSheet: operatingLedger.createSdsSheet(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    sdsSheet: operatingLedger.createSdsSheet(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
+});
+
+app.get('/api/ledger/sds-sheets', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    sdsSheets: operatingLedger.listSdsSheets(req.query || {})
+      .filter(sheet => fieldWorkerCanAccessJob(req, sheet.jobId))
+      .filter(sheet => req.operator?.role !== 'field_worker' || sheet.current === true)
+      .map(sheet => recordForOperator(req, sheet))
+  }));
+});
+
+app.get('/api/ledger/jobs/:id/sds-sheets', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    sdsSheets: operatingLedger.listSdsSheets({ ...(req.query || {}), jobId: req.params.id })
+      .filter(sheet => req.operator?.role !== 'field_worker' || sheet.current === true)
+      .map(sheet => recordForOperator(req, sheet))
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/sds-revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const revision = operatingLedger.createSdsRevision(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      sdsSheet: revision,
+      approval: revision.approval,
+      replayed: revision.replayed === true,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/site-access', (req, res) => {
@@ -6460,6 +6497,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         preTaskPlanClosure: 'evidence_retained',
         preTaskPlanActivationInference: false,
         preTaskPlanAcknowledgementInference: false,
+        sdsRevisionEntryKey: 'durable',
+        sdsRevisionSourceIntegrity: 'product_document_snapshot_sha256',
+        sdsRevisionApproval: 'source_current_approval_gated',
+        sdsRevisionSupersession: 'atomic_single_current_product',
+        sdsRevisionAutonomy: 'internal_review_task_only',
+        sdsCurrentStatusInference: false,
         dayworkEntryKey: 'durable',
         dayworkQuantitySnapshot: 'sha256_source_bound',
         dayworkApproval: 'source_current_approval_gated',

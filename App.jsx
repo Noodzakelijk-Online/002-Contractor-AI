@@ -80,6 +80,7 @@ import './App.css'
 
 const ResourcesWorkspace = lazy(() => import('./components/ResourcesWorkspace'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
+const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -10421,6 +10422,17 @@ function App() {
                   ) : null}
                   <p className="attendance-policy">Acknowledgements prove only the retained briefing event. They do not certify legal compliance, worker competence, or unchanged site conditions.</p>
                 </section>
+                <LazyControlBoundary label="SDS register controls">
+                  <SdsRegisterControl
+                    jobs={activeJobs}
+                    fieldScoped={fieldScoped}
+                    canCoordinate={canCoordinate}
+                    apiRequest={api}
+                    notify={notify}
+                    refresh={refresh}
+                    onOpenApprovals={openApprovals}
+                  />
+                </LazyControlBoundary>
                 <LazyControlBoundary label="pre-task plan controls">
                   <PreTaskPlanControl
                     jobs={activeJobs}

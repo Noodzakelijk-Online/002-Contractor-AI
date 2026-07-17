@@ -1004,6 +1004,49 @@ const ENVIRONMENTAL_REPORT_FORMAT = 'contractor-ai-environmental-report/v1';
 const SAFETY_BRIEFING_FORMAT = 'contractor-ai-safety-briefing/v1';
 const WORK_PERMIT_FORMAT = 'contractor-ai-work-permit/v1';
 const PRE_TASK_PLAN_FORMAT = 'contractor-ai-pre-task-plan/v1';
+const SDS_REVISION_FORMAT = 'contractor-ai-sds-revision/v1';
+const SDS_CURRENT_STATUSES = new Set(['current', 'approved', 'accepted', 'active']);
+
+function sdsProductKey(material, manufacturer, productCode = '') {
+  const identity = [
+    normalizeText(manufacturer, '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(),
+    normalizeText(productCode, '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()
+      || normalizeText(material, '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()
+  ];
+  return `sds_product_${sha256Json(identity).slice(0, 32)}`;
+}
+
+function sdsRevisionSourceBasis(values = {}) {
+  const data = values.data && typeof values.data === 'object'
+    ? values.data
+    : fromJson(values.data_json, {});
+  return {
+    format: SDS_REVISION_FORMAT,
+    sdsSheetId: values.id,
+    jobId: values.jobId || values.job_id,
+    productKey: values.productKey || values.product_key,
+    revisionNumber: Number(values.revisionNumber || values.revision_number || 1),
+    supersedesSdsId: values.supersedesSdsId || values.supersedes_sds_id || null,
+    material: values.material,
+    manufacturer: values.manufacturer || data.manufacturer || values.supplier || null,
+    productCode: values.productCode || values.product_code || data.productCode || null,
+    language: values.language || data.language || 'nl',
+    issuedOn: values.issuedOn || values.issued_on || data.issuedOn || null,
+    expiresAt: values.expiresAt || values.expires_at || null,
+    documentId: values.documentId || values.document_id || null,
+    documentReference: values.documentReference || data.documentReference || data.documentRef || null,
+    documentChecksum: normalizeText(values.documentChecksum || data.documentChecksum, '') || null,
+    hazardClasses: normalizeList(values.hazardClasses || data.hazardClasses || data.hazardClass),
+    requiredPpe: normalizeList(values.requiredPpe || data.requiredPpe || data.ppe),
+    firstAidMeasures: normalizeText(values.firstAidMeasures || data.firstAidMeasures, '') || null,
+    fireMeasures: normalizeText(values.fireMeasures || data.fireMeasures, '') || null,
+    handlingStorage: normalizeText(values.handlingStorage || data.handlingStorage || data.storage, '') || null,
+    spillResponse: normalizeText(values.spillResponse || data.spillResponse, '') || null,
+    disposal: normalizeText(values.disposal || data.disposal, '') || null,
+    emergencyContact: normalizeText(values.emergencyContact || data.emergencyContact, '') || null,
+    revisionReason: normalizeText(values.revisionReason || data.revisionReason, '') || null
+  };
+}
 const SCHEDULE_HOUR_MS = 60 * 60 * 1000;
 const SCHEDULE_TASK_STATUSES = new Set(['open', 'in_progress', 'blocked']);
 
@@ -3552,6 +3595,115 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON pre_task_plan_attendees(worker_id, status, updated_at DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_pre_task_attendees_job_entry_key
           ON pre_task_plan_attendees(job_id, entry_key) WHERE entry_key IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '046_governed_sds_revision_control',
+    description: 'Retain source-bound SDS revisions with product identity, document ownership, immutable safety controls, approval-backed current status, and explicit supersession.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE sds_sheets ADD COLUMN product_key TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN revision_number INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE sds_sheets ADD COLUMN supersedes_sds_id TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN manufacturer TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN product_code TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN language TEXT NOT NULL DEFAULT 'nl';
+        ALTER TABLE sds_sheets ADD COLUMN issued_on TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN document_id TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN source_hash TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN snapshot_hash TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN snapshot_json TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN entry_key TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN entry_fingerprint TEXT;
+        ALTER TABLE sds_sheets ADD COLUMN reviewed_at TEXT;
+      `);
+
+      const revisions = new Map();
+      const currentByProduct = new Map();
+      const rows = db.prepare('SELECT * FROM sds_sheets ORDER BY job_id, created_at, id').all();
+      for (const row of rows) {
+        const data = fromJson(row.data_json, {});
+        const manufacturer = normalizeText(data.manufacturer || row.supplier, '') || null;
+        const productCode = normalizeText(data.productCode, '') || null;
+        const productKey = sdsProductKey(row.material, manufacturer, productCode);
+        const groupingKey = `${row.job_id}:${productKey}`;
+        const revisionNumber = (revisions.get(groupingKey) || 0) + 1;
+        revisions.set(groupingKey, revisionNumber);
+        const sourceBasis = sdsRevisionSourceBasis({
+          ...row,
+          data,
+          productKey,
+          revisionNumber,
+          manufacturer,
+          productCode,
+          language: data.language || 'nl',
+          issuedOn: data.issuedOn || null,
+          documentReference: data.documentReference || data.documentRef || null
+        });
+        const sourceHash = sha256Json(sourceBasis);
+        const snapshot = {
+          ...sourceBasis,
+          sourceHash,
+          requestedStatus: SDS_CURRENT_STATUSES.has(normalizeStatus(row.status, 'missing')) ? 'current' : normalizeStatus(row.status, 'missing'),
+          retainedAt: row.updated_at || row.created_at
+        };
+        const migratedData = {
+          ...data,
+          manufacturer,
+          productCode,
+          language: data.language || 'nl',
+          issuedOn: data.issuedOn || null,
+          documentReference: data.documentReference || data.documentRef || null,
+          governedRevision: data.governedRevision === true,
+          migratedRevisionControl: true
+        };
+        db.prepare(`
+          UPDATE sds_sheets
+          SET product_key = ?, revision_number = ?, manufacturer = ?, product_code = ?, language = ?, issued_on = ?,
+              source_hash = ?, snapshot_hash = ?, snapshot_json = ?, data_json = ?
+          WHERE id = ?
+        `).run(
+          productKey,
+          revisionNumber,
+          manufacturer,
+          productCode,
+          data.language || 'nl',
+          data.issuedOn || null,
+          sourceHash,
+          sha256Json(snapshot),
+          toJson(snapshot),
+          toJson(migratedData),
+          row.id
+        );
+        if (SDS_CURRENT_STATUSES.has(normalizeStatus(row.status, 'missing'))) {
+          const priorCurrentId = currentByProduct.get(groupingKey);
+          if (priorCurrentId) {
+            const prior = db.prepare('SELECT data_json FROM sds_sheets WHERE id = ?').get(priorCurrentId);
+            db.prepare("UPDATE sds_sheets SET status = 'superseded', data_json = ? WHERE id = ?").run(toJson({
+              ...fromJson(prior?.data_json, {}),
+              supersededBySdsId: row.id,
+              supersededDuringMigration: true
+            }), priorCurrentId);
+          }
+          currentByProduct.set(groupingKey, row.id);
+        }
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sds_job_entry_key
+          ON sds_sheets(job_id, entry_key) WHERE entry_key IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sds_job_product_revision
+          ON sds_sheets(job_id, product_key, revision_number) WHERE product_key IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sds_supersedes
+          ON sds_sheets(supersedes_sds_id) WHERE supersedes_sds_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sds_one_current_product
+          ON sds_sheets(job_id, product_key)
+          WHERE product_key IS NOT NULL AND status IN ('current', 'approved', 'accepted', 'active');
+        CREATE INDEX IF NOT EXISTS idx_sds_job_status_expiry
+          ON sds_sheets(job_id, status, expires_at, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sds_document
+          ON sds_sheets(document_id, status) WHERE document_id IS NOT NULL;
       `);
     }
   }
@@ -26599,7 +26751,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ? this.db.prepare("SELECT id FROM approvals WHERE id = ? AND target_type = 'sds_sheet' AND target_id = ? AND status = 'approved'").get(sheet.approvalId, sheet.id)
         : null;
       const expired = sheet.expiresAt && Date.parse(sheet.expiresAt) <= Date.now();
-      if (!sdsStatuses.has(sheet.status) || !approval || expired) {
+      if (!sdsStatuses.has(sheet.status) || !approval || expired || sheet.integrityValid !== true) {
         blockers.push({ type: 'sds_not_current', id: sheet.id, message: `SDS ${sheet.material} is not current and approval-backed.` });
       }
     }
@@ -26615,6 +26767,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       } : null,
       sdsSheets: sdsSheets.filter(Boolean).map(sheet => ({
         id: sheet.id, material: sheet.material, status: sheet.status, expiresAt: sheet.expiresAt,
+        productKey: sheet.productKey, revisionNumber: sheet.revisionNumber, documentId: sheet.documentId,
+        sourceHash: sheet.sourceHash, snapshotHash: sheet.snapshotHash,
         approvalId: sheet.approvalId, updatedAt: sheet.updatedAt
       })).sort((left, right) => left.id.localeCompare(right.id))
     };
@@ -27708,34 +27862,80 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const actor = options.actor || 'Contractor.AI';
       const id = makeId('sds');
       const timestamp = nowIso();
+      const material = normalizeText(payload.material || payload.title || payload.name, 'Site material');
+      const manufacturer = normalizeText(payload.manufacturer || payload.supplier, '') || null;
+      const productCode = normalizeText(payload.productCode || payload.product_code, '') || null;
+      const productKey = sdsProductKey(material, manufacturer, productCode);
+      const revisionNumber = Number(this.db.prepare(`
+        SELECT COALESCE(MAX(revision_number), 0) + 1 AS revision_number
+        FROM sds_sheets WHERE job_id = ? AND product_key = ?
+      `).get(jobId, productKey)?.revision_number || 1);
       const requestedStatus = normalizeStatus(payload.status, 'missing');
       const approvalStatuses = ['current', 'approved', 'accepted', 'active'];
       const needsApproval = normalizeBoolean(payload.requiresApproval, approvalStatuses.includes(requestedStatus));
       const status = needsApproval && approvalStatuses.includes(requestedStatus)
         ? 'pending_approval'
         : requestedStatus;
+      const data = {
+        requestedStatus,
+        documentRef: payload.documentRef || payload.document_ref || payload.file || null,
+        documentReference: payload.documentReference || payload.document_reference || payload.documentRef || payload.document_ref || payload.file || null,
+        manufacturer,
+        productCode,
+        language: normalizeText(payload.language, 'nl'),
+        issuedOn: payload.issuedOn || payload.issued_on || null,
+        hazardClass: payload.hazardClass || payload.hazard_class || null,
+        hazardClasses: normalizeList(payload.hazardClasses || payload.hazard_classes || payload.hazardClass || payload.hazard_class),
+        requiredPpe: normalizeList(payload.requiredPpe || payload.required_ppe || payload.ppe),
+        firstAidMeasures: payload.firstAidMeasures || payload.first_aid_measures || null,
+        fireMeasures: payload.fireMeasures || payload.fire_measures || null,
+        handlingStorage: payload.handlingStorage || payload.handling_storage || payload.storage || null,
+        spillResponse: payload.spillResponse || payload.spill_response || null,
+        disposal: payload.disposal || null,
+        emergencyContact: payload.emergencyContact || payload.emergency_contact || null,
+        revisionReason: payload.revisionReason || payload.revision_reason || null,
+        storage: payload.storage || null,
+        notes: payload.notes || payload.note || null,
+        governedRevision: false
+      };
 
       this.db.prepare(`
-        INSERT INTO sds_sheets (id, job_id, material, supplier, status, expires_at, approval_id, data_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sds_sheets (
+          id, job_id, material, supplier, status, expires_at, approval_id, data_json, created_at, updated_at,
+          product_key, revision_number, supersedes_sds_id, manufacturer, product_code, language, issued_on,
+          document_id, entry_key, entry_fingerprint
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         jobId,
-        normalizeText(payload.material || payload.title || payload.name, 'Site material'),
-        payload.supplier || null,
+        material,
+        payload.supplier || manufacturer,
         status,
         payload.expiresAt || payload.expires_at || null,
         null,
-        toJson({
-          requestedStatus,
-          documentRef: payload.documentRef || payload.document_ref || payload.file || null,
-          hazardClass: payload.hazardClass || payload.hazard_class || null,
-          storage: payload.storage || null,
-          notes: payload.notes || payload.note || null
-        }),
+        toJson(data),
         timestamp,
-        timestamp
+        timestamp,
+        productKey,
+        revisionNumber,
+        payload.supersedesSdsId || payload.supersedes_sds_id || null,
+        manufacturer,
+        productCode,
+        data.language,
+        data.issuedOn,
+        payload.documentId || payload.document_id || null,
+        payload.entryKey || payload.entry_key || null,
+        payload.entryFingerprint || payload.entry_fingerprint || null
       );
+
+      const inserted = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(id);
+      const sourceBasis = sdsRevisionSourceBasis(inserted);
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = { ...sourceBasis, sourceHash, requestedStatus, retainedAt: timestamp };
+      this.db.prepare(`
+        UPDATE sds_sheets SET source_hash = ?, snapshot_hash = ?, snapshot_json = ? WHERE id = ?
+      `).run(sourceHash, sha256Json(snapshot), toJson(snapshot), id);
 
       let approval = null;
       if (needsApproval) {
@@ -27744,9 +27944,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           targetId: id,
           jobId,
           approvalType: 'sds_current_review',
-          summary: `Approve SDS for ${normalizeText(payload.material || payload.title || payload.name, 'site material')}`,
+          summary: `Approve SDS for ${material}`,
           reason: 'Marking an SDS sheet current affects hazardous-material handling and site compliance. Approval is required before relying on it.',
-          data: { requestedStatus, material: payload.material || payload.title || payload.name || null }
+          data: { requestedStatus, material, productKey, revisionNumber, sourceHash }
         }, { actor, audit: false });
         this.db.prepare('UPDATE sds_sheets SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
       }
@@ -27756,6 +27956,242 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         this.audit({ entityType: 'sds_sheet', entityId: id, jobId, action: 'record_sds_sheet', actor, after: sdsSheet });
       }
       return { ...sdsSheet, approval };
+    });
+  }
+
+  getSdsSheet(sdsSheetId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(String(sdsSheetId || ''));
+    if (!row || (options.jobId && row.job_id !== options.jobId)) {
+      throw ledgerInputError('sds_sheet_not_found', 'The requested SDS revision was not found.', { sdsSheetId }, 404);
+    }
+    return this.mapSdsSheet(row);
+  }
+
+  listSdsSheets(filters = {}) {
+    const limit = Math.max(1, Math.min(Number(filters.limit || 250), 500));
+    const rows = filters.jobId
+      ? this.db.prepare('SELECT * FROM sds_sheets WHERE job_id = ? ORDER BY product_key, revision_number DESC, created_at DESC LIMIT ?').all(filters.jobId, limit)
+      : this.db.prepare('SELECT * FROM sds_sheets ORDER BY updated_at DESC, created_at DESC LIMIT ?').all(limit);
+    const status = normalizeStatus(filters.status, '');
+    const productKey = normalizeText(filters.productKey || filters.product_key, '');
+    const query = normalizeText(filters.query || filters.search, '').toLowerCase();
+    return rows.map(row => this.mapSdsSheet(row)).filter(sheet => {
+      if (status && sheet.status !== status) return false;
+      if (productKey && sheet.productKey !== productKey) return false;
+      if (normalizeBoolean(filters.currentOnly || filters.current_only, false) && !sheet.current) return false;
+      if (query && ![
+        sheet.material,
+        sheet.manufacturer,
+        sheet.productCode,
+        sheet.documentReference,
+        ...(sheet.hazardClasses || [])
+      ].some(value => String(value || '').toLowerCase().includes(query))) return false;
+      return true;
+    });
+  }
+
+  createSdsRevision(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('sds_revision_entry_key_invalid', 'SDS revision replay key must contain 8 to 200 safe characters.');
+      }
+      const material = normalizeText(payload.material || payload.title || payload.name, '');
+      const manufacturer = normalizeText(payload.manufacturer || payload.supplier, '');
+      const productCode = normalizeText(payload.productCode || payload.product_code, '');
+      const language = normalizeText(payload.language, 'nl').toLowerCase();
+      if (material.length < 2 || material.length > 240) {
+        throw ledgerInputError('sds_revision_material_invalid', 'SDS material name must be between two and 240 characters.');
+      }
+      if (manufacturer.length < 2 || manufacturer.length > 160) {
+        throw ledgerInputError('sds_revision_manufacturer_invalid', 'SDS manufacturer must be between two and 160 characters.');
+      }
+      if (productCode.length > 80) {
+        throw ledgerInputError('sds_revision_product_code_invalid', 'SDS product code must be 80 characters or fewer.');
+      }
+      if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/i.test(language)) {
+        throw ledgerInputError('sds_revision_language_invalid', 'SDS language must use a retained language code such as nl, en, or nl-NL.');
+      }
+      const issuedInput = normalizeText(payload.issuedOn || payload.issued_on, '');
+      const issuedTime = Date.parse(issuedInput);
+      if (!issuedInput || !Number.isFinite(issuedTime) || issuedTime > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('sds_revision_issued_on_invalid', 'SDS issue date must be valid and cannot be in the future.');
+      }
+      const issuedOn = new Date(issuedTime).toISOString().slice(0, 10);
+      const expiresInput = normalizeText(payload.expiresAt || payload.expires_at || payload.validUntil || payload.valid_until, '');
+      const expiresTime = Date.parse(expiresInput);
+      if (!expiresInput || !Number.isFinite(expiresTime) || expiresTime <= Math.max(Date.now(), issuedTime)) {
+        throw ledgerInputError('sds_revision_expiry_invalid', 'SDS expiry must be a valid future date after its issue date.');
+      }
+      const expiresAt = new Date(expiresTime).toISOString();
+      const documentId = normalizeText(payload.documentId || payload.document_id, '');
+      const documentRow = documentId
+        ? this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId)
+        : null;
+      if (!documentRow || ['cancelled', 'rejected', 'superseded', 'void'].includes(normalizeStatus(documentRow.status, 'stored'))) {
+        throw ledgerInputError('sds_revision_document_invalid', 'A current job-owned SDS evidence document is required.', { documentId }, 409);
+      }
+      if (normalizeStatus(documentRow.mime_type, '') !== 'application/pdf') {
+        throw ledgerInputError('sds_revision_document_type_invalid', 'Governed SDS revisions require a retained PDF document.', { documentId }, 409);
+      }
+      const documentData = fromJson(documentRow.data_json, {});
+      const documentChecksum = normalizeText(documentData.analysis?.upload?.sha256 || documentData.contentHash, '');
+      if (!documentChecksum) {
+        throw ledgerInputError('sds_revision_document_checksum_missing', 'The retained SDS document has no upload checksum and cannot be frozen as a governed revision.', { documentId }, 409);
+      }
+      const documentReference = normalizeText(
+        payload.documentReference || payload.document_reference || documentRow.filename || documentRow.title,
+        ''
+      );
+      const hazardClasses = [...new Set(normalizeList(payload.hazardClasses || payload.hazard_classes || payload.hazardClass || payload.hazard_class))];
+      const requiredPpe = [...new Set(normalizeList(payload.requiredPpe || payload.required_ppe || payload.ppe))];
+      const firstAidMeasures = normalizeText(payload.firstAidMeasures || payload.first_aid_measures, '');
+      const fireMeasures = normalizeText(payload.fireMeasures || payload.fire_measures, '');
+      const handlingStorage = normalizeText(payload.handlingStorage || payload.handling_storage || payload.storage, '');
+      const spillResponse = normalizeText(payload.spillResponse || payload.spill_response, '');
+      const disposal = normalizeText(payload.disposal, '');
+      const emergencyContact = normalizeText(payload.emergencyContact || payload.emergency_contact, '');
+      const revisionReason = normalizeText(payload.revisionReason || payload.revision_reason, '');
+      const notes = normalizeText(payload.notes || payload.note, '');
+      if (!hazardClasses.length || hazardClasses.length > 20 || hazardClasses.some(value => value.length > 160)) {
+        throw ledgerInputError('sds_revision_hazard_classes_invalid', 'Retain between one and 20 SDS hazard classifications of up to 160 characters.');
+      }
+      if (!requiredPpe.length || requiredPpe.length > 20 || requiredPpe.some(value => value.length > 160)) {
+        throw ledgerInputError('sds_revision_ppe_invalid', 'Retain between one and 20 required PPE controls of up to 160 characters.');
+      }
+      for (const [key, label, value] of [
+        ['first_aid', 'First-aid measures', firstAidMeasures],
+        ['fire', 'Fire measures', fireMeasures],
+        ['handling_storage', 'Handling and storage', handlingStorage],
+        ['spill_response', 'Spill response', spillResponse],
+        ['disposal', 'Disposal controls', disposal],
+        ['emergency_contact', 'Emergency contact', emergencyContact]
+      ]) {
+        if (value.length < 3 || value.length > 2000) {
+          throw ledgerInputError(`sds_revision_${key}_invalid`, `${label} must be between three and 2,000 characters.`);
+        }
+      }
+      if (revisionReason.length < 3 || revisionReason.length > 1000) {
+        throw ledgerInputError('sds_revision_reason_invalid', 'Revision reason must be between three and 1,000 characters.');
+      }
+      if (notes.length > 2000) throw ledgerInputError('sds_revision_notes_invalid', 'SDS notes must be 2,000 characters or fewer.');
+
+      const productKey = sdsProductKey(material, manufacturer, productCode);
+      const supersedesSdsId = normalizeText(payload.supersedesSdsId || payload.supersedes_sds_id, '') || null;
+      const supersedesRow = supersedesSdsId
+        ? this.db.prepare('SELECT * FROM sds_sheets WHERE id = ? AND job_id = ?').get(supersedesSdsId, jobId)
+        : null;
+      if (supersedesSdsId && !supersedesRow) {
+        throw ledgerInputError('sds_revision_supersedes_invalid', 'The superseded SDS revision does not belong to this job.', { supersedesSdsId }, 409);
+      }
+      if (supersedesRow && supersedesRow.product_key !== productKey) {
+        throw ledgerInputError('sds_revision_product_mismatch', 'A revision must retain the same manufacturer and product identity as the source SDS.', { supersedesSdsId }, 409);
+      }
+      const existing = this.db.prepare('SELECT * FROM sds_sheets WHERE job_id = ? AND entry_key = ?').get(jobId, entryKey);
+      const revisionNumber = existing
+        ? Number(existing.revision_number || 1)
+        : supersedesRow
+        ? Number(supersedesRow.revision_number || 1) + 1
+        : Number(this.db.prepare(`
+          SELECT COALESCE(MAX(revision_number), 0) + 1 AS revision_number
+          FROM sds_sheets WHERE job_id = ? AND product_key = ?
+        `).get(jobId, productKey)?.revision_number || 1);
+      const fingerprintBasis = {
+        jobId, productKey, revisionNumber, supersedesSdsId, material, manufacturer, productCode: productCode || null,
+        language, issuedOn, expiresAt, documentId, documentChecksum, hazardClasses, requiredPpe,
+        firstAidMeasures, fireMeasures, handlingStorage, spillResponse, disposal, emergencyContact, revisionReason, notes: notes || null
+      };
+      const entryFingerprint = sha256Json(fingerprintBasis);
+      if (existing) {
+        if (existing.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('sds_revision_entry_key_conflict', 'This SDS replay key is already bound to different revision evidence.', { entryKey }, 409);
+        }
+        const approvalRow = existing.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existing.approval_id) : null;
+        return { ...this.mapSdsSheet(existing), approval: approvalRow ? this.mapApproval(approvalRow) : null, replayed: true };
+      }
+      if (supersedesRow && !SDS_CURRENT_STATUSES.has(normalizeStatus(supersedesRow.status, ''))) {
+        throw ledgerInputError('sds_revision_source_not_current', 'Only the current retained SDS can be revised.', { supersedesSdsId }, 409);
+      }
+      const currentRow = this.db.prepare(`
+        SELECT * FROM sds_sheets
+        WHERE job_id = ? AND product_key = ? AND status IN ('current', 'approved', 'accepted', 'active')
+        ORDER BY revision_number DESC LIMIT 1
+      `).get(jobId, productKey);
+      if (currentRow && currentRow.id !== supersedesSdsId) {
+        throw ledgerInputError('sds_revision_supersession_required', 'Select the current SDS revision before replacing this product record.', { currentSdsId: currentRow.id }, 409);
+      }
+      const existingPending = supersedesSdsId
+        ? this.db.prepare("SELECT id FROM sds_sheets WHERE supersedes_sds_id = ? AND status = 'pending_approval'").get(supersedesSdsId)
+        : null;
+      if (existingPending) {
+        throw ledgerInputError('sds_revision_pending_exists', 'This SDS already has a pending replacement revision.', { sdsSheetId: existingPending.id }, 409);
+      }
+
+      const id = makeId('sds');
+      const timestamp = nowIso();
+      const data = {
+        requestedStatus: 'current',
+        documentRef: documentReference,
+        documentReference,
+        documentChecksum,
+        manufacturer,
+        productCode: productCode || null,
+        language,
+        issuedOn,
+        hazardClasses,
+        requiredPpe,
+        firstAidMeasures,
+        fireMeasures,
+        handlingStorage,
+        spillResponse,
+        disposal,
+        emergencyContact,
+        revisionReason,
+        notes: notes || null,
+        governedRevision: true,
+        externalCommitments: 0
+      };
+      this.db.prepare(`
+        INSERT INTO sds_sheets (
+          id, job_id, material, supplier, status, expires_at, approval_id, data_json, created_at, updated_at,
+          product_key, revision_number, supersedes_sds_id, manufacturer, product_code, language, issued_on,
+          document_id, source_hash, snapshot_hash, snapshot_json, entry_key, entry_fingerprint, reviewed_at
+        ) VALUES (?, ?, ?, ?, 'pending_approval', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL)
+      `).run(
+        id, jobId, material, manufacturer, expiresAt, toJson(data), timestamp, timestamp,
+        productKey, revisionNumber, supersedesSdsId, manufacturer, productCode || null, language, issuedOn,
+        documentId, entryKey, entryFingerprint
+      );
+      const row = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(id);
+      const sourceBasis = sdsRevisionSourceBasis(row);
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = { ...sourceBasis, sourceHash, requestedStatus: 'current', retainedAt: timestamp };
+      const snapshotHash = sha256Json(snapshot);
+      this.db.prepare(`
+        UPDATE sds_sheets SET source_hash = ?, snapshot_hash = ?, snapshot_json = ? WHERE id = ?
+      `).run(sourceHash, snapshotHash, toJson(snapshot), id);
+      const approval = this.createApproval({
+        targetType: 'sds_sheet',
+        targetId: id,
+        jobId,
+        approvalType: 'sds_current_review',
+        summary: `Approve SDS revision ${revisionNumber} for ${material}`,
+        reason: 'Current SDS status controls hazardous-material handling, pre-task source validity, and field reliance. The exact document and emergency controls require human verification.',
+        data: {
+          requestedStatus: 'current', productKey, revisionNumber, supersedesSdsId,
+          documentId, documentChecksum, sourceHash, snapshotHash, externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE sds_sheets SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, timestamp, id);
+      const revision = this.getSdsSheet(id, { jobId });
+      this.audit({
+        entityType: 'sds_sheet', entityId: id, jobId, action: 'create_sds_revision', actor,
+        after: revision,
+        metadata: { productKey, revisionNumber, supersedesSdsId, documentId, sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { ...revision, approval, replayed: false };
     });
   }
 
@@ -30044,7 +30480,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             data: {
               ...next.data,
               documentRef: payload.documentRef || payload.document_ref || normalizeList(payload.evidence)[0] || existingData.documentRef || null,
+              documentReference: payload.documentReference || payload.document_reference || payload.documentRef || payload.document_ref || normalizeList(payload.evidence)[0] || existingData.documentReference || existingData.documentRef || null,
+              manufacturer: payload.manufacturer || payload.supplier || existingData.manufacturer || row.manufacturer || row.supplier || null,
+              productCode: payload.productCode || payload.product_code || existingData.productCode || row.product_code || null,
+              language: payload.language || existingData.language || row.language || 'nl',
+              issuedOn: payload.issuedOn || payload.issued_on || existingData.issuedOn || row.issued_on || null,
               hazardClass: payload.hazardClass || payload.hazard_class || existingData.hazardClass || null,
+              hazardClasses: normalizeList(payload.hazardClasses || payload.hazard_classes || payload.hazardClass || payload.hazard_class || existingData.hazardClasses || existingData.hazardClass),
+              requiredPpe: normalizeList(payload.requiredPpe || payload.required_ppe || payload.ppe || existingData.requiredPpe || existingData.ppe),
+              firstAidMeasures: payload.firstAidMeasures || payload.first_aid_measures || existingData.firstAidMeasures || null,
+              fireMeasures: payload.fireMeasures || payload.fire_measures || existingData.fireMeasures || null,
+              handlingStorage: payload.handlingStorage || payload.handling_storage || payload.storage || existingData.handlingStorage || existingData.storage || null,
+              spillResponse: payload.spillResponse || payload.spill_response || existingData.spillResponse || null,
+              disposal: payload.disposal || existingData.disposal || null,
+              emergencyContact: payload.emergencyContact || payload.emergency_contact || existingData.emergencyContact || null,
               storage: payload.storage || existingData.storage || null
             },
             material: normalizeText(payload.material || payload.title || payload.name, row.material),
@@ -30052,12 +30501,41 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             expiresAt: payload.expiresAt || payload.expires_at || row.expires_at
           };
         },
-        save(recordId, values, timestamp) {
+        save(recordId, values, timestamp, retainedRow) {
+          const manufacturer = normalizeText(values.data.manufacturer || values.supplier, '') || null;
+          const productCode = normalizeText(values.data.productCode, '') || null;
+          const productKey = sdsProductKey(values.material, manufacturer, productCode);
+          const sourceBasis = sdsRevisionSourceBasis({
+            ...retainedRow,
+            id: recordId,
+            jobId,
+            productKey,
+            material: values.material,
+            manufacturer,
+            productCode,
+            language: values.data.language || 'nl',
+            issuedOn: values.data.issuedOn || null,
+            expiresAt: values.expiresAt,
+            data: values.data
+          });
+          const sourceHash = sha256Json(sourceBasis);
+          const snapshot = {
+            ...sourceBasis,
+            sourceHash,
+            requestedStatus: normalizeStatus(values.data.requestedStatus, values.status),
+            retainedAt: timestamp
+          };
           this.db.prepare(`
             UPDATE sds_sheets
-            SET material = ?, supplier = ?, status = ?, expires_at = ?, approval_id = ?, data_json = ?, updated_at = ?
+            SET material = ?, supplier = ?, status = ?, expires_at = ?, approval_id = ?, data_json = ?, updated_at = ?,
+                product_key = ?, manufacturer = ?, product_code = ?, language = ?, issued_on = ?,
+                source_hash = ?, snapshot_hash = ?, snapshot_json = ?
             WHERE id = ? AND job_id = ?
-          `).run(values.material, values.supplier, values.status, values.expiresAt, values.approvalId, toJson(values.data), timestamp, recordId, jobId);
+          `).run(
+            values.material, values.supplier, values.status, values.expiresAt, values.approvalId, toJson(values.data), timestamp,
+            productKey, manufacturer, productCode, values.data.language || 'nl', values.data.issuedOn || null,
+            sourceHash, sha256Json(snapshot), toJson(snapshot), recordId, jobId
+          );
         }
       },
       site_access: {
@@ -30472,7 +30950,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
 
       const values = config.update(row, next);
-      config.save.call(this, recordId, values, timestamp);
+      config.save.call(this, recordId, values, timestamp, row);
       const afterRow = this.db.prepare(`SELECT * FROM ${config.table} WHERE id = ?`).get(recordId);
       const record = config.map(afterRow);
       if (approval?.id) {
@@ -32422,6 +32900,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'sds_sheet') {
+        const row = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE sds_sheets SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            approvalDecision: {
+              status, approvalId, resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'pre_task_plan') {
         const row = this.db.prepare('SELECT * FROM pre_task_plans WHERE id = ?').get(before.target_id);
         if (row && row.status === 'pending_approval') {
@@ -33957,12 +34450,54 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.db.prepare('UPDATE jha_records SET status = ?, approved_at = COALESCE(approved_at, ?), updated_at = ? WHERE id = ?')
         .run(approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'sds_sheet') {
-      const sds = this.db.prepare('SELECT data_json FROM sds_sheets WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(sds?.data_json, {}).requestedStatus, 'current');
+      const sds = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(targetId);
+      if (!sds) throw ledgerInputError('sds_sheet_not_found', 'The SDS revision no longer exists.', { targetId }, 409);
+      const mapped = this.mapSdsSheet(sds);
+      if (mapped.integrityValid !== true) {
+        throw ledgerInputError('sds_revision_integrity_failed', 'The retained SDS source, document, or revision snapshot changed after approval was requested.', { sdsSheetId: targetId }, 409);
+      }
+      if (mapped.expired) {
+        throw ledgerInputError('sds_revision_expired', 'An expired SDS revision cannot become current.', { sdsSheetId: targetId }, 409);
+      }
+      const sdsData = fromJson(sds.data_json, {});
+      const requestedStatus = normalizeStatus(sdsData.requestedStatus, 'current');
       const approvedStatus = ['current', 'approved', 'accepted', 'active'].includes(requestedStatus)
         ? requestedStatus
         : 'current';
-      this.db.prepare('UPDATE sds_sheets SET status = ?, updated_at = ? WHERE id = ?').run(approvedStatus, timestamp, targetId);
+      const superseded = sds.supersedes_sds_id
+        ? this.db.prepare('SELECT * FROM sds_sheets WHERE id = ? AND job_id = ?').get(sds.supersedes_sds_id, sds.job_id)
+        : null;
+      if (sds.supersedes_sds_id && (
+        !superseded
+        || superseded.product_key !== sds.product_key
+        || !SDS_CURRENT_STATUSES.has(normalizeStatus(superseded.status, ''))
+      )) {
+        throw ledgerInputError('sds_revision_source_changed', 'The SDS revision being replaced is no longer the current record for this product.', { sdsSheetId: targetId }, 409);
+      }
+      const competingCurrent = this.db.prepare(`
+        SELECT id FROM sds_sheets
+        WHERE job_id = ? AND product_key = ? AND id <> ? AND status IN ('current', 'approved', 'accepted', 'active')
+        ORDER BY revision_number DESC LIMIT 1
+      `).get(sds.job_id, sds.product_key, sds.supersedes_sds_id || targetId);
+      if (competingCurrent) {
+        throw ledgerInputError('sds_revision_current_conflict', 'Another current SDS revision exists for this product. Create a replacement from that exact revision.', { currentSdsId: competingCurrent.id }, 409);
+      }
+      if (superseded) {
+        this.db.prepare(`
+          UPDATE sds_sheets SET status = 'superseded', data_json = ?, updated_at = ? WHERE id = ?
+        `).run(toJson({
+          ...fromJson(superseded.data_json, {}),
+          supersededBySdsId: targetId,
+          supersededAt: timestamp
+        }), timestamp, superseded.id);
+      }
+      this.db.prepare(`
+        UPDATE sds_sheets SET status = ?, reviewed_at = COALESCE(reviewed_at, ?), data_json = ?, updated_at = ? WHERE id = ?
+      `).run(approvedStatus, timestamp, toJson({
+        ...sdsData,
+        approvalDecision: { status: 'approved', resolvedAt: timestamp },
+        supersedesSdsId: sds.supersedes_sds_id || null
+      }), timestamp, targetId);
     } else if (targetType === 'site_access_log') {
       const access = this.db.prepare('SELECT * FROM site_access_logs WHERE id = ?').get(targetId);
       const accessData = fromJson(access?.data_json, {});
@@ -39587,6 +40122,49 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'request_sds', jobId: job.id, severity: 'medium', message: `${job.title} has ${job.material_count || 0} material need(s) but no current SDS register.` });
     }
 
+    const sdsReviewRows = this.db.prepare(`
+      SELECT sheets.*, jobs.title AS job_title
+      FROM sds_sheets sheets
+      JOIN jobs ON jobs.id = sheets.job_id
+      WHERE sheets.status IN ('current', 'approved', 'accepted', 'active')
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY sheets.expires_at ASC, sheets.updated_at DESC
+      LIMIT 25
+    `).all();
+    for (const row of sdsReviewRows) {
+      const sheet = this.mapSdsSheet(row);
+      const expiryTime = Date.parse(sheet.expiresAt || '');
+      const expiresSoon = Number.isFinite(expiryTime) && expiryTime <= Date.now() + 30 * 24 * 60 * 60 * 1000;
+      const reasons = [];
+      if (sheet.integrityValid !== true) reasons.push('integrity failure');
+      if (sheet.expired) reasons.push('expired');
+      else if (expiresSoon) reasons.push('expires within 30 days');
+      if (!reasons.length) continue;
+      const reviewHash = sha256Json({
+        sdsSheetId: sheet.id,
+        status: sheet.status,
+        sourceHash: sheet.sourceHash,
+        expiresAt: sheet.expiresAt,
+        reasons
+      });
+      const taskId = `task_${sha256Text(`sds-revision-review:${sheet.id}:${reviewHash}`).slice(0, 24)}`;
+      if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+      actions.push({
+        type: 'review_sds_revision',
+        sdsSheetId: sheet.id,
+        jobId: sheet.jobId,
+        severity: sheet.expired || sheet.integrityValid !== true ? 'high' : 'medium',
+        material: sheet.material,
+        manufacturer: sheet.manufacturer,
+        revisionNumber: sheet.revisionNumber,
+        expiresAt: sheet.expiresAt,
+        reasons,
+        sourceHash: reviewHash,
+        taskId,
+        message: `${row.job_title}: SDS revision ${sheet.revisionNumber} for ${sheet.material} requires review (${reasons.join(', ')}).`
+      });
+    }
+
     const jobsWithoutSiteAccess = this.db.prepare(`
       SELECT jobs.id, jobs.title
       FROM jobs
@@ -40427,6 +41005,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'schedule_orientation',
       'create_jha',
       'request_sds',
+      'review_sds_revision',
       'create_site_access_gate',
       'create_budget_line',
       'prepare_cost_forecast',
@@ -41029,6 +41608,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }, { actor, audit: false });
           applied.push({ ...action, sdsSheetId: sdsSheet.id, status: 'requested' });
           this.audit({ entityType: 'sds_sheet', entityId: sdsSheet.id, jobId: action.jobId, action: 'autonomous_request_sds', actor, after: sdsSheet });
+        }
+
+        const sdsRevisionReviews = preview.filter(action => action.type === 'review_sds_revision').slice(0, 10);
+        for (const action of sdsRevisionReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0, revisionInferred: false });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review SDS: ${action.material}`,
+            description: `${action.message} Verify the current manufacturer PDF, issue and expiry dates, product identity, hazard classification, PPE, first-aid, spill, fire, storage, disposal, and emergency controls. Create a governed replacement revision; do not mark a source current or infer supplier verification automatically.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(action.reasons?.includes('expires within 30 days') ? 7 : 0),
+            source: 'sds_revision_monitor',
+            data: {
+              sdsSheetId: action.sdsSheetId,
+              revisionNumber: action.revisionNumber,
+              expiresAt: action.expiresAt,
+              reasons: action.reasons,
+              sourceHash: action.sourceHash,
+              internalOnly: true,
+              externalCommitments: 0,
+              revisionInferred: false,
+              currentStatusInferred: false
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, revisionInferred: false });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_sds_revision_review_task', actor, after: task,
+            metadata: { sdsSheetId: action.sdsSheetId, sourceHash: action.sourceHash, externalCommitments: 0, revisionInferred: false }
+          });
         }
 
         const accessGates = preview.filter(action => action.type === 'create_site_access_gate').slice(0, 3);
@@ -43096,6 +43708,37 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (jhasWithoutApproval) issues.push({ severity: 'warning', message: `${jhasWithoutApproval} JHA record(s) have no approval gate.` });
     const sdsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM sds_sheets WHERE status IN ('current', 'approved', 'accepted', 'active') AND approval_id IS NULL").get().count || 0);
     if (sdsWithoutApproval) issues.push({ severity: 'warning', message: `${sdsWithoutApproval} current SDS sheet(s) have no approval gate.` });
+    for (const row of this.db.prepare('SELECT * FROM sds_sheets WHERE source_hash IS NOT NULL ORDER BY job_id, product_key, revision_number').all()) {
+      const sheet = this.mapSdsSheet(row);
+      if (sheet.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `SDS revision ${sheet.id} failed retained source, document, or snapshot verification.` });
+      }
+      if (sheet.data?.governedRevision === true) {
+        const expectedApprovalStatus = sheet.status === 'pending_approval'
+          ? 'pending'
+          : SDS_CURRENT_STATUSES.has(sheet.status) || sheet.status === 'superseded'
+            ? 'approved'
+            : ['rejected', 'cancelled'].includes(sheet.status) ? sheet.status : null;
+        const approval = sheet.approvalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'sds_sheet' AND target_id = ?").get(sheet.approvalId, sheet.id)
+          : null;
+        if (!approval || (expectedApprovalStatus && approval.status !== expectedApprovalStatus)) {
+          issues.push({ severity: 'error', message: `Governed SDS revision ${sheet.id} lacks its matching retained approval decision.` });
+        }
+        if (!sheet.documentId || !sheet.data.documentChecksum) {
+          issues.push({ severity: 'error', message: `Governed SDS revision ${sheet.id} lacks its job-owned checksum-bound PDF evidence.` });
+        }
+      }
+      if (sheet.supersedesSdsId) {
+        const prior = this.db.prepare('SELECT * FROM sds_sheets WHERE id = ?').get(sheet.supersedesSdsId);
+        if (!prior || prior.job_id !== sheet.jobId || prior.product_key !== sheet.productKey || Number(prior.revision_number || 0) + 1 !== sheet.revisionNumber) {
+          issues.push({ severity: 'error', message: `SDS revision ${sheet.id} has invalid product or revision supersession lineage.` });
+        }
+      }
+      if (SDS_CURRENT_STATUSES.has(sheet.status) && sheet.expired) {
+        issues.push({ severity: 'warning', message: `SDS revision ${sheet.id} remains current after its retained expiry date.` });
+      }
+    }
     const siteAccessWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM site_access_logs WHERE status IN ('checked_in', 'cleared', 'approved', 'granted') AND approval_id IS NULL").get().count || 0);
     if (siteAccessWithoutApproval) issues.push({ severity: 'warning', message: `${siteAccessWithoutApproval} site access clearance record(s) have no approval gate.` });
     const budgetLinesWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM budget_lines WHERE status IN ('approved', 'locked', 'baseline') AND approval_id IS NULL").get().count || 0);
@@ -44761,15 +45404,77 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   mapSdsSheet(row) {
+    const data = fromJson(row.data_json);
+    const snapshot = fromJson(row.snapshot_json, null);
+    const sourceBasis = sdsRevisionSourceBasis(row);
+    const sourceHashValid = Boolean(row.source_hash && sha256Json(sourceBasis) === row.source_hash);
+    const snapshotHashValid = Boolean(
+      snapshot
+      && snapshot.format === SDS_REVISION_FORMAT
+      && snapshot.sdsSheetId === row.id
+      && snapshot.jobId === row.job_id
+      && snapshot.sourceHash === row.source_hash
+      && sha256Json(snapshot) === row.snapshot_hash
+    );
+    const documentRow = row.document_id
+      ? this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(row.document_id, row.job_id)
+      : null;
+    const documentData = fromJson(documentRow?.data_json, {});
+    const retainedDocumentChecksum = normalizeText(data.documentChecksum, '');
+    const currentDocumentChecksum = normalizeText(documentData.analysis?.upload?.sha256 || documentData.contentHash, '');
+    const documentIntegrityValid = row.document_id
+      ? Boolean(documentRow && retainedDocumentChecksum && currentDocumentChecksum === retainedDocumentChecksum)
+      : data.governedRevision !== true;
+    const expiresAt = row.expires_at;
+    const expired = Boolean(expiresAt && Number.isFinite(Date.parse(expiresAt)) && Date.parse(expiresAt) <= Date.now());
+    const integrityValid = sourceHashValid && snapshotHashValid && documentIntegrityValid;
     return {
       id: row.id,
       jobId: row.job_id,
       material: row.material,
       supplier: row.supplier,
+      manufacturer: row.manufacturer || data.manufacturer || row.supplier || null,
+      productCode: row.product_code || data.productCode || null,
+      productKey: row.product_key,
+      revisionNumber: Number(row.revision_number || 1),
+      supersedesSdsId: row.supersedes_sds_id || null,
+      supersededBySdsId: data.supersededBySdsId || null,
+      language: row.language || data.language || 'nl',
+      issuedOn: row.issued_on || data.issuedOn || null,
       status: row.status,
-      expiresAt: row.expires_at,
+      expiresAt,
+      expired,
+      current: SDS_CURRENT_STATUSES.has(normalizeStatus(row.status, '')) && !expired && integrityValid,
+      documentId: row.document_id || null,
+      documentReference: data.documentReference || data.documentRef || null,
+      document: documentRow ? {
+        id: documentRow.id,
+        title: documentRow.title,
+        filename: documentRow.filename,
+        mimeType: documentRow.mime_type,
+        status: documentRow.status
+      } : null,
+      hazardClasses: normalizeList(data.hazardClasses || data.hazardClass),
+      requiredPpe: normalizeList(data.requiredPpe || data.ppe),
+      firstAidMeasures: data.firstAidMeasures || null,
+      fireMeasures: data.fireMeasures || null,
+      handlingStorage: data.handlingStorage || data.storage || null,
+      spillResponse: data.spillResponse || null,
+      disposal: data.disposal || null,
+      emergencyContact: data.emergencyContact || null,
+      revisionReason: data.revisionReason || null,
+      sourceHash: row.source_hash || null,
+      snapshotHash: row.snapshot_hash || null,
+      snapshot,
+      integrityValid,
+      sourceHashValid,
+      snapshotHashValid,
+      documentIntegrityValid,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      reviewedAt: row.reviewed_at || null,
       approvalId: row.approval_id,
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

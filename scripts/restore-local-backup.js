@@ -814,6 +814,45 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('046_governed_sds_revision_control')) {
+        if (!retainedTables.has('sds_sheets')) {
+          throw new Error('Backup governed SDS revision schema is incomplete: sds_sheets.');
+        }
+        const sdsColumns = new Set(database.prepare('PRAGMA table_info(sds_sheets)').all().map(row => row.name));
+        for (const column of [
+          'product_key',
+          'revision_number',
+          'supersedes_sds_id',
+          'manufacturer',
+          'product_code',
+          'language',
+          'issued_on',
+          'document_id',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint',
+          'reviewed_at'
+        ]) {
+          if (!sdsColumns.has(column)) {
+            throw new Error(`Backup governed SDS revision schema is incomplete: sds_sheets.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_sds_job_entry_key',
+          'idx_sds_job_product_revision',
+          'idx_sds_supersedes',
+          'idx_sds_one_current_product',
+          'idx_sds_job_status_expiry',
+          'idx_sds_document'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup governed SDS revision constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

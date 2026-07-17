@@ -191,5 +191,5 @@ test('NCR API enforces field identity and office-only correction and closure gat
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
   assert.equal(diagnostics.body.diagnostics.counts.nonconformanceRecords, 1);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '045_governed_pre_task_plans');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '046_governed_sds_revision_control');
 });
