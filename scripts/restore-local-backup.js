@@ -882,6 +882,19 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('048_thirteen_week_cash_flow_forecast')) {
+        for (const table of ['cash_flow_items', 'cash_flow_forecast_number_sequences', 'cash_flow_forecast_version_sequence', 'cash_flow_forecast_snapshots']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup cash-flow forecast schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_cash_flow_items_status_date', 'idx_cash_flow_items_job', 'idx_cash_flow_forecast_status']) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup cash-flow forecast constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

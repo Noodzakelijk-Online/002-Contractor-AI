@@ -66,13 +66,13 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'financial-control',
     label: 'Financial control and payments',
     vendors: ['Sage 100 Contractor', 'Built', 'Buildertrend', 'Contractor Foreman', 'Procore'],
-    capabilities: ['job costing', 'scope-change approval', 'purchase orders', 'invoices', 'AIA/progress billing', 'draws', 'lien waivers', 'payments', 'risk controls'],
+    capabilities: ['job costing', 'scope-change approval', 'purchase orders', 'invoices', 'AIA/progress billing', '13-week cash flow', 'draws', 'lien waivers', 'payments', 'risk controls'],
     sourceEvidence: [
       'Sage Construction Management emphasizes financials, contracts, change control, invoicing and construction accounting visibility.',
       'Built focuses on budget/draw management, invoice management, compliance tracking, lien waiver management, payments and risk mitigation.'
     ],
     serviceGroups: [
-      { name: 'Cost control', services: ['Budget line', 'source-linked cost forecast', 'expense', 'purchase order', 'change order', 'invoice draft'] },
+      { name: 'Cost control', services: ['Budget line', 'source-linked cost forecast', '13-week cash-flow forecast', 'expense', 'purchase order', 'change order', 'invoice draft'] },
       { name: 'Payment risk', services: ['Payment follow-up', 'draw request', 'waiver/compliance hold', 'finance handoff'] }
     ]
   },
@@ -167,6 +167,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   'financial-control': [
     { key: 'budget', label: 'Budget lines', table: 'budget_lines', detailKey: 'budgetLines' },
     { key: 'cost_forecast', label: 'Approved cost forecast', table: 'cost_forecast_snapshots', detailKey: 'costForecastSnapshots', readyStatuses: ['approved'] },
+    { key: 'cash_flow_forecast', label: 'Approved 13-week cash-flow forecast', table: 'cash_flow_forecast_snapshots', readyStatuses: ['approved'], ledgerOnly: true },
     { key: 'billing_milestone', label: 'Billing milestones', table: 'billing_milestones', detailKey: 'billingMilestones' },
     { key: 'expense', label: 'Expenses', table: 'expenses', detailKey: 'expenses' },
     { key: 'purchase_order', label: 'Purchase orders', table: 'purchase_orders', detailKey: 'purchaseOrders' },
@@ -999,6 +1000,8 @@ const AUDIT_CHAIN_ALGORITHM = 'sha256';
 const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
 const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
+const CASH_FLOW_FORECAST_FORMAT = 'contractor-ai-cash-flow-forecast/v1';
+const CASH_FLOW_FORECAST_WEEKS = 13;
 const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
 const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
 const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
@@ -3769,6 +3772,66 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           WHERE type = 'drawing_revision' AND source_document_id IS NOT NULL;
       `);
     }
+  },
+  {
+    version: '048_thirteen_week_cash_flow_forecast',
+    description: 'Retain replay-safe cash assumptions and source-current approval-backed 13-week liquidity forecasts.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cash_flow_items (
+          id TEXT PRIMARY KEY,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+          direction TEXT NOT NULL,
+          category TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          currency TEXT NOT NULL DEFAULT 'EUR',
+          amount REAL NOT NULL,
+          expected_at TEXT NOT NULL,
+          recurrence TEXT NOT NULL DEFAULT 'once',
+          recurrence_end_at TEXT,
+          confidence_percent REAL NOT NULL DEFAULT 100,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cash_flow_items_status_date
+          ON cash_flow_items(status, expected_at, recurrence_end_at);
+        CREATE INDEX IF NOT EXISTS idx_cash_flow_items_job
+          ON cash_flow_items(job_id, status, expected_at);
+
+        CREATE TABLE IF NOT EXISTS cash_flow_forecast_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS cash_flow_forecast_version_sequence (
+          sequence_key TEXT PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS cash_flow_forecast_snapshots (
+          id TEXT PRIMARY KEY,
+          forecast_number TEXT NOT NULL UNIQUE,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          currency TEXT NOT NULL,
+          as_of_date TEXT NOT NULL,
+          opening_balance REAL NOT NULL DEFAULT 0,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cash_flow_forecast_status
+          ON cash_flow_forecast_snapshots(status, version_number DESC);
+      `);
+    }
   }
 ];
 
@@ -5420,7 +5483,7 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
-    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods'].includes(table)) {
+    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots'].includes(table)) {
       return { from: `${table} AS records`, condition: '1 = 1' };
     }
     if (table === 'jobs') {
@@ -23541,6 +23604,803 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return after;
   }
 
+  cashFlowDate(value, label = 'Cash-flow date', code = 'cash_flow_date_invalid') {
+    const retained = normalizeRetainedDate(value, { required: true, label, code });
+    return retained.slice(0, 10);
+  }
+
+  cashFlowAddDays(dateValue, days) {
+    const date = new Date(`${dateValue}T00:00:00.000Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  }
+
+  cashFlowWeekStart(dateValue) {
+    const date = new Date(`${dateValue}T00:00:00.000Z`);
+    const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+    date.setUTCDate(date.getUTCDate() - daysSinceMonday);
+    return date.toISOString().slice(0, 10);
+  }
+
+  cashFlowMonthlyDate(dateValue, preferredDay = null) {
+    const date = new Date(`${dateValue}T00:00:00.000Z`);
+    const year = date.getUTCFullYear();
+    const month = date.getUTCMonth() + 1;
+    const targetYear = year + Math.floor(month / 12);
+    const targetMonth = month % 12;
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Number.isInteger(preferredDay) && preferredDay >= 1 && preferredDay <= 31
+      ? preferredDay
+      : date.getUTCDate();
+    return new Date(Date.UTC(targetYear, targetMonth, Math.min(targetDay, lastDay))).toISOString().slice(0, 10);
+  }
+
+  normalizeCashFlowItem(payload = {}) {
+    const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+    if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+      throw ledgerInputError('cash_flow_entry_key_invalid', 'Cash-flow assumptions require a replay key containing 8 to 200 safe characters.');
+    }
+    const title = normalizeText(payload.title || payload.description, '');
+    if (title.length < 2 || title.length > 160) {
+      throw ledgerInputError('cash_flow_title_invalid', 'Cash-flow assumption title must contain 2 to 160 characters.');
+    }
+    const direction = normalizeStatus(payload.direction, '');
+    if (!['inflow', 'outflow'].includes(direction)) {
+      throw ledgerInputError('cash_flow_direction_invalid', 'Cash-flow direction must be inflow or outflow.');
+    }
+    const category = normalizeStatus(payload.category, 'other');
+    if (!/^[a-z0-9_]{2,60}$/.test(category)) {
+      throw ledgerInputError('cash_flow_category_invalid', 'Cash-flow category must contain 2 to 60 safe characters.');
+    }
+    const amount = roundMoney(Number(payload.amount));
+    if (!(amount > 0 && amount <= 1_000_000_000_000)) {
+      throw ledgerInputError('cash_flow_amount_invalid', 'Cash-flow amount must be greater than zero and no more than 1 trillion.');
+    }
+    const currency = normalizeCommercialCurrency(payload.currency || 'EUR');
+    const expectedAt = this.cashFlowDate(
+      payload.expectedAt || payload.expected_at,
+      'Expected cash date',
+      'cash_flow_expected_date_invalid'
+    );
+    const recurrence = normalizeStatus(payload.recurrence, 'once');
+    if (!['once', 'weekly', 'monthly'].includes(recurrence)) {
+      throw ledgerInputError('cash_flow_recurrence_invalid', 'Cash-flow recurrence must be once, weekly, or monthly.');
+    }
+    const recurrenceEndInput = payload.recurrenceEndAt || payload.recurrence_end_at;
+    const recurrenceEndAt = recurrence === 'once'
+      ? null
+      : this.cashFlowDate(recurrenceEndInput, 'Recurrence end date', 'cash_flow_recurrence_end_invalid');
+    if (recurrenceEndAt && recurrenceEndAt < expectedAt) {
+      throw ledgerInputError('cash_flow_recurrence_range_invalid', 'Recurrence end date cannot precede the first expected date.');
+    }
+    const confidencePercent = roundQuantity(Number(payload.confidencePercent ?? payload.confidence_percent ?? 100));
+    if (!Number.isFinite(confidencePercent) || confidencePercent < 0 || confidencePercent > 100) {
+      throw ledgerInputError('cash_flow_confidence_invalid', 'Cash-flow confidence must be between 0 and 100 percent.');
+    }
+    const notes = normalizeText(payload.notes, '');
+    if (notes.length > 2000) {
+      throw ledgerInputError('cash_flow_notes_too_long', 'Cash-flow notes must be 2,000 characters or fewer.');
+    }
+    const sourceReference = normalizeText(payload.sourceReference || payload.source_reference, '');
+    if (sourceReference.length > 500) {
+      throw ledgerInputError('cash_flow_source_reference_too_long', 'Cash-flow source reference must be 500 characters or fewer.');
+    }
+    const jobId = normalizeText(payload.jobId || payload.job_id, '') || null;
+    const basis = {
+      jobId,
+      direction,
+      category,
+      title,
+      currency,
+      amount,
+      expectedAt,
+      recurrence,
+      recurrenceEndAt,
+      confidencePercent,
+      sourceReference: sourceReference || null,
+      notes: notes || null
+    };
+    return { entryKey, entryFingerprint: sha256Json(basis), ...basis };
+  }
+
+  listCashFlowItems(options = {}) {
+    const includeArchived = normalizeBoolean(options.includeArchived ?? options.include_archived, false);
+    const limit = safeLimit(options.limit, 500, 5_000);
+    const rows = this.db.prepare(`
+      SELECT items.*, jobs.title AS job_title
+      FROM cash_flow_items items
+      LEFT JOIN jobs ON jobs.id = items.job_id
+      ${includeArchived ? '' : "WHERE items.status = 'active'"}
+      ORDER BY items.expected_at ASC, items.created_at ASC
+      LIMIT ?
+    `).all(limit);
+    return rows.map(row => this.mapCashFlowItem(row));
+  }
+
+  createCashFlowItem(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const normalized = this.normalizeCashFlowItem(payload);
+      if (normalized.jobId) this.requireJob(normalized.jobId, { allowInactive: true });
+      const existing = this.db.prepare('SELECT * FROM cash_flow_items WHERE entry_key = ?').get(normalized.entryKey);
+      if (existing) {
+        if (existing.entry_fingerprint !== normalized.entryFingerprint) {
+          throw ledgerInputError(
+            'cash_flow_entry_key_conflict',
+            'This cash-flow replay key is already bound to different assumption content.',
+            { entryKey: normalized.entryKey, itemId: existing.id },
+            409
+          );
+        }
+        return { item: this.mapCashFlowItem(existing), replayed: true };
+      }
+      const id = makeId('cashitem');
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      this.db.prepare(`
+        INSERT INTO cash_flow_items (
+          id, entry_key, entry_fingerprint, job_id, direction, category, title, status,
+          currency, amount, expected_at, recurrence, recurrence_end_at, confidence_percent,
+          data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        normalized.entryKey,
+        normalized.entryFingerprint,
+        normalized.jobId,
+        normalized.direction,
+        normalized.category,
+        normalized.title,
+        normalized.currency,
+        normalized.amount,
+        normalized.expectedAt,
+        normalized.recurrence,
+        normalized.recurrenceEndAt,
+        normalized.confidencePercent,
+        toJson({ sourceReference: normalized.sourceReference, notes: normalized.notes, externalCommitments: 0 }),
+        timestamp,
+        timestamp
+      );
+      const item = this.mapCashFlowItem(this.db.prepare('SELECT * FROM cash_flow_items WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'cash_flow_item',
+        entityId: id,
+        jobId: normalized.jobId,
+        action: 'create_cash_flow_assumption',
+        actor,
+        after: item,
+        metadata: { entryKey: normalized.entryKey, entryFingerprint: normalized.entryFingerprint, externalCommitments: 0, fundsMoved: false }
+      });
+      return { item, replayed: false };
+    });
+  }
+
+  archiveCashFlowItem(itemId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM cash_flow_items WHERE id = ?').get(String(itemId || ''));
+      if (!row) throw ledgerInputError('cash_flow_item_not_found', 'Cash-flow assumption not found.', { itemId }, 404);
+      const before = this.mapCashFlowItem(row);
+      if (row.status === 'archived') return { item: before, replayed: true };
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 1000) {
+        throw ledgerInputError('cash_flow_archive_reason_invalid', 'Archiving a cash-flow assumption requires a reason between 8 and 1,000 characters.');
+      }
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      this.db.prepare(`
+        UPDATE cash_flow_items
+        SET status = 'archived', data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'active'
+      `).run(toJson({
+        ...fromJson(row.data_json, {}),
+        archived: { reason, archivedAt: timestamp, archivedBy: actor }
+      }), timestamp, row.id);
+      const item = this.mapCashFlowItem(this.db.prepare('SELECT * FROM cash_flow_items WHERE id = ?').get(row.id));
+      this.audit({
+        entityType: 'cash_flow_item',
+        entityId: row.id,
+        jobId: row.job_id,
+        action: 'archive_cash_flow_assumption',
+        actor,
+        before,
+        after: item,
+        metadata: { reason, externalCommitments: 0, fundsMoved: false }
+      });
+      return { item, replayed: false };
+    });
+  }
+
+  cashFlowOccurrenceDates(item, asOfDate, horizonEnd) {
+    const dates = [];
+    let cursor = item.expectedAt;
+    const recurrenceEndAt = item.recurrenceEndAt || horizonEnd;
+    const preferredDay = item.recurrence === 'monthly' ? Number(item.expectedAt.slice(8, 10)) : null;
+    if (item.recurrence === 'once') return [cursor];
+    let guard = 0;
+    while (cursor < asOfDate && cursor <= recurrenceEndAt && guard < 1_000) {
+      cursor = item.recurrence === 'weekly'
+        ? this.cashFlowAddDays(cursor, 7)
+        : this.cashFlowMonthlyDate(cursor, preferredDay);
+      guard += 1;
+    }
+    while (cursor < horizonEnd && cursor <= recurrenceEndAt && guard < 1_000) {
+      dates.push(cursor);
+      cursor = item.recurrence === 'weekly'
+        ? this.cashFlowAddDays(cursor, 7)
+        : this.cashFlowMonthlyDate(cursor, preferredDay);
+      guard += 1;
+    }
+    return dates;
+  }
+
+  allocateCashFlowForecastNumber(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('cash_flow_forecast_date_invalid', 'Cash-flow forecast date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO cash_flow_forecast_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE cash_flow_forecast_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable cash-flow forecast number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'cash_flow_forecast_number_allocation_failed';
+      throw error;
+    }
+    return `CF-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  allocateCashFlowForecastVersion() {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO cash_flow_forecast_version_sequence (sequence_key, last_value, updated_at)
+      VALUES ('global', 0, ?)
+    `).run(timestamp);
+    const row = this.db.prepare(`
+      UPDATE cash_flow_forecast_version_sequence
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE sequence_key = 'global'
+      RETURNING last_value
+    `).get(timestamp);
+    const versionNumber = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(versionNumber) || versionNumber < 1) {
+      const error = new Error('A durable cash-flow forecast version could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'cash_flow_forecast_version_allocation_failed';
+      throw error;
+    }
+    return versionNumber;
+  }
+
+  listCashFlowForecastSnapshots(options = {}) {
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT id FROM cash_flow_forecast_snapshots
+      ORDER BY version_number DESC
+      LIMIT ?
+    `).all(limit).map(row => this.getCashFlowForecastSnapshot(row.id));
+  }
+
+  getCashFlowForecastSnapshot(snapshotId) {
+    const row = this.db.prepare('SELECT * FROM cash_flow_forecast_snapshots WHERE id = ?').get(String(snapshotId || ''));
+    if (!row) throw ledgerInputError('cash_flow_forecast_not_found', 'Cash-flow forecast snapshot not found.', { snapshotId }, 404);
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    if (!snapshot
+      || snapshot.format !== CASH_FLOW_FORECAST_FORMAT
+      || snapshot.sourceHash !== row.source_hash
+      || sha256Text(snapshotJson) !== row.snapshot_hash) {
+      throw ledgerInputError(
+        'cash_flow_forecast_integrity_failed',
+        'The retained cash-flow forecast failed integrity verification.',
+        { snapshotId: row.id },
+        409
+      );
+    }
+    return this.mapCashFlowForecastSnapshot(row);
+  }
+
+  calculateCashFlowForecast(options = {}) {
+    const latestApproved = this.db.prepare(`
+      SELECT * FROM cash_flow_forecast_snapshots
+      WHERE status = 'approved'
+      ORDER BY version_number DESC LIMIT 1
+    `).get();
+    const asOfDate = this.cashFlowDate(
+      options.asOfDate || options.as_of_date || nowIso().slice(0, 10),
+      'Cash-flow as-of date',
+      'cash_flow_as_of_date_invalid'
+    );
+    const openingInput = options.openingBalance ?? options.opening_balance ?? latestApproved?.opening_balance ?? 0;
+    const numericOpeningBalance = Number(openingInput);
+    if (!Number.isFinite(numericOpeningBalance) || Math.abs(numericOpeningBalance) > 1_000_000_000_000) {
+      throw ledgerInputError('cash_flow_opening_balance_invalid', 'Opening cash balance must be between -1 trillion and 1 trillion.');
+    }
+    const openingBalance = roundMoney(numericOpeningBalance);
+    const weekStart = this.cashFlowWeekStart(asOfDate);
+    const horizonEnd = this.cashFlowAddDays(weekStart, CASH_FLOW_FORECAST_WEEKS * 7);
+    const items = this.listCashFlowItems({ limit: 5_000 });
+    const sources = [];
+    const excludedSources = [];
+    const undatedCommitments = [];
+    const addSource = source => {
+      const expectedAt = this.cashFlowDate(source.expectedAt, 'Expected cash date', 'cash_flow_source_date_invalid');
+      const retained = {
+        sourceType: source.sourceType,
+        sourceId: source.sourceId,
+        jobId: source.jobId || null,
+        jobTitle: source.jobTitle || null,
+        direction: source.direction,
+        category: source.category,
+        title: source.title,
+        currency: normalizeCommercialCurrency(source.currency || 'EUR'),
+        amount: roundMoney(source.amount),
+        expectedAt,
+        confidencePercent: roundQuantity(source.confidencePercent ?? 100),
+        overdue: expectedAt < asOfDate,
+        sourceReference: source.sourceReference || null
+      };
+      if (!(retained.amount > 0.01)) return;
+      if (expectedAt >= horizonEnd) excludedSources.push(retained);
+      else sources.push(retained);
+    };
+
+    for (const item of items) {
+      for (const expectedAt of this.cashFlowOccurrenceDates(item, asOfDate, horizonEnd)) {
+        addSource({
+          sourceType: 'manual_assumption',
+          sourceId: item.id,
+          jobId: item.jobId,
+          jobTitle: item.jobTitle,
+          direction: item.direction,
+          category: item.category,
+          title: item.title,
+          currency: item.currency,
+          amount: item.amount,
+          expectedAt,
+          confidencePercent: item.confidencePercent,
+          sourceReference: item.data?.sourceReference || item.entryKey
+        });
+      }
+    }
+
+    const invoiceRows = this.db.prepare(`
+      SELECT invoices.*, jobs.title AS job_title
+      FROM invoices
+      JOIN jobs ON jobs.id = invoices.job_id
+      WHERE invoices.status IN ('sent', 'submitted', 'issued', 'partially_paid', 'partially_settled')
+      ORDER BY invoices.due_at, invoices.created_at
+    `).all();
+    for (const row of invoiceRows) {
+      const invoice = this.mapInvoice(row);
+      const reconciliation = this.getInvoiceReconciliation(invoice.id);
+      addSource({
+        sourceType: 'client_receivable',
+        sourceId: invoice.id,
+        jobId: invoice.jobId,
+        jobTitle: row.job_title,
+        direction: 'inflow',
+        category: 'client_receivable',
+        title: invoice.data?.issuePackage?.issueReference || row.job_title || 'Client receivable',
+        currency: invoice.currency,
+        amount: reconciliation.outstandingAmount,
+        expectedAt: invoice.dueAt || asOfDate,
+        confidencePercent: 90,
+        sourceReference: invoice.data?.issuePackage?.issueReference || invoice.id
+      });
+    }
+
+    const supplierRows = this.db.prepare(`
+      SELECT supplier_invoices.*, jobs.title AS job_title
+      FROM supplier_invoices
+      JOIN jobs ON jobs.id = supplier_invoices.job_id
+      WHERE supplier_invoices.status IN ('approved', 'partially_paid')
+      ORDER BY supplier_invoices.due_at, supplier_invoices.created_at
+    `).all();
+    for (const row of supplierRows) {
+      const invoice = this.mapSupplierInvoice(row);
+      const reconciliation = this.getSupplierInvoiceReconciliation(invoice.id);
+      addSource({
+        sourceType: 'supplier_payable',
+        sourceId: invoice.id,
+        jobId: invoice.jobId,
+        jobTitle: row.job_title,
+        direction: 'outflow',
+        category: 'supplier_payable',
+        title: `${invoice.supplier} ${invoice.invoiceNumber}`,
+        currency: invoice.currency,
+        amount: reconciliation.outstandingAmount,
+        expectedAt: invoice.dueAt || asOfDate,
+        confidencePercent: 95,
+        sourceReference: invoice.invoiceNumber
+      });
+    }
+
+    const commitmentRows = this.db.prepare(`
+      SELECT purchase_orders.*, jobs.title AS job_title,
+        COALESCE(SUM(CASE
+          WHEN supplier_invoices.status NOT IN ('rejected', 'cancelled', 'reversed')
+          THEN supplier_invoices.net_amount ELSE 0 END), 0) AS invoiced_amount
+      FROM purchase_orders
+      JOIN jobs ON jobs.id = purchase_orders.job_id
+      LEFT JOIN supplier_invoices ON supplier_invoices.purchase_order_id = purchase_orders.id
+      WHERE purchase_orders.status IN ('ordered', 'sent', 'submitted', 'issued', 'received', 'closed')
+      GROUP BY purchase_orders.id, jobs.title
+      ORDER BY purchase_orders.created_at
+    `).all();
+    for (const row of commitmentRows) {
+      const remainingAmount = roundMoney(Math.max(0, normalizeNumber(row.amount, 0) - normalizeNumber(row.invoiced_amount, 0)));
+      if (remainingAmount <= 0.01) continue;
+      undatedCommitments.push({
+        sourceType: 'unallocated_purchase_commitment',
+        sourceId: row.id,
+        jobId: row.job_id,
+        jobTitle: row.job_title || null,
+        direction: 'outflow',
+        category: 'purchase_commitment',
+        title: row.supplier || row.job_title || 'Issued purchase commitment',
+        currency: normalizeCommercialCurrency(row.currency || 'EUR'),
+        amount: remainingAmount,
+        confidencePercent: 100,
+        sourceReference: row.id
+      });
+    }
+
+    const milestoneRows = this.db.prepare(`
+      SELECT milestones.*, jobs.title AS job_title
+      FROM billing_milestones milestones
+      JOIN jobs ON jobs.id = milestones.job_id
+      WHERE milestones.status = 'approved' AND milestones.invoice_id IS NULL
+      ORDER BY milestones.due_at, milestones.sequence_number
+    `).all();
+    for (const row of milestoneRows) {
+      const milestone = this.mapBillingMilestone(row);
+      addSource({
+        sourceType: 'planned_billing',
+        sourceId: milestone.id,
+        jobId: milestone.jobId,
+        jobTitle: row.job_title,
+        direction: 'inflow',
+        category: 'planned_billing',
+        title: `${row.job_title}: ${milestone.title}`,
+        currency: milestone.currency,
+        amount: milestone.total || milestone.amount,
+        expectedAt: milestone.dueAt,
+        confidencePercent: 70,
+        sourceReference: `Milestone ${milestone.sequenceNumber}`
+      });
+    }
+
+    sources.sort((left, right) => (
+      left.expectedAt.localeCompare(right.expectedAt)
+      || left.direction.localeCompare(right.direction)
+      || left.sourceType.localeCompare(right.sourceType)
+      || String(left.sourceId).localeCompare(String(right.sourceId))
+    ));
+    excludedSources.sort((left, right) => left.expectedAt.localeCompare(right.expectedAt) || String(left.sourceId).localeCompare(String(right.sourceId)));
+    undatedCommitments.sort((left, right) => String(left.sourceId).localeCompare(String(right.sourceId)));
+    const currencies = [...new Set([...sources, ...excludedSources, ...undatedCommitments].map(source => source.currency))].sort();
+    const currency = currencies[0] || 'EUR';
+    const weeks = Array.from({ length: CASH_FLOW_FORECAST_WEEKS }, (_, index) => {
+      const startsAt = this.cashFlowAddDays(weekStart, index * 7);
+      return {
+        index: index + 1,
+        startsAt,
+        endsAt: this.cashFlowAddDays(startsAt, 6),
+        openingBalance: 0,
+        inflow: 0,
+        outflow: 0,
+        net: 0,
+        closingBalance: 0,
+        weightedInflow: 0,
+        weightedOutflow: 0,
+        weightedNet: 0,
+        weightedClosingBalance: 0,
+        sourceCount: 0,
+        sources: []
+      };
+    });
+    for (const source of sources) {
+      const milliseconds = Date.parse(`${source.expectedAt}T00:00:00.000Z`) - Date.parse(`${weekStart}T00:00:00.000Z`);
+      const index = Math.max(0, Math.min(CASH_FLOW_FORECAST_WEEKS - 1, Math.floor(milliseconds / 604_800_000)));
+      const week = weeks[index];
+      const weightedAmount = roundMoney(source.amount * source.confidencePercent / 100);
+      if (source.direction === 'inflow') {
+        week.inflow = roundMoney(week.inflow + source.amount);
+        week.weightedInflow = roundMoney(week.weightedInflow + weightedAmount);
+      } else {
+        week.outflow = roundMoney(week.outflow + source.amount);
+        week.weightedOutflow = roundMoney(week.weightedOutflow + weightedAmount);
+      }
+      week.sourceCount += 1;
+      week.sources.push(source);
+    }
+    let rollingBalance = openingBalance;
+    let weightedBalance = openingBalance;
+    for (const week of weeks) {
+      week.openingBalance = rollingBalance;
+      week.net = roundMoney(week.inflow - week.outflow);
+      rollingBalance = roundMoney(rollingBalance + week.net);
+      week.closingBalance = rollingBalance;
+      week.weightedNet = roundMoney(week.weightedInflow - week.weightedOutflow);
+      weightedBalance = roundMoney(weightedBalance + week.weightedNet);
+      week.weightedClosingBalance = weightedBalance;
+    }
+    const total = (direction, weighted = false) => roundMoney(weeks.reduce((sum, week) => (
+      sum + week[weighted ? (direction === 'inflow' ? 'weightedInflow' : 'weightedOutflow') : direction]
+    ), 0));
+    const negativeWeeks = weeks.filter(week => week.closingBalance < -0.01);
+    const weightedNegativeWeeks = weeks.filter(week => week.weightedClosingBalance < -0.01);
+    const minimumWeek = weeks.reduce((lowest, week) => week.closingBalance < lowest.closingBalance ? week : lowest, weeks[0]);
+    const summary = {
+      openingBalance,
+      totalInflows: total('inflow'),
+      totalOutflows: total('outflow'),
+      netMovement: roundMoney(total('inflow') - total('outflow')),
+      closingBalance: weeks.at(-1).closingBalance,
+      weightedInflows: total('inflow', true),
+      weightedOutflows: total('outflow', true),
+      weightedClosingBalance: weeks.at(-1).weightedClosingBalance,
+      minimumBalance: minimumWeek.closingBalance,
+      minimumBalanceWeek: minimumWeek.index,
+      negativeWeeks: negativeWeeks.length,
+      weightedNegativeWeeks: weightedNegativeWeeks.length,
+      sourceCount: sources.length,
+      excludedSourceCount: excludedSources.length,
+      undatedCommitmentCount: undatedCommitments.length,
+      undatedCommitmentValue: roundMoney(undatedCommitments.reduce((sum, commitment) => sum + commitment.amount, 0)),
+      overdueSourceCount: sources.filter(source => source.overdue).length,
+      atRisk: negativeWeeks.length > 0 || weightedNegativeWeeks.length > 0
+    };
+    const blockers = [];
+    if (currencies.length > 1) blockers.push({
+      code: 'cash_flow_currency_mismatch',
+      message: `Cash-flow sources contain multiple currencies: ${currencies.join(', ')}. Convert them before freezing a forecast.`,
+      currencies
+    });
+    const warnings = [];
+    if (!sources.length) warnings.push({ code: 'cash_flow_no_movements', message: 'No retained cash movements fall inside the 13-week horizon.' });
+    if (summary.overdueSourceCount) warnings.push({ code: 'cash_flow_overdue_sources', message: `${summary.overdueSourceCount} overdue cash movement(s) are included in week 1.` });
+    if (excludedSources.length) warnings.push({ code: 'cash_flow_beyond_horizon', message: `${excludedSources.length} retained cash movement(s) fall beyond the 13-week horizon.` });
+    if (undatedCommitments.length) warnings.push({
+      code: 'cash_flow_undated_commitments',
+      message: `${undatedCommitments.length} issued purchase commitment(s) totalling ${summary.undatedCommitmentValue.toFixed(2)} ${currency} have no approved supplier payable date and are not assigned to a forecast week.`
+    });
+    if (summary.atRisk) warnings.push({ code: 'cash_flow_negative_balance', message: `Projected cash is negative in ${Math.max(summary.negativeWeeks, summary.weightedNegativeWeeks)} week(s).` });
+    const sourceBasis = {
+      format: CASH_FLOW_FORECAST_FORMAT,
+      asOfDate,
+      weekStart,
+      horizonEnd,
+      openingBalance,
+      currency,
+      sources,
+      excludedSources,
+      undatedCommitments
+    };
+    const sourceHash = sha256Json(sourceBasis);
+    const snapshotRows = this.db.prepare(`
+      SELECT * FROM cash_flow_forecast_snapshots
+      ORDER BY version_number DESC
+    `).all();
+    const snapshots = snapshotRows.map(row => this.mapCashFlowForecastSnapshot(row));
+    const activeSnapshot = snapshots.find(snapshot => snapshot.status === 'approved') || null;
+    const pendingSnapshot = snapshots.find(snapshot => snapshot.status === 'pending_approval') || null;
+    return {
+      format: CASH_FLOW_FORECAST_FORMAT,
+      generatedAt: nowIso(),
+      asOfDate,
+      weekStart,
+      horizonEnd,
+      weeksInHorizon: CASH_FLOW_FORECAST_WEEKS,
+      currency,
+      openingBalance,
+      ready: blockers.length === 0,
+      blockers,
+      warnings,
+      sourceHash,
+      sourceBasis,
+      sources,
+      excludedSources,
+      undatedCommitments,
+      weeks,
+      summary,
+      items,
+      snapshots,
+      activeSnapshot: activeSnapshot ? { ...activeSnapshot, sourceCurrent: activeSnapshot.sourceHash === sourceHash } : null,
+      pendingSnapshot: pendingSnapshot ? { ...pendingSnapshot, sourceCurrent: pendingSnapshot.sourceHash === sourceHash } : null,
+      snapshotCurrent: Boolean(activeSnapshot && activeSnapshot.sourceHash === sourceHash),
+      policy: {
+        derivedSources: ['client_receivable', 'supplier_payable', 'planned_billing', 'unallocated_purchase_commitment'],
+        manualAssumptionsRetained: true,
+        confidenceWeightedScenario: true,
+        fundsMoved: false,
+        externalCommitmentsCreated: 0
+      }
+    };
+  }
+
+  requestCashFlowForecastSnapshot(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const forecast = this.calculateCashFlowForecast(payload);
+      if (!forecast.ready) {
+        throw ledgerInputError(
+          'cash_flow_forecast_not_ready',
+          'Resolve the cash-flow forecast blockers before requesting approval.',
+          { blockers: forecast.blockers },
+          409
+        );
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM cash_flow_forecast_snapshots
+        WHERE status = 'pending_approval'
+        ORDER BY version_number DESC LIMIT 1
+      `).get();
+      if (pending) {
+        if (pending.source_hash === forecast.sourceHash) {
+          return {
+            snapshot: this.mapCashFlowForecastSnapshot(pending),
+            approval: pending.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)) : null,
+            forecast,
+            replayed: true
+          };
+        }
+        throw ledgerInputError(
+          'cash_flow_forecast_pending',
+          'Resolve the pending cash-flow forecast before requesting a revised version.',
+          { snapshotId: pending.id, approvalId: pending.approval_id },
+          409
+        );
+      }
+      const timestamp = nowIso();
+      const versionNumber = this.allocateCashFlowForecastVersion();
+      const forecastNumber = this.allocateCashFlowForecastNumber(timestamp);
+      const snapshot = {
+        format: CASH_FLOW_FORECAST_FORMAT,
+        forecastNumber,
+        versionNumber,
+        asOfDate: forecast.asOfDate,
+        weekStart: forecast.weekStart,
+        horizonEnd: forecast.horizonEnd,
+        preparedAt: timestamp,
+        preparedBy: actor,
+        currency: forecast.currency,
+        openingBalance: forecast.openingBalance,
+        sourceHash: forecast.sourceHash,
+        sourceBasis: forecast.sourceBasis,
+        weeks: forecast.weeks,
+        summary: forecast.summary,
+        warnings: forecast.warnings,
+        controls: {
+          externalCommitmentsCreated: 0,
+          fundsMoved: false,
+          paymentsInitiated: false,
+          sourceCurrentAtRequest: true
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('cashflow');
+      this.db.prepare(`
+        INSERT INTO cash_flow_forecast_snapshots (
+          id, forecast_number, version_number, status, currency, as_of_date, opening_balance,
+          source_hash, snapshot_hash, snapshot_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id,
+        forecastNumber,
+        versionNumber,
+        forecast.currency,
+        forecast.asOfDate,
+        forecast.openingBalance,
+        forecast.sourceHash,
+        snapshotHash,
+        snapshotJson,
+        toJson({ requestedBy: actor, reason: normalizeText(payload.reason || payload.notes, '') || null }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'cash_flow_forecast',
+        targetId: id,
+        approvalType: 'cash_flow_forecast_snapshot',
+        summary: `Approve 13-week cash-flow forecast ${forecastNumber}`,
+        reason: 'The snapshot freezes source-derived receivables, payables, planned billing, retained assumptions, confidence weighting, and weekly liquidity for management review.',
+        data: {
+          forecastNumber,
+          versionNumber,
+          sourceHash: forecast.sourceHash,
+          snapshotHash,
+          currency: forecast.currency,
+          openingBalance: forecast.openingBalance,
+          totalInflows: forecast.summary.totalInflows,
+          totalOutflows: forecast.summary.totalOutflows,
+          closingBalance: forecast.summary.closingBalance,
+          minimumBalance: forecast.summary.minimumBalance,
+          negativeWeeks: forecast.summary.negativeWeeks,
+          atRisk: forecast.summary.atRisk,
+          externalCommitments: 0,
+          fundsMoved: false
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE cash_flow_forecast_snapshots SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const retained = this.mapCashFlowForecastSnapshot(this.db.prepare('SELECT * FROM cash_flow_forecast_snapshots WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'cash_flow_forecast',
+        entityId: id,
+        action: 'request_cash_flow_forecast_approval',
+        actor,
+        after: retained,
+        metadata: { approvalId: approval.id, forecastNumber, versionNumber, sourceHash: forecast.sourceHash, externalCommitments: 0, fundsMoved: false }
+      });
+      return { snapshot: retained, approval, forecast, replayed: false };
+    });
+  }
+
+  applyCashFlowForecastApproval(snapshotId) {
+    const row = this.db.prepare('SELECT * FROM cash_flow_forecast_snapshots WHERE id = ?').get(snapshotId);
+    if (!row) throw ledgerInputError('cash_flow_forecast_not_found', 'Cash-flow forecast snapshot not found.', { snapshotId }, 404);
+    if (row.status === 'approved') return this.mapCashFlowForecastSnapshot(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('cash_flow_forecast_state_conflict', `Cash-flow forecast cannot be approved from ${row.status}.`, { snapshotId, status: row.status }, 409);
+    }
+    this.getCashFlowForecastSnapshot(snapshotId);
+    const current = this.calculateCashFlowForecast({ asOfDate: row.as_of_date, openingBalance: row.opening_balance });
+    if (!current.ready || current.sourceHash !== row.source_hash) {
+      throw ledgerInputError(
+        'cash_flow_forecast_stale',
+        'Cash-flow evidence changed after this forecast was requested. Reject it and request a current snapshot.',
+        { snapshotId, retainedSourceHash: row.source_hash, currentSourceHash: current.sourceHash, blockers: current.blockers },
+        409
+      );
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    const before = this.mapCashFlowForecastSnapshot(row);
+    this.db.prepare(`
+      UPDATE cash_flow_forecast_snapshots
+      SET status = 'superseded', updated_at = ?
+      WHERE status = 'approved' AND id <> ?
+    `).run(timestamp, snapshotId);
+    this.db.prepare(`
+      UPDATE cash_flow_forecast_snapshots
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, snapshotId);
+    const after = this.mapCashFlowForecastSnapshot(this.db.prepare('SELECT * FROM cash_flow_forecast_snapshots WHERE id = ?').get(snapshotId));
+    this.audit({
+      entityType: 'cash_flow_forecast',
+      entityId: snapshotId,
+      action: 'approve_cash_flow_forecast',
+      actor,
+      before,
+      after,
+      metadata: {
+        approvalId: row.approval_id || null,
+        forecastNumber: row.forecast_number,
+        versionNumber: row.version_number,
+        sourceHash: row.source_hash,
+        externalCommitments: 0,
+        fundsMoved: false
+      }
+    });
+    return after;
+  }
+
   normalizeProductionPlanLines(lines = []) {
     if (!Array.isArray(lines) || lines.length < 1 || lines.length > 200) {
       throw ledgerInputError('production_baseline_lines_required', 'A production baseline requires between 1 and 200 plan lines.');
@@ -33574,6 +34434,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'cash_flow_forecast') {
+        this.db.prepare(`
+          UPDATE cash_flow_forecast_snapshots
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM cash_flow_forecast_snapshots WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'production_baseline') {
         this.db.prepare(`
           UPDATE production_baselines
@@ -33919,6 +34799,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyScheduleBaselineApproval(targetId);
     } else if (targetType === 'cost_forecast') {
       this.applyCostForecastApproval(targetId);
+    } else if (targetType === 'cash_flow_forecast') {
+      this.applyCashFlowForecastApproval(targetId);
     } else if (targetType === 'production_baseline') {
       this.applyProductionBaselineApproval(targetId);
     } else if (targetType === 'production_entry_reversal') {
@@ -38467,6 +39349,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       site_access_logs: 'status',
       budget_lines: 'status',
       cost_forecast_snapshots: 'status',
+      cash_flow_forecast_snapshots: 'status',
       production_baselines: 'status',
       production_entries: 'status',
       billing_milestones: 'status',
@@ -43486,6 +44369,47 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Job ${forecastRow.job_id} cost forecast cannot be recalculated: ${error.message}` });
       }
     }
+    const approvedCashFlowsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM cash_flow_forecast_snapshots forecasts
+      LEFT JOIN approvals ON approvals.id = forecasts.approval_id
+      WHERE forecasts.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'cash_flow_forecast' OR approvals.target_id <> forecasts.id
+        )
+    `).get().count || 0);
+    if (approvedCashFlowsWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedCashFlowsWithoutApproval} approved cash-flow forecast(s) lack a matching approval decision.` });
+    }
+    const cashFlowRows = this.db.prepare(`
+      SELECT * FROM cash_flow_forecast_snapshots
+      WHERE status IN ('pending_approval', 'approved', 'superseded')
+      ORDER BY version_number
+    `).all();
+    for (const cashFlowRow of cashFlowRows) {
+      try {
+        this.getCashFlowForecastSnapshot(cashFlowRow.id);
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Cash-flow forecast ${cashFlowRow.forecast_number} failed retained snapshot verification: ${error.code || error.message}.` });
+      }
+    }
+    for (const cashFlowRow of cashFlowRows.filter(row => ['pending_approval', 'approved'].includes(row.status))) {
+      try {
+        const currentForecast = this.calculateCashFlowForecast({
+          asOfDate: cashFlowRow.as_of_date,
+          openingBalance: cashFlowRow.opening_balance
+        });
+        if (!currentForecast.ready || currentForecast.sourceHash !== cashFlowRow.source_hash) {
+          issues.push({
+            severity: 'warning',
+            message: `Cash evidence changed after ${cashFlowRow.forecast_number} was ${cashFlowRow.status === 'approved' ? 'approved' : 'requested'}.`
+          });
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Cash-flow forecast ${cashFlowRow.forecast_number} cannot be recalculated: ${error.message}` });
+      }
+    }
     const approvedProductionBaselinesWithoutApproval = Number(this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM production_baselines baselines
@@ -44661,6 +45585,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         taskDependencies: this.count('task_dependencies'),
         scheduleBaselines: this.count('schedule_baselines'),
         costForecastSnapshots: this.count('cost_forecast_snapshots'),
+        cashFlowItems: this.count('cash_flow_items'),
+        cashFlowForecastSnapshots: this.count('cash_flow_forecast_snapshots'),
         productionBaselines: this.count('production_baselines'),
         productionEntries: this.count('production_entries'),
         attendanceSessions: this.count('attendance_sessions'),
@@ -46813,6 +47739,58 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapCashFlowItem(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      jobId: row.job_id || null,
+      jobTitle: row.job_title || null,
+      direction: row.direction,
+      category: row.category,
+      title: row.title,
+      status: row.status,
+      currency: row.currency,
+      amount: normalizeNumber(row.amount, 0),
+      expectedAt: row.expected_at,
+      recurrence: row.recurrence,
+      recurrenceEndAt: row.recurrence_end_at || null,
+      confidencePercent: normalizeNumber(row.confidence_percent, 100),
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapCashFlowForecastSnapshot(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      forecastNumber: row.forecast_number,
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      currency: row.currency,
+      asOfDate: row.as_of_date,
+      openingBalance: normalizeNumber(row.opening_balance, 0),
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === CASH_FLOW_FORECAST_FORMAT
+        && snapshot.sourceHash === row.source_hash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapProductionBaseline(row) {
     if (!row) return null;
     const snapshotJson = normalizeText(row.snapshot_json, '');
@@ -47907,6 +48885,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.forecast = data.forecast ?? null;
       preview.budgetVariance = data.budgetVariance ?? null;
       preview.projectedMargin = data.projectedMargin ?? null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'cash_flow_forecast') {
+      const row = this.db.prepare('SELECT * FROM cash_flow_forecast_snapshots WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapCashFlowForecastSnapshot(row) : null;
+      primaryEffect = `Approve 13-week cash-flow forecast ${mapped?.forecastNumber || data.forecastNumber || ''}.`;
+      addEffect(`Freeze ${normalizeNumber(data.totalInflows, 0).toFixed(2)} ${data.currency || mapped?.currency || 'EUR'} inflow and ${normalizeNumber(data.totalOutflows, 0).toFixed(2)} outflow against the retained source hash.`);
+      addEffect(`Retain closing cash ${normalizeNumber(data.closingBalance, 0).toFixed(2)} and minimum cash ${normalizeNumber(data.minimumBalance, 0).toFixed(2)} for liquidity review.`);
+      addSafeguard('Approval is refused if a retained assumption, receivable, supplier payable, billing milestone, reconciliation, opening balance, or forecast date changed after the snapshot request.');
+      addSafeguard('Does not edit source records, initiate a payment, collect a receivable, move funds, send a report, or create any external commitment.');
+      riskLevel = data.atRisk ? 'high' : 'medium';
+      preview.forecastNumber = mapped?.forecastNumber || data.forecastNumber || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.openingBalance = data.openingBalance ?? mapped?.openingBalance ?? null;
+      preview.totalInflows = data.totalInflows ?? null;
+      preview.totalOutflows = data.totalOutflows ?? null;
+      preview.closingBalance = data.closingBalance ?? null;
+      preview.minimumBalance = data.minimumBalance ?? null;
+      preview.negativeWeeks = data.negativeWeeks ?? null;
       preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (['budget_line', 'draw_request', 'lien_waiver', 'finance_handoff'].includes(targetType)) {

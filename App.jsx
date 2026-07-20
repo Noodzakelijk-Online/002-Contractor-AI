@@ -80,6 +80,7 @@ import './App.css'
 
 const ResourcesWorkspace = lazy(() => import('./components/ResourcesWorkspace'))
 const AuditHistory = lazy(() => import('./components/AuditHistory'))
+const CashFlowForecastControl = lazy(() => import('./components/CashFlowForecastControl'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
@@ -1034,7 +1035,13 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       availabilityRegister: availability.availabilityRegister || { catalog: [], summary: {}, workers: [], periods: [], conflicts: [] },
     }
   }
-  if (section === 'finance') return { finance: await api('/api/ledger/finance?limit=100') }
+  if (section === 'finance') {
+    const [finance, cashFlow] = await Promise.all([
+      api('/api/ledger/finance?limit=100'),
+      api('/api/ledger/cash-flow'),
+    ])
+    return { finance, cashFlow: cashFlow.cashFlow }
+  }
   if (section === 'clients') {
     const [clientSuccess, directory] = await Promise.all([
       api('/api/ledger/client-success?limit=100'),
@@ -2075,6 +2082,7 @@ function PortfolioScheduleWorkspace({ schedule, jobs, canApprove, onOpenApproval
 
 function FinanceWorkspace({
   finance,
+  cashFlow,
   jobs,
   canCoordinate,
   canApprove,
@@ -2084,6 +2092,7 @@ function FinanceWorkspace({
   onAction,
   onOpenApprovals,
   onOpen,
+  onCashFlowChange,
 }) {
   const rows = finance?.jobs || EMPTY_LIST
   const summary = finance?.summary || {}
@@ -2096,6 +2105,17 @@ function FinanceWorkspace({
         </div>
         <span className="count-badge">{rows.length}</span>
       </div>
+      <LazyControlBoundary label="cash-flow forecast">
+        <CashFlowForecastControl
+          cashFlow={cashFlow}
+          jobs={jobs}
+          request={api}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          onChange={onCashFlowChange}
+          onOpenApprovals={onOpenApprovals}
+        />
+      </LazyControlBoundary>
       <div className="finance-summary" aria-label="Finance summary">
         <div>
           <span>Invoice ready</span>
@@ -9708,6 +9728,7 @@ function App() {
             {section === 'finance' && capabilities.finance ? (
               <FinanceWorkspace
                 finance={data.finance}
+                cashFlow={data.cashFlow}
                 jobs={jobs}
                 canCoordinate={canCoordinate}
                 canApprove={capabilities.approvals === true}
@@ -9717,6 +9738,7 @@ function App() {
                 onAction={openFinanceControl}
                 onOpenApprovals={openApprovals}
                 onOpen={openJobWorkspace}
+                onCashFlowChange={(cashFlow) => setData((current) => ({ ...current, cashFlow }))}
               />
             ) : null}
 

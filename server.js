@@ -4007,6 +4007,42 @@ app.get('/api/ledger/finance', (req, res) => {
   }));
 });
 
+app.get('/api/ledger/cash-flow', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    cashFlow: operatingLedger.calculateCashFlowForecast(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/cash-flow/items', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createCashFlowItem(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    cashFlow: operatingLedger.calculateCashFlowForecast()
+  }), 201);
+});
+
+app.post('/api/ledger/cash-flow/items/:itemId/archive', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.archiveCashFlowItem(req.params.itemId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    cashFlow: operatingLedger.calculateCashFlowForecast()
+  }));
+});
+
+app.post('/api/ledger/cash-flow/snapshots', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestCashFlowForecastSnapshot(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }), 201);
+});
+
 app.get('/api/ledger/client-success', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -5777,6 +5813,8 @@ function operationalExport() {
     supplierInvoicePayments: operatingLedger.listSupplierInvoicePayments({ limit: 500 }),
     billingMilestones: operatingLedger.listBillingMilestones({ limit: 500 }),
     costForecastSnapshots: operatingLedger.listAllCostForecastSnapshots({ limit: 5_000 }),
+    cashFlowItems: operatingLedger.listCashFlowItems({ includeArchived: true, limit: 5_000 }),
+    cashFlowForecastSnapshots: operatingLedger.listCashFlowForecastSnapshots({ limit: 5_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     dayworkTickets: operatingLedger.listDayworkTickets({ limit: 5_000 }),
@@ -5844,6 +5882,8 @@ function validateOperationalExport(snapshot) {
     'takeoffItems',
     'purchaseOrders',
     'costForecastSnapshots',
+    'cashFlowItems',
+    'cashFlowForecastSnapshots',
     'attendanceSessions',
     'attendanceAdjustments',
     'weeklyTimesheets',
@@ -5909,6 +5949,8 @@ function validateOperationalExport(snapshot) {
       supplierInvoicePayments: snapshot.supplierInvoicePayments.length,
       billingMilestones: snapshot.billingMilestones.length,
       costForecastSnapshots: Array.isArray(snapshot.costForecastSnapshots) ? snapshot.costForecastSnapshots.length : 0,
+      cashFlowItems: Array.isArray(snapshot.cashFlowItems) ? snapshot.cashFlowItems.length : 0,
+      cashFlowForecastSnapshots: Array.isArray(snapshot.cashFlowForecastSnapshots) ? snapshot.cashFlowForecastSnapshots.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
       dayworkTickets: Array.isArray(snapshot.dayworkTickets) ? snapshot.dayworkTickets.length : 0,
@@ -6531,6 +6573,9 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         attendanceAdjustment: 'approval_gated_compensating_record',
         weeklyTimesheetSnapshot: 'source_current_approval_gated',
         timesheetExportIntegrity: 'sha256',
+        cashFlowEntryKey: 'durable',
+        cashFlowAssumptionRetirement: 'retained_archive',
+        cashFlowForecastSnapshot: 'source_current_approval_gated',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
@@ -6661,6 +6706,20 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         immutableSnapshots: true,
         approvalRequired: true,
         sourceCurrentApprovalRequired: true,
+        externalCommitments: 0
+      },
+      cashFlowForecasting: {
+        horizonWeeks: 13,
+        sourceLinked: true,
+        derivedSources: ['client_receivables', 'supplier_payables', 'approved_billing_milestones', 'unallocated_purchase_commitments'],
+        manualAssumptions: 'replay_safe_retained',
+        recurrence: ['once', 'weekly', 'monthly'],
+        confidenceWeightedScenario: true,
+        mixedCurrencySnapshots: false,
+        immutableSnapshots: true,
+        approvalRequired: true,
+        sourceCurrentApprovalRequired: true,
+        fundsMoved: false,
         externalCommitments: 0
       },
       productionControl: {

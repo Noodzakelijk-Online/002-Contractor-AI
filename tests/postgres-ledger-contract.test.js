@@ -1405,7 +1405,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(migrations.currentVersion, '048_thirteen_week_cash_flow_forecast');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1486,12 +1486,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('047_governed_drawing_revision_control'));
+  assert.deepEqual(versions, Array(4).fill('048_thirteen_week_cash_flow_forecast'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 47);
+    assert.equal(Number(migrationCount.count), 48);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -2023,7 +2023,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2376,7 +2376,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2484,7 +2484,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2583,7 +2583,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2670,7 +2670,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
   } finally {
     ledger?.close();
   }
@@ -2775,7 +2775,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '047_governed_drawing_revision_control');
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -2789,6 +2789,69 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.revisionNumber, 2);
     assert.equal(ledger.listSdsSheets({ jobId, currentOnly: true })[0].id, secondId);
+    assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and restart integrity', { skip: !connectionString }, () => {
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const asOfDate = new Date().toISOString().slice(0, 10);
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  let snapshotId;
+  try {
+    const retained = ledger.createCashFlowItem({
+      entryKey: `postgres-cash-flow-${marker}`,
+      direction: 'outflow',
+      category: 'overhead',
+      title: `Hosted recurring overhead ${marker}`,
+      amount: 125,
+      expectedAt: asOfDate,
+      recurrence: 'weekly',
+      recurrenceEndAt: ledger.cashFlowAddDays(asOfDate, 14),
+      confidencePercent: 80,
+      sourceReference: `POSTGRES-CASH-${marker}`
+    }, { actor: 'postgres_finance_operator' });
+    assert.equal(retained.replayed, false);
+    assert.equal(ledger.createCashFlowItem({
+      entryKey: `postgres-cash-flow-${marker}`,
+      direction: 'outflow',
+      category: 'overhead',
+      title: `Hosted recurring overhead ${marker}`,
+      amount: 125,
+      expectedAt: asOfDate,
+      recurrence: 'weekly',
+      recurrenceEndAt: ledger.cashFlowAddDays(asOfDate, 14),
+      confidencePercent: 80,
+      sourceReference: `POSTGRES-CASH-${marker}`
+    }).replayed, true);
+
+    const forecast = ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 });
+    const retainedSources = forecast.sources.filter(source => source.sourceId === retained.item.id);
+    assert.equal(forecast.weeks.length, 13);
+    assert.equal(retainedSources.length, 3);
+    assert.equal(retainedSources.reduce((sum, source) => sum + source.amount, 0), 375);
+
+    const requested = ledger.requestCashFlowForecastSnapshot({ asOfDate, openingBalance: 1000 }, { actor: 'postgres_finance_operator' });
+    snapshotId = requested.snapshot.id;
+    ledger.resolveApproval(requested.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_finance_approver',
+      reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
+    });
+    assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
+    assert.equal(ledger.migrationStatus().currentVersion, '048_thirteen_week_cash_flow_forecast');
+  } finally {
+    ledger.close();
+  }
+
+  ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const snapshot = ledger.getCashFlowForecastSnapshot(snapshotId);
+    assert.equal(snapshot.status, 'approved');
+    assert.equal(snapshot.integrityValid, true);
+    assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();

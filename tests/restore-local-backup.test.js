@@ -158,6 +158,20 @@ test('backup verification rejects a migration 031 ledger with missing cost-forec
   );
 });
 
+test('backup verification rejects a migration 048 ledger with missing cash-flow forecast constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-cash-flow-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Cash-flow forecast schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_cash_flow_forecast_status');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /cash-flow forecast constraints are incomplete: idx_cash_flow_forecast_status/i
+  );
+});
+
 test('backup verification rejects a migration 032 ledger with missing production-control constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-production-control-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

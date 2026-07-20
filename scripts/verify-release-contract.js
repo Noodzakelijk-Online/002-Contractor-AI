@@ -6,6 +6,7 @@ const REQUIRED_PATHS = [
   'App.jsx',
   'ClientPortal.css',
   'ClientPortal.jsx',
+  'components/CashFlowForecastControl.jsx',
   'Dockerfile',
   'docker-compose.hosted.yml',
   'evidence-storage.js',
@@ -110,6 +111,10 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   for (const canonicalRoute of [
     "app.get('/api/ledger/dashboard'",
     "app.get('/api/ledger/schedule'",
+    "app.get('/api/ledger/cash-flow'",
+    "app.post('/api/ledger/cash-flow/items'",
+    "app.post('/api/ledger/cash-flow/items/:itemId/archive'",
+    "app.post('/api/ledger/cash-flow/snapshots'",
     "app.get('/api/ledger/bid-packages'",
     "app.post('/api/ledger/bid-packages/:id/commitment'",
     "app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package'",
@@ -128,6 +133,10 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/operations/restore/validate'"
   ]) {
     if (!serverSource.includes(canonicalRoute)) failures.push(`Canonical ledger route is missing: ${canonicalRoute}`);
+  }
+  const ledgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
+  if (!ledgerSource.includes("version: '048_thirteen_week_cash_flow_forecast'")) {
+    failures.push('Canonical cash-flow forecast migration is missing.');
   }
 
   const hostedEnvironment = fs.readFileSync(path.join(root, '.env.hosted.example'), 'utf8');

@@ -10,6 +10,7 @@ const dashboardSource = [
   fs.readFileSync(path.join(__dirname, '..', 'components', 'JobWorkspaceControls.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'ResourcesWorkspace.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'AuditHistory.jsx'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, '..', 'components', 'CashFlowForecastControl.jsx'), 'utf8'),
 ].join('\n');
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
@@ -25,6 +26,7 @@ test('React dashboard uses ledger endpoints instead of cached or simulated contr
 test('large navigation and job controls are loaded through local suspense boundaries', () => {
   assert.match(dashboardRootSource, /lazy\(\(\) => import\('\.\/components\/ResourcesWorkspace'\)\)/);
   assert.match(dashboardRootSource, /const AuditHistory = lazy\(\(\) => import\('\.\/components\/AuditHistory'\)\)/);
+  assert.match(dashboardRootSource, /const CashFlowForecastControl = lazy\(\(\) => import\('\.\/components\/CashFlowForecastControl'\)\)/);
   assert.match(dashboardRootSource, /const loadJobWorkspaceControls = \(\) => import\('\.\/components\/JobWorkspaceControls'\)/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="resource controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="audit history">/);
@@ -82,6 +84,18 @@ test('finance dashboard freezes server-derived cost forecasts through approval-b
   assert.match(dashboardSource, /costForecast\.snapshotCurrent/);
   assert.match(dashboardSource, /awaiting approval/);
   assert.match(dashboardSource, /Cost forecast .* retained from the current cost-code evidence/);
+});
+
+test('finance dashboard operates an approval-backed 13-week cash-flow forecast', () => {
+  assert.match(dashboardSource, /data-testid="cash-flow-control"/);
+  assert.match(dashboardSource, /\/api\/ledger\/cash-flow\?/);
+  assert.match(dashboardSource, /\/api\/ledger\/cash-flow\/items/);
+  assert.match(dashboardSource, /\/api\/ledger\/cash-flow\/snapshots/);
+  assert.match(dashboardSource, /13-week cash-flow forecast/);
+  assert.match(dashboardSource, /No payment or external commitment was created/);
+  assert.match(dashboardSource, /cashFlow\?\.warnings/);
+  assert.match(dashboardSource, /canApprove && pendingSnapshot\?\.approvalId/);
+  assert.match(dashboardSource, /money\(source\.amount, source\.currency\)/);
 });
 
 test('workforce qualifications use retained approval-backed evidence and job readiness controls', () => {
