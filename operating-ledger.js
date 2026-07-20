@@ -180,6 +180,10 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'waiver', label: 'Waiver/compliance hold', table: 'lien_waivers', detailKey: 'lienWaivers' },
     { key: 'handoff', label: 'Finance handoff', table: 'finance_handoffs', detailKey: 'financeHandoffs' }
   ],
+  'performance-management': [
+    { key: 'balanced_scorecard', label: 'Approved Contractor Balanced Scorecard', table: 'performance_scorecard_snapshots', readyStatuses: ['approved'], ledgerOnly: true },
+    { key: 'performance_targets', label: 'Approved KPI target revisions', table: 'performance_scorecard_targets', readyStatuses: ['approved'], ledgerOnly: true }
+  ],
   'client-portal': [
     { key: 'communication', label: 'Client communication', table: 'communication_records', detailKey: 'communications' },
     { key: 'selection', label: 'Client selections', table: 'client_selections', detailKey: 'clientSelections' },
@@ -1002,6 +1006,30 @@ const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
 const CASH_FLOW_FORECAST_FORMAT = 'contractor-ai-cash-flow-forecast/v1';
 const CASH_FLOW_FORECAST_WEEKS = 13;
+const PERFORMANCE_SCORECARD_FORMAT = 'contractor-ai-performance-scorecard/v1';
+const PERFORMANCE_SCORECARD_DEFAULT_WEEKS = 13;
+const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
+  { key: 'recordable_incidents', perspective: 'safety', label: 'Recordable incidents', unit: 'count', comparison: 'at_most', target: 0 },
+  { key: 'safety_action_closure_pct', perspective: 'safety', label: 'Safety actions closed', unit: 'percent', comparison: 'at_least', target: 95 },
+  { key: 'inspection_pass_rate_pct', perspective: 'quality', label: 'Inspection pass rate', unit: 'percent', comparison: 'at_least', target: 95 },
+  { key: 'open_nonconformances', perspective: 'quality', label: 'Open nonconformances', unit: 'count', comparison: 'at_most', target: 0 },
+  { key: 'on_time_completion_pct', perspective: 'delivery_reliability', label: 'On-time completion', unit: 'percent', comparison: 'at_least', target: 90 },
+  { key: 'overdue_active_jobs', perspective: 'delivery_reliability', label: 'Overdue active jobs', unit: 'count', comparison: 'at_most', target: 0 },
+  { key: 'warranty_resolution_pct', perspective: 'customer_satisfaction', label: 'Warranty claims resolved', unit: 'percent', comparison: 'at_least', target: 90 },
+  { key: 'handover_delivery_pct', perspective: 'customer_satisfaction', label: 'Handover delivery coverage', unit: 'percent', comparison: 'at_least', target: 90 },
+  { key: 'billable_utilization_pct', perspective: 'employee_capacity', label: 'Billable crew utilization', unit: 'percent', comparison: 'at_least', target: 70 },
+  { key: 'assignment_coverage_pct', perspective: 'employee_capacity', label: 'Active-job crew coverage', unit: 'percent', comparison: 'at_least', target: 95 },
+  { key: 'portfolio_margin_pct', perspective: 'financial_performance', label: 'Projected portfolio margin', unit: 'percent', comparison: 'at_least', target: 20 },
+  { key: 'overdue_receivable_rate_pct', perspective: 'financial_performance', label: 'Overdue receivable rate', unit: 'percent', comparison: 'at_most', target: 10 },
+  { key: 'opportunity_win_rate_pct', perspective: 'commercial_pipeline', label: 'Opportunity win rate', unit: 'percent', comparison: 'at_least', target: 35 },
+  { key: 'follow_up_compliance_pct', perspective: 'commercial_pipeline', label: 'Pipeline follow-up compliance', unit: 'percent', comparison: 'at_least', target: 90 },
+  { key: 'equipment_utilization_pct', perspective: 'asset_productivity', label: 'Equipment utilization', unit: 'percent', comparison: 'at_least', target: 65 },
+  { key: 'equipment_return_compliance_pct', perspective: 'asset_productivity', label: 'On-time equipment returns', unit: 'percent', comparison: 'at_least', target: 95 },
+  { key: 'permit_validity_pct', perspective: 'compliance', label: 'Permit validity', unit: 'percent', comparison: 'at_least', target: 100 },
+  { key: 'trade_partner_compliance_pct', perspective: 'compliance', label: 'Trade-partner compliance', unit: 'percent', comparison: 'at_least', target: 100 },
+  { key: 'environmental_approval_rate_pct', perspective: 'sustainability', label: 'Environmental records approved', unit: 'percent', comparison: 'at_least', target: 95 },
+  { key: 'emissions_evidence_coverage_pct', perspective: 'sustainability', label: 'Emissions evidence coverage', unit: 'percent', comparison: 'at_least', target: 100 }
+]);
 const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
 const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
 const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
@@ -3832,6 +3860,64 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON cash_flow_forecast_snapshots(status, version_number DESC);
       `);
     }
+  },
+  {
+    version: '049_contractor_balanced_scorecard',
+    description: 'Retain approval-gated KPI target revisions and source-current immutable Contractor Balanced Scorecard snapshots.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS performance_scorecard_targets (
+          id TEXT PRIMARY KEY,
+          metric_key TEXT NOT NULL,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          target_value REAL NOT NULL,
+          comparison TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(metric_key, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_performance_target_one_approved
+          ON performance_scorecard_targets(metric_key)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_performance_target_status
+          ON performance_scorecard_targets(status, metric_key, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS performance_scorecard_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS performance_scorecard_version_sequence (
+          sequence_key TEXT PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS performance_scorecard_snapshots (
+          id TEXT PRIMARY KEY,
+          scorecard_number TEXT NOT NULL UNIQUE,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          weeks INTEGER NOT NULL,
+          source_hash TEXT NOT NULL,
+          target_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_performance_scorecard_status
+          ON performance_scorecard_snapshots(status, version_number DESC);
+      `);
+    }
   }
 ];
 
@@ -5483,7 +5569,7 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
-    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots'].includes(table)) {
+    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots'].includes(table)) {
       return { from: `${table} AS records`, condition: '1 = 1' };
     }
     if (table === 'jobs') {
@@ -24401,6 +24487,751 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return after;
   }
 
+  performanceScorecardMetric(metricKey) {
+    const key = normalizeText(metricKey, '').toLowerCase();
+    const definition = PERFORMANCE_SCORECARD_METRICS.find(metric => metric.key === key);
+    if (!definition) {
+      throw ledgerInputError('performance_metric_invalid', 'Performance target metric is not supported.', { metricKey }, 400);
+    }
+    return definition;
+  }
+
+  listPerformanceScorecardTargets(options = {}) {
+    const includeHistory = normalizeBoolean(options.includeHistory ?? options.include_history);
+    const rows = this.db.prepare(`
+      SELECT * FROM performance_scorecard_targets
+      ${includeHistory ? '' : "WHERE status IN ('pending_approval', 'approved')"}
+      ORDER BY metric_key, version_number DESC
+    `).all().map(row => this.mapPerformanceScorecardTarget(row));
+    const approvedByMetric = new Map(rows.filter(row => row.status === 'approved').map(row => [row.metricKey, row]));
+    const pending = rows.filter(row => row.status === 'pending_approval');
+    const effective = PERFORMANCE_SCORECARD_METRICS.map(definition => {
+      const revision = approvedByMetric.get(definition.key) || null;
+      return {
+        metricKey: definition.key,
+        perspective: definition.perspective,
+        label: definition.label,
+        unit: definition.unit,
+        comparison: definition.comparison,
+        targetValue: revision?.targetValue ?? definition.target,
+        source: revision ? 'approved_revision' : 'built_in_default',
+        revision
+      };
+    });
+    return { effective, pending, revisions: rows };
+  }
+
+  requestPerformanceScorecardTarget(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const definition = this.performanceScorecardMetric(payload.metricKey || payload.metric_key);
+      const targetValue = Number(payload.targetValue ?? payload.target_value);
+      if (!Number.isFinite(targetValue) || targetValue < 0 || targetValue > (definition.unit === 'percent' ? 100 : 1_000_000_000)) {
+        throw ledgerInputError(
+          'performance_target_value_invalid',
+          `${definition.label} target must be between 0 and ${definition.unit === 'percent' ? 100 : '1,000,000,000'}.`,
+          { metricKey: definition.key }
+        );
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('performance_target_entry_key_invalid', 'A target revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('performance_target_reason_invalid', 'A target revision requires a reason between 8 and 500 characters.');
+      }
+      const fingerprint = sha256Json({
+        metricKey: definition.key,
+        targetValue: roundMeasurement(targetValue, 3),
+        comparison: definition.comparison,
+        reason
+      });
+      const replay = this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError(
+            'performance_target_replay_conflict',
+            'This target entryKey was already used with different values.',
+            { entryKey, targetId: replay.id },
+            409
+          );
+        }
+        const target = this.mapPerformanceScorecardTarget(replay);
+        return {
+          target,
+          approval: target.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(target.approvalId)) : null,
+          replayed: true
+        };
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM performance_scorecard_targets
+        WHERE metric_key = ? AND status = 'pending_approval'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(definition.key);
+      if (pending) {
+        throw ledgerInputError(
+          'performance_target_pending',
+          `Resolve the pending ${definition.label} target revision first.`,
+          { targetId: pending.id, approvalId: pending.approval_id },
+          409
+        );
+      }
+      const versionNumber = Number(this.db.prepare(`
+        SELECT COALESCE(MAX(version_number), 0) AS value
+        FROM performance_scorecard_targets
+        WHERE metric_key = ?
+      `).get(definition.key)?.value || 0) + 1;
+      const timestamp = nowIso();
+      const id = makeId('scoretarget');
+      this.db.prepare(`
+        INSERT INTO performance_scorecard_targets (
+          id, metric_key, version_number, status, target_value, comparison,
+          entry_key, entry_fingerprint, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id,
+        definition.key,
+        versionNumber,
+        roundMeasurement(targetValue, 3),
+        definition.comparison,
+        entryKey,
+        fingerprint,
+        toJson({ reason, requestedBy: actor, unit: definition.unit, perspective: definition.perspective }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'performance_scorecard_target',
+        targetId: id,
+        approvalType: 'performance_scorecard_target_revision',
+        summary: `Approve ${definition.label} target revision`,
+        reason,
+        data: {
+          metricKey: definition.key,
+          label: definition.label,
+          perspective: definition.perspective,
+          unit: definition.unit,
+          comparison: definition.comparison,
+          targetValue: roundMeasurement(targetValue, 3),
+          versionNumber,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE performance_scorecard_targets SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const retained = this.mapPerformanceScorecardTarget(this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'performance_scorecard_target',
+        entityId: id,
+        action: 'request_performance_target_approval',
+        actor,
+        after: retained,
+        metadata: { approvalId: approval.id, metricKey: definition.key, versionNumber, targetValue: retained.targetValue, externalCommitments: 0 }
+      });
+      return { target: retained, approval, replayed: false };
+    });
+  }
+
+  applyPerformanceScorecardTargetApproval(targetId) {
+    const row = this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(targetId);
+    if (!row) throw ledgerInputError('performance_target_not_found', 'Performance target revision not found.', { targetId }, 404);
+    if (row.status === 'approved') return this.mapPerformanceScorecardTarget(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('performance_target_state_conflict', `Performance target cannot be approved from ${row.status}.`, { targetId, status: row.status }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    const before = this.mapPerformanceScorecardTarget(row);
+    this.db.prepare(`
+      UPDATE performance_scorecard_targets
+      SET status = 'superseded', updated_at = ?
+      WHERE metric_key = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.metric_key, targetId);
+    this.db.prepare(`
+      UPDATE performance_scorecard_targets
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, targetId);
+    const after = this.mapPerformanceScorecardTarget(this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(targetId));
+    this.audit({
+      entityType: 'performance_scorecard_target',
+      entityId: targetId,
+      action: 'approve_performance_target',
+      actor,
+      before,
+      after,
+      metadata: { approvalId: row.approval_id || null, metricKey: row.metric_key, versionNumber: row.version_number, targetValue: row.target_value, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  allocatePerformanceScorecardNumber(preparedAt = nowIso()) {
+    const periodYear = new Date(preparedAt).getUTCFullYear();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO performance_scorecard_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE performance_scorecard_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw ledgerInputError('performance_scorecard_number_allocation_failed', 'A durable performance scorecard number could not be allocated.', {}, 500);
+    }
+    return `BSC-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  allocatePerformanceScorecardVersion() {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO performance_scorecard_version_sequence (sequence_key, last_value, updated_at)
+      VALUES ('global', 0, ?)
+    `).run(timestamp);
+    const row = this.db.prepare(`
+      UPDATE performance_scorecard_version_sequence
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE sequence_key = 'global'
+      RETURNING last_value
+    `).get(timestamp);
+    const versionNumber = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(versionNumber) || versionNumber < 1) {
+      throw ledgerInputError('performance_scorecard_version_allocation_failed', 'A durable performance scorecard version could not be allocated.', {}, 500);
+    }
+    return versionNumber;
+  }
+
+  listPerformanceScorecardSnapshots(options = {}) {
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT id FROM performance_scorecard_snapshots
+      ORDER BY version_number DESC LIMIT ?
+    `).all(limit).map(row => this.getPerformanceScorecardSnapshot(row.id));
+  }
+
+  getPerformanceScorecardSnapshot(snapshotId) {
+    const row = this.db.prepare('SELECT * FROM performance_scorecard_snapshots WHERE id = ?').get(String(snapshotId || ''));
+    if (!row) throw ledgerInputError('performance_scorecard_not_found', 'Performance scorecard snapshot not found.', { snapshotId }, 404);
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    if (!snapshot
+      || snapshot.format !== PERFORMANCE_SCORECARD_FORMAT
+      || snapshot.sourceHash !== row.source_hash
+      || snapshot.targetHash !== row.target_hash
+      || sha256Text(snapshotJson) !== row.snapshot_hash) {
+      throw ledgerInputError(
+        'performance_scorecard_integrity_failed',
+        'The retained performance scorecard failed integrity verification.',
+        { snapshotId: row.id },
+        409
+      );
+    }
+    return this.mapPerformanceScorecardSnapshot(row);
+  }
+
+  calculatePerformanceScorecard(options = {}) {
+    const periodEnd = this.cashFlowDate(
+      options.periodEnd || options.period_end || nowIso().slice(0, 10),
+      'Scorecard period end',
+      'performance_scorecard_period_invalid'
+    );
+    if (periodEnd > nowIso().slice(0, 10)) {
+      throw ledgerInputError('performance_scorecard_period_future', 'Scorecard period end cannot be in the future.');
+    }
+    const weeks = Number(options.weeks ?? PERFORMANCE_SCORECARD_DEFAULT_WEEKS);
+    if (!Number.isInteger(weeks) || weeks < 4 || weeks > 52) {
+      throw ledgerInputError('performance_scorecard_weeks_invalid', 'Scorecard period must contain between 4 and 52 whole weeks.');
+    }
+    const periodStart = this.cashFlowAddDays(periodEnd, -(weeks * 7 - 1));
+    const priorPeriodEnd = this.cashFlowAddDays(periodStart, -1);
+    const priorPeriodStart = this.cashFlowAddDays(priorPeriodEnd, -(weeks * 7 - 1));
+    const dateOnly = value => {
+      const candidate = normalizeText(value, '').slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? candidate : null;
+    };
+    const inWindow = (value, start, end) => {
+      const date = dateOnly(value);
+      return Boolean(date && date >= start && date <= end);
+    };
+    const percent = (numerator, denominator) => denominator > 0
+      ? roundMeasurement(numerator / denominator * 100, 1)
+      : null;
+    const compact = (rows, fields) => rows.map(row => Object.fromEntries([
+      ['id', row.id],
+      ...fields.map(field => [field, row[field] ?? null])
+    ]));
+    const excludedJobStatuses = new Set(['cancelled', 'canceled', 'rejected', 'void']);
+    const activeJobStatuses = new Set(['completed', 'archived', 'cancelled', 'canceled', 'rejected', 'void']);
+    const jobs = this.db.prepare('SELECT * FROM jobs ORDER BY id').all();
+    const operationalJobs = jobs.filter(row => !excludedJobStatuses.has(normalizeStatus(row.status, '')));
+    const activeJobs = operationalJobs.filter(row => !activeJobStatuses.has(normalizeStatus(row.status, '')));
+    const incidents = this.db.prepare('SELECT * FROM incident_records ORDER BY id').all();
+    const safetyChecks = this.db.prepare('SELECT * FROM safety_checks ORDER BY id').all();
+    const checklistSubmissions = this.db.prepare('SELECT * FROM inspection_checklist_submissions ORDER BY id').all();
+    const nonconformances = this.db.prepare('SELECT * FROM nonconformance_records ORDER BY id').all();
+    const warrantyClaims = this.db.prepare('SELECT * FROM warranty_claims ORDER BY id').all();
+    const communications = this.db.prepare('SELECT * FROM communication_records ORDER BY id').all();
+    const timesheets = this.db.prepare('SELECT * FROM weekly_timesheets ORDER BY id').all();
+    const assignments = this.db.prepare('SELECT * FROM assignments ORDER BY id').all();
+    const invoices = this.db.prepare('SELECT * FROM invoices ORDER BY id').all();
+    const payments = this.db.prepare('SELECT * FROM payments ORDER BY id').all();
+    const opportunities = this.db.prepare('SELECT * FROM opportunities ORDER BY id').all();
+    const tools = this.db.prepare('SELECT * FROM tools ORDER BY id').all();
+    const custodySessions = this.db.prepare('SELECT * FROM equipment_custody_sessions ORDER BY id').all();
+    const permits = this.db.prepare('SELECT * FROM permit_records ORDER BY id').all();
+    const partners = this.db.prepare('SELECT * FROM trade_partners ORDER BY id').all();
+    const environmentalActivities = this.db.prepare('SELECT * FROM environmental_activities ORDER BY id').all();
+    const activeJobIds = new Set(activeJobs.map(job => job.id));
+    const operationalJobIds = new Set(operationalJobs.map(job => job.id));
+    const completedDate = row => dateOnly(fromJson(row.data_json, {}).completedAt || row.updated_at);
+    const forecastEligibleJobIds = new Set(this.db.prepare(`
+      SELECT DISTINCT job_id
+      FROM budget_lines
+      WHERE status IN ('approved', 'locked', 'baseline') AND budget_amount > 0
+    `).all().map(row => row.job_id));
+    const portfolioForecasts = [];
+    for (const job of activeJobs.filter(row => forecastEligibleJobIds.has(row.id))) {
+      try {
+        const forecast = this.calculateCostForecast(job.id);
+        if (forecast.ready && forecast.summary.contractValue > 0 && forecast.summary.projectedMarginPercent !== null) {
+          portfolioForecasts.push({
+            jobId: job.id,
+            sourceHash: forecast.sourceHash,
+            projectedMarginPercent: forecast.summary.projectedMarginPercent,
+            ready: forecast.ready,
+            blockerCodes: forecast.blockers.map(blocker => blocker.code)
+          });
+        }
+      } catch (error) {
+        portfolioForecasts.push({ jobId: job.id, errorCode: error.code || 'cost_forecast_unavailable' });
+      }
+    }
+
+    const metricInputs = (start, end, currentWindow) => {
+      const periodIncidents = incidents.filter(row => operationalJobIds.has(row.job_id)
+        && inWindow(row.occurred_at || row.created_at, start, end)
+        && !['cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
+      const periodSafetyChecks = safetyChecks.filter(row => operationalJobIds.has(row.job_id)
+        && inWindow(row.due_at || row.completed_at || row.created_at, start, end)
+        && !['cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
+      const closedSafetyChecks = periodSafetyChecks.filter(row => ['completed', 'approved', 'verified', 'closed'].includes(normalizeStatus(row.status, '')));
+      const periodInspections = checklistSubmissions.filter(row => operationalJobIds.has(row.job_id)
+        && inWindow(row.submitted_at || row.created_at, start, end)
+        && !['cancelled', 'canceled', 'rejected', 'void', 'draft'].includes(normalizeStatus(row.status, '')));
+      const passedInspections = periodInspections.filter(row => ['pass', 'passed', 'approved', 'accepted'].includes(normalizeStatus(row.result, '')));
+      const completedJobs = operationalJobs.filter(row => normalizeStatus(row.status, '') === 'completed' && inWindow(completedDate(row), start, end));
+      const completedOnTime = completedJobs.filter(row => {
+        const target = dateOnly(row.target_completion || row.scheduled_end);
+        return target && completedDate(row) <= target;
+      });
+      const periodWarranty = warrantyClaims.filter(row => operationalJobIds.has(row.job_id)
+        && inWindow(row.created_at, start, end)
+        && !['cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
+      const resolvedWarranty = periodWarranty.filter(row => ['closed', 'resolved', 'accepted'].includes(normalizeStatus(row.status, '')));
+      const handoverDeliveredJobIds = new Set(communications.filter(row => {
+        const data = fromJson(row.data_json, {});
+        return data.source === 'handover_issue_package'
+          && ['sent', 'delivered'].includes(normalizeStatus(row.status, ''))
+          && dateOnly(row.sent_at || row.updated_at || row.created_at) <= end;
+      }).map(row => row.job_id));
+      const periodTimesheets = timesheets.filter(row => inWindow(row.period_start, start, end)
+        && normalizeStatus(row.status, '') === 'approved');
+      const totalHours = periodTimesheets.reduce((sum, row) => sum + normalizeNumber(row.total_hours, 0), 0);
+      const billableHours = periodTimesheets.reduce((sum, row) => sum + normalizeNumber(row.billable_hours, 0), 0);
+      const issuedInvoices = invoices.filter(row => operationalJobIds.has(row.job_id)
+        && dateOnly(row.issued_at || row.created_at) <= end
+        && !['draft', 'pending_approval', 'cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
+      const paidByInvoice = new Map();
+      for (const payment of payments) {
+        if (!['approved', 'confirmed', 'received', 'settled', 'paid'].includes(normalizeStatus(payment.status, ''))) continue;
+        if (dateOnly(payment.paid_at || payment.created_at) > end) continue;
+        paidByInvoice.set(payment.invoice_id, roundMoney((paidByInvoice.get(payment.invoice_id) || 0) + normalizeNumber(payment.amount, 0)));
+      }
+      const outstandingInvoices = issuedInvoices.map(row => ({
+        ...row,
+        outstanding: roundMoney(Math.max(0, normalizeNumber(row.total, row.amount) - (paidByInvoice.get(row.id) || 0)))
+      })).filter(row => row.outstanding > 0.01);
+      const overdueInvoices = outstandingInvoices.filter(row => dateOnly(row.due_at) && dateOnly(row.due_at) < end);
+      const decidedOpportunities = opportunities.filter(row => inWindow(row.updated_at, start, end)
+        && ['won', 'lost', 'rejected'].includes(normalizeStatus(row.stage, '')));
+      const wonOpportunities = decidedOpportunities.filter(row => normalizeStatus(row.stage, '') === 'won');
+      const openOpportunities = opportunities.filter(row => !['won', 'lost', 'rejected', 'cancelled', 'canceled', 'archived'].includes(normalizeStatus(row.stage, '')));
+      const compliantFollowUps = openOpportunities.filter(row => !dateOnly(row.next_follow_up_at) || dateOnly(row.next_follow_up_at) >= end);
+      const activeTools = tools.filter(row => !['retired', 'inactive', 'lost', 'disposed', 'rejected'].includes(normalizeStatus(row.status, '')));
+      const utilizedToolIds = new Set(custodySessions.filter(row => ['checked_out', 'in_use', 'overdue'].includes(normalizeStatus(row.status, ''))).map(row => row.tool_id));
+      const returnedSessions = custodySessions.filter(row => inWindow(row.returned_at, start, end));
+      const onTimeReturns = returnedSessions.filter(row => !row.due_back_at || String(row.returned_at) <= String(row.due_back_at));
+      const activePermits = permits.filter(row => operationalJobIds.has(row.job_id)
+        && !['closed', 'expired', 'cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
+      const validPermits = activePermits.filter(row => (!dateOnly(row.valid_from) || dateOnly(row.valid_from) <= end)
+        && (!dateOnly(row.expires_at) || dateOnly(row.expires_at) >= end)
+        && !['draft', 'pending_approval', 'suspended'].includes(normalizeStatus(row.status, '')));
+      const activePartners = partners.filter(row => !['retired', 'inactive', 'cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
+      const compliantPartners = activePartners.filter(row => ['verified', 'approved', 'active'].includes(normalizeStatus(row.status, ''))
+        && (!dateOnly(row.insurance_expires_at) || dateOnly(row.insurance_expires_at) >= end)
+        && (!dateOnly(row.vca_expires_at) || dateOnly(row.vca_expires_at) >= end));
+      const periodEnvironmental = environmentalActivities.filter(row => operationalJobIds.has(row.job_id)
+        && inWindow(row.activity_date || row.created_at, start, end)
+        && !['cancelled', 'canceled', 'rejected', 'reversed', 'void'].includes(normalizeStatus(row.status, '')));
+      const approvedEnvironmental = periodEnvironmental.filter(row => ['approved', 'pending_reversal'].includes(normalizeStatus(row.status, '')));
+      const evidenceCovered = periodEnvironmental.filter(row => {
+        const data = fromJson(row.data_json, {});
+        return Boolean(row.evidence_reference || row.evidence_document_id)
+          && Boolean(row.factor_source || data.factorSource)
+          && Boolean(row.factor_reference || data.factorReference);
+      });
+      const assignedJobIds = new Set(assignments.filter(row => activeJobIds.has(row.job_id)
+        && !['released', 'cancelled', 'canceled', 'completed', 'closed', 'rejected'].includes(normalizeStatus(row.status, ''))
+        && (!dateOnly(row.scheduled_start) || dateOnly(row.scheduled_start) <= end)
+        && (!dateOnly(row.scheduled_end) || dateOnly(row.scheduled_end) >= start)).map(row => row.job_id));
+      const openNcrs = nonconformances.filter(row => activeJobIds.has(row.job_id) && normalizeStatus(row.status, '') !== 'closed');
+      const overdueJobs = activeJobs.filter(row => {
+        const target = dateOnly(row.target_completion || row.scheduled_end);
+        return target && target < end;
+      });
+      const values = {
+        recordable_incidents: { value: operationalJobs.length ? periodIncidents.length : null, sampleSize: operationalJobs.length, evidenceIds: periodIncidents.map(row => row.id), periodBased: true },
+        safety_action_closure_pct: { value: percent(closedSafetyChecks.length, periodSafetyChecks.length), sampleSize: periodSafetyChecks.length, numerator: closedSafetyChecks.length, denominator: periodSafetyChecks.length, evidenceIds: periodSafetyChecks.map(row => row.id), periodBased: true },
+        inspection_pass_rate_pct: { value: percent(passedInspections.length, periodInspections.length), sampleSize: periodInspections.length, numerator: passedInspections.length, denominator: periodInspections.length, evidenceIds: periodInspections.map(row => row.id), periodBased: true },
+        open_nonconformances: { value: currentWindow && activeJobs.length ? openNcrs.length : null, sampleSize: currentWindow ? activeJobs.length : 0, evidenceIds: currentWindow ? openNcrs.map(row => row.id) : [], periodBased: false },
+        on_time_completion_pct: { value: percent(completedOnTime.length, completedJobs.length), sampleSize: completedJobs.length, numerator: completedOnTime.length, denominator: completedJobs.length, evidenceIds: completedJobs.map(row => row.id), periodBased: true },
+        overdue_active_jobs: { value: currentWindow && activeJobs.length ? overdueJobs.length : null, sampleSize: currentWindow ? activeJobs.length : 0, evidenceIds: currentWindow ? overdueJobs.map(row => row.id) : [], periodBased: false },
+        warranty_resolution_pct: { value: percent(resolvedWarranty.length, periodWarranty.length), sampleSize: periodWarranty.length, numerator: resolvedWarranty.length, denominator: periodWarranty.length, evidenceIds: periodWarranty.map(row => row.id), periodBased: true },
+        handover_delivery_pct: { value: percent(completedJobs.filter(row => handoverDeliveredJobIds.has(row.id)).length, completedJobs.length), sampleSize: completedJobs.length, numerator: completedJobs.filter(row => handoverDeliveredJobIds.has(row.id)).length, denominator: completedJobs.length, evidenceIds: completedJobs.map(row => row.id), periodBased: true },
+        billable_utilization_pct: { value: percent(billableHours, totalHours), sampleSize: periodTimesheets.length, numerator: roundMeasurement(billableHours, 2), denominator: roundMeasurement(totalHours, 2), evidenceIds: periodTimesheets.map(row => row.id), periodBased: true },
+        assignment_coverage_pct: { value: currentWindow ? percent(assignedJobIds.size, activeJobs.length) : null, sampleSize: currentWindow ? activeJobs.length : 0, numerator: currentWindow ? assignedJobIds.size : null, denominator: currentWindow ? activeJobs.length : null, evidenceIds: currentWindow ? [...assignedJobIds].sort() : [], periodBased: false },
+        portfolio_margin_pct: { value: currentWindow ? (portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length ? roundMeasurement(portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).reduce((sum, row) => sum + row.projectedMarginPercent, 0) / portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length, 1) : null) : null, sampleSize: currentWindow ? portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length : 0, evidenceIds: currentWindow ? portfolioForecasts.map(row => row.jobId) : [], periodBased: false },
+        overdue_receivable_rate_pct: { value: currentWindow ? percent(overdueInvoices.length, outstandingInvoices.length) : null, sampleSize: currentWindow ? outstandingInvoices.length : 0, numerator: currentWindow ? overdueInvoices.length : null, denominator: currentWindow ? outstandingInvoices.length : null, evidenceIds: currentWindow ? outstandingInvoices.map(row => row.id) : [], periodBased: false },
+        opportunity_win_rate_pct: { value: percent(wonOpportunities.length, decidedOpportunities.length), sampleSize: decidedOpportunities.length, numerator: wonOpportunities.length, denominator: decidedOpportunities.length, evidenceIds: decidedOpportunities.map(row => row.id), periodBased: true },
+        follow_up_compliance_pct: { value: currentWindow ? percent(compliantFollowUps.length, openOpportunities.length) : null, sampleSize: currentWindow ? openOpportunities.length : 0, numerator: currentWindow ? compliantFollowUps.length : null, denominator: currentWindow ? openOpportunities.length : null, evidenceIds: currentWindow ? openOpportunities.map(row => row.id) : [], periodBased: false },
+        equipment_utilization_pct: { value: currentWindow ? percent(activeTools.filter(row => utilizedToolIds.has(row.id)).length, activeTools.length) : null, sampleSize: currentWindow ? activeTools.length : 0, numerator: currentWindow ? activeTools.filter(row => utilizedToolIds.has(row.id)).length : null, denominator: currentWindow ? activeTools.length : null, evidenceIds: currentWindow ? activeTools.map(row => row.id) : [], periodBased: false },
+        equipment_return_compliance_pct: { value: percent(onTimeReturns.length, returnedSessions.length), sampleSize: returnedSessions.length, numerator: onTimeReturns.length, denominator: returnedSessions.length, evidenceIds: returnedSessions.map(row => row.id), periodBased: true },
+        permit_validity_pct: { value: currentWindow ? percent(validPermits.length, activePermits.length) : null, sampleSize: currentWindow ? activePermits.length : 0, numerator: currentWindow ? validPermits.length : null, denominator: currentWindow ? activePermits.length : null, evidenceIds: currentWindow ? activePermits.map(row => row.id) : [], periodBased: false },
+        trade_partner_compliance_pct: { value: currentWindow ? percent(compliantPartners.length, activePartners.length) : null, sampleSize: currentWindow ? activePartners.length : 0, numerator: currentWindow ? compliantPartners.length : null, denominator: currentWindow ? activePartners.length : null, evidenceIds: currentWindow ? activePartners.map(row => row.id) : [], periodBased: false },
+        environmental_approval_rate_pct: { value: percent(approvedEnvironmental.length, periodEnvironmental.length), sampleSize: periodEnvironmental.length, numerator: approvedEnvironmental.length, denominator: periodEnvironmental.length, evidenceIds: periodEnvironmental.map(row => row.id), periodBased: true },
+        emissions_evidence_coverage_pct: { value: percent(evidenceCovered.length, periodEnvironmental.length), sampleSize: periodEnvironmental.length, numerator: evidenceCovered.length, denominator: periodEnvironmental.length, evidenceIds: periodEnvironmental.map(row => row.id), periodBased: true }
+      };
+      return values;
+    };
+
+    const currentInputs = metricInputs(periodStart, periodEnd, true);
+    const priorInputs = metricInputs(priorPeriodStart, priorPeriodEnd, false);
+    const targetRegister = this.listPerformanceScorecardTargets({ includeHistory: true });
+    const targetByMetric = new Map(targetRegister.effective.map(target => [target.metricKey, target]));
+    const scoreValue = (value, target, comparison) => {
+      if (value === null || value === undefined) return 0;
+      if (comparison === 'at_least') return target <= 0 ? 100 : Math.max(0, Math.min(100, value / target * 100));
+      if (target <= 0) return value <= 0 ? 100 : 0;
+      return Math.max(0, Math.min(100, target / Math.max(value, 0.000001) * 100));
+    };
+    const metrics = PERFORMANCE_SCORECARD_METRICS.map(definition => {
+      const input = currentInputs[definition.key];
+      const prior = priorInputs[definition.key];
+      const target = targetByMetric.get(definition.key);
+      const value = input.value;
+      const targetValue = target.targetValue;
+      const meetsTarget = value !== null && value !== undefined && (definition.comparison === 'at_least' ? value >= targetValue : value <= targetValue);
+      const score = roundMeasurement(scoreValue(value, targetValue, definition.comparison), 1);
+      const priorValue = input.periodBased ? prior.value : null;
+      const trendDelta = value !== null && priorValue !== null ? roundMeasurement(value - priorValue, 1) : null;
+      const improving = trendDelta === null ? null : definition.comparison === 'at_least' ? trendDelta > 0 : trendDelta < 0;
+      return {
+        key: definition.key,
+        perspective: definition.perspective,
+        label: definition.label,
+        unit: definition.unit,
+        comparison: definition.comparison,
+        targetValue,
+        targetSource: target.source,
+        targetRevisionId: target.revision?.id || null,
+        value,
+        priorValue,
+        trendDelta,
+        trend: trendDelta === null || trendDelta === 0 ? 'flat_or_unavailable' : improving ? 'improving' : 'declining',
+        sampleSize: input.sampleSize,
+        numerator: input.numerator ?? null,
+        denominator: input.denominator ?? null,
+        evidenceIds: input.evidenceIds,
+        score,
+        status: value === null || value === undefined ? 'no_data' : meetsTarget ? 'on_track' : score >= 90 ? 'watch' : 'off_track'
+      };
+    });
+    const perspectiveOrder = [...new Set(PERFORMANCE_SCORECARD_METRICS.map(metric => metric.perspective))];
+    const perspectives = perspectiveOrder.map(key => {
+      const perspectiveMetrics = metrics.filter(metric => metric.perspective === key);
+      const score = roundMeasurement(perspectiveMetrics.reduce((sum, metric) => sum + metric.score, 0) / perspectiveMetrics.length, 1);
+      return {
+        key,
+        score,
+        status: perspectiveMetrics.every(metric => metric.status === 'no_data') ? 'no_data' : score >= 90 ? 'on_track' : score >= 70 ? 'watch' : 'off_track',
+        onTrack: perspectiveMetrics.filter(metric => metric.status === 'on_track').length,
+        noData: perspectiveMetrics.filter(metric => metric.status === 'no_data').length,
+        metrics: perspectiveMetrics
+      };
+    });
+    const dataMetricCount = metrics.filter(metric => metric.status !== 'no_data').length;
+    const summary = {
+      overallScore: roundMeasurement(perspectives.reduce((sum, perspective) => sum + perspective.score, 0) / perspectives.length, 1),
+      dataCoveragePct: roundMeasurement(dataMetricCount / metrics.length * 100, 1),
+      perspectiveCount: perspectives.length,
+      metricCount: metrics.length,
+      onTrack: metrics.filter(metric => metric.status === 'on_track').length,
+      watch: metrics.filter(metric => metric.status === 'watch').length,
+      offTrack: metrics.filter(metric => metric.status === 'off_track').length,
+      noData: metrics.filter(metric => metric.status === 'no_data').length
+    };
+    const targetBasis = targetRegister.effective.map(target => ({
+      metricKey: target.metricKey,
+      targetValue: target.targetValue,
+      comparison: target.comparison,
+      source: target.source,
+      revisionId: target.revision?.id || null,
+      revisionVersion: target.revision?.versionNumber || null
+    }));
+    const targetHash = sha256Json(targetBasis);
+    const sourceBasis = {
+      format: PERFORMANCE_SCORECARD_FORMAT,
+      periodStart,
+      periodEnd,
+      priorPeriodStart,
+      priorPeriodEnd,
+      weeks,
+      evidence: {
+        jobs: compact(jobs, ['status', 'target_completion', 'scheduled_end', 'contract_value', 'updated_at', 'data_json']),
+        incidents: compact(incidents, ['job_id', 'status', 'severity', 'occurred_at', 'updated_at']),
+        safetyChecks: compact(safetyChecks, ['job_id', 'status', 'due_at', 'completed_at', 'updated_at']),
+        checklistSubmissions: compact(checklistSubmissions, ['job_id', 'status', 'result', 'submitted_at', 'updated_at']),
+        nonconformances: compact(nonconformances, ['job_id', 'status', 'closed_at', 'updated_at']),
+        warrantyClaims: compact(warrantyClaims, ['job_id', 'status', 'resolved_at', 'created_at', 'updated_at']),
+        handoverCommunications: compact(communications.filter(row => fromJson(row.data_json, {}).source === 'handover_issue_package'), ['job_id', 'status', 'sent_at', 'updated_at', 'data_json']),
+        timesheets: compact(timesheets, ['worker_id', 'period_start', 'period_end', 'status', 'total_hours', 'billable_hours', 'source_hash', 'updated_at']),
+        assignments: compact(assignments, ['job_id', 'worker_id', 'status', 'scheduled_start', 'scheduled_end', 'updated_at']),
+        invoices: compact(invoices, ['job_id', 'status', 'total', 'due_at', 'updated_at']),
+        payments: compact(payments, ['invoice_id', 'status', 'amount', 'paid_at', 'updated_at']),
+        opportunities: compact(opportunities, ['stage', 'next_follow_up_at', 'updated_at']),
+        tools: compact(tools, ['status', 'updated_at']),
+        custodySessions: compact(custodySessions, ['tool_id', 'status', 'due_back_at', 'returned_at', 'updated_at']),
+        permits: compact(permits, ['job_id', 'status', 'valid_from', 'expires_at', 'updated_at']),
+        tradePartners: compact(partners, ['status', 'insurance_expires_at', 'vca_expires_at', 'updated_at']),
+        environmentalActivities: compact(environmentalActivities, ['job_id', 'status', 'activity_date', 'factor_source', 'factor_reference', 'evidence_reference', 'evidence_document_id', 'updated_at']),
+        portfolioForecasts
+      },
+      metrics: metrics.map(metric => ({ key: metric.key, value: metric.value, priorValue: metric.priorValue, sampleSize: metric.sampleSize, evidenceIds: metric.evidenceIds }))
+    };
+    const sourceHash = sha256Json(sourceBasis);
+    const snapshots = this.db.prepare(`
+      SELECT * FROM performance_scorecard_snapshots
+      ORDER BY version_number DESC
+    `).all().map(row => this.mapPerformanceScorecardSnapshot(row));
+    const activeSnapshot = snapshots.find(snapshot => snapshot.status === 'approved') || null;
+    const pendingSnapshot = snapshots.find(snapshot => snapshot.status === 'pending_approval') || null;
+    const blockers = targetRegister.pending.length ? [{
+      code: 'performance_target_revisions_pending',
+      message: `${targetRegister.pending.length} performance target revision(s) await approval. Resolve them before freezing a scorecard.`,
+      targetIds: targetRegister.pending.map(target => target.id)
+    }] : [];
+    const warnings = [];
+    if (summary.noData) warnings.push({ code: 'performance_metrics_missing_data', message: `${summary.noData} of ${summary.metricCount} KPI(s) lack retained evidence for this period.` });
+    if (summary.offTrack) warnings.push({ code: 'performance_metrics_off_track', message: `${summary.offTrack} KPI(s) are materially below target.` });
+    return {
+      format: PERFORMANCE_SCORECARD_FORMAT,
+      generatedAt: nowIso(),
+      periodStart,
+      periodEnd,
+      priorPeriodStart,
+      priorPeriodEnd,
+      weeks,
+      ready: blockers.length === 0,
+      blockers,
+      warnings,
+      sourceHash,
+      targetHash,
+      sourceBasis,
+      targetBasis,
+      summary,
+      perspectives,
+      metrics,
+      targets: targetRegister,
+      snapshots,
+      activeSnapshot: activeSnapshot ? { ...activeSnapshot, sourceCurrent: activeSnapshot.sourceHash === sourceHash && activeSnapshot.targetHash === targetHash } : null,
+      pendingSnapshot: pendingSnapshot ? { ...pendingSnapshot, sourceCurrent: pendingSnapshot.sourceHash === sourceHash && pendingSnapshot.targetHash === targetHash } : null,
+      snapshotCurrent: Boolean(activeSnapshot && activeSnapshot.sourceHash === sourceHash && activeSnapshot.targetHash === targetHash),
+      policy: {
+        objectivePerspectives: perspectiveOrder,
+        targetChanges: 'approval_gated',
+        missingEvidencePasses: false,
+        immutableSnapshots: true,
+        externalCommitmentsCreated: 0,
+        fundsMoved: false,
+        messagesSent: false
+      }
+    };
+  }
+
+  requestPerformanceScorecardSnapshot(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const scorecard = this.calculatePerformanceScorecard(payload);
+      if (!scorecard.ready) {
+        throw ledgerInputError('performance_scorecard_not_ready', 'Resolve scorecard blockers before requesting approval.', { blockers: scorecard.blockers }, 409);
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM performance_scorecard_snapshots
+        WHERE status = 'pending_approval'
+        ORDER BY version_number DESC LIMIT 1
+      `).get();
+      if (pending) {
+        if (pending.source_hash === scorecard.sourceHash && pending.target_hash === scorecard.targetHash
+          && pending.period_start === scorecard.periodStart && pending.period_end === scorecard.periodEnd) {
+          return {
+            snapshot: this.mapPerformanceScorecardSnapshot(pending),
+            approval: pending.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)) : null,
+            scorecard,
+            replayed: true
+          };
+        }
+        throw ledgerInputError('performance_scorecard_pending', 'Resolve the pending performance scorecard before requesting a revised version.', { snapshotId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const timestamp = nowIso();
+      const versionNumber = this.allocatePerformanceScorecardVersion();
+      const scorecardNumber = this.allocatePerformanceScorecardNumber(timestamp);
+      const snapshot = {
+        format: PERFORMANCE_SCORECARD_FORMAT,
+        scorecardNumber,
+        versionNumber,
+        periodStart: scorecard.periodStart,
+        periodEnd: scorecard.periodEnd,
+        priorPeriodStart: scorecard.priorPeriodStart,
+        priorPeriodEnd: scorecard.priorPeriodEnd,
+        weeks: scorecard.weeks,
+        preparedAt: timestamp,
+        preparedBy: actor,
+        sourceHash: scorecard.sourceHash,
+        targetHash: scorecard.targetHash,
+        sourceBasis: scorecard.sourceBasis,
+        targetBasis: scorecard.targetBasis,
+        summary: scorecard.summary,
+        perspectives: scorecard.perspectives,
+        warnings: scorecard.warnings,
+        controls: { externalCommitmentsCreated: 0, fundsMoved: false, messagesSent: false, sourceCurrentAtRequest: true }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const id = makeId('scorecard');
+      this.db.prepare(`
+        INSERT INTO performance_scorecard_snapshots (
+          id, scorecard_number, version_number, status, period_start, period_end, weeks,
+          source_hash, target_hash, snapshot_hash, snapshot_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id,
+        scorecardNumber,
+        versionNumber,
+        scorecard.periodStart,
+        scorecard.periodEnd,
+        scorecard.weeks,
+        scorecard.sourceHash,
+        scorecard.targetHash,
+        snapshotHash,
+        snapshotJson,
+        toJson({ requestedBy: actor, reason: normalizeText(payload.reason || payload.notes, '') || null }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'performance_scorecard',
+        targetId: id,
+        approvalType: 'performance_scorecard_snapshot',
+        summary: `Approve Contractor Balanced Scorecard ${scorecardNumber}`,
+        reason: 'Freeze the ten-perspective, source-derived contractor performance position for management review.',
+        data: {
+          scorecardNumber,
+          versionNumber,
+          periodStart: scorecard.periodStart,
+          periodEnd: scorecard.periodEnd,
+          weeks: scorecard.weeks,
+          sourceHash: scorecard.sourceHash,
+          targetHash: scorecard.targetHash,
+          snapshotHash,
+          overallScore: scorecard.summary.overallScore,
+          dataCoveragePct: scorecard.summary.dataCoveragePct,
+          onTrack: scorecard.summary.onTrack,
+          watch: scorecard.summary.watch,
+          offTrack: scorecard.summary.offTrack,
+          noData: scorecard.summary.noData,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE performance_scorecard_snapshots SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const retained = this.mapPerformanceScorecardSnapshot(this.db.prepare('SELECT * FROM performance_scorecard_snapshots WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'performance_scorecard',
+        entityId: id,
+        action: 'request_performance_scorecard_approval',
+        actor,
+        after: retained,
+        metadata: { approvalId: approval.id, scorecardNumber, versionNumber, sourceHash: scorecard.sourceHash, targetHash: scorecard.targetHash, externalCommitments: 0 }
+      });
+      return { snapshot: retained, approval, scorecard, replayed: false };
+    });
+  }
+
+  applyPerformanceScorecardApproval(snapshotId) {
+    const row = this.db.prepare('SELECT * FROM performance_scorecard_snapshots WHERE id = ?').get(snapshotId);
+    if (!row) throw ledgerInputError('performance_scorecard_not_found', 'Performance scorecard snapshot not found.', { snapshotId }, 404);
+    if (row.status === 'approved') return this.mapPerformanceScorecardSnapshot(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('performance_scorecard_state_conflict', `Performance scorecard cannot be approved from ${row.status}.`, { snapshotId, status: row.status }, 409);
+    }
+    this.getPerformanceScorecardSnapshot(snapshotId);
+    const current = this.calculatePerformanceScorecard({ periodEnd: row.period_end, weeks: row.weeks });
+    if (!current.ready || current.sourceHash !== row.source_hash || current.targetHash !== row.target_hash) {
+      throw ledgerInputError(
+        'performance_scorecard_stale',
+        'Performance evidence or approved KPI targets changed after this scorecard was requested. Reject it and request a current snapshot.',
+        { snapshotId, retainedSourceHash: row.source_hash, currentSourceHash: current.sourceHash, retainedTargetHash: row.target_hash, currentTargetHash: current.targetHash, blockers: current.blockers },
+        409
+      );
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    const before = this.mapPerformanceScorecardSnapshot(row);
+    this.db.prepare(`
+      UPDATE performance_scorecard_snapshots
+      SET status = 'superseded', updated_at = ?
+      WHERE status = 'approved' AND id <> ?
+    `).run(timestamp, snapshotId);
+    this.db.prepare(`
+      UPDATE performance_scorecard_snapshots
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, snapshotId);
+    const after = this.mapPerformanceScorecardSnapshot(this.db.prepare('SELECT * FROM performance_scorecard_snapshots WHERE id = ?').get(snapshotId));
+    this.audit({
+      entityType: 'performance_scorecard',
+      entityId: snapshotId,
+      action: 'approve_performance_scorecard',
+      actor,
+      before,
+      after,
+      metadata: { approvalId: row.approval_id || null, scorecardNumber: row.scorecard_number, versionNumber: row.version_number, sourceHash: row.source_hash, targetHash: row.target_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
   normalizeProductionPlanLines(lines = []) {
     if (!Array.isArray(lines) || lines.length < 1 || lines.length > 200) {
       throw ledgerInputError('production_baseline_lines_required', 'A production baseline requires between 1 and 200 plan lines.');
@@ -34454,6 +35285,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'performance_scorecard_target') {
+        this.db.prepare(`
+          UPDATE performance_scorecard_targets
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM performance_scorecard_targets WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
+      } else if (before.target_type === 'performance_scorecard') {
+        this.db.prepare(`
+          UPDATE performance_scorecard_snapshots
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM performance_scorecard_snapshots WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'production_baseline') {
         this.db.prepare(`
           UPDATE production_baselines
@@ -34801,6 +35672,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyCostForecastApproval(targetId);
     } else if (targetType === 'cash_flow_forecast') {
       this.applyCashFlowForecastApproval(targetId);
+    } else if (targetType === 'performance_scorecard_target') {
+      this.applyPerformanceScorecardTargetApproval(targetId);
+    } else if (targetType === 'performance_scorecard') {
+      this.applyPerformanceScorecardApproval(targetId);
     } else if (targetType === 'production_baseline') {
       this.applyProductionBaselineApproval(targetId);
     } else if (targetType === 'production_entry_reversal') {
@@ -39350,6 +40225,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       budget_lines: 'status',
       cost_forecast_snapshots: 'status',
       cash_flow_forecast_snapshots: 'status',
+      performance_scorecard_targets: 'status',
+      performance_scorecard_snapshots: 'status',
       production_baselines: 'status',
       production_entries: 'status',
       billing_milestones: 'status',
@@ -44410,6 +45287,67 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Cash-flow forecast ${cashFlowRow.forecast_number} cannot be recalculated: ${error.message}` });
       }
     }
+    const approvedPerformanceTargetsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM performance_scorecard_targets targets
+      LEFT JOIN approvals ON approvals.id = targets.approval_id
+      WHERE targets.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'performance_scorecard_target' OR approvals.target_id <> targets.id
+        )
+    `).get().count || 0);
+    if (approvedPerformanceTargetsWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedPerformanceTargetsWithoutApproval} approved performance target revision(s) lack a matching approval decision.` });
+    }
+    const performanceTargetRows = this.db.prepare(`
+      SELECT * FROM performance_scorecard_targets
+      ORDER BY metric_key, version_number
+    `).all();
+    for (const targetRow of performanceTargetRows) {
+      const definition = PERFORMANCE_SCORECARD_METRICS.find(metric => metric.key === targetRow.metric_key);
+      if (!definition || targetRow.comparison !== definition.comparison || !Number.isFinite(Number(targetRow.target_value))) {
+        issues.push({ severity: 'error', message: `Performance target ${targetRow.id} has an unsupported metric, comparison, or value.` });
+      }
+    }
+    const approvedScorecardsWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM performance_scorecard_snapshots scorecards
+      LEFT JOIN approvals ON approvals.id = scorecards.approval_id
+      WHERE scorecards.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'performance_scorecard' OR approvals.target_id <> scorecards.id
+        )
+    `).get().count || 0);
+    if (approvedScorecardsWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedScorecardsWithoutApproval} approved performance scorecard(s) lack a matching approval decision.` });
+    }
+    const scorecardRows = this.db.prepare(`
+      SELECT * FROM performance_scorecard_snapshots
+      WHERE status IN ('pending_approval', 'approved', 'superseded')
+      ORDER BY version_number
+    `).all();
+    for (const scorecardRow of scorecardRows) {
+      try {
+        this.getPerformanceScorecardSnapshot(scorecardRow.id);
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Performance scorecard ${scorecardRow.scorecard_number} failed retained snapshot verification: ${error.code || error.message}.` });
+      }
+    }
+    for (const scorecardRow of scorecardRows.filter(row => ['pending_approval', 'approved'].includes(row.status))) {
+      try {
+        const currentScorecard = this.calculatePerformanceScorecard({ periodEnd: scorecardRow.period_end, weeks: scorecardRow.weeks });
+        if (!currentScorecard.ready || currentScorecard.sourceHash !== scorecardRow.source_hash || currentScorecard.targetHash !== scorecardRow.target_hash) {
+          issues.push({
+            severity: 'warning',
+            message: `Performance evidence or targets changed after ${scorecardRow.scorecard_number} was ${scorecardRow.status === 'approved' ? 'approved' : 'requested'}.`
+          });
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Performance scorecard ${scorecardRow.scorecard_number} cannot be recalculated: ${error.message}` });
+      }
+    }
     const approvedProductionBaselinesWithoutApproval = Number(this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM production_baselines baselines
@@ -45587,6 +46525,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         costForecastSnapshots: this.count('cost_forecast_snapshots'),
         cashFlowItems: this.count('cash_flow_items'),
         cashFlowForecastSnapshots: this.count('cash_flow_forecast_snapshots'),
+        performanceScorecardTargets: this.count('performance_scorecard_targets'),
+        performanceScorecardSnapshots: this.count('performance_scorecard_snapshots'),
         productionBaselines: this.count('production_baselines'),
         productionEntries: this.count('production_entries'),
         attendanceSessions: this.count('attendance_sessions'),
@@ -47791,6 +48731,58 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapPerformanceScorecardTarget(row) {
+    if (!row) return null;
+    const definition = PERFORMANCE_SCORECARD_METRICS.find(metric => metric.key === row.metric_key) || {};
+    return {
+      id: row.id,
+      metricKey: row.metric_key,
+      perspective: definition.perspective || fromJson(row.data_json, {}).perspective || null,
+      label: definition.label || row.metric_key,
+      unit: definition.unit || fromJson(row.data_json, {}).unit || 'number',
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      targetValue: normalizeNumber(row.target_value, 0),
+      comparison: row.comparison,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapPerformanceScorecardSnapshot(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      scorecardNumber: row.scorecard_number,
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      periodStart: row.period_start,
+      periodEnd: row.period_end,
+      weeks: Math.round(normalizeNumber(row.weeks, PERFORMANCE_SCORECARD_DEFAULT_WEEKS)),
+      sourceHash: row.source_hash,
+      targetHash: row.target_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === PERFORMANCE_SCORECARD_FORMAT
+        && snapshot.sourceHash === row.source_hash
+        && snapshot.targetHash === row.target_hash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapProductionBaseline(row) {
     if (!row) return null;
     const snapshotJson = normalizeText(row.snapshot_json, '');
@@ -48906,6 +49898,44 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.minimumBalance = data.minimumBalance ?? null;
       preview.negativeWeeks = data.negativeWeeks ?? null;
       preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'performance_scorecard_target') {
+      const row = this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapPerformanceScorecardTarget(row) : null;
+      primaryEffect = `Approve ${mapped?.label || data.label || 'performance KPI'} target revision.`;
+      addEffect(`Set the governed ${mapped?.comparison || data.comparison || 'target'} threshold to ${normalizeNumber(mapped?.targetValue ?? data.targetValue, 0)} ${mapped?.unit || data.unit || ''}.`);
+      addSafeguard('Supersedes only the prior approved target revision for this KPI and retains its complete history. Existing scorecard snapshots remain immutable.');
+      addSafeguard('Does not edit source evidence, move funds, contact any party, change a project commitment, or create an external action.');
+      riskLevel = 'high';
+      preview.metricKey = mapped?.metricKey || data.metricKey || null;
+      preview.label = mapped?.label || data.label || null;
+      preview.perspective = mapped?.perspective || data.perspective || null;
+      preview.targetValue = mapped?.targetValue ?? data.targetValue ?? null;
+      preview.unit = mapped?.unit || data.unit || null;
+      preview.comparison = mapped?.comparison || data.comparison || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+    } else if (targetType === 'performance_scorecard') {
+      const row = this.db.prepare('SELECT * FROM performance_scorecard_snapshots WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapPerformanceScorecardSnapshot(row) : null;
+      primaryEffect = `Approve Contractor Balanced Scorecard ${mapped?.scorecardNumber || data.scorecardNumber || ''}.`;
+      addEffect(`Freeze the ${data.weeks || mapped?.weeks || PERFORMANCE_SCORECARD_DEFAULT_WEEKS}-week result across ten operating perspectives and twenty retained-data KPIs.`);
+      addEffect(`Retain overall score ${normalizeNumber(data.overallScore, 0).toFixed(1)} with ${normalizeNumber(data.dataCoveragePct, 0).toFixed(1)}% evidence coverage.`);
+      addSafeguard('Approval is refused if any included ledger evidence or approved KPI target changed after the snapshot request. Missing evidence never counts as passing.');
+      addSafeguard('Does not edit source records, set targets, send a report, move funds, or create any project, supplier, schedule, or client commitment.');
+      riskLevel = normalizeNumber(data.offTrack, 0) > 0 || normalizeNumber(data.noData, 0) > 0 ? 'high' : 'medium';
+      preview.scorecardNumber = mapped?.scorecardNumber || data.scorecardNumber || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.periodStart = mapped?.periodStart || data.periodStart || null;
+      preview.periodEnd = mapped?.periodEnd || data.periodEnd || null;
+      preview.weeks = mapped?.weeks || data.weeks || null;
+      preview.overallScore = data.overallScore ?? mapped?.snapshot?.summary?.overallScore ?? null;
+      preview.dataCoveragePct = data.dataCoveragePct ?? mapped?.snapshot?.summary?.dataCoveragePct ?? null;
+      preview.onTrack = data.onTrack ?? null;
+      preview.watch = data.watch ?? null;
+      preview.offTrack = data.offTrack ?? null;
+      preview.noData = data.noData ?? null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.targetHash = mapped?.targetHash || data.targetHash || null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (['budget_line', 'draw_request', 'lien_waiver', 'finance_handoff'].includes(targetType)) {
       primaryEffect = `Approve ${ledgerApprovalHumanTarget(targetType)} finance control.`;

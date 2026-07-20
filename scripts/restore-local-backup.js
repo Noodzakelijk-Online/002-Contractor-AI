@@ -895,6 +895,24 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('049_contractor_balanced_scorecard')) {
+        for (const table of [
+          'performance_scorecard_targets',
+          'performance_scorecard_number_sequences',
+          'performance_scorecard_version_sequence',
+          'performance_scorecard_snapshots'
+        ]) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup performance scorecard schema is incomplete: ${table}.`);
+          }
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_performance_target_one_approved', 'idx_performance_target_status', 'idx_performance_scorecard_status']) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup performance scorecard constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

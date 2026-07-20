@@ -1926,6 +1926,7 @@ app.get('/api/session', (req, res) => {
         dispatch: !fieldWorker,
         resources: !fieldWorker,
         finance: !fieldWorker,
+        performance: !fieldWorker,
         clientSuccess: !fieldWorker,
         fieldEvidence: role === 'owner' || role === 'office_operator' || fieldWorker,
         maintenance: role === 'owner'
@@ -4043,6 +4044,32 @@ app.post('/api/ledger/cash-flow/snapshots', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/performance-scorecard', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    scorecard: operatingLedger.calculatePerformanceScorecard(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/performance-scorecard/targets', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestPerformanceScorecardTarget(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    scorecard: operatingLedger.calculatePerformanceScorecard(req.body || {})
+  }), 201);
+});
+
+app.post('/api/ledger/performance-scorecard/snapshots', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestPerformanceScorecardSnapshot(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    })
+  }), 201);
+});
+
 app.get('/api/ledger/client-success', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -5815,6 +5842,8 @@ function operationalExport() {
     costForecastSnapshots: operatingLedger.listAllCostForecastSnapshots({ limit: 5_000 }),
     cashFlowItems: operatingLedger.listCashFlowItems({ includeArchived: true, limit: 5_000 }),
     cashFlowForecastSnapshots: operatingLedger.listCashFlowForecastSnapshots({ limit: 5_000 }),
+    performanceScorecardTargets: operatingLedger.listPerformanceScorecardTargets({ includeHistory: true }).revisions,
+    performanceScorecardSnapshots: operatingLedger.listPerformanceScorecardSnapshots({ limit: 5_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     dayworkTickets: operatingLedger.listDayworkTickets({ limit: 5_000 }),
@@ -5884,6 +5913,8 @@ function validateOperationalExport(snapshot) {
     'costForecastSnapshots',
     'cashFlowItems',
     'cashFlowForecastSnapshots',
+    'performanceScorecardTargets',
+    'performanceScorecardSnapshots',
     'attendanceSessions',
     'attendanceAdjustments',
     'weeklyTimesheets',
@@ -5951,6 +5982,8 @@ function validateOperationalExport(snapshot) {
       costForecastSnapshots: Array.isArray(snapshot.costForecastSnapshots) ? snapshot.costForecastSnapshots.length : 0,
       cashFlowItems: Array.isArray(snapshot.cashFlowItems) ? snapshot.cashFlowItems.length : 0,
       cashFlowForecastSnapshots: Array.isArray(snapshot.cashFlowForecastSnapshots) ? snapshot.cashFlowForecastSnapshots.length : 0,
+      performanceScorecardTargets: Array.isArray(snapshot.performanceScorecardTargets) ? snapshot.performanceScorecardTargets.length : 0,
+      performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
       dayworkTickets: Array.isArray(snapshot.dayworkTickets) ? snapshot.dayworkTickets.length : 0,
@@ -6576,6 +6609,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         cashFlowEntryKey: 'durable',
         cashFlowAssumptionRetirement: 'retained_archive',
         cashFlowForecastSnapshot: 'source_current_approval_gated',
+        performanceTargetRevision: 'approval_gated_versioned',
+        performanceScorecardSnapshot: 'source_and_target_current_approval_gated',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
@@ -6720,6 +6755,21 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         approvalRequired: true,
         sourceCurrentApprovalRequired: true,
         fundsMoved: false,
+        externalCommitments: 0
+      },
+      performanceScorecard: {
+        framework: 'contractor_balanced_scorecard',
+        perspectives: ['safety', 'quality', 'delivery_reliability', 'customer_satisfaction', 'employee_capacity', 'financial_performance', 'commercial_pipeline', 'asset_productivity', 'compliance', 'sustainability'],
+        metricCount: 20,
+        periodWeeks: { default: 13, minimum: 4, maximum: 52 },
+        priorPeriodComparison: true,
+        missingEvidencePasses: false,
+        targetRevisions: 'approval_gated_versioned',
+        immutableSnapshots: true,
+        sourceCurrentApprovalRequired: true,
+        targetCurrentApprovalRequired: true,
+        fundsMoved: false,
+        messagesSent: false,
         externalCommitments: 0
       },
       productionControl: {

@@ -81,6 +81,7 @@ import './App.css'
 const ResourcesWorkspace = lazy(() => import('./components/ResourcesWorkspace'))
 const AuditHistory = lazy(() => import('./components/AuditHistory'))
 const CashFlowForecastControl = lazy(() => import('./components/CashFlowForecastControl'))
+const PerformanceScorecard = lazy(() => import('./components/PerformanceScorecard'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
@@ -109,6 +110,7 @@ const navItems = [
   ['dispatch', 'Dispatch', MapPin],
   ['resources', 'Resources', Wrench],
   ['finance', 'Finance', ReceiptEuro],
+  ['performance', 'Performance', Activity],
   ['clients', 'Clients', BadgeCheck],
   ['field', 'Field updates', HardHat],
   ['operations', 'Operations', Gauge],
@@ -1041,6 +1043,10 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       api('/api/ledger/cash-flow'),
     ])
     return { finance, cashFlow: cashFlow.cashFlow }
+  }
+  if (section === 'performance') {
+    const result = await api('/api/ledger/performance-scorecard')
+    return { performanceScorecard: result.scorecard }
   }
   if (section === 'clients') {
     const [clientSuccess, directory] = await Promise.all([
@@ -3001,6 +3007,7 @@ function App() {
         if (key === 'dispatch') return capabilities.dispatch
         if (key === 'resources') return capabilities.resources
         if (key === 'finance') return capabilities.finance
+        if (key === 'performance') return capabilities.performance
         if (key === 'clients') return capabilities.clientSuccess
         if (key === 'field') return capabilities.fieldEvidence
         if (key === 'operations') return capabilities.maintenance
@@ -9740,6 +9747,19 @@ function App() {
                 onOpen={openJobWorkspace}
                 onCashFlowChange={(cashFlow) => setData((current) => ({ ...current, cashFlow }))}
               />
+            ) : null}
+
+            {section === 'performance' && capabilities.performance ? (
+              <LazyControlBoundary label="performance scorecard">
+                <PerformanceScorecard
+                  scorecard={data.performanceScorecard}
+                  request={api}
+                  canCoordinate={canCoordinate}
+                  canApprove={capabilities.approvals === true}
+                  onChange={(performanceScorecard) => setData((current) => ({ ...current, performanceScorecard }))}
+                  onOpenApprovals={openApprovals}
+                />
+              </LazyControlBoundary>
             ) : null}
 
             {section === 'clients' && capabilities.clientSuccess ? (

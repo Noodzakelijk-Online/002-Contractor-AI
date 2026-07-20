@@ -172,6 +172,20 @@ test('backup verification rejects a migration 048 ledger with missing cash-flow 
   );
 });
 
+test('backup verification rejects a migration 049 ledger with missing performance scorecard constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-performance-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Performance scorecard schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_performance_scorecard_status');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /performance scorecard constraints are incomplete: idx_performance_scorecard_status/i
+  );
+});
+
 test('backup verification rejects a migration 032 ledger with missing production-control constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-production-control-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

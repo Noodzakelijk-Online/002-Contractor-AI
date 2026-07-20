@@ -7,6 +7,7 @@ const REQUIRED_PATHS = [
   'ClientPortal.css',
   'ClientPortal.jsx',
   'components/CashFlowForecastControl.jsx',
+  'components/PerformanceScorecard.jsx',
   'Dockerfile',
   'docker-compose.hosted.yml',
   'evidence-storage.js',
@@ -115,6 +116,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/ledger/cash-flow/items'",
     "app.post('/api/ledger/cash-flow/items/:itemId/archive'",
     "app.post('/api/ledger/cash-flow/snapshots'",
+    "app.get('/api/ledger/performance-scorecard'",
+    "app.post('/api/ledger/performance-scorecard/targets'",
+    "app.post('/api/ledger/performance-scorecard/snapshots'",
     "app.get('/api/ledger/bid-packages'",
     "app.post('/api/ledger/bid-packages/:id/commitment'",
     "app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package'",
@@ -137,6 +141,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const ledgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
   if (!ledgerSource.includes("version: '048_thirteen_week_cash_flow_forecast'")) {
     failures.push('Canonical cash-flow forecast migration is missing.');
+  }
+  if (!ledgerSource.includes("version: '049_contractor_balanced_scorecard'")) {
+    failures.push('Canonical Contractor Balanced Scorecard migration is missing.');
   }
 
   const hostedEnvironment = fs.readFileSync(path.join(root, '.env.hosted.example'), 'utf8');

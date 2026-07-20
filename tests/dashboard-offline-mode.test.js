@@ -11,6 +11,7 @@ const dashboardSource = [
   fs.readFileSync(path.join(__dirname, '..', 'components', 'ResourcesWorkspace.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'AuditHistory.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'CashFlowForecastControl.jsx'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, '..', 'components', 'PerformanceScorecard.jsx'), 'utf8'),
 ].join('\n');
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
@@ -27,12 +28,39 @@ test('large navigation and job controls are loaded through local suspense bounda
   assert.match(dashboardRootSource, /lazy\(\(\) => import\('\.\/components\/ResourcesWorkspace'\)\)/);
   assert.match(dashboardRootSource, /const AuditHistory = lazy\(\(\) => import\('\.\/components\/AuditHistory'\)\)/);
   assert.match(dashboardRootSource, /const CashFlowForecastControl = lazy\(\(\) => import\('\.\/components\/CashFlowForecastControl'\)\)/);
+  assert.match(dashboardRootSource, /const PerformanceScorecard = lazy\(\(\) => import\('\.\/components\/PerformanceScorecard'\)\)/);
   assert.match(dashboardRootSource, /const loadJobWorkspaceControls = \(\) => import\('\.\/components\/JobWorkspaceControls'\)/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="resource controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="audit history">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="job controls" mode="job">/);
+});
+
+test('performance workspace renders ten evidence-backed perspectives with governed targets and snapshots', () => {
+  for (const perspective of [
+    'safety',
+    'quality',
+    'delivery_reliability',
+    'customer_satisfaction',
+    'employee_capacity',
+    'financial_performance',
+    'commercial_pipeline',
+    'asset_productivity',
+    'compliance',
+    'sustainability',
+  ]) {
+    assert.match(dashboardSource, new RegExp(`${perspective}:`));
+  }
+  assert.match(dashboardSource, /data-testid="performance-scorecard"/);
+  assert.match(dashboardSource, /data-testid="performance-metric-table"/);
+  assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\?/);
+  assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\/targets/);
+  assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\/snapshots/);
+  assert.match(dashboardSource, /summary\.metricCount \|\| 20/);
+  assert.match(dashboardSource, /if \(status === 'no_data'\) return 'No data'/);
+  assert.match(dashboardSource, /canApprove && pendingSnapshot\?\.approvalId/);
+  assert.match(dashboardSource, /No external action was created/);
 });
 
 test('portfolio schedule is role-gated, ledger-backed, rendered, and connected to operating workflows', () => {
