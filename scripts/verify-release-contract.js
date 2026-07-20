@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const REQUIRED_PATHS = [
+  '.dockerignore',
   'App.jsx',
   'ClientPortal.css',
   'ClientPortal.jsx',
@@ -13,7 +14,8 @@ const REQUIRED_PATHS = [
   'postgres-sync-worker.js',
   'server.js',
   'scripts/migrate-local-backup-to-hosted.js',
-  'scripts/restore-local-backup.js'
+  'scripts/restore-local-backup.js',
+  'scripts/verify-container-runtime.js'
 ];
 
 const RETIRED_PATHS = [
@@ -97,7 +99,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const packageFile = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   if (packageJson.main !== 'server.js') failures.push('package.json must use server.js as the sole runtime entrypoint.');
-  for (const script of ['build', 'lint', 'migrate:hosted', 'restore:local', 'test', 'test:browser', 'verify:release']) {
+  for (const script of ['build', 'lint', 'migrate:hosted', 'restore:local', 'test', 'test:browser', 'test:container', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
 
@@ -137,6 +139,23 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!/^USER node$/m.test(dockerfile)) failures.push('Docker runtime must run as the node user.');
   if (!/^HEALTHCHECK\b/m.test(dockerfile)) failures.push('Docker runtime must define a readiness healthcheck.');
 
+  const dockerIgnore = fs.readFileSync(path.join(root, '.dockerignore'), 'utf8');
+  if (!/^\.env\*$/m.test(dockerIgnore)) failures.push('Docker build context must exclude every .env variant.');
+
+  const containerVerifier = fs.readFileSync(path.join(root, 'scripts', 'verify-container-runtime.js'), 'utf8');
+  for (const requiredProbe of [
+    "'/api/health/ready'",
+    "'/api/auth/login'",
+    "'/api/readiness'",
+    "'--read-only'",
+    "'--cap-drop', 'ALL'",
+    "'no-new-privileges:true'",
+    "'/var/lib/contractor-ai'",
+    "docker(['stop'"
+  ]) {
+    if (!containerVerifier.includes(requiredProbe)) failures.push(`Container runtime verifier is missing required probe: ${requiredProbe}`);
+  }
+
   const hostedCompose = fs.readFileSync(path.join(root, 'docker-compose.hosted.yml'), 'utf8');
   for (const requirement of [
     /127\.0\.0\.1:/,
@@ -148,7 +167,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'verify.yml'), 'utf8');
-  for (const command of ['npm run verify:release', 'npm run lint', 'npm test', 'npm run build', 'npm run test:browser']) {
+  for (const command of ['npm run verify:release', 'npm run lint', 'npm test', 'npm run build', 'npm run test:browser', 'npm run test:container']) {
     if (!workflow.includes(command)) failures.push(`CI workflow is missing required gate: ${command}`);
   }
   if (!/push:\s*\n\s+branches:\s*\n\s+- main/.test(workflow)) {

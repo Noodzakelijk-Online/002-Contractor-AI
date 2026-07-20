@@ -79,10 +79,11 @@ npm run verify:release
 npm run lint
 npm run build
 npm test
+npm run test:container
 npm run test:browser
 ```
 
-GitHub Actions runs the same checks for every push and pull request. Its PostgreSQL service enables TLS before testing, verifies `SHOW ssl`, and supplies `sslmode=require`, so hosted-path tests cannot silently fall back to a plaintext or skipped contract.
+GitHub Actions runs the same checks for every push and pull request. Its PostgreSQL service enables TLS before testing, verifies `SHOW ssl`, and supplies `sslmode=require`, so hosted-path tests cannot silently fall back to a plaintext or skipped contract. The container gate builds the exact production image, starts it with a read-only root filesystem, dropped capabilities, disabled privilege escalation, loopback-only publishing, and a durable data volume, then proves readiness, authentication, non-root execution, Docker health, restart persistence, and graceful shutdown. Every `.env*` file is excluded from the Docker build context.
 
 ## Container and EU Hosting
 

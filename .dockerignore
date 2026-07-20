@@ -2,8 +2,12 @@ node_modules
 dist
 data
 .git
-.env
+.env*
 .pytest_cache
+coverage
+playwright-report
+test-results
+.vite
 advanced_ai_backend
 contractor_ai_backend
 god_mode_contractor_ai

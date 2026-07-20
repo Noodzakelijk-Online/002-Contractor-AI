@@ -60,5 +60,6 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      - run: npm run test:container
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
