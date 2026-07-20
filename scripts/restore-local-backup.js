@@ -932,6 +932,32 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup governed market-fit constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('051_governed_bid_decisions')) {
+        for (const table of ['bid_decision_policies', 'opportunity_bid_decisions']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed bid/no-bid schema is incomplete: ${table}.`);
+          }
+        }
+        const policyColumns = new Set(database.prepare('PRAGMA table_info(bid_decision_policies)').all().map(row => row.name));
+        for (const column of ['version_number', 'status', 'policy_name', 'entry_key', 'entry_fingerprint', 'snapshot_hash', 'snapshot_json', 'approval_id']) {
+          if (!policyColumns.has(column)) throw new Error(`Backup governed bid/no-bid schema is incomplete: bid_decision_policies.${column}.`);
+        }
+        const decisionColumns = new Set(database.prepare('PRAGMA table_info(opportunity_bid_decisions)').all().map(row => row.name));
+        for (const column of ['opportunity_id', 'policy_id', 'status', 'recommendation', 'proposed_decision', 'score', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint', 'approval_id']) {
+          if (!decisionColumns.has(column)) throw new Error(`Backup governed bid/no-bid schema is incomplete: opportunity_bid_decisions.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_bid_decision_policy_one_approved',
+          'idx_bid_decision_policy_status',
+          'idx_opportunity_bid_decision_one_approved',
+          'idx_opportunity_bid_decision_one_pending',
+          'idx_opportunity_bid_decision_history',
+          'idx_opportunity_bid_decision_policy'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup governed bid/no-bid constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

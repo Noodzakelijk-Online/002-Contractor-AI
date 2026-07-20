@@ -84,7 +84,7 @@ test('business identity is durable, validated, and reports commercial issue read
   assert.equal(retained.data.quoteTerms, organizationPayload().quoteTerms);
 
   assert.equal(ledger.getOrganizationProfile().legalName, retained.legalName);
-  assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
+  assert.equal(ledger.migrationStatus().currentVersion, '051_governed_bid_decisions');
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
 });
 

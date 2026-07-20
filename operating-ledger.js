@@ -1017,6 +1017,23 @@ const MARKET_FIT_CRITERIA = Object.freeze([
   { key: 'client_segment', label: 'Client-segment fit', weight: 10 },
   { key: 'source_channel', label: 'Lead-source fit', weight: 10 }
 ]);
+const BID_DECISION_POLICY_FORMAT = 'contractor-ai-bid-decision-policy/v1';
+const BID_DECISION_FORMAT = 'contractor-ai-bid-decision/v1';
+const BID_DECISION_CRITERIA = Object.freeze([
+  { key: 'market_fit', label: 'Ideal-customer and service-area fit', weight: 20, minimumRating: 3, source: 'market_fit' },
+  { key: 'client_payment', label: 'Client and payment confidence', weight: 15, minimumRating: 2, source: 'operator' },
+  { key: 'scope_contract', label: 'Scope and contract clarity', weight: 15, minimumRating: 2, source: 'operator' },
+  { key: 'capacity_schedule', label: 'Capacity and schedule feasibility', weight: 20, minimumRating: 2, source: 'operator' },
+  { key: 'technical_safety', label: 'Technical capability and safety', weight: 15, minimumRating: 2, source: 'operator' },
+  { key: 'commercial_return', label: 'Commercial return and risk', weight: 15, minimumRating: 2, source: 'operator' }
+]);
+const BID_DECISION_GATES = Object.freeze([
+  { key: 'scope_defined', label: 'Scope is sufficiently defined' },
+  { key: 'capacity_available', label: 'Required capacity is available' },
+  { key: 'contract_risk_acceptable', label: 'Contract risk is acceptable' },
+  { key: 'payment_terms_acceptable', label: 'Payment terms are acceptable' },
+  { key: 'compliance_achievable', label: 'Safety and compliance obligations are achievable' }
+]);
 const PERFORMANCE_SCORECARD_DEFAULT_WEEKS = 13;
 const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
   { key: 'recordable_incidents', perspective: 'safety', label: 'Recordable incidents', unit: 'count', comparison: 'at_most', target: 0 },
@@ -3988,6 +4005,62 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON opportunity_fit_assessments(profile_id, recommendation, created_at DESC);
       `);
     }
+  },
+  {
+    version: '051_governed_bid_decisions',
+    description: 'Retain approval-gated bid/no-bid policy revisions and source-bound opportunity pursuit decisions.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bid_decision_policies (
+          id TEXT PRIMARY KEY,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          policy_name TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bid_decision_policy_one_approved
+          ON bid_decision_policies(status)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_bid_decision_policy_status
+          ON bid_decision_policies(status, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS opportunity_bid_decisions (
+          id TEXT PRIMARY KEY,
+          opportunity_id TEXT NOT NULL REFERENCES opportunities(id),
+          policy_id TEXT NOT NULL REFERENCES bid_decision_policies(id),
+          status TEXT NOT NULL,
+          recommendation TEXT NOT NULL,
+          proposed_decision TEXT NOT NULL,
+          score REAL NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunity_bid_decision_one_approved
+          ON opportunity_bid_decisions(opportunity_id)
+          WHERE status = 'approved';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunity_bid_decision_one_pending
+          ON opportunity_bid_decisions(opportunity_id)
+          WHERE status = 'pending_approval';
+        CREATE INDEX IF NOT EXISTS idx_opportunity_bid_decision_history
+          ON opportunity_bid_decisions(opportunity_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_bid_decision_policy
+          ON opportunity_bid_decisions(policy_id, proposed_decision, status, created_at DESC);
+      `);
+    }
   }
 ];
 
@@ -6524,6 +6597,7 @@ class ContractorOperatingLedger {
       : null;
     opportunity.bidPackages = this.listBidPackages({ opportunityId, includeClosed: true, limit: 100 });
     opportunity.marketFit = this.assessOpportunityMarketFit(opportunityId);
+    opportunity.bidDecision = this.bidDecisionForOpportunity(opportunityId);
     return opportunity;
   }
 
@@ -6958,6 +7032,611 @@ class ContractorOperatingLedger {
       },
       criteria: MARKET_FIT_CRITERIA,
       advisoryOnly: true,
+      externalCommitments: 0
+    };
+  }
+
+  normalizeBidDecisionPolicy(payload = {}, versionNumber = 1, actor = 'Contractor.AI') {
+    const policyName = normalizeText(payload.policyName || payload.policy_name || payload.name, 'Standard bid/no-bid scorecard');
+    if (policyName.length < 2 || policyName.length > 120) {
+      throw ledgerInputError('bid_decision_policy_name_invalid', 'The bid/no-bid policy name must contain 2 to 120 characters.');
+    }
+    const rawCriteria = Array.isArray(payload.criteria) ? payload.criteria : [];
+    const weightOverrides = payload.weights && typeof payload.weights === 'object' && !Array.isArray(payload.weights) ? payload.weights : {};
+    const minimumOverrides = payload.minimumRatings && typeof payload.minimumRatings === 'object' && !Array.isArray(payload.minimumRatings)
+      ? payload.minimumRatings
+      : payload.minimum_ratings && typeof payload.minimum_ratings === 'object' && !Array.isArray(payload.minimum_ratings)
+        ? payload.minimum_ratings
+        : {};
+    const criteria = BID_DECISION_CRITERIA.map(definition => {
+      const submitted = rawCriteria.find(item => normalizeStatus(item?.key, '') === definition.key) || {};
+      const weight = roundMeasurement(
+        submitted.weight ?? weightOverrides[definition.key] ?? definition.weight,
+        1
+      );
+      const minimumRating = roundMeasurement(
+        submitted.minimumRating ?? submitted.minimum_rating ?? minimumOverrides[definition.key] ?? definition.minimumRating,
+        1
+      );
+      if (weight <= 0 || weight > 100) {
+        throw ledgerInputError('bid_decision_weight_invalid', `${definition.label} weight must be greater than 0 and no more than 100.`, { criterion: definition.key });
+      }
+      if (minimumRating < 0 || minimumRating > 5) {
+        throw ledgerInputError('bid_decision_minimum_rating_invalid', `${definition.label} minimum rating must be between 0 and 5.`, { criterion: definition.key });
+      }
+      return { ...definition, weight, minimumRating };
+    });
+    const totalWeight = roundMeasurement(criteria.reduce((sum, criterion) => sum + criterion.weight, 0), 1);
+    if (Math.abs(totalWeight - 100) > 0.001) {
+      throw ledgerInputError('bid_decision_weight_total_invalid', 'Bid/no-bid criterion weights must total exactly 100.', { totalWeight });
+    }
+    const bidThreshold = roundMeasurement(normalizeNumber(payload.bidThreshold ?? payload.bid_threshold, 70), 1);
+    const noBidThreshold = roundMeasurement(normalizeNumber(payload.noBidThreshold ?? payload.no_bid_threshold, 45), 1);
+    if (bidThreshold <= 0 || bidThreshold > 100 || noBidThreshold < 0 || noBidThreshold >= bidThreshold) {
+      throw ledgerInputError('bid_decision_threshold_invalid', 'The bid threshold must be above the no-bid threshold and no greater than 100.');
+    }
+    return {
+      format: BID_DECISION_POLICY_FORMAT,
+      versionNumber,
+      policyName,
+      criteria,
+      gates: BID_DECISION_GATES,
+      policy: {
+        bidThreshold,
+        noBidThreshold,
+        ratingScaleMaximum: 5,
+        evidenceMinimumCharacters: 8
+      },
+      governance: {
+        requestedBy: actor,
+        approvalRequired: true,
+        operatorOverrideRequiresReason: true,
+        opportunityStageMutation: false,
+        automaticLeadClosure: false,
+        externalCommitments: 0
+      }
+    };
+  }
+
+  listBidDecisionPolicies(options = {}) {
+    const includeHistory = normalizeBoolean(options.includeHistory ?? options.include_history, false);
+    return this.db.prepare(`
+      SELECT * FROM bid_decision_policies
+      ${includeHistory ? '' : "WHERE status IN ('pending_approval', 'approved')"}
+      ORDER BY version_number DESC
+    `).all().map(row => this.mapBidDecisionPolicy(row));
+  }
+
+  getBidDecisionPolicy(policyId) {
+    const row = this.db.prepare('SELECT * FROM bid_decision_policies WHERE id = ?').get(policyId);
+    if (!row) throw ledgerInputError('bid_decision_policy_not_found', 'Bid/no-bid policy not found.', { policyId }, 404);
+    const policy = this.mapBidDecisionPolicy(row);
+    if (!policy.integrityValid) {
+      throw ledgerInputError('bid_decision_policy_integrity_failed', 'The retained bid/no-bid policy failed checksum verification.', { policyId }, 409);
+    }
+    return policy;
+  }
+
+  activeBidDecisionPolicy() {
+    const row = this.db.prepare("SELECT * FROM bid_decision_policies WHERE status = 'approved' ORDER BY version_number DESC LIMIT 1").get();
+    return row ? this.getBidDecisionPolicy(row.id) : null;
+  }
+
+  requestBidDecisionPolicy(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('bid_decision_policy_entry_key_invalid', 'A bid/no-bid policy revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('bid_decision_policy_reason_invalid', 'A bid/no-bid policy revision requires a reason between 8 and 500 characters.');
+      }
+      const replay = this.db.prepare('SELECT * FROM bid_decision_policies WHERE entry_key = ?').get(entryKey);
+      const versionNumber = replay
+        ? Math.round(normalizeNumber(replay.version_number, 1))
+        : Number(this.db.prepare('SELECT COALESCE(MAX(version_number), 0) AS value FROM bid_decision_policies').get()?.value || 0) + 1;
+      const snapshot = this.normalizeBidDecisionPolicy(payload, versionNumber, actor);
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const fingerprint = sha256Json({ snapshot, reason });
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('bid_decision_policy_replay_conflict', 'This bid/no-bid policy entryKey was already used with different values.', { entryKey, policyId: replay.id }, 409);
+        }
+        const policy = this.getBidDecisionPolicy(replay.id);
+        return {
+          policy,
+          approval: policy.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(policy.approvalId)) : null,
+          replayed: true
+        };
+      }
+      const pending = this.db.prepare("SELECT id, approval_id FROM bid_decision_policies WHERE status = 'pending_approval' ORDER BY version_number DESC LIMIT 1").get();
+      if (pending) {
+        throw ledgerInputError('bid_decision_policy_pending', 'Resolve the pending bid/no-bid policy revision first.', { policyId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const timestamp = nowIso();
+      const id = makeId('bidpolicy');
+      this.db.prepare(`
+        INSERT INTO bid_decision_policies (
+          id, version_number, status, policy_name, entry_key, entry_fingerprint,
+          snapshot_hash, snapshot_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, 'pending_approval', ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(id, versionNumber, snapshot.policyName, entryKey, fingerprint, snapshotHash, snapshotJson,
+        toJson({ reason, requestedBy: actor, externalCommitments: 0 }), timestamp, timestamp);
+      const approval = this.createApproval({
+        targetType: 'bid_decision_policy',
+        targetId: id,
+        approvalType: 'bid_decision_policy_revision',
+        summary: `Approve bid/no-bid scorecard ${snapshot.policyName} v${versionNumber}`,
+        reason,
+        data: {
+          policyName: snapshot.policyName,
+          versionNumber,
+          bidThreshold: snapshot.policy.bidThreshold,
+          noBidThreshold: snapshot.policy.noBidThreshold,
+          criteria: snapshot.criteria,
+          gates: snapshot.gates,
+          snapshotHash,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE bid_decision_policies SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const retained = this.getBidDecisionPolicy(id);
+      this.audit({
+        entityType: 'bid_decision_policy', entityId: id, action: 'request_bid_decision_policy_approval', actor, after: retained,
+        metadata: { approvalId: approval.id, versionNumber, snapshotHash, externalCommitments: 0 }
+      });
+      return { policy: retained, approval, replayed: false };
+    });
+  }
+
+  applyBidDecisionPolicyApproval(policyId) {
+    const row = this.db.prepare('SELECT * FROM bid_decision_policies WHERE id = ?').get(policyId);
+    if (!row) throw ledgerInputError('bid_decision_policy_not_found', 'Bid/no-bid policy not found.', { policyId }, 404);
+    if (row.status === 'approved') return this.getBidDecisionPolicy(policyId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('bid_decision_policy_state_conflict', `Bid/no-bid policy cannot be approved from ${row.status}.`, { policyId, status: row.status }, 409);
+    }
+    const policy = this.getBidDecisionPolicy(policyId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'bid_decision_policy' || approval.target_id !== policyId) {
+      throw ledgerInputError('bid_decision_policy_approval_invalid', 'The bid/no-bid policy lacks a matching approved decision.', { policyId }, 409);
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE bid_decision_policies SET status = 'superseded', updated_at = ? WHERE status = 'approved' AND id <> ?").run(timestamp, policyId);
+    this.db.prepare(`
+      UPDATE bid_decision_policies SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, policyId);
+    const after = this.getBidDecisionPolicy(policyId);
+    this.audit({
+      entityType: 'bid_decision_policy', entityId: policyId, action: 'approve_bid_decision_policy', actor,
+      before: policy, after,
+      metadata: { approvalId: row.approval_id, versionNumber: row.version_number, snapshotHash: row.snapshot_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  evaluateOpportunityBidDecision(opportunityId, payload = {}, options = {}) {
+    const opportunity = this.mapOpportunity(this.requireOpportunity(opportunityId));
+    const policy = options.policy || this.activeBidDecisionPolicy();
+    if (!policy) {
+      return {
+        format: BID_DECISION_FORMAT,
+        status: 'unconfigured', opportunityId, policy: null, score: null, recommendation: 'review',
+        criteria: [], gates: [], blockers: [], evidenceGaps: ['approved_bid_decision_policy'],
+        sourceHash: sha256Json({ opportunityId, opportunityUpdatedAt: opportunity.updatedAt, policyId: null }),
+        approvalRequired: true, opportunityStageMutation: false, externalCommitments: 0
+      };
+    }
+    const scorecard = payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input) ? payload.input : payload;
+    const submittedCriteria = Array.isArray(scorecard.criteria) ? scorecard.criteria : [];
+    const submittedGates = Array.isArray(scorecard.gates)
+      ? scorecard.gates
+      : scorecard.gates && typeof scorecard.gates === 'object'
+        ? Object.entries(scorecard.gates).map(([key, value]) => (
+            value && typeof value === 'object' && !Array.isArray(value) ? { key, ...value } : { key, status: value }
+          ))
+        : [];
+    const fitEvaluation = this.assessOpportunityMarketFit(opportunityId);
+    const retainedFit = this.listOpportunityFitAssessments({ opportunityId, limit: 1 })[0] || null;
+    const fitCurrent = Boolean(
+      retainedFit?.integrityValid
+      && fitEvaluation.profile
+      && retainedFit.profileId === fitEvaluation.profile.id
+      && retainedFit.sourceHash === fitEvaluation.sourceHash
+    );
+    const normalizedInputCriteria = [];
+    const criteria = policy.snapshot.criteria.map(definition => {
+      if (definition.source === 'market_fit') {
+        const fitEvidenceComplete = fitCurrent && fitEvaluation.evidenceGaps.length === 0;
+        const rating = fitEvidenceComplete ? roundMeasurement(fitEvaluation.score / 20, 1) : null;
+        const status = rating === null
+          ? 'missing_evidence'
+          : rating < definition.minimumRating
+            ? 'below_minimum'
+            : 'pass';
+        return {
+          ...definition,
+          rating,
+          awardedWeight: rating === null ? 0 : roundMeasurement((rating / 5) * definition.weight, 1),
+          status,
+          evidence: retainedFit ? `Retained fit assessment ${retainedFit.id}` : null,
+          evidenceReference: retainedFit?.snapshotHash || null,
+          explanation: !retainedFit
+            ? 'Retain the current market-fit assessment before making a pursuit decision.'
+            : !fitCurrent
+              ? 'The retained market-fit assessment is stale or belongs to a superseded policy.'
+              : fitEvaluation.evidenceGaps.length
+                ? 'The current market-fit assessment still contains evidence gaps.'
+                : `Derived from the current retained ${fitEvaluation.score}% market-fit assessment.`
+        };
+      }
+      const submitted = submittedCriteria.find(item => normalizeStatus(item?.key, '') === definition.key) || {};
+      const hasRating = submitted.rating !== undefined && submitted.rating !== null && submitted.rating !== '';
+      const rating = hasRating ? roundMeasurement(Number(submitted.rating), 1) : null;
+      if (hasRating && (!Number.isFinite(Number(submitted.rating)) || rating < 0 || rating > 5)) {
+        throw ledgerInputError('bid_decision_rating_invalid', `${definition.label} rating must be between 0 and 5.`, { criterion: definition.key });
+      }
+      const evidence = normalizeText(submitted.evidence || submitted.notes, '');
+      if (evidence.length > 1_000) {
+        throw ledgerInputError('bid_decision_evidence_too_long', `${definition.label} evidence cannot exceed 1,000 characters.`, { criterion: definition.key });
+      }
+      normalizedInputCriteria.push({ key: definition.key, rating, evidence: evidence || null });
+      const complete = rating !== null && evidence.length >= policy.snapshot.policy.evidenceMinimumCharacters;
+      const status = !complete ? 'missing_evidence' : rating < definition.minimumRating ? 'below_minimum' : 'pass';
+      return {
+        ...definition,
+        rating,
+        awardedWeight: rating === null ? 0 : roundMeasurement((rating / 5) * definition.weight, 1),
+        status,
+        evidence: evidence || null,
+        evidenceReference: null,
+        explanation: rating === null
+          ? 'Retain an operator rating and evidence.'
+          : evidence.length < policy.snapshot.policy.evidenceMinimumCharacters
+            ? `Retain at least ${policy.snapshot.policy.evidenceMinimumCharacters} characters of supporting evidence.`
+            : rating < definition.minimumRating
+              ? `The rating is below the approved minimum of ${definition.minimumRating}.`
+              : 'The rating and supporting evidence meet the approved scorecard policy.'
+      };
+    });
+    const gates = policy.snapshot.gates.map(definition => {
+      const submitted = submittedGates.find(item => normalizeStatus(item?.key, '') === definition.key) || {};
+      const status = normalizeStatus(submitted.status || submitted.value, 'unknown');
+      if (!['yes', 'no', 'unknown'].includes(status)) {
+        throw ledgerInputError('bid_decision_gate_invalid', `${definition.label} must be yes, no, or unknown.`, { gate: definition.key });
+      }
+      return {
+        ...definition,
+        status,
+        outcome: status === 'yes' ? 'pass' : status === 'no' ? 'block' : 'missing_evidence'
+      };
+    });
+    const normalizedInput = {
+      criteria: normalizedInputCriteria,
+      gates: gates.map(gate => ({ key: gate.key, status: gate.status }))
+    };
+    const score = roundMeasurement(criteria.reduce((sum, criterion) => sum + criterion.awardedWeight, 0), 1);
+    const blockers = [
+      ...criteria.filter(criterion => criterion.status === 'below_minimum').map(criterion => criterion.key),
+      ...gates.filter(gate => gate.outcome === 'block').map(gate => gate.key)
+    ];
+    const evidenceGaps = [
+      ...criteria.filter(criterion => criterion.status === 'missing_evidence').map(criterion => criterion.key),
+      ...gates.filter(gate => gate.outcome === 'missing_evidence').map(gate => gate.key)
+    ];
+    const recommendation = blockers.length
+      ? 'no_bid'
+      : evidenceGaps.length
+        ? 'review'
+        : score >= policy.snapshot.policy.bidThreshold
+          ? 'bid'
+          : score <= policy.snapshot.policy.noBidThreshold
+            ? 'no_bid'
+            : 'review';
+    const sourceMaterial = {
+      opportunityId: opportunity.id,
+      opportunityUpdatedAt: opportunity.updatedAt,
+      opportunityStage: opportunity.stage,
+      estimatedValue: opportunity.estimatedValue,
+      targetDecisionAt: opportunity.targetDecisionAt,
+      policyId: policy.id,
+      policyVersion: policy.versionNumber,
+      policySnapshotHash: policy.snapshotHash,
+      marketFitAssessmentId: retainedFit?.id || null,
+      marketFitAssessmentHash: retainedFit?.snapshotHash || null,
+      marketFitSourceHash: fitEvaluation.sourceHash,
+      marketFitCurrent: fitCurrent,
+      input: normalizedInput
+    };
+    return {
+      format: BID_DECISION_FORMAT,
+      status: 'calculated',
+      opportunityId,
+      opportunity: {
+        id: opportunity.id,
+        title: opportunity.title,
+        clientName: opportunity.client?.name || null,
+        stage: opportunity.stage,
+        estimatedValue: opportunity.estimatedValue,
+        targetDecisionAt: opportunity.targetDecisionAt
+      },
+      policy: {
+        id: policy.id,
+        policyName: policy.policyName,
+        versionNumber: policy.versionNumber,
+        snapshotHash: policy.snapshotHash,
+        bidThreshold: policy.snapshot.policy.bidThreshold,
+        noBidThreshold: policy.snapshot.policy.noBidThreshold
+      },
+      marketFit: {
+        retainedAssessmentId: retainedFit?.id || null,
+        retainedAssessmentHash: retainedFit?.snapshotHash || null,
+        current: fitCurrent,
+        recommendation: fitEvaluation.recommendation,
+        score: fitEvaluation.score,
+        evidenceGaps: fitEvaluation.evidenceGaps
+      },
+      input: normalizedInput,
+      score,
+      recommendation,
+      criteria,
+      gates,
+      blockers,
+      evidenceGaps,
+      sourceHash: sha256Json(sourceMaterial),
+      approvalRequired: true,
+      opportunityStageMutation: false,
+      automaticLeadClosure: false,
+      externalCommitments: 0
+    };
+  }
+
+  listOpportunityBidDecisions(options = {}) {
+    const opportunityId = normalizeText(options.opportunityId || options.opportunity_id, '');
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM opportunity_bid_decisions
+      WHERE (? = '' OR opportunity_id = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(opportunityId, opportunityId, limit).map(row => this.mapOpportunityBidDecision(row));
+  }
+
+  getOpportunityBidDecision(decisionId) {
+    const row = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE id = ?').get(decisionId);
+    if (!row) throw ledgerInputError('bid_decision_not_found', 'Opportunity bid/no-bid decision not found.', { decisionId }, 404);
+    const decision = this.mapOpportunityBidDecision(row);
+    if (!decision.integrityValid) {
+      throw ledgerInputError('bid_decision_integrity_failed', 'The retained bid/no-bid decision failed checksum verification.', { decisionId }, 409);
+    }
+    return decision;
+  }
+
+  requestOpportunityBidDecision(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('bid_decision_entry_key_invalid', 'A bid/no-bid decision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const proposedDecision = normalizeStatus(payload.proposedDecision || payload.proposed_decision || payload.decision, '');
+      if (!['bid', 'no_bid'].includes(proposedDecision)) {
+        throw ledgerInputError('bid_decision_value_invalid', 'The proposed pursuit decision must be bid or no_bid.');
+      }
+      const rationale = normalizeText(payload.rationale || payload.reason, '');
+      if (rationale.length < 8 || rationale.length > 1_000) {
+        throw ledgerInputError('bid_decision_rationale_invalid', 'A bid/no-bid decision requires a rationale between 8 and 1,000 characters.');
+      }
+      const evaluation = this.evaluateOpportunityBidDecision(opportunityId, payload);
+      if (!evaluation.policy) {
+        throw ledgerInputError('bid_decision_policy_required', 'Approve a bid/no-bid scorecard policy before requesting a pursuit decision.', { opportunityId }, 409);
+      }
+      const override = proposedDecision !== evaluation.recommendation;
+      const overrideReason = normalizeText(payload.overrideReason || payload.override_reason, '');
+      if (override && (overrideReason.length < 12 || overrideReason.length > 500)) {
+        throw ledgerInputError('bid_decision_override_reason_required', 'Overriding the scorecard recommendation requires a reason between 12 and 500 characters.', {
+          recommendation: evaluation.recommendation,
+          proposedDecision
+        });
+      }
+      const fingerprint = sha256Json({
+        opportunityId,
+        policyId: evaluation.policy.id,
+        sourceHash: evaluation.sourceHash,
+        proposedDecision,
+        rationale,
+        overrideReason: overrideReason || null
+      });
+      const replay = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('bid_decision_replay_conflict', 'This bid/no-bid entryKey was already used with different evidence or a different decision.', { entryKey, decisionId: replay.id }, 409);
+        }
+        const decision = this.getOpportunityBidDecision(replay.id);
+        return {
+          decision,
+          approval: decision.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(decision.approvalId)) : null,
+          replayed: true
+        };
+      }
+      const pending = this.db.prepare("SELECT id, approval_id FROM opportunity_bid_decisions WHERE opportunity_id = ? AND status = 'pending_approval'").get(opportunityId);
+      if (pending) {
+        throw ledgerInputError('bid_decision_pending', 'Resolve the pending bid/no-bid decision for this opportunity first.', { decisionId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const timestamp = nowIso();
+      const id = makeId('biddecision');
+      const snapshot = {
+        ...evaluation,
+        proposedDecision,
+        rationale,
+        override,
+        overrideReason: overrideReason || null,
+        requestedAt: timestamp,
+        requestedBy: actor
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO opportunity_bid_decisions (
+          id, opportunity_id, policy_id, status, recommendation, proposed_decision, score,
+          source_hash, snapshot_hash, snapshot_json, entry_key, entry_fingerprint,
+          approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(id, opportunityId, evaluation.policy.id, evaluation.recommendation, proposedDecision, evaluation.score,
+        evaluation.sourceHash, snapshotHash, snapshotJson, entryKey, fingerprint,
+        toJson({ rationale, override, overrideReason: overrideReason || null, requestedBy: actor, externalCommitments: 0 }), timestamp, timestamp);
+      const approval = this.createApproval({
+        targetType: 'opportunity_bid_decision',
+        targetId: id,
+        approvalType: 'bid_pursuit_decision',
+        summary: `Approve ${proposedDecision === 'bid' ? 'bid' : 'no-bid'} pursuit decision for ${evaluation.opportunity.title}`,
+        reason: rationale,
+        data: {
+          opportunityId,
+          opportunityTitle: evaluation.opportunity.title,
+          policyId: evaluation.policy.id,
+          policyVersion: evaluation.policy.versionNumber,
+          recommendation: evaluation.recommendation,
+          proposedDecision,
+          score: evaluation.score,
+          blockers: evaluation.blockers,
+          evidenceGaps: evaluation.evidenceGaps,
+          override,
+          overrideReason: overrideReason || null,
+          requiresExceptionOverride: override,
+          sourceHash: evaluation.sourceHash,
+          snapshotHash,
+          opportunityStageMutation: false,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE opportunity_bid_decisions SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const retained = this.getOpportunityBidDecision(id);
+      this.audit({
+        entityType: 'opportunity_bid_decision', entityId: id, action: 'request_opportunity_bid_decision_approval', actor,
+        after: retained,
+        metadata: {
+          opportunityId, policyId: evaluation.policy.id, approvalId: approval.id, recommendation: evaluation.recommendation,
+          proposedDecision, score: evaluation.score, override, sourceHash: evaluation.sourceHash, externalCommitments: 0
+        }
+      });
+      return { decision: retained, approval, replayed: false };
+    });
+  }
+
+  applyOpportunityBidDecisionApproval(decisionId) {
+    const row = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE id = ?').get(decisionId);
+    if (!row) throw ledgerInputError('bid_decision_not_found', 'Opportunity bid/no-bid decision not found.', { decisionId }, 404);
+    if (row.status === 'approved') return this.getOpportunityBidDecision(decisionId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('bid_decision_state_conflict', `Bid/no-bid decision cannot be approved from ${row.status}.`, { decisionId, status: row.status }, 409);
+    }
+    const before = this.getOpportunityBidDecision(decisionId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'opportunity_bid_decision' || approval.target_id !== decisionId) {
+      throw ledgerInputError('bid_decision_approval_invalid', 'The bid/no-bid decision lacks a matching approved decision.', { decisionId }, 409);
+    }
+    const activePolicy = this.activeBidDecisionPolicy();
+    if (!activePolicy || activePolicy.id !== before.policyId) {
+      throw ledgerInputError('bid_decision_stale', 'The bid/no-bid policy changed after this pursuit decision was requested.', { decisionId }, 409);
+    }
+    const current = this.evaluateOpportunityBidDecision(before.opportunityId, before.snapshot.input, { policy: activePolicy });
+    if (current.sourceHash !== before.sourceHash) {
+      throw ledgerInputError('bid_decision_stale', 'Opportunity, market-fit, policy, or scorecard evidence changed after this pursuit decision was requested.', {
+        decisionId,
+        retainedSourceHash: before.sourceHash,
+        currentSourceHash: current.sourceHash
+      }, 409);
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE opportunity_bid_decisions SET status = 'superseded', updated_at = ?
+      WHERE opportunity_id = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, before.opportunityId, decisionId);
+    this.db.prepare(`
+      UPDATE opportunity_bid_decisions SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor },
+      opportunityStageMutation: false,
+      externalCommitments: 0
+    }), timestamp, decisionId);
+    const after = this.getOpportunityBidDecision(decisionId);
+    this.audit({
+      entityType: 'opportunity_bid_decision', entityId: decisionId, action: 'approve_opportunity_bid_decision', actor,
+      before, after,
+      metadata: {
+        opportunityId: before.opportunityId, approvalId: row.approval_id, proposedDecision: before.proposedDecision,
+        recommendation: before.recommendation, override: before.snapshot.override, sourceHash: before.sourceHash,
+        opportunityStageMutation: false, externalCommitments: 0
+      }
+    });
+    return after;
+  }
+
+  bidDecisionForOpportunity(opportunityId) {
+    const decisions = this.listOpportunityBidDecisions({ opportunityId, limit: 100 });
+    const currentDecision = decisions.find(decision => decision.status === 'approved') || null;
+    const pendingDecision = decisions.find(decision => decision.status === 'pending_approval') || null;
+    const basis = pendingDecision || currentDecision || decisions[0] || null;
+    let evaluation = this.evaluateOpportunityBidDecision(opportunityId, basis?.snapshot?.input || {});
+    const stale = Boolean(basis && basis.sourceHash !== evaluation.sourceHash);
+    return { currentDecision, pendingDecision, latestDecision: basis, evaluation, stale, decisions };
+  }
+
+  bidDecisionRegister(options = {}) {
+    const policies = this.listBidDecisionPolicies({ includeHistory: true });
+    const activePolicy = policies.find(policy => policy.status === 'approved') || null;
+    const pendingPolicies = policies.filter(policy => policy.status === 'pending_approval');
+    const decisions = this.listOpportunityBidDecisions({ limit: options.decisionLimit || options.decision_limit || 5_000 });
+    const decisionsByOpportunity = new Map();
+    for (const decision of decisions) {
+      if (!decisionsByOpportunity.has(decision.opportunityId)) decisionsByOpportunity.set(decision.opportunityId, []);
+      decisionsByOpportunity.get(decision.opportunityId).push(decision);
+    }
+    const opportunities = this.listOpportunities({ includeClosed: true, limit: options.limit || 500 }).map(opportunity => {
+      const history = decisionsByOpportunity.get(opportunity.id) || [];
+      const currentDecision = history.find(decision => decision.status === 'approved') || null;
+      const pendingDecision = history.find(decision => decision.status === 'pending_approval') || null;
+      const basis = pendingDecision || currentDecision || history[0] || null;
+      const evaluation = this.evaluateOpportunityBidDecision(opportunity.id, basis?.snapshot?.input || {}, { policy: activePolicy });
+      return {
+        opportunity,
+        evaluation,
+        currentDecision,
+        pendingDecision,
+        stale: Boolean(basis && basis.sourceHash !== evaluation.sourceHash)
+      };
+    });
+    const open = opportunities.filter(item => OPEN_OPPORTUNITY_STAGES.has(item.opportunity.stage));
+    return {
+      policy: { activePolicy, pendingPolicies, policies },
+      decisions,
+      opportunities,
+      summary: {
+        configured: Boolean(activePolicy),
+        open: open.length,
+        bid: open.filter(item => item.currentDecision?.proposedDecision === 'bid' && !item.stale).length,
+        noBid: open.filter(item => item.currentDecision?.proposedDecision === 'no_bid' && !item.stale).length,
+        review: open.filter(item => !item.currentDecision || item.stale).length,
+        pendingApproval: open.filter(item => item.pendingDecision).length,
+        missingOrStale: open.filter(item => (!item.currentDecision && !item.pendingDecision) || item.stale).length
+      },
+      criteria: activePolicy?.snapshot?.criteria || BID_DECISION_CRITERIA,
+      gates: BID_DECISION_GATES,
+      approvalRequired: true,
+      opportunityStageMutation: false,
+      automaticLeadClosure: false,
       externalCommitments: 0
     };
   }
@@ -35803,6 +36482,48 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'bid_decision_policy') {
+        this.db.prepare(`
+          UPDATE bid_decision_policies
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM bid_decision_policies WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
+      } else if (before.target_type === 'opportunity_bid_decision') {
+        this.db.prepare(`
+          UPDATE opportunity_bid_decisions
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM opportunity_bid_decisions WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            },
+            opportunityStageMutation: false,
+            externalCommitments: 0
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'performance_scorecard_target') {
         this.db.prepare(`
           UPDATE performance_scorecard_targets
@@ -36192,6 +36913,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyCashFlowForecastApproval(targetId);
     } else if (targetType === 'market_fit_profile') {
       this.applyMarketFitProfileApproval(targetId);
+    } else if (targetType === 'bid_decision_policy') {
+      this.applyBidDecisionPolicyApproval(targetId);
+    } else if (targetType === 'opportunity_bid_decision') {
+      this.applyOpportunityBidDecisionApproval(targetId);
     } else if (targetType === 'performance_scorecard_target') {
       this.applyPerformanceScorecardTargetApproval(targetId);
     } else if (targetType === 'performance_scorecard') {
@@ -40745,6 +41470,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       budget_lines: 'status',
       cost_forecast_snapshots: 'status',
       cash_flow_forecast_snapshots: 'status',
+      market_fit_profiles: 'status',
+      opportunity_fit_assessments: 'status',
+      bid_decision_policies: 'status',
+      opportunity_bid_decisions: 'status',
       performance_scorecard_targets: 'status',
       performance_scorecard_snapshots: 'status',
       production_baselines: 'status',
@@ -42028,6 +42757,41 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             });
           }
         }
+      }
+    }
+    const bidDecisionPolicy = this.activeBidDecisionPolicy();
+    if (bidDecisionPolicy) {
+      const openOpportunities = this.db.prepare(`
+        SELECT id, title FROM opportunities
+        WHERE stage IN ('new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating')
+        ORDER BY updated_at DESC
+        LIMIT 10
+      `).all();
+      for (const record of openOpportunities) {
+        const latestRow = this.db.prepare(`
+          SELECT * FROM opportunity_bid_decisions
+          WHERE opportunity_id = ?
+          ORDER BY created_at DESC LIMIT 1
+        `).get(record.id);
+        const latest = latestRow ? this.mapOpportunityBidDecision(latestRow) : null;
+        const evaluation = this.evaluateOpportunityBidDecision(record.id, latest?.snapshot?.input || {}, { policy: bidDecisionPolicy });
+        if (!evaluation.marketFit?.current) continue;
+        const sourceCurrent = Boolean(latest?.integrityValid && latest.sourceHash === evaluation.sourceHash);
+        if (sourceCurrent && ['pending_approval', 'approved'].includes(latest.status)) continue;
+        const idempotencyKey = `bid-decision-review:${record.id}:${evaluation.sourceHash.slice(0, 32)}`;
+        const existingReview = this.db.prepare('SELECT id FROM opportunity_activities WHERE idempotency_key = ?').get(idempotencyKey);
+        if (existingReview) continue;
+        actions.push({
+          type: 'review_bid_decision',
+          opportunityId: record.id,
+          idempotencyKey,
+          severity: latest || evaluation.blockers.length ? 'high' : 'medium',
+          score: evaluation.score,
+          recommendation: evaluation.recommendation,
+          stale: Boolean(latest && !sourceCurrent),
+          title: record.title,
+          message: `${record.title} requires an internal bid/no-bid scorecard${latest && !sourceCurrent ? ' refresh' : ''}. Automation cannot choose, close, or contact the lead.`
+        });
       }
     }
     const jobsWithoutAssignment = this.db.prepare(`
@@ -44235,6 +44999,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         }
 
+        const bidDecisionReviews = preview.filter(action => action.type === 'review_bid_decision').slice(0, 10);
+        for (const action of bidDecisionReviews) {
+          try {
+            const result = this.createOpportunityActivity(action.opportunityId, {
+              activityType: 'bid_decision_review',
+              status: 'open',
+              summary: action.stale ? 'Refresh stale bid/no-bid scorecard' : 'Complete bid/no-bid scorecard',
+              notes: `Current recommendation: ${action.recommendation}; score ${action.score}%. Complete operator ratings, explicit gates, rationale, and approval before retaining a pursuit decision. This task cannot choose, close, or contact the lead.`,
+              source: 'autonomous_cycle',
+              internalOnly: true,
+              idempotencyKey: action.idempotencyKey
+            }, { actor });
+            applied.push({ ...action, activityId: result.activity.id, status: result.replayed ? 'replayed' : 'task_created' });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
         const assignActions = preview.filter(action => action.type === 'assign_worker').slice(0, 3);
         for (const action of assignActions) {
           try {
@@ -45920,6 +46702,54 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Opportunity fit assessment ${assessment.id} cannot be verified: ${error.code || error.message}.` });
       }
     }
+    const approvedBidDecisionPoliciesWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM bid_decision_policies policies
+      LEFT JOIN approvals ON approvals.id = policies.approval_id
+      WHERE policies.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'bid_decision_policy' OR approvals.target_id <> policies.id
+        )
+    `).get().count || 0);
+    if (approvedBidDecisionPoliciesWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedBidDecisionPoliciesWithoutApproval} approved bid/no-bid policy revision(s) lack a matching approval decision.` });
+    }
+    const bidDecisionPolicyRows = this.db.prepare('SELECT * FROM bid_decision_policies ORDER BY version_number').all();
+    for (const policyRow of bidDecisionPolicyRows) {
+      const policy = this.mapBidDecisionPolicy(policyRow);
+      if (!policy.integrityValid) {
+        issues.push({ severity: 'error', message: `Bid/no-bid policy v${policy.versionNumber} failed retained snapshot verification.` });
+      }
+    }
+    const activeBidPolicyRow = this.db.prepare("SELECT * FROM bid_decision_policies WHERE status = 'approved' ORDER BY version_number DESC LIMIT 1").get();
+    const activeBidPolicy = activeBidPolicyRow ? this.mapBidDecisionPolicy(activeBidPolicyRow) : null;
+    const bidDecisionRows = this.db.prepare('SELECT * FROM opportunity_bid_decisions ORDER BY created_at').all();
+    for (const decisionRow of bidDecisionRows) {
+      const decision = this.mapOpportunityBidDecision(decisionRow);
+      if (!decision.integrityValid) {
+        issues.push({ severity: 'error', message: `Opportunity bid/no-bid decision ${decision.id} failed retained snapshot verification.` });
+        continue;
+      }
+      if (decision.status === 'approved') {
+        const approval = this.db.prepare(`
+          SELECT id FROM approvals
+          WHERE id = ? AND target_type = 'opportunity_bid_decision' AND target_id = ? AND status = 'approved'
+        `).get(decision.approvalId, decision.id);
+        if (!approval) {
+          issues.push({ severity: 'error', message: `Approved bid/no-bid decision ${decision.id} lacks its matching approval decision.` });
+        }
+      }
+      try {
+        const retainedPolicy = this.getBidDecisionPolicy(decision.policyId);
+        const current = this.evaluateOpportunityBidDecision(decision.opportunityId, decision.snapshot.input, { policy: retainedPolicy });
+        if (current.sourceHash !== decision.sourceHash || (decision.status === 'approved' && activeBidPolicy?.id !== decision.policyId)) {
+          issues.push({ severity: 'warning', message: `Opportunity bid/no-bid decision ${decision.id} is stale because material opportunity, market-fit, scorecard, or policy evidence changed.` });
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Opportunity bid/no-bid decision ${decision.id} cannot be verified: ${error.code || error.message}.` });
+      }
+    }
     const approvedPerformanceTargetsWithoutApproval = Number(this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM performance_scorecard_targets targets
@@ -47113,6 +47943,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         opportunityActivities: this.count('opportunity_activities'),
         marketFitProfiles: this.count('market_fit_profiles'),
         opportunityFitAssessments: this.count('opportunity_fit_assessments'),
+        bidDecisionPolicies: this.count('bid_decision_policies'),
+        opportunityBidDecisions: this.count('opportunity_bid_decisions'),
         bidPackages: this.count('bid_packages'),
         bidPackageParticipants: this.count('bid_package_participants'),
         bidCommitments: Number(this.db.prepare('SELECT COUNT(*) AS count FROM bid_packages WHERE purchase_order_id IS NOT NULL').get().count || 0),
@@ -47241,6 +48073,70 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         && snapshot.profileName === row.profile_name
         && sha256Text(snapshotJson) === row.snapshot_hash
       ),
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapBidDecisionPolicy(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      policyName: row.policy_name,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === BID_DECISION_POLICY_FORMAT
+        && snapshot.versionNumber === Math.round(normalizeNumber(row.version_number, 0))
+        && snapshot.policyName === row.policy_name
+        && Array.isArray(snapshot.criteria)
+        && roundMeasurement(snapshot.criteria.reduce((sum, criterion) => sum + normalizeNumber(criterion.weight, 0), 0), 1) === 100
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOpportunityBidDecision(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      opportunityId: row.opportunity_id,
+      policyId: row.policy_id,
+      status: row.status,
+      recommendation: row.recommendation,
+      proposedDecision: row.proposed_decision,
+      score: roundMeasurement(row.score, 1),
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === BID_DECISION_FORMAT
+        && snapshot.opportunityId === row.opportunity_id
+        && snapshot.policy?.id === row.policy_id
+        && snapshot.sourceHash === row.source_hash
+        && roundMeasurement(snapshot.score, 1) === roundMeasurement(row.score, 1)
+        && snapshot.recommendation === row.recommendation
+        && snapshot.proposedDecision === row.proposed_decision
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
       approvalId: row.approval_id || null,
       data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
@@ -50607,6 +51503,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.fitThreshold = data.fitThreshold ?? mapped?.snapshot?.policy?.fitThreshold ?? null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
       preview.serviceAreas = mapped?.snapshot?.policy?.serviceAreas || [];
+    } else if (targetType === 'bid_decision_policy') {
+      const row = this.db.prepare('SELECT * FROM bid_decision_policies WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapBidDecisionPolicy(row) : null;
+      primaryEffect = `Approve bid/no-bid scorecard policy ${mapped?.policyName || data.policyName || ''}.`;
+      addEffect(`Activate version ${mapped?.versionNumber || data.versionNumber || ''} with bid threshold ${data.bidThreshold ?? mapped?.snapshot?.policy?.bidThreshold ?? 0}% and no-bid threshold ${data.noBidThreshold ?? mapped?.snapshot?.policy?.noBidThreshold ?? 0}%.`);
+      addEffect(`Govern ${mapped?.snapshot?.criteria?.length || data.criteria?.length || 0} weighted criteria and ${mapped?.snapshot?.gates?.length || data.gates?.length || 0} explicit pursuit gates.`);
+      addSafeguard('Supersedes only the previous policy. Historical policies and pursuit decisions remain retained and checksum-verifiable.');
+      addSafeguard('Policy approval cannot close a lead, create a job or tender, contact a client, promise a date, or commit spend.');
+      riskLevel = 'high';
+      preview.policyName = mapped?.policyName || data.policyName || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.bidThreshold = data.bidThreshold ?? mapped?.snapshot?.policy?.bidThreshold ?? null;
+      preview.noBidThreshold = data.noBidThreshold ?? mapped?.snapshot?.policy?.noBidThreshold ?? null;
+      preview.criteria = mapped?.snapshot?.criteria || data.criteria || [];
+      preview.gates = mapped?.snapshot?.gates || data.gates || [];
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'opportunity_bid_decision') {
+      const row = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapOpportunityBidDecision(row) : null;
+      const proposedDecision = mapped?.proposedDecision || data.proposedDecision || 'review';
+      primaryEffect = `Approve the ${proposedDecision === 'bid' ? 'bid' : 'no-bid'} pursuit decision for ${data.opportunityTitle || mapped?.snapshot?.opportunity?.title || 'the opportunity'}.`;
+      addEffect(`Retain the operator decision against score ${normalizeNumber(mapped?.score ?? data.score, 0).toFixed(1)}% and recommendation ${mapped?.recommendation || data.recommendation || 'review'}.`);
+      addEffect('Make the decision visible to internal pipeline operators while preserving the complete scorecard, gates, rationale, and approval lineage.');
+      addSafeguard('Approval is refused if opportunity, policy, retained market-fit evidence, ratings, or gate evidence changed after the request.');
+      addSafeguard('Does not change the opportunity stage, close or reject a lead, create a bid package or job, contact anyone, promise dates, or commit spend.');
+      if (data.override === true || mapped?.snapshot?.override === true) {
+        addSafeguard(`Operator override: ${data.overrideReason || mapped?.snapshot?.overrideReason || 'A separate reviewer reason is required.'}`);
+      }
+      riskLevel = data.override === true || proposedDecision === 'no_bid' ? 'high' : 'medium';
+      preview.opportunityId = mapped?.opportunityId || data.opportunityId || null;
+      preview.opportunityTitle = data.opportunityTitle || mapped?.snapshot?.opportunity?.title || null;
+      preview.policyVersion = data.policyVersion || mapped?.snapshot?.policy?.versionNumber || null;
+      preview.score = mapped?.score ?? data.score ?? null;
+      preview.recommendation = mapped?.recommendation || data.recommendation || null;
+      preview.proposedDecision = proposedDecision;
+      preview.blockers = data.blockers || mapped?.snapshot?.blockers || [];
+      preview.evidenceGaps = data.evidenceGaps || mapped?.snapshot?.evidenceGaps || [];
+      preview.override = data.override === true || mapped?.snapshot?.override === true;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'performance_scorecard_target') {
       const row = this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapPerformanceScorecardTarget(row) : null;
@@ -50729,6 +51665,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 module.exports = {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
+  BID_DECISION_CRITERIA,
+  BID_DECISION_GATES,
   MARKET_FIT_CRITERIA,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS,

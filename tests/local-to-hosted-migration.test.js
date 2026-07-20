@@ -7,7 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 const { spawnSync } = require('node:child_process');
 const { Client } = require('pg');
-const { ContractorOperatingLedger } = require('../operating-ledger');
+const { ContractorOperatingLedger, BID_DECISION_CRITERIA, BID_DECISION_GATES } = require('../operating-ledger');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
 const {
   migrateLocalBackupToHosted,
@@ -763,6 +763,66 @@ function createBackupFixture(t, suffix = 'success') {
     status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration independent verification matched the correction.'
   });
   const nonconformance = source.getNonconformance(nonconformanceRequest.nonconformance.id);
+  const marketPolicy = source.requestMarketFitProfile({
+    entryKey: `migration-market-policy-${suffix}`,
+    reason: 'Retain the local market focus through hosted migration.',
+    profileName: 'Migration Arnhem focus',
+    services: ['Renovation'],
+    clientSegments: ['Homeowner'],
+    sourceChannels: ['Referral'],
+    minJobValue: 5000,
+    maxJobValue: 150000,
+    fitThreshold: 70,
+    serviceAreas: [{ label: 'Arnhem', country: 'NL', postalPrefixes: ['68'], cities: ['Arnhem'] }]
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(marketPolicy.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration market focus verified.'
+  });
+  const pursuitOpportunity = source.createOpportunity({
+    clientName: `Migration pursuit client ${suffix}`,
+    title: `Migration pursuit decision ${suffix}`,
+    stage: 'estimating',
+    service: 'Renovation',
+    clientSegment: 'Homeowner',
+    sourceChannel: 'Referral',
+    postalCode: '6811AA',
+    city: 'Arnhem',
+    country: 'NL',
+    estimatedValue: 65000
+  }, { actor: 'migration_fixture' });
+  source.retainOpportunityFitAssessment(pursuitOpportunity.id, {
+    entryKey: `migration-market-assessment-${suffix}`
+  }, { actor: 'migration_fixture' });
+  const bidDecisionPolicy = source.requestBidDecisionPolicy({
+    entryKey: `migration-bid-decision-policy-${suffix}`,
+    reason: 'Retain governed pursuit thresholds through hosted migration.',
+    policyName: 'Migration pursuit scorecard',
+    bidThreshold: 70,
+    noBidThreshold: 45,
+    criteria: BID_DECISION_CRITERIA.map(criterion => ({
+      key: criterion.key,
+      weight: criterion.weight,
+      minimumRating: criterion.minimumRating
+    }))
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(bidDecisionPolicy.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration pursuit policy verified.'
+  });
+  const pursuitDecisionRequest = source.requestOpportunityBidDecision(pursuitOpportunity.id, {
+    entryKey: `migration-pursuit-decision-${suffix}`,
+    criteria: BID_DECISION_CRITERIA.filter(criterion => criterion.source === 'operator').map(criterion => ({
+      key: criterion.key,
+      rating: 5,
+      evidence: `${criterion.label} retained in the migration fixture.`
+    })),
+    gates: BID_DECISION_GATES.map(gate => ({ key: gate.key, status: 'yes' })),
+    proposedDecision: 'bid',
+    rationale: 'Retained evidence supports investing in this migration pursuit.'
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(pursuitDecisionRequest.approval.id, {
+    status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration pursuit evidence verified.'
+  });
+  const pursuitDecision = source.getOpportunityBidDecision(pursuitDecisionRequest.decision.id);
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -794,7 +854,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -922,7 +982,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '050_governed_market_fit');
+  assert.equal(migration.migrationVersion, '051_governed_bid_decisions');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1084,6 +1144,12 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedBidPackage.commitment.externalCommitments, 1);
     assert.equal(migratedBidPackage.commitment.issuePackage.providerMessageId, 'migration-order-success');
     assert.equal(migratedBidPackage.commitment.purchaseOrder.data.source.commitmentHash, migratedBidPackage.commitmentHash);
+    const migratedPursuit = hosted.bidDecisionForOpportunity(fixture.pursuitOpportunity.id);
+    assert.equal(migratedPursuit.currentDecision.id, fixture.pursuitDecision.id);
+    assert.equal(migratedPursuit.currentDecision.proposedDecision, 'bid');
+    assert.equal(migratedPursuit.currentDecision.integrityValid, true);
+    assert.equal(migratedPursuit.stale, false);
+    assert.equal(hosted.getOpportunity(fixture.pursuitOpportunity.id).stage, 'estimating');
     const migratedOrderUbl = hosted.getPurchaseOrderIssueDocument(fixture.bidOrderPackage.ublDocument.id, { audit: false });
     assert.equal(migratedOrderUbl.packageHash, fixture.bidOrderPackage.packageHash);
     assert.match(migratedOrderUbl.content, /urn:oasis:names:specification:ubl:schema:xsd:Order-2/);

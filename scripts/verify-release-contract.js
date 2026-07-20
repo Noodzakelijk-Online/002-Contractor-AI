@@ -7,6 +7,7 @@ const REQUIRED_PATHS = [
   'ClientPortal.css',
   'ClientPortal.jsx',
   'components/CashFlowForecastControl.jsx',
+  'components/BidDecisionControl.jsx',
   'components/MarketFitControl.jsx',
   'components/PerformanceScorecard.jsx',
   'Dockerfile',
@@ -123,6 +124,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.get('/api/ledger/market-fit'",
     "app.post('/api/ledger/market-fit/profiles'",
     "app.post('/api/ledger/opportunities/:id/market-fit-assessments'",
+    "app.get('/api/ledger/bid-decisions'",
+    "app.post('/api/ledger/bid-decisions/policies'",
+    "app.post('/api/ledger/opportunities/:id/bid-decisions'",
     "app.get('/api/ledger/bid-packages'",
     "app.post('/api/ledger/bid-packages/:id/commitment'",
     "app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package'",
@@ -152,8 +156,17 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '050_governed_market_fit'")) {
     failures.push('Canonical governed market-fit migration is missing.');
   }
+  if (!ledgerSource.includes("version: '051_governed_bid_decisions'")) {
+    failures.push('Canonical governed bid/no-bid migration is missing.');
+  }
   if (!serverSource.includes("assessmentMode: 'deterministic_source_bound_advisory'")) {
     failures.push('Market-fit capability does not declare deterministic advisory assessment semantics.');
+  }
+  if (!serverSource.includes("assessmentMode: 'deterministic_source_bound_operator_evidence'")) {
+    failures.push('Bid/no-bid capability does not declare source-bound operator evidence semantics.');
+  }
+  if (!serverSource.includes("autonomousReview: 'internal_task_only'")) {
+    failures.push('Bid/no-bid capability does not constrain autonomous review to internal tasks.');
   }
   if (!ledgerSource.includes("sourceScope: 'material_metric_inputs/v2'")) {
     failures.push('Performance scorecards do not declare material-input source hashing.');

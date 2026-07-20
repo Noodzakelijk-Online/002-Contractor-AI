@@ -9,6 +9,8 @@ const { pipeline } = require('node:stream/promises');
 const {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
+  BID_DECISION_CRITERIA,
+  BID_DECISION_GATES,
   MARKET_FIT_CRITERIA,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS
@@ -2437,6 +2439,43 @@ app.post('/api/ledger/opportunities/:id/market-fit-assessments', (req, res) => {
       actor: actorFromRequest(req, 'market_fit_assessment')
     }),
     evaluation: operatingLedger.assessOpportunityMarketFit(req.params.id)
+  }), 201);
+});
+
+app.get('/api/ledger/bid-decisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    bidDecisions: operatingLedger.bidDecisionRegister(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/bid-decisions/policies', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can request a bid/no-bid scorecard policy revision.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestBidDecisionPolicy(req.body || {}, {
+      actor: actorFromRequest(req, 'bid_decision_policy')
+    }),
+    bidDecisions: operatingLedger.bidDecisionRegister()
+  }), 201);
+});
+
+app.get('/api/ledger/opportunities/:id/bid-decision', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    bidDecision: operatingLedger.bidDecisionForOpportunity(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/bid-decisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestOpportunityBidDecision(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'bid_decision')
+    }),
+    bidDecision: operatingLedger.bidDecisionForOpportunity(req.params.id)
   }), 201);
 });
 
@@ -5005,6 +5044,7 @@ app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
     let bidPackage = null;
+    let bidDecision = null;
     if (approval.targetType === 'bid_package_selection') {
       bidPackage = operatingLedger.getBidPackage(approval.targetId);
     } else if (approval.targetType === 'purchase_order') {
@@ -5015,11 +5055,17 @@ app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
         bidPackage = operatingLedger.getBidPackageByPurchaseOrder(communication.data.sourceRecordId);
       }
     }
+    if (approval.targetType === 'opportunity_bid_decision') {
+      bidDecision = operatingLedger.bidDecisionForOpportunity(
+        operatingLedger.getOpportunityBidDecision(approval.targetId).opportunityId
+      );
+    }
     return {
       success: true,
       approval,
       job: approval.jobId ? operatingLedger.getJobDetail(approval.jobId) : null,
       bidPackage,
+      bidDecision,
       dashboard: operatingLedger.dashboardSummary()
     };
   });
@@ -5875,6 +5921,8 @@ function operationalExport() {
     opportunityActivities: operatingLedger.listOpportunityActivities({ limit: 1_000 }),
     marketFitProfiles: operatingLedger.listMarketFitProfiles({ includeHistory: true }),
     opportunityFitAssessments: operatingLedger.listOpportunityFitAssessments({ limit: 5_000 }),
+    bidDecisionPolicies: operatingLedger.listBidDecisionPolicies({ includeHistory: true }),
+    opportunityBidDecisions: operatingLedger.listOpportunityBidDecisions({ limit: 5_000 }),
     bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
     bidPackageParticipants: operatingLedger.listBidPackageParticipants({ limit: 5_000 }),
     takeoffSheets: operatingLedger.listAllTakeoffs({ limit: 5_000 }),
@@ -5963,6 +6011,8 @@ function validateOperationalExport(snapshot) {
     'performanceScorecardSnapshots',
     'marketFitProfiles',
     'opportunityFitAssessments',
+    'bidDecisionPolicies',
+    'opportunityBidDecisions',
     'attendanceSessions',
     'attendanceAdjustments',
     'weeklyTimesheets',
@@ -6034,6 +6084,8 @@ function validateOperationalExport(snapshot) {
       performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
       marketFitProfiles: Array.isArray(snapshot.marketFitProfiles) ? snapshot.marketFitProfiles.length : 0,
       opportunityFitAssessments: Array.isArray(snapshot.opportunityFitAssessments) ? snapshot.opportunityFitAssessments.length : 0,
+      bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
+      opportunityBidDecisions: Array.isArray(snapshot.opportunityBidDecisions) ? snapshot.opportunityBidDecisions.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
       dayworkTickets: Array.isArray(snapshot.dayworkTickets) ? snapshot.dayworkTickets.length : 0,
@@ -6663,6 +6715,9 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         performanceScorecardSnapshot: 'source_and_target_current_approval_gated',
         marketFitPolicyRevision: 'owner_requested_approval_gated_versioned',
         opportunityFitAssessment: 'source_bound_exact_replay',
+        bidDecisionPolicyRevision: 'owner_requested_approval_gated_versioned',
+        opportunityBidDecision: 'source_current_approval_gated_exact_replay',
+        bidDecisionOverride: 'explicit_reason_and_separate_approval',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
@@ -6838,6 +6893,23 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         automaticRejection: false,
         messagesSent: false,
         jobsCreated: false,
+        externalCommitments: 0
+      },
+      bidDecisions: {
+        framework: 'weighted_bid_no_bid_scorecard',
+        criteria: BID_DECISION_CRITERIA,
+        gates: BID_DECISION_GATES,
+        policyRevisions: 'owner_requested_approval_gated_versioned',
+        assessmentMode: 'deterministic_source_bound_operator_evidence',
+        marketFitIntegration: 'current_retained_assessment_required',
+        decisionApproval: 'source_current_required',
+        overrideControl: 'explicit_reason_and_separate_approval',
+        autonomousReview: 'internal_task_only',
+        opportunityStageMutation: false,
+        automaticLeadClosure: false,
+        messagesSent: false,
+        jobsCreated: false,
+        bidPackagesCreated: false,
         externalCommitments: 0
       },
       productionControl: {

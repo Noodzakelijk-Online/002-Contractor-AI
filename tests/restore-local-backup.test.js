@@ -200,6 +200,20 @@ test('backup verification rejects a migration 050 ledger with missing governed m
   );
 });
 
+test('backup verification rejects a migration 051 ledger with missing governed bid/no-bid constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-bid-decision-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Governed bid/no-bid schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_opportunity_bid_decision_one_pending');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /governed bid\/no-bid constraints are incomplete: idx_opportunity_bid_decision_one_pending/i
+  );
+});
+
 test('backup verification rejects a migration 032 ledger with missing production-control constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-production-control-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

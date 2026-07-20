@@ -83,6 +83,7 @@ const AuditHistory = lazy(() => import('./components/AuditHistory'))
 const CashFlowForecastControl = lazy(() => import('./components/CashFlowForecastControl'))
 const PerformanceScorecard = lazy(() => import('./components/PerformanceScorecard'))
 const MarketFitControl = lazy(() => import('./components/MarketFitControl'))
+const BidDecisionControl = lazy(() => import('./components/BidDecisionControl'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
@@ -965,9 +966,10 @@ function reconcileJobCollections(data, job) {
 
 async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false) {
   if (section === 'pipeline') {
-    const [opportunities, marketFit, bids, partners] = await Promise.all([
+    const [opportunities, marketFit, bidDecisions, bids, partners] = await Promise.all([
       api('/api/ledger/opportunities?includeClosed=true&limit=500'),
       api('/api/ledger/market-fit?limit=500'),
+      api('/api/ledger/bid-decisions?limit=500'),
       api('/api/ledger/bid-packages?includeClosed=true&limit=500'),
       api('/api/ledger/trade-partners?includeRetired=true&limit=500'),
     ])
@@ -975,6 +977,7 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       opportunities: opportunities.opportunities || [],
       opportunityForecast: opportunities.forecast || null,
       marketFit: marketFit.marketFit || null,
+      bidDecisions: bidDecisions.bidDecisions || null,
       bidPackages: bids.bidPackages || [],
       bidPackageSummary: bids.summary || {},
       tradePartners: partners.partners || [],
@@ -1407,6 +1410,7 @@ function PipelineWorkspace({
   opportunities,
   forecast,
   marketFit,
+  bidDecisions,
   bidPackages,
   bidSummary,
   selectedBidPackage,
@@ -1423,6 +1427,8 @@ function PipelineWorkspace({
   onConvert,
   onRequestMarketFitPolicy,
   onRetainMarketFitAssessment,
+  onRequestBidDecisionPolicy,
+  onRequestBidDecision,
   onOpenJob,
   onCreateBidPackage,
   onSelectBidPackage,
@@ -1494,6 +1500,17 @@ function PipelineWorkspace({
           submitting={submitting}
           onRequestPolicy={onRequestMarketFitPolicy}
           onRetainAssessment={onRetainMarketFitAssessment}
+        />
+      </LazyControlBoundary>
+
+      <LazyControlBoundary label="bid/no-bid controls">
+        <BidDecisionControl
+          bidDecisions={bidDecisions}
+          canManagePolicy={canManagePolicy}
+          canCoordinate={canCoordinate}
+          submitting={submitting}
+          onRequestPolicy={onRequestBidDecisionPolicy}
+          onRequestDecision={onRequestBidDecision}
         />
       </LazyControlBoundary>
 
@@ -1636,6 +1653,19 @@ function PipelineWorkspace({
               <span>
                 {Number.isFinite(Number(selectedOpportunity.marketFit.score)) ? `${selectedOpportunity.marketFit.score}% fit` : 'Policy setup required'}
                 {selectedOpportunity.marketFit.evidenceGaps?.length ? ` / ${selectedOpportunity.marketFit.evidenceGaps.length} evidence gap(s)` : ''}
+              </span>
+            </div>
+          ) : null}
+          {selectedOpportunity.bidDecision ? (
+            <div className={`pipeline-market-fit status-${selectedOpportunity.bidDecision.evaluation?.recommendation || 'review'}`}>
+              <ClipboardCheck size={15} />
+              <strong>{formatStatus(selectedOpportunity.bidDecision.currentDecision?.proposedDecision || selectedOpportunity.bidDecision.pendingDecision?.proposedDecision || 'review')}</strong>
+              <span>
+                {Number.isFinite(Number(selectedOpportunity.bidDecision.evaluation?.score))
+                  ? `${selectedOpportunity.bidDecision.evaluation.score}% pursuit score`
+                  : 'Scorecard evidence required'}
+                {selectedOpportunity.bidDecision.pendingDecision ? ' / approval pending' : ''}
+                {selectedOpportunity.bidDecision.stale ? ' / evidence stale' : ''}
               </span>
             </div>
           ) : null}
@@ -2811,6 +2841,8 @@ function App() {
           organization: null,
           opportunities: [],
           opportunityForecast: null,
+          marketFit: null,
+          bidDecisions: null,
           bidPackages: [],
           bidPackageSummary: {},
         })
@@ -2855,6 +2887,8 @@ function App() {
           organization: null,
           opportunities: [],
           opportunityForecast: null,
+          marketFit: null,
+          bidDecisions: null,
           bidPackages: [],
           bidPackageSummary: {},
         })
@@ -3611,9 +3645,59 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ entryKey: `fit:${opportunityId}:${String(sourceHash || '').slice(0, 32)}` }),
       })
-      const result = await api('/api/ledger/market-fit?limit=500')
-      setData((current) => (current ? { ...current, marketFit: result.marketFit || current.marketFit } : current))
+      const [result, bidDecisionResult] = await Promise.all([
+        api('/api/ledger/market-fit?limit=500'),
+        api('/api/ledger/bid-decisions?limit=500'),
+      ])
+      setData((current) => (current ? {
+        ...current,
+        marketFit: result.marketFit || current.marketFit,
+        bidDecisions: bidDecisionResult.bidDecisions || current.bidDecisions,
+      } : current))
       notify('Current opportunity fit retained in the ledger.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestBidDecisionPolicy(payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/bid-decisions/policies', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => (current ? { ...current, bidDecisions: result.bidDecisions || current.bidDecisions } : current))
+      notify('Bid/no-bid policy revision retained for approval.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestBidDecision(opportunityId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityId)}/bid-decisions`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      const register = await api('/api/ledger/bid-decisions?limit=500')
+      setData((current) => (current ? { ...current, bidDecisions: register.bidDecisions || current.bidDecisions } : current))
+      if (selectedOpportunity?.id === opportunityId) {
+        const detail = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityId)}`)
+        setSelectedOpportunity(detail.opportunity)
+      }
+      notify(result.replayed ? 'The matching pursuit decision was already retained.' : 'Pursuit decision retained for explicit approval.')
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -9587,6 +9671,7 @@ function App() {
                 opportunities={data.opportunities || EMPTY_LIST}
                 forecast={data.opportunityForecast}
                 marketFit={data.marketFit}
+                bidDecisions={data.bidDecisions}
                 bidPackages={data.bidPackages || EMPTY_LIST}
                 bidSummary={data.bidPackageSummary || {}}
                 selectedBidPackage={selectedBidPackage}
@@ -9603,6 +9688,8 @@ function App() {
                 onConvert={convertOpportunity}
                 onRequestMarketFitPolicy={requestMarketFitPolicy}
                 onRetainMarketFitAssessment={retainMarketFitAssessment}
+                onRequestBidDecisionPolicy={requestBidDecisionPolicy}
+                onRequestBidDecision={requestBidDecision}
                 onOpenJob={openOpportunityJob}
                 onCreateBidPackage={openBidPackageEditor}
                 onSelectBidPackage={selectBidPackage}
