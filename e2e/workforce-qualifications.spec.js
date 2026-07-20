@@ -6,6 +6,10 @@ async function postJson(request, route, data) {
   return response.json();
 }
 
+async function waitForResources(page) {
+  await expect(page.getByText('Loading resources', { exact: true })).toBeHidden({ timeout: 15_000 });
+}
+
 test('operator enforces a job qualification, submits worker evidence, and verifies responsive readiness', async ({ page, request }) => {
   const suffix = Date.now();
   const worker = (await postJson(request, '/api/ledger/workers', {
@@ -29,6 +33,7 @@ test('operator enforces a job qualification, submits worker evidence, and verifi
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Resources', exact: true }).click();
+  await waitForResources(page);
   await page.getByRole('tab', { name: 'Qualifications', exact: true }).click();
   const workspace = page.getByTestId('qualification-workspace');
   await expect(workspace).toBeVisible();
@@ -71,6 +76,7 @@ test('operator enforces a job qualification, submits worker evidence, and verifi
 
   await page.getByRole('tab', { name: 'Inventory', exact: true }).click();
   await page.getByRole('tab', { name: 'Workforce', exact: true }).click();
+  await waitForResources(page);
   await page.getByRole('tab', { name: 'Qualifications', exact: true }).click();
   await expect(workerRow.getByText('current', { exact: true })).toBeVisible();
   await expect(workerRow.getByText('VCA Basic')).toBeVisible();

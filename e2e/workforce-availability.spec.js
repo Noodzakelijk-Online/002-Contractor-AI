@@ -12,6 +12,10 @@ function localDateTime(value) {
   return local.toISOString().slice(0, 16);
 }
 
+async function waitForResources(page) {
+  await expect(page.getByText('Loading resources', { exact: true })).toBeHidden({ timeout: 15_000 });
+}
+
 test('operator retains worker unavailability, sees assignment conflict, and requests governed cancellation', async ({ page, request }) => {
   const suffix = Date.now();
   const worker = (await postJson(request, '/api/ledger/workers', {
@@ -25,6 +29,7 @@ test('operator retains worker unavailability, sees assignment conflict, and requ
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Resources', exact: true }).click();
+  await waitForResources(page);
   await page.getByRole('tab', { name: 'Availability', exact: true }).click();
   const workspace = page.getByTestId('availability-workspace');
   await expect(workspace).toBeVisible();
@@ -64,6 +69,7 @@ test('operator retains worker unavailability, sees assignment conflict, and requ
 
   await page.getByRole('tab', { name: 'Inventory', exact: true }).click();
   await page.getByRole('tab', { name: 'Workforce', exact: true }).click();
+  await waitForResources(page);
   await page.getByRole('tab', { name: 'Availability', exact: true }).click();
   await expect(availabilityRow.getByText('1 conflict', { exact: true })).toBeVisible();
   await availabilityRow.getByRole('button', { name: 'Request cancellation' }).click();
@@ -88,6 +94,7 @@ test('operator retains worker unavailability, sees assignment conflict, and requ
 
   await page.getByRole('tab', { name: 'Inventory', exact: true }).click();
   await page.getByRole('tab', { name: 'Workforce', exact: true }).click();
+  await waitForResources(page);
   await page.getByRole('tab', { name: 'Availability', exact: true }).click();
   await expect(availabilityRow).toHaveCount(0);
 

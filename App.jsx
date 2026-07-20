@@ -84,6 +84,7 @@ const CashFlowForecastControl = lazy(() => import('./components/CashFlowForecast
 const PerformanceScorecard = lazy(() => import('./components/PerformanceScorecard'))
 const MarketFitControl = lazy(() => import('./components/MarketFitControl'))
 const BidDecisionControl = lazy(() => import('./components/BidDecisionControl'))
+const SiteSurveyControl = lazy(() => import('./components/SiteSurveyControl'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
@@ -1429,6 +1430,10 @@ function PipelineWorkspace({
   onRetainMarketFitAssessment,
   onRequestBidDecisionPolicy,
   onRequestBidDecision,
+  onPlanSiteSurvey,
+  onUploadSiteSurveyEvidence,
+  onSubmitSiteSurvey,
+  onReviewSiteSurveyApproval,
   onOpenJob,
   onCreateBidPackage,
   onSelectBidPackage,
@@ -1651,7 +1656,9 @@ function PipelineWorkspace({
               <Target size={15} />
               <strong>{formatStatus(selectedOpportunity.marketFit.recommendation || 'review')}</strong>
               <span>
-                {Number.isFinite(Number(selectedOpportunity.marketFit.score)) ? `${selectedOpportunity.marketFit.score}% fit` : 'Policy setup required'}
+                {selectedOpportunity.marketFit.score !== null && selectedOpportunity.marketFit.score !== undefined && Number.isFinite(Number(selectedOpportunity.marketFit.score))
+                  ? `${selectedOpportunity.marketFit.score}% fit`
+                  : 'Policy setup required'}
                 {selectedOpportunity.marketFit.evidenceGaps?.length ? ` / ${selectedOpportunity.marketFit.evidenceGaps.length} evidence gap(s)` : ''}
               </span>
             </div>
@@ -1661,7 +1668,7 @@ function PipelineWorkspace({
               <ClipboardCheck size={15} />
               <strong>{formatStatus(selectedOpportunity.bidDecision.currentDecision?.proposedDecision || selectedOpportunity.bidDecision.pendingDecision?.proposedDecision || 'review')}</strong>
               <span>
-                {Number.isFinite(Number(selectedOpportunity.bidDecision.evaluation?.score))
+                {selectedOpportunity.bidDecision.evaluation?.score !== null && selectedOpportunity.bidDecision.evaluation?.score !== undefined && Number.isFinite(Number(selectedOpportunity.bidDecision.evaluation.score))
                   ? `${selectedOpportunity.bidDecision.evaluation.score}% pursuit score`
                   : 'Scorecard evidence required'}
                 {selectedOpportunity.bidDecision.pendingDecision ? ' / approval pending' : ''}
@@ -1669,6 +1676,18 @@ function PipelineWorkspace({
               </span>
             </div>
           ) : null}
+          <LazyControlBoundary label="site survey controls">
+            <SiteSurveyControl
+              opportunity={selectedOpportunity}
+              canCoordinate={canCoordinate}
+              canApprove={canApprove}
+              submitting={submitting}
+              onPlan={onPlanSiteSurvey}
+              onUploadEvidence={onUploadSiteSurveyEvidence}
+              onSubmit={onSubmitSiteSurvey}
+              onReviewApproval={onReviewSiteSurveyApproval}
+            />
+          </LazyControlBoundary>
           {selectedOpportunity.description ? <p className="pipeline-description">{selectedOpportunity.description}</p> : null}
           <div className="pipeline-activity-heading">
             <div>
@@ -2781,6 +2800,11 @@ function App() {
   const sectionRef = useRef('today')
   const resourceViewRef = useRef('workforce')
   const sectionLoadSequenceRef = useRef(0)
+  const resourceViewLoadTimerRef = useRef(null)
+
+  useEffect(() => () => {
+    if (resourceViewLoadTimerRef.current) clearTimeout(resourceViewLoadTimerRef.current)
+  }, [])
 
   const refresh = useCallback(async () => {
     if (!hasLoadedDataRef.current) setLoading(true)
@@ -3125,6 +3149,11 @@ function App() {
 
   const selectSection = (next) => {
     if (initialDataLoading && !['today', 'jobs'].includes(next)) return
+    if (resourceViewLoadTimerRef.current) {
+      clearTimeout(resourceViewLoadTimerRef.current)
+      resourceViewLoadTimerRef.current = null
+      setSectionLoading(false)
+    }
     setApprovalFocus(null)
     sectionRef.current = next
     setSection(next)
@@ -3134,19 +3163,27 @@ function App() {
   const selectResourceView = (next) => {
     resourceViewRef.current = next
     setResourceView(next)
-    if (sectionRef.current === 'resources') void refreshSection('resources', next)
+    if (sectionRef.current !== 'resources') return
+    if (resourceViewLoadTimerRef.current) clearTimeout(resourceViewLoadTimerRef.current)
+    setSectionLoading(true)
+    resourceViewLoadTimerRef.current = setTimeout(() => {
+      resourceViewLoadTimerRef.current = null
+      void refreshSection('resources', next)
+    }, 120)
   }
 
   async function loadTimesheetPeriod(periodStart) {
+    const sequence = ++sectionLoadSequenceRef.current
     setSectionLoading(true)
     setError('')
     try {
       const result = await api(`/api/ledger/timesheets?periodStart=${encodeURIComponent(periodStart)}`)
+      if (sequence !== sectionLoadSequenceRef.current) return
       setData((current) => current ? { ...current, timesheets: result.timesheets || { rows: [], exports: [], summary: {} } } : current)
     } catch (requestError) {
-      setError(requestError.message)
+      if (sequence === sectionLoadSequenceRef.current) setError(requestError.message)
     } finally {
-      setSectionLoading(false)
+      if (sequence === sectionLoadSequenceRef.current) setSectionLoading(false)
     }
   }
 
@@ -3437,6 +3474,16 @@ function App() {
       } else {
         await refresh()
       }
+      if (item.targetType === 'opportunity_site_survey' && item.data?.opportunityId) {
+        const detail = await api(`/api/ledger/opportunities/${encodeURIComponent(item.data.opportunityId)}`)
+        setSelectedOpportunity((current) => current?.id === item.data.opportunityId ? detail.opportunity : current)
+        setData((current) => current ? {
+          ...current,
+          opportunities: (current.opportunities || EMPTY_LIST).map((opportunity) =>
+            opportunity.id === detail.opportunity.id ? detail.opportunity : opportunity,
+          ),
+        } : current)
+      }
       setSubmitting(false)
       notify(`Approval ${status}. The ledger and audit trail were updated.`)
     } catch (requestError) {
@@ -3529,6 +3576,106 @@ function App() {
     } catch (requestError) {
       setError(requestError.message)
     }
+  }
+
+  async function refreshOpportunityDetail(opportunityId) {
+    const detail = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityId)}`)
+    setSelectedOpportunity((current) => current?.id === opportunityId ? detail.opportunity : current)
+    setData((current) => current ? {
+      ...current,
+      opportunities: (current.opportunities || EMPTY_LIST).map((opportunity) =>
+        opportunity.id === opportunityId ? detail.opportunity : opportunity,
+      ),
+    } : current)
+    return detail.opportunity
+  }
+
+  async function planOpportunitySiteSurvey(payload) {
+    if (!selectedOpportunity?.id) return null
+    const opportunityId = selectedOpportunity.id
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityId)}/site-surveys`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      await refreshOpportunityDetail(opportunityId)
+      notify(result.replayed ? 'The matching internal site-survey plan already exists.' : 'Internal site-survey plan retained. No appointment confirmation was sent.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function uploadOpportunitySiteSurveyEvidence(file) {
+    if (!selectedOpportunity?.id || !file) return null
+    const opportunityId = selectedOpportunity.id
+    const payload = new FormData()
+    payload.append('evidenceFile', file)
+    payload.append('opportunityId', opportunityId)
+    payload.append('title', file.name || 'Site-survey evidence')
+    payload.append('category', 'site_survey_evidence')
+    setSubmitting(true)
+    setError('')
+    try {
+      const response = await fetch('/api/ledger/upload', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Idempotency-Key': `site-survey-upload:${opportunityId}:${globalThis.crypto.randomUUID()}` },
+        body: payload,
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        const requestError = new Error(result.error?.message || 'Site-survey evidence could not be retained.')
+        requestError.code = result.error?.code || 'site_survey_upload_failed'
+        throw requestError
+      }
+      await refreshOpportunityDetail(opportunityId)
+      notify('Private site-survey evidence retained with checksum verification.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function submitOpportunitySiteSurvey(surveyId, payload) {
+    if (!selectedOpportunity?.id || !surveyId) return null
+    const opportunityId = selectedOpportunity.id
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityId)}/site-surveys/${encodeURIComponent(surveyId)}/submissions`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current && result.approval ? {
+        ...current,
+        approvals: upsertById(current.approvals, result.approval),
+      } : current)
+      await refreshOpportunityDetail(opportunityId)
+      notify(result.replayed ? 'The matching site-survey submission already exists.' : 'Site survey retained for source-current office approval.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function reviewOpportunitySiteSurveyApproval(approvalId) {
+    if (!approvalId || !selectedOpportunity) return
+    openApprovals({
+      approvalId,
+      jobTitle: `${selectedOpportunity.title} site survey`,
+    })
   }
 
   function openOpportunityActivity(opportunity) {
@@ -9690,6 +9837,10 @@ function App() {
                 onRetainMarketFitAssessment={retainMarketFitAssessment}
                 onRequestBidDecisionPolicy={requestBidDecisionPolicy}
                 onRequestBidDecision={requestBidDecision}
+                onPlanSiteSurvey={planOpportunitySiteSurvey}
+                onUploadSiteSurveyEvidence={uploadOpportunitySiteSurveyEvidence}
+                onSubmitSiteSurvey={submitOpportunitySiteSurvey}
+                onReviewSiteSurveyApproval={reviewOpportunitySiteSurveyApproval}
                 onOpenJob={openOpportunityJob}
                 onCreateBidPackage={openBidPackageEditor}
                 onSelectBidPackage={selectBidPackage}

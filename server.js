@@ -2292,6 +2292,50 @@ app.get('/api/ledger/documents/:id/content', async (req, res) => {
   }
 });
 
+app.get('/api/ledger/opportunity-evidence/:id/content', async (req, res) => {
+  try {
+    if (req.operator?.role === 'field_worker') {
+      return sendError(req, res, 403, 'opportunity_evidence_forbidden', 'Field workers cannot access private preconstruction opportunity evidence.');
+    }
+    const retained = operatingLedger.getOpportunityEvidence(req.params.id);
+    if (!retained.storageRef || !retained.contentHash) {
+      return sendError(req, res, 409, 'opportunity_evidence_content_missing', 'This evidence record has no retained private file and checksum.');
+    }
+    if (!evidenceStorage) throw evidenceStorageInitError || new EvidenceStorageError('storage_unavailable', 'Evidence storage is unavailable.');
+    const evidence = await evidenceStorage.read(retained.storageRef);
+    const actualChecksum = crypto.createHash('sha256').update(evidence).digest('hex');
+    if (actualChecksum !== retained.contentHash) {
+      const error = new Error('The retained opportunity evidence bytes no longer match the upload checksum.');
+      error.statusCode = 409;
+      error.code = 'opportunity_evidence_integrity_failed';
+      throw error;
+    }
+    operatingLedger.audit({
+      entityType: 'opportunity_evidence',
+      entityId: retained.id,
+      action: 'download_opportunity_evidence',
+      actor: actorFromRequest(req, 'authenticated_operator'),
+      after: { opportunityId: retained.opportunityId, storageRef: retained.storageRef, filename: retained.filename },
+      metadata: { contentHash: retained.contentHash, private: true, externalCommitments: 0 }
+    });
+    res.setHeader('Content-Type', retained.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(evidence.length));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(retained.filename || 'opportunity-evidence')}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.end(evidence);
+  } catch (error) {
+    return sendError(
+      req,
+      res,
+      error.statusCode || 500,
+      error.code || 'opportunity_evidence_download_failed',
+      error.statusCode ? error.message : 'Unable to retrieve the retained opportunity evidence file.',
+      serializeError(error)
+    );
+  }
+});
+
 app.get('/api/ledger/documents/:id/issue-package', (req, res) => {
   try {
     const issuePackage = operatingLedger.getIssuePackage(req.params.id, {
@@ -2476,6 +2520,41 @@ app.post('/api/ledger/opportunities/:id/bid-decisions', (req, res) => {
       actor: actorFromRequest(req, 'bid_decision')
     }),
     bidDecision: operatingLedger.bidDecisionForOpportunity(req.params.id)
+  }), 201);
+});
+
+app.get('/api/ledger/site-surveys', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    siteSurveys: operatingLedger.siteSurveyRegister(req.query || {})
+  }));
+});
+
+app.get('/api/ledger/opportunities/:id/site-surveys', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    siteSurvey: operatingLedger.siteSurveyForOpportunity(req.params.id),
+    evidence: operatingLedger.listOpportunityEvidence({ opportunityId: req.params.id, limit: 500 })
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/site-surveys', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestOpportunitySiteSurvey(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'site_survey_plan')
+    }),
+    siteSurvey: operatingLedger.siteSurveyForOpportunity(req.params.id)
+  }), 201);
+});
+
+app.post('/api/ledger/opportunities/:id/site-surveys/:surveyId/submissions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.submitOpportunitySiteSurvey(req.params.id, req.params.surveyId, req.body || {}, {
+      actor: actorFromRequest(req, 'site_survey_completion')
+    }),
+    siteSurvey: operatingLedger.siteSurveyForOpportunity(req.params.id)
   }), 201);
 });
 
@@ -5756,8 +5835,23 @@ app.post('/api/ledger/upload', async (req, res) => {
     uploadPayload = await readUploadPayload(req, {
       authorizePayload(payload) {
         const requestedJobId = payload.jobId || payload.job_id || payload.ledgerJobId || payload.ledger_job_id;
-        if (!requestedJobId) {
-          throw new UploadRequestError(400, 'ledger_job_required', 'Evidence uploads must identify an operating-ledger job.');
+        const requestedOpportunityId = payload.opportunityId || payload.opportunity_id;
+        if (!requestedJobId && !requestedOpportunityId) {
+          throw new UploadRequestError(400, 'ledger_job_required', 'Evidence uploads must identify an operating-ledger job or opportunity.');
+        }
+        if (requestedJobId && requestedOpportunityId) {
+          throw new UploadRequestError(400, 'ledger_evidence_owner_invalid', 'Evidence uploads must identify exactly one operating-ledger job or opportunity.');
+        }
+        if (requestedOpportunityId) {
+          if (req.operator?.role === 'field_worker') {
+            throw new UploadRequestError(403, 'opportunity_evidence_forbidden', 'Field workers cannot upload private preconstruction opportunity evidence.');
+          }
+          try {
+            operatingLedger.getOpportunity(requestedOpportunityId);
+          } catch {
+            throw new UploadRequestError(404, 'opportunity_not_found', 'The requested operating-ledger opportunity was not found.');
+          }
+          return;
         }
         if (req.operator?.role === 'field_worker' && !fieldWorkerCanAccessJob(req, requestedJobId)) {
           throw new UploadRequestError(403, 'field_job_scope_forbidden', 'This field worker is not assigned to the evidence job.');
@@ -5797,6 +5891,47 @@ app.post('/api/ledger/upload', async (req, res) => {
     };
     const actor = actorFromRequest(req, 'upload_api');
     const responseBody = operatingLedger.transaction(() => {
+      const opportunityId = payload.opportunityId || payload.opportunity_id || null;
+      if (opportunityId) {
+        const opportunityEvidence = operatingLedger.addOpportunityEvidence(opportunityId, {
+          type: analysis.category === 'field_photo' || String(payload.fileType || '').startsWith('image/') ? 'photo' : 'document',
+          title: payload.title || storedFile?.originalName || payload.filename || payload.name || 'Uploaded site-survey evidence',
+          filename: storedFile?.originalName || payload.filename || payload.name || null,
+          mimeType: storedFile?.mimeType || payload.fileType || payload.mimeType || payload.mime_type || null,
+          sizeBytes: storedFile?.size || payload.size || payload.sizeBytes || payload.size_bytes || 0,
+          storageRef: storedFile?.storageRef || payload.storageRef || null,
+          contentHash: storedFile?.sha256 || payload.contentHash || payload.content_hash || null,
+          status: 'stored',
+          tags: [analysis.category, payload.category, payload.riskLevel].filter(Boolean),
+          analysis,
+          data: { analysis, private: true, intendedUse: 'preconstruction_site_survey' }
+        }, { actor });
+        const body = {
+          success: true,
+          filename: payload.filename || payload.name || 'metadata-only',
+          uploadedFile: storedFile,
+          analysis,
+          opportunityEvidence,
+          actions: [],
+          migration: {
+            opportunity: `/api/ledger/opportunities/${opportunityId}`,
+            siteSurvey: `/api/ledger/opportunities/${opportunityId}/site-surveys`
+          }
+        };
+        if (idempotency?.claimed) {
+          const completed = operatingLedger.completeIdempotentRequest(
+            idempotency.keyHash,
+            idempotency.requestHash,
+            200,
+            body,
+            idempotency.leaseId
+          );
+          if (!completed) {
+            throw new UploadRequestError(503, 'idempotency_completion_failed', 'The evidence retry receipt could not be completed safely.');
+          }
+        }
+        return body;
+      }
       const ledgerDetail = resolveUploadLedgerJobDetail(payload, actor);
       const ledgerDocument = operatingLedger.addDocument(ledgerDetail.id, {
         type: analysis.category === 'field_photo' || String(payload.fileType || '').startsWith('image/') ? 'photo' : 'document',
@@ -5923,6 +6058,8 @@ function operationalExport() {
     opportunityFitAssessments: operatingLedger.listOpportunityFitAssessments({ limit: 5_000 }),
     bidDecisionPolicies: operatingLedger.listBidDecisionPolicies({ includeHistory: true }),
     opportunityBidDecisions: operatingLedger.listOpportunityBidDecisions({ limit: 5_000 }),
+    opportunityEvidence: operatingLedger.listOpportunityEvidence({ limit: 5_000 }),
+    opportunitySiteSurveys: operatingLedger.listOpportunitySiteSurveys({ limit: 5_000 }),
     bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
     bidPackageParticipants: operatingLedger.listBidPackageParticipants({ limit: 5_000 }),
     takeoffSheets: operatingLedger.listAllTakeoffs({ limit: 5_000 }),
@@ -6013,6 +6150,8 @@ function validateOperationalExport(snapshot) {
     'opportunityFitAssessments',
     'bidDecisionPolicies',
     'opportunityBidDecisions',
+    'opportunityEvidence',
+    'opportunitySiteSurveys',
     'attendanceSessions',
     'attendanceAdjustments',
     'weeklyTimesheets',
@@ -6086,6 +6225,8 @@ function validateOperationalExport(snapshot) {
       opportunityFitAssessments: Array.isArray(snapshot.opportunityFitAssessments) ? snapshot.opportunityFitAssessments.length : 0,
       bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
       opportunityBidDecisions: Array.isArray(snapshot.opportunityBidDecisions) ? snapshot.opportunityBidDecisions.length : 0,
+      opportunityEvidence: Array.isArray(snapshot.opportunityEvidence) ? snapshot.opportunityEvidence.length : 0,
+      opportunitySiteSurveys: Array.isArray(snapshot.opportunitySiteSurveys) ? snapshot.opportunitySiteSurveys.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
       dayworkTickets: Array.isArray(snapshot.dayworkTickets) ? snapshot.dayworkTickets.length : 0,
@@ -6676,6 +6817,16 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
           mechanism: runtime.databaseMode === 'postgres' ? 'postgres_advisory_lock' : 'sqlite_write_transaction'
         }
       },
+      preconstructionSiteSurvey: {
+        available: true,
+        template: 'versioned_standard_checklist',
+        evidence: 'private_sha256_verified',
+        measurementsRequired: true,
+        approval: 'source_current',
+        estimatingReadiness: 'derived_after_approval',
+        convertedJobProvenance: true,
+        externalCommitments: 0
+      },
       commercialIssue: {
         available: organization.readiness.ready,
         organizationStatus: organization.readiness.status,
@@ -6718,6 +6869,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         bidDecisionPolicyRevision: 'owner_requested_approval_gated_versioned',
         opportunityBidDecision: 'source_current_approval_gated_exact_replay',
         bidDecisionOverride: 'explicit_reason_and_separate_approval',
+        siteSurveyPlanEntryKey: 'durable',
+        siteSurveySubmissionEntryKey: 'durable',
+        siteSurveyEvidenceIntegrity: 'private_sha256_readback_verified',
+        siteSurveyApproval: 'source_current_approval_gated',
+        siteSurveyEstimatingReadiness: 'derived_from_approved_snapshot',
+        siteSurveyAutonomy: 'internal_review_task_only',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',

@@ -1,0 +1,104 @@
+.site-survey-control { display: grid; min-width: 0; border-bottom: 1px solid #dfe8e4; }
+.site-survey-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 14px 18px; background: #f7faf8; border-top: 1px solid #dfe8e4; border-bottom: 1px solid #dfe8e4; }
+.site-survey-title { display: flex; align-items: center; gap: 10px; min-width: 0; color: #2b6959; }
+.site-survey-title > div { min-width: 0; }
+.site-survey-title h3, .site-survey-band-heading h4, .site-survey-completion h4, .site-survey-section-heading h4 { margin: 0; color: #293f36; font-size: 12px; }
+.site-survey-title p, .site-survey-band-heading p, .site-survey-completion-heading p { margin: 3px 0 0; color: #72807b; font-size: 9px; }
+.site-survey-state { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 26px; padding: 0 8px; color: #566862; background: #e8eeeb; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.site-survey-state-ready { color: #146442; background: #def1e6; }
+.site-survey-state-pending_approval, .site-survey-state-planned, .site-survey-state-in_progress { color: #8a5e12; background: #fff0ce; }
+.site-survey-state-stale, .site-survey-state-rejected, .site-survey-state-required { color: #943b3b; background: #f8dddd; }
+.site-survey-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid #e4ebe8; }
+.site-survey-summary > div { display: grid; gap: 4px; min-width: 0; padding: 11px 18px; border-right: 1px solid #e4ebe8; }
+.site-survey-summary > div:last-child { border-right: 0; }
+.site-survey-summary span, .site-survey-control label > span { color: #76847f; font-size: 8px; font-weight: 750; text-transform: uppercase; }
+.site-survey-summary strong { min-width: 0; overflow-wrap: anywhere; color: #31483f; font-size: 10px; }
+.site-survey-alert { display: flex; align-items: flex-start; gap: 9px; padding: 10px 18px; border-bottom: 1px solid; }
+.site-survey-alert > svg { flex: 0 0 auto; margin-top: 1px; }
+.site-survey-alert > div { display: grid; gap: 3px; }
+.site-survey-alert strong, .site-survey-alert span { font-size: 10px; }
+.site-survey-alert-error { color: #8d3932; background: #fbefed; border-color: #efd7d3; }
+.site-survey-alert-warning { color: #805b17; background: #fff7e7; border-color: #efdfb8; }
+.site-survey-band { display: grid; grid-template-columns: minmax(180px, .7fr) repeat(2, minmax(160px, .8fr)) minmax(210px, 1fr) auto; align-items: end; gap: 12px; min-width: 0; padding: 12px 18px; border-bottom: 1px solid #e3eae7; }
+.site-survey-band-heading { display: flex; align-items: center; gap: 9px; min-width: 0; align-self: center; color: #2b6959; }
+.site-survey-band-heading > div { min-width: 0; }
+.site-survey-control label { display: grid; gap: 5px; min-width: 0; }
+.site-survey-control input, .site-survey-control select, .site-survey-control textarea { width: 100%; min-width: 0; color: #2f443c; background: #fff; border: 1px solid #cfdad6; border-radius: 5px; font: inherit; font-size: 10px; }
+.site-survey-control input, .site-survey-control select { min-height: 34px; padding: 0 9px; }
+.site-survey-control textarea { padding: 8px 9px; line-height: 1.45; resize: vertical; }
+.site-survey-control input:focus, .site-survey-control select:focus, .site-survey-control textarea:focus { outline: 2px solid #94c5b5; outline-offset: 1px; border-color: #2f7967; }
+.site-survey-plan { grid-template-columns: minmax(170px, .7fr) minmax(170px, .75fr) minmax(160px, .7fr) minmax(220px, 1fr) auto; background: #fff; }
+.site-survey-evidence-upload { grid-template-columns: minmax(180px, .8fr) minmax(260px, 1.8fr) auto; background: #f9fbfa; }
+.site-survey-file input { padding: 6px 8px; }
+.site-survey-evidence-list { display: grid; border-bottom: 1px solid #e3eae7; }
+.site-survey-evidence-list > label { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 9px 18px; border-bottom: 1px solid #edf1ef; cursor: pointer; }
+.site-survey-evidence-list > label:last-child { border-bottom: 0; }
+.site-survey-evidence-list input { width: 15px; min-height: 15px; padding: 0; accent-color: #246c5b; }
+.site-survey-evidence-list label > span { display: grid; gap: 2px; min-width: 0; text-transform: none; }
+.site-survey-evidence-list strong { overflow: hidden; color: #31463e; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.site-survey-evidence-list small { color: #74817c; font-size: 9px; }
+.site-survey-evidence-list a { display: grid; width: 30px; height: 30px; place-items: center; color: #276b5a; border: 1px solid #cfddd7; border-radius: 5px; }
+.site-survey-completion { display: grid; min-width: 0; }
+.site-survey-completion-heading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .35fr); align-items: center; gap: 18px; padding: 13px 18px 10px; }
+.site-survey-progress { display: block; height: 6px; overflow: hidden; background: #e3ebe7; border-radius: 3px; }
+.site-survey-progress i { display: block; height: 100%; background: #2b7763; transition: width 180ms ease; }
+.site-survey-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; padding: 0 18px 14px; }
+.site-survey-wide { grid-column: 1 / -1; }
+.site-survey-checklist { display: grid; border-top: 1px solid #e4ebe8; }
+.site-survey-checklist-row { display: grid; grid-template-columns: 30px minmax(260px, 1.5fr) minmax(120px, .45fr) minmax(180px, .7fr); align-items: center; gap: 10px; min-width: 0; padding: 9px 18px; border-bottom: 1px solid #edf1ef; }
+.site-survey-checklist-number { color: #2b6e5c; font-size: 9px; font-weight: 800; }
+.site-survey-checklist-copy { display: grid; gap: 3px; min-width: 0; }
+.site-survey-checklist-copy strong { color: #354b42; font-size: 10px; line-height: 1.4; }
+.site-survey-checklist-copy small { color: #7a8782; font-size: 8px; font-weight: 700; text-transform: uppercase; }
+.site-survey-measurements { display: grid; border-bottom: 1px solid #e3eae7; }
+.site-survey-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px 8px; }
+.site-survey-section-heading > div { display: flex; align-items: center; gap: 8px; color: #2b6959; }
+.site-survey-measurement-row { display: grid; grid-template-columns: minmax(180px, 1.3fr) minmax(80px, .45fr) minmax(70px, .4fr) minmax(130px, .8fr) minmax(150px, 1fr) 34px; align-items: end; gap: 9px; padding: 9px 18px; border-top: 1px solid #edf1ef; }
+.site-survey-measurement-row .icon-button { width: 34px; min-width: 34px; height: 34px; }
+.site-survey-notes-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; padding: 14px 18px; border-bottom: 1px solid #e3eae7; }
+.site-survey-submit-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 18px; background: #f7faf8; }
+.site-survey-submit-row > span { display: inline-flex; align-items: center; gap: 7px; color: #5b6d66; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.site-survey-pending { grid-template-columns: minmax(180px, .8fr) minmax(260px, 1.4fr) auto; background: #fff9ed; }
+.site-survey-pending-copy { display: grid; gap: 4px; min-width: 0; }
+.site-survey-pending-copy strong { color: #6e501b; font-size: 10px; }
+.site-survey-pending-copy span { color: #866d3f; font-size: 9px; }
+.site-survey-ready { display: flex; align-items: center; gap: 10px; padding: 12px 18px; color: #176044; background: #eaf6ee; }
+.site-survey-ready > div { display: grid; gap: 3px; }
+.site-survey-ready strong { font-size: 11px; }
+.site-survey-ready span { font-size: 9px; }
+
+@media (max-width: 1050px) {
+  .site-survey-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .site-survey-plan .site-survey-band-heading, .site-survey-plan .site-survey-wide { grid-column: 1 / -1; }
+  .site-survey-plan .primary-button { justify-self: end; }
+  .site-survey-evidence-upload { grid-template-columns: minmax(0, 1fr) auto; }
+  .site-survey-evidence-upload .site-survey-band-heading { grid-column: 1 / -1; }
+  .site-survey-checklist-row { grid-template-columns: 30px minmax(220px, 1fr) minmax(120px, .5fr); }
+  .site-survey-checklist-row > input { grid-column: 2 / -1; }
+  .site-survey-measurement-row { grid-template-columns: repeat(3, minmax(0, 1fr)) 34px; }
+  .site-survey-measurement-row label:nth-child(4), .site-survey-measurement-row label:nth-child(5) { grid-column: span 2; }
+  .site-survey-notes-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 680px) {
+  .site-survey-heading { align-items: flex-start; padding: 12px 14px; }
+  .site-survey-title { align-items: flex-start; }
+  .site-survey-state { white-space: nowrap; }
+  .site-survey-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .site-survey-summary > div:nth-child(2) { border-right: 0; }
+  .site-survey-summary > div:nth-child(-n + 2) { border-bottom: 1px solid #e4ebe8; }
+  .site-survey-band, .site-survey-plan, .site-survey-evidence-upload, .site-survey-pending { grid-template-columns: minmax(0, 1fr); padding: 12px 14px; }
+  .site-survey-plan .site-survey-band-heading, .site-survey-plan .site-survey-wide { grid-column: auto; }
+  .site-survey-band .primary-button, .site-survey-band .secondary-button { width: 100%; }
+  .site-survey-completion-heading { grid-template-columns: minmax(0, 1fr); padding: 12px 14px 10px; }
+  .site-survey-form-grid, .site-survey-notes-grid { grid-template-columns: minmax(0, 1fr); padding-left: 14px; padding-right: 14px; }
+  .site-survey-checklist-row { grid-template-columns: 24px minmax(0, 1fr); padding: 10px 14px; }
+  .site-survey-checklist-row select, .site-survey-checklist-row > input { grid-column: 2; }
+  .site-survey-measurement-row { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px 14px; }
+  .site-survey-measurement-row label:nth-child(4), .site-survey-measurement-row label:nth-child(5) { grid-column: auto; }
+  .site-survey-measurement-row label:first-child, .site-survey-measurement-row label:nth-child(5) { grid-column: 1 / -1; }
+  .site-survey-measurement-row .icon-button { grid-column: 2; justify-self: end; }
+  .site-survey-submit-row { align-items: stretch; flex-direction: column; padding: 12px 14px; }
+  .site-survey-submit-row .primary-button { width: 100%; }
+  .site-survey-evidence-list > label { padding: 9px 14px; }
+}

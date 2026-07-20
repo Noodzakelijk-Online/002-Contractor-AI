@@ -134,6 +134,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/ledger/jobs/:id/takeoffs'",
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert'",
     "app.post('/api/ledger/upload'",
+    "app.post('/api/ledger/opportunities/:id/site-surveys'",
+    "app.post('/api/ledger/opportunities/:id/site-surveys/:surveyId/submissions'",
     "app.post('/api/ledger/jobs/:id/daily-logs'",
     "app.post('/api/ledger/jobs/:id/controlled-document-revisions'",
     "app.post('/api/ledger/jobs/:id/supplier-invoices'",
@@ -158,6 +160,15 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!ledgerSource.includes("version: '051_governed_bid_decisions'")) {
     failures.push('Canonical governed bid/no-bid migration is missing.');
+  }
+  if (!ledgerSource.includes("version: '052_governed_site_surveys'")) {
+    failures.push('Canonical governed site-survey migration is missing.');
+  }
+  if (!serverSource.includes("siteSurveyApproval: 'source_current_approval_gated'")) {
+    failures.push('Site-survey capability does not declare source-current approval semantics.');
+  }
+  if (!serverSource.includes("siteSurveyAutonomy: 'internal_review_task_only'")) {
+    failures.push('Site-survey capability does not constrain autonomy to internal review work.');
   }
   if (!serverSource.includes("assessmentMode: 'deterministic_source_bound_advisory'")) {
     failures.push('Market-fit capability does not declare deterministic advisory assessment semantics.');

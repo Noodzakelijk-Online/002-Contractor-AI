@@ -65,7 +65,7 @@ function decisionDraft(item) {
 function recommendationTag(value, score) {
   return (
     <span className={`bid-decision-recommendation recommendation-${value || 'review'}`}>
-      {statusLabel(value)} {Number.isFinite(Number(score)) ? `${Number(score).toFixed(1)}%` : ''}
+      {statusLabel(value)} {score !== null && score !== undefined && Number.isFinite(Number(score)) ? `${Number(score).toFixed(1)}%` : ''}
     </span>
   )
 }

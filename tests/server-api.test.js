@@ -182,6 +182,18 @@ test('ledger evidence uploads retain documents and create approval-safe follow-u
   });
   assert.equal(missingJob.response.status, 400);
   assert.equal(missingJob.body.error.code, 'ledger_job_required');
+
+  const conflictingOwner = await request(baseUrl, '/api/ledger/upload', {
+    method: 'POST',
+    body: JSON.stringify({
+      filename: 'ambiguous.jpg',
+      fileType: 'image/jpeg',
+      jobId: intake.body.job.id,
+      opportunityId: 'opp_conflicting_owner'
+    })
+  });
+  assert.equal(conflictingOwner.response.status, 400);
+  assert.equal(conflictingOwner.body.error.code, 'ledger_evidence_owner_invalid');
 });
 test('multipart field upload stores local evidence and links ledger document', async t => {
   const server = app.listen(0);

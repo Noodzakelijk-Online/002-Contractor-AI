@@ -14,6 +14,23 @@ async function postJson(request, route, data) {
   return response.json();
 }
 
+async function waitForResources(page) {
+  await expect(page.getByText('Loading resources', { exact: true })).toBeHidden({ timeout: 15_000 });
+}
+
+async function selectTimesheetPeriod(page, workspace, periodStart) {
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/ledger/timesheets'
+      && url.searchParams.get('periodStart') === periodStart
+      && response.ok();
+  });
+  await workspace.getByLabel('Week starting').fill(periodStart);
+  await responsePromise;
+  await waitForResources(page);
+  await expect(workspace.getByLabel('Week starting')).toHaveValue(periodStart);
+}
+
 test('operator reviews a weekly timesheet, approves it, and downloads a controlled handoff on desktop and mobile', async ({ page, request }) => {
   const suffix = Date.now();
   const periodStart = weekStart(1);
@@ -44,7 +61,8 @@ test('operator reviews a weekly timesheet, approves it, and downloads a controll
   await page.getByRole('tab', { name: 'Timesheets', exact: true }).click();
   const workspace = page.getByTestId('timesheet-workspace');
   await expect(workspace).toBeVisible();
-  await workspace.getByLabel('Week starting').fill(periodStart);
+  await waitForResources(page);
+  await selectTimesheetPeriod(page, workspace, periodStart);
   const row = workspace.getByTestId(`timesheet-row-${worker.id}`);
   await expect(row.getByText(worker.name)).toBeVisible();
   await expect(row.getByText('8 logged')).toBeVisible();
@@ -62,8 +80,8 @@ test('operator reviews a weekly timesheet, approves it, and downloads a controll
     reason: 'Worker time source and weekly allocation were verified.'
   });
 
-  await workspace.getByLabel('Week starting').fill(weekStart(0));
-  await workspace.getByLabel('Week starting').fill(periodStart);
+  await selectTimesheetPeriod(page, workspace, weekStart(0));
+  await selectTimesheetPeriod(page, workspace, periodStart);
   await expect(row.getByText('approved')).toBeVisible();
   await workspace.getByTestId('prepare-timesheet-export').click();
   await expect(page.getByText('Checksum-protected timesheet handoff prepared. No payroll or provider action was performed.')).toBeVisible();

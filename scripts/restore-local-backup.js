@@ -958,6 +958,32 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup governed bid/no-bid constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('052_governed_site_surveys')) {
+        for (const table of ['opportunity_evidence', 'opportunity_site_surveys']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed site-survey schema is incomplete: ${table}.`);
+          }
+        }
+        const evidenceColumns = new Set(database.prepare('PRAGMA table_info(opportunity_evidence)').all().map(row => row.name));
+        for (const column of ['opportunity_id', 'storage_ref', 'content_hash', 'status', 'data_json']) {
+          if (!evidenceColumns.has(column)) throw new Error(`Backup governed site-survey schema is incomplete: opportunity_evidence.${column}.`);
+        }
+        const surveyColumns = new Set(database.prepare('PRAGMA table_info(opportunity_site_surveys)').all().map(row => row.name));
+        for (const column of ['opportunity_id', 'status', 'template_version', 'template_hash', 'source_hash', 'snapshot_hash', 'snapshot_json', 'schedule_entry_key', 'schedule_fingerprint', 'submission_entry_key', 'submission_fingerprint', 'approval_id']) {
+          if (!surveyColumns.has(column)) throw new Error(`Backup governed site-survey schema is incomplete: opportunity_site_surveys.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_opportunity_evidence_history',
+          'idx_opportunity_evidence_storage',
+          'idx_opportunity_site_survey_one_active',
+          'idx_opportunity_site_survey_one_approved',
+          'idx_opportunity_site_survey_history',
+          'idx_opportunity_site_survey_approval'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup governed site-survey constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

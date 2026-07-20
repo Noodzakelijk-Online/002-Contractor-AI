@@ -37,7 +37,7 @@ function Recommendation({ value, score }) {
   const Icon = value === 'pursue' ? Check : value === 'decline' ? TriangleAlert : Target
   return (
     <span className={`market-fit-recommendation market-fit-${value || 'review'}`}>
-      <Icon size={13} /> {formatStatus(value || 'review')} {Number.isFinite(Number(score)) ? `${score}%` : ''}
+      <Icon size={13} /> {formatStatus(value || 'review')} {score !== null && score !== undefined && Number.isFinite(Number(score)) ? `${score}%` : ''}
     </span>
   )
 }

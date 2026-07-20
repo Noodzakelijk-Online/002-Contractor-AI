@@ -109,6 +109,7 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
 const LEDGER_CAPABILITY_REQUIREMENTS = {
   preconstruction: [
     { key: 'market_fit', label: 'Approved ICP and service-area policy', table: 'market_fit_profiles', readyStatuses: ['approved'], ledgerOnly: true },
+    { key: 'opportunity_site_survey', label: 'Approved preconstruction site survey', table: 'opportunity_site_surveys', readyStatuses: ['approved'], ledgerOnly: true },
     { key: 'intake', label: 'Client intake', table: 'job_requests', detailKey: 'request' },
     { key: 'bid_package', label: 'Bid / tender package', table: 'bid_packages', detailKey: 'bidPackages' },
     { key: 'takeoff', label: 'Quantity takeoff', table: 'takeoff_sheets', detailKey: 'takeoffs' },
@@ -1034,6 +1035,24 @@ const BID_DECISION_GATES = Object.freeze([
   { key: 'payment_terms_acceptable', label: 'Payment terms are acceptable' },
   { key: 'compliance_achievable', label: 'Safety and compliance obligations are achievable' }
 ]);
+const SITE_SURVEY_FORMAT = 'contractor-ai-site-survey/v1';
+const SITE_SURVEY_TEMPLATE = Object.freeze({
+  key: 'standard_preconstruction_site_survey',
+  name: 'Standard preconstruction site survey',
+  version: 1,
+  items: Object.freeze([
+    { key: 'client_scope', category: 'scope', prompt: 'Client brief, decision maker, work boundaries, finishes, and success criteria are confirmed', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+    { key: 'access_logistics', category: 'logistics', prompt: 'Access, parking, loading, storage, working hours, neighbours, occupants, and public protection are recorded', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+    { key: 'dimensions_quantities', category: 'measurement', prompt: 'Estimate-driving dimensions, quantities, levels, and tolerances are measured from identified locations', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+    { key: 'existing_conditions', category: 'condition', prompt: 'Existing finishes, defects, moisture, damage, ground conditions, and interfaces are photographed and described', required: true, allowNotApplicable: false, failureSeverity: 'high' },
+    { key: 'utilities_services', category: 'services', prompt: 'Known utilities, isolation points, drainage, water, power, ventilation, and service conflicts are identified', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+    { key: 'structure_ground', category: 'technical', prompt: 'Structural, substrate, boundary, excavation, bearing, fixing, and temporary-work assumptions are recorded', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+    { key: 'safety_hazards', category: 'safety', prompt: 'Access hazards, work-at-height, hazardous-material, occupied-site, manual-handling, and stop-work conditions are recorded', required: true, allowNotApplicable: false, failureSeverity: 'critical' },
+    { key: 'regulatory_design', category: 'compliance', prompt: 'Permit, landlord, VvE, utility, design, engineering, Wkb, Bbl, and other approval dependencies are identified', required: true, allowNotApplicable: true, failureSeverity: 'high' },
+    { key: 'protection_waste', category: 'logistics', prompt: 'Protection, dust/noise control, waste route, disposal, welfare, and reinstatement requirements are confirmed', required: true, allowNotApplicable: false, failureSeverity: 'medium' },
+    { key: 'assumptions_exclusions', category: 'commercial', prompt: 'Scope assumptions, exclusions, allowances, client selections, and unresolved estimate risks are explicit', required: true, allowNotApplicable: false, failureSeverity: 'high' }
+  ])
+});
 const PERFORMANCE_SCORECARD_DEFAULT_WEEKS = 13;
 const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
   { key: 'recordable_incidents', perspective: 'safety', label: 'Recordable incidents', unit: 'count', comparison: 'at_most', target: 0 },
@@ -1813,6 +1832,67 @@ function normalizeInspectionChecklistResponses(value, checklistItems) {
     );
   }
   return checklistItems.filter(item => byKey.has(item.key)).map(item => ({ ...byKey.get(item.key) }));
+}
+
+function siteSurveyTemplateSnapshot() {
+  return {
+    format: SITE_SURVEY_FORMAT,
+    key: SITE_SURVEY_TEMPLATE.key,
+    name: SITE_SURVEY_TEMPLATE.name,
+    version: SITE_SURVEY_TEMPLATE.version,
+    items: SITE_SURVEY_TEMPLATE.items.map(item => ({ ...item }))
+  };
+}
+
+function normalizeSiteSurveyMeasurements(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
+    throw ledgerInputError('site_survey_measurements_invalid', 'A site survey requires between 1 and 100 estimate-driving measurements.');
+  }
+  return value.map((measurement, index) => {
+    if (!measurement || typeof measurement !== 'object' || Array.isArray(measurement)) {
+      throw ledgerInputError('site_survey_measurement_invalid', `Measurement ${index + 1} must be an object.`);
+    }
+    const label = normalizeText(measurement.label || measurement.description || measurement.name, '');
+    const unit = normalizeText(measurement.unit, '');
+    const quantity = Number(measurement.quantity ?? measurement.value);
+    const location = normalizeText(measurement.location, '');
+    const notes = normalizeText(measurement.notes || measurement.note, '');
+    if (label.length < 2 || label.length > 160) {
+      throw ledgerInputError('site_survey_measurement_label_invalid', `Measurement ${index + 1} requires a label between 2 and 160 characters.`);
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 1_000_000_000) {
+      throw ledgerInputError('site_survey_measurement_quantity_invalid', `Measurement ${index + 1} requires a positive finite quantity.`);
+    }
+    if (unit.length < 1 || unit.length > 40) {
+      throw ledgerInputError('site_survey_measurement_unit_invalid', `Measurement ${index + 1} requires a unit between 1 and 40 characters.`);
+    }
+    if (location.length > 240 || notes.length > 1_000) {
+      throw ledgerInputError('site_survey_measurement_detail_invalid', `Measurement ${index + 1} location or notes are too long.`);
+    }
+    const evidenceIds = [...new Set(normalizeList(
+      measurement.evidenceIds || measurement.evidence_ids || measurement.evidence
+    ).map(id => normalizeText(id, '')).filter(Boolean))];
+    if (evidenceIds.length > 20) {
+      throw ledgerInputError('site_survey_measurement_evidence_invalid', `Measurement ${index + 1} supports at most 20 evidence links.`);
+    }
+    return {
+      label,
+      quantity: roundMeasurement(quantity, 4),
+      unit,
+      location: location || null,
+      notes: notes || null,
+      evidenceIds
+    };
+  });
+}
+
+function normalizeSiteSurveyList(value, label, options = {}) {
+  const maximum = Number(options.maximum || 50);
+  const items = [...new Set(normalizeList(value).map(item => normalizeText(item, '')).filter(Boolean))];
+  if (items.length > maximum || items.some(item => item.length > 500)) {
+    throw ledgerInputError('site_survey_list_invalid', `${label} supports at most ${maximum} entries of 500 characters each.`);
+  }
+  return items;
 }
 
 function rowDate(value) {
@@ -4061,6 +4141,65 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON opportunity_bid_decisions(policy_id, proposed_decision, status, created_at DESC);
       `);
     }
+  },
+  {
+    version: '052_governed_site_surveys',
+    description: 'Retain private opportunity evidence and source-current approval-backed preconstruction site surveys.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS opportunity_evidence (
+          id TEXT PRIMARY KEY,
+          opportunity_id TEXT NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+          type TEXT NOT NULL DEFAULT 'document',
+          title TEXT NOT NULL,
+          filename TEXT,
+          mime_type TEXT,
+          size_bytes INTEGER NOT NULL DEFAULT 0,
+          storage_ref TEXT,
+          status TEXT NOT NULL DEFAULT 'stored',
+          content_hash TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_evidence_history
+          ON opportunity_evidence(opportunity_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_evidence_storage
+          ON opportunity_evidence(storage_ref) WHERE storage_ref IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS opportunity_site_surveys (
+          id TEXT PRIMARY KEY,
+          opportunity_id TEXT NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          template_version INTEGER NOT NULL,
+          template_hash TEXT NOT NULL,
+          scheduled_at TEXT,
+          completed_at TEXT,
+          surveyor TEXT,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          schedule_entry_key TEXT NOT NULL UNIQUE,
+          schedule_fingerprint TEXT NOT NULL,
+          submission_entry_key TEXT UNIQUE,
+          submission_fingerprint TEXT,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunity_site_survey_one_active
+          ON opportunity_site_surveys(opportunity_id)
+          WHERE status IN ('planned', 'in_progress', 'pending_approval');
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunity_site_survey_one_approved
+          ON opportunity_site_surveys(opportunity_id)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_opportunity_site_survey_history
+          ON opportunity_site_surveys(opportunity_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_site_survey_approval
+          ON opportunity_site_surveys(approval_id, status) WHERE approval_id IS NOT NULL;
+      `);
+    }
   }
 ];
 
@@ -5713,7 +5852,7 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
-    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots', 'market_fit_profiles'].includes(table)) {
+    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots', 'market_fit_profiles', 'opportunity_site_surveys'].includes(table)) {
       return { from: `${table} AS records`, condition: '1 = 1' };
     }
     if (table === 'jobs') {
@@ -6598,6 +6737,8 @@ class ContractorOperatingLedger {
     opportunity.bidPackages = this.listBidPackages({ opportunityId, includeClosed: true, limit: 100 });
     opportunity.marketFit = this.assessOpportunityMarketFit(opportunityId);
     opportunity.bidDecision = this.bidDecisionForOpportunity(opportunityId);
+    opportunity.siteSurvey = this.siteSurveyForOpportunity(opportunityId);
+    opportunity.evidence = this.listOpportunityEvidence({ opportunityId, limit: 500 });
     return opportunity;
   }
 
@@ -7637,6 +7778,548 @@ class ContractorOperatingLedger {
       approvalRequired: true,
       opportunityStageMutation: false,
       automaticLeadClosure: false,
+      externalCommitments: 0
+    };
+  }
+
+  listOpportunityEvidence(filters = {}) {
+    const opportunityId = normalizeText(filters.opportunityId || filters.opportunity_id, '');
+    const limit = safeLimit(filters.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM opportunity_evidence
+      WHERE (? = '' OR opportunity_id = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(opportunityId, opportunityId, limit).map(row => this.mapOpportunityEvidence(row));
+  }
+
+  getOpportunityEvidence(evidenceId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM opportunity_evidence WHERE id = ?').get(String(evidenceId || ''));
+    if (!row || (options.opportunityId && row.opportunity_id !== options.opportunityId)) {
+      throw ledgerInputError('opportunity_evidence_not_found', 'Opportunity evidence not found.', { evidenceId }, 404);
+    }
+    return this.mapOpportunityEvidence(row);
+  }
+
+  addOpportunityEvidence(opportunityId, payload = {}, options = {}) {
+    this.requireOpportunity(opportunityId);
+    const id = normalizeText(options.id || payload.id, '') || makeId('oppevidence');
+    const timestamp = nowIso();
+    const title = normalizeText(payload.title || payload.filename || payload.name, 'Evidence');
+    const contentHash = normalizeText(payload.contentHash || payload.content_hash, '').toLowerCase() || null;
+    if (title.length < 2 || title.length > 240) {
+      throw ledgerInputError('opportunity_evidence_title_invalid', 'Opportunity evidence title must contain 2 to 240 characters.');
+    }
+    if (contentHash && !/^[a-f0-9]{64}$/.test(contentHash)) {
+      throw ledgerInputError('opportunity_evidence_hash_invalid', 'Opportunity evidence contentHash must be a SHA-256 hexadecimal digest.');
+    }
+    const inserted = this.db.prepare(`
+      ${options.ignoreExisting ? 'INSERT OR IGNORE' : 'INSERT'} INTO opportunity_evidence (
+        id, opportunity_id, type, title, filename, mime_type, size_bytes, storage_ref,
+        status, content_hash, data_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      opportunityId,
+      normalizeStatus(payload.type, 'document'),
+      title,
+      normalizeText(payload.filename || payload.name, '') || null,
+      normalizeText(payload.mimeType || payload.mime_type, '') || null,
+      Math.max(0, Math.round(normalizeNumber(payload.sizeBytes || payload.size_bytes || payload.size, 0))),
+      normalizeText(payload.storageRef || payload.storage_ref, '') || null,
+      normalizeStatus(payload.status, 'stored'),
+      contentHash,
+      toJson({ ...(payload.data || {}), tags: payload.tags || payload.data?.tags || [], externalCommitments: 0 }),
+      timestamp,
+      timestamp
+    );
+    if (options.ignoreExisting && Number(inserted.changes || 0) === 0) {
+      return { ...this.getOpportunityEvidence(id, { opportunityId }), replayed: true };
+    }
+    const evidence = this.getOpportunityEvidence(id, { opportunityId });
+    if (options.audit !== false) {
+      this.audit({
+        entityType: 'opportunity_evidence', entityId: id, action: 'store_opportunity_evidence',
+        actor: options.actor || 'Contractor.AI', after: evidence,
+        metadata: { opportunityId, contentHash, private: true, externalCommitments: 0 }
+      });
+    }
+    return evidence;
+  }
+
+  siteSurveySourceMaterial(opportunityId, evidenceIds = []) {
+    const opportunity = this.mapOpportunity(this.requireOpportunity(opportunityId));
+    const template = siteSurveyTemplateSnapshot();
+    const evidence = [...new Set(evidenceIds.map(id => normalizeText(id, '')).filter(Boolean))]
+      .sort()
+      .map(id => this.getOpportunityEvidence(id, { opportunityId }))
+      .map(item => ({
+        id: item.id,
+        opportunityId: item.opportunityId,
+        type: item.type,
+        title: item.title,
+        filename: item.filename,
+        mimeType: item.mimeType,
+        sizeBytes: item.sizeBytes,
+        storageRef: item.storageRef,
+        status: item.status,
+        contentHash: item.contentHash,
+        updatedAt: item.updatedAt
+      }));
+    return {
+      format: SITE_SURVEY_FORMAT,
+      opportunity: {
+        id: opportunity.id,
+        clientId: opportunity.clientId,
+        title: opportunity.title,
+        service: opportunity.service,
+        description: opportunity.description,
+        address: opportunity.address,
+        city: opportunity.city,
+        postalCode: opportunity.postalCode,
+        country: opportunity.country,
+        estimatedValue: opportunity.estimatedValue
+      },
+      templateHash: sha256Json(template),
+      evidence
+    };
+  }
+
+  listOpportunitySiteSurveys(filters = {}) {
+    const opportunityId = normalizeText(filters.opportunityId || filters.opportunity_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const limit = safeLimit(filters.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM opportunity_site_surveys
+      WHERE (? = '' OR opportunity_id = ?)
+        AND (? = '' OR status = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(opportunityId, opportunityId, status, status, limit).map(row => this.mapOpportunitySiteSurvey(row));
+  }
+
+  getOpportunitySiteSurvey(surveyId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM opportunity_site_surveys WHERE id = ?').get(String(surveyId || ''));
+    if (!row || (options.opportunityId && row.opportunity_id !== options.opportunityId)) {
+      throw ledgerInputError('site_survey_not_found', 'Opportunity site survey not found.', { surveyId }, 404);
+    }
+    return this.mapOpportunitySiteSurvey(row);
+  }
+
+  requestOpportunitySiteSurvey(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('site_survey_entry_key_invalid', 'A site-survey plan requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const surveyor = normalizeText(payload.surveyor || payload.assignedTo || payload.assigned_to, '');
+      const scheduledAt = normalizeText(payload.scheduledAt || payload.scheduled_at, '');
+      const scheduledDate = new Date(scheduledAt);
+      const notes = normalizeText(payload.notes || payload.note, '');
+      if (surveyor.length < 2 || surveyor.length > 160) {
+        throw ledgerInputError('site_survey_surveyor_invalid', 'A site-survey plan requires a surveyor name between 2 and 160 characters.');
+      }
+      if (!scheduledAt || Number.isNaN(scheduledDate.getTime())) {
+        throw ledgerInputError('site_survey_schedule_invalid', 'A site-survey plan requires a valid scheduledAt date and time.');
+      }
+      if (notes.length > 2_000) {
+        throw ledgerInputError('site_survey_notes_too_long', 'Site-survey planning notes must be 2,000 characters or fewer.');
+      }
+      const scheduleInput = { opportunityId, scheduledAt: scheduledDate.toISOString(), surveyor, notes: notes || null };
+      const fingerprint = sha256Json(scheduleInput);
+      const replay = this.db.prepare('SELECT * FROM opportunity_site_surveys WHERE schedule_entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.schedule_fingerprint !== fingerprint) {
+          throw ledgerInputError('site_survey_replay_conflict', 'This site-survey entryKey was already used with a different plan.', { entryKey, surveyId: replay.id }, 409);
+        }
+        return { survey: this.getOpportunitySiteSurvey(replay.id), replayed: true };
+      }
+      const beforeOpportunity = this.mapOpportunity(this.requireOpportunity(opportunityId));
+      if (!OPEN_OPPORTUNITY_STAGES.has(beforeOpportunity.stage)) {
+        throw ledgerInputError('site_survey_opportunity_closed', 'A site survey can be planned only for an open opportunity.', { opportunityId, stage: beforeOpportunity.stage }, 409);
+      }
+      const pursuit = this.bidDecisionForOpportunity(opportunityId);
+      if (pursuit.currentDecision?.proposedDecision === 'no_bid' && !pursuit.stale) {
+        throw ledgerInputError('site_survey_no_bid_conflict', 'The current approved no-bid decision must be superseded before planning a site survey.', {
+          opportunityId, decisionId: pursuit.currentDecision.id
+        }, 409);
+      }
+      const active = this.db.prepare(`
+        SELECT id, status FROM opportunity_site_surveys
+        WHERE opportunity_id = ? AND status IN ('planned', 'in_progress', 'pending_approval')
+      `).get(opportunityId);
+      if (active) {
+        throw ledgerInputError('site_survey_active', 'Resolve the active site survey before planning another one.', { surveyId: active.id, status: active.status }, 409);
+      }
+      const timestamp = nowIso();
+      if (['new', 'qualifying'].includes(beforeOpportunity.stage)) {
+        this.db.prepare(`
+          UPDATE opportunities SET stage = 'site_visit', probability_percent = MAX(probability_percent, 35), updated_at = ?
+          WHERE id = ?
+        `).run(timestamp, opportunityId);
+        const stagedOpportunity = this.mapOpportunity(this.requireOpportunity(opportunityId));
+        this.audit({
+          entityType: 'opportunity', entityId: opportunityId, action: 'advance_opportunity_to_site_visit', actor,
+          before: beforeOpportunity, after: stagedOpportunity,
+          metadata: { reason: 'operator_site_survey_plan', automatic: false, externalCommitments: 0 }
+        });
+      }
+      const template = siteSurveyTemplateSnapshot();
+      const templateHash = sha256Json(template);
+      const sourceMaterial = this.siteSurveySourceMaterial(opportunityId, []);
+      const sourceHash = sha256Json(sourceMaterial);
+      const id = makeId('sitesurvey');
+      const snapshot = {
+        format: SITE_SURVEY_FORMAT,
+        surveyId: id,
+        opportunityId,
+        template,
+        plan: {
+          scheduledAt: scheduledDate.toISOString(), surveyor, notes: notes || null,
+          plannedAt: timestamp, plannedBy: actor
+        },
+        sourceHash,
+        externalCommitments: 0
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO opportunity_site_surveys (
+          id, opportunity_id, status, template_version, template_hash, scheduled_at, completed_at, surveyor,
+          source_hash, snapshot_hash, snapshot_json, schedule_entry_key, schedule_fingerprint,
+          submission_entry_key, submission_fingerprint, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, 'planned', ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
+      `).run(
+        id, opportunityId, template.version, templateHash, scheduledDate.toISOString(), surveyor,
+        sourceHash, snapshotHash, snapshotJson, entryKey, fingerprint,
+        toJson({ notes: notes || null, plannedBy: actor, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const survey = this.getOpportunitySiteSurvey(id, { opportunityId });
+      this.audit({
+        entityType: 'opportunity_site_survey', entityId: id, action: 'plan_opportunity_site_survey', actor,
+        after: survey,
+        metadata: { opportunityId, scheduledAt: survey.scheduledAt, templateVersion: template.version, internalPlanOnly: true, externalCommitments: 0 }
+      });
+      return { survey, replayed: false };
+    });
+  }
+
+  submitOpportunitySiteSurvey(opportunityId, surveyId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('site_survey_submission_entry_key_invalid', 'A site-survey submission requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const row = this.db.prepare('SELECT * FROM opportunity_site_surveys WHERE id = ? AND opportunity_id = ?').get(surveyId, opportunityId);
+      if (!row) throw ledgerInputError('site_survey_not_found', 'Opportunity site survey not found.', { surveyId, opportunityId }, 404);
+      const template = siteSurveyTemplateSnapshot();
+      const templateHash = sha256Json(template);
+      if (row.template_version !== template.version || row.template_hash !== templateHash) {
+        throw ledgerInputError('site_survey_template_stale', 'The site-survey template changed. Plan a new survey against the current checklist.', { surveyId }, 409);
+      }
+      const surveyedAtRaw = normalizeText(payload.surveyedAt || payload.surveyed_at || payload.completedAt || payload.completed_at, '');
+      const surveyedDate = new Date(surveyedAtRaw);
+      const surveyor = normalizeText(payload.surveyor || row.surveyor, '');
+      const scopeSummary = normalizeText(payload.scopeSummary || payload.scope_summary || payload.summary, '');
+      if (!surveyedAtRaw || Number.isNaN(surveyedDate.getTime())) {
+        throw ledgerInputError('site_survey_completed_at_invalid', 'A site-survey submission requires a valid surveyedAt date and time.');
+      }
+      if (surveyor.length < 2 || surveyor.length > 160) {
+        throw ledgerInputError('site_survey_surveyor_invalid', 'A site-survey submission requires a surveyor name between 2 and 160 characters.');
+      }
+      if (scopeSummary.length < 8 || scopeSummary.length > 4_000) {
+        throw ledgerInputError('site_survey_scope_invalid', 'A site-survey submission requires a scope summary between 8 and 4,000 characters.');
+      }
+      const checklistResponses = normalizeInspectionChecklistResponses(
+        payload.checklistResponses || payload.checklist_responses,
+        template.items
+      );
+      const measurements = normalizeSiteSurveyMeasurements(payload.measurements);
+      const assumptions = normalizeSiteSurveyList(payload.assumptions, 'Site-survey assumptions');
+      const exclusions = normalizeSiteSurveyList(payload.exclusions, 'Site-survey exclusions');
+      const constraints = normalizeSiteSurveyList(payload.constraints, 'Site-survey constraints');
+      const utilities = normalizeSiteSurveyList(payload.utilities, 'Site-survey utilities');
+      const hazards = normalizeSiteSurveyList(payload.hazards, 'Site-survey hazards');
+      const clientDecisions = normalizeSiteSurveyList(payload.clientDecisions || payload.client_decisions, 'Site-survey client decisions');
+      const evidenceIds = [...new Set([
+        ...normalizeList(payload.evidenceIds || payload.evidence_ids).map(id => normalizeText(id, '')).filter(Boolean),
+        ...checklistResponses.flatMap(response => response.evidenceDocumentIds),
+        ...measurements.flatMap(measurement => measurement.evidenceIds)
+      ])].sort();
+      if (!evidenceIds.length) {
+        throw ledgerInputError('site_survey_evidence_required', 'A completed site survey requires at least one retained opportunity evidence file.');
+      }
+      const evidence = evidenceIds.map(id => this.getOpportunityEvidence(id, { opportunityId }));
+      const invalidEvidence = evidence.filter(item => (
+        item.status !== 'stored' || !item.storageRef || !/^[a-f0-9]{64}$/.test(item.contentHash || '')
+      ));
+      if (invalidEvidence.length) {
+        throw ledgerInputError('site_survey_evidence_invalid', 'Every site-survey evidence link must be stored privately with a retained SHA-256 digest.', {
+          evidenceIds: invalidEvidence.map(item => item.id)
+        }, 409);
+      }
+      const submissionInput = {
+        surveyId,
+        opportunityId,
+        surveyedAt: surveyedDate.toISOString(),
+        surveyor,
+        scopeSummary,
+        checklistResponses,
+        measurements,
+        evidenceIds,
+        assumptions,
+        exclusions,
+        constraints,
+        utilities,
+        hazards,
+        clientDecisions
+      };
+      const fingerprint = sha256Json(submissionInput);
+      const replay = this.db.prepare('SELECT * FROM opportunity_site_surveys WHERE submission_entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.submission_fingerprint !== fingerprint) {
+          throw ledgerInputError('site_survey_submission_replay_conflict', 'This site-survey submission entryKey was already used with different evidence.', {
+            entryKey, surveyId: replay.id
+          }, 409);
+        }
+        const survey = this.getOpportunitySiteSurvey(replay.id);
+        return {
+          survey,
+          approval: survey.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(survey.approvalId)) : null,
+          replayed: true
+        };
+      }
+      if (!['planned', 'in_progress'].includes(row.status)) {
+        throw ledgerInputError('site_survey_state_conflict', `A site survey cannot be submitted from ${row.status}.`, { surveyId, status: row.status }, 409);
+      }
+      const criticalFailures = checklistResponses.filter(response => (
+        response.result === 'fail'
+        && template.items.find(item => item.key === response.itemKey)?.failureSeverity === 'critical'
+      ));
+      const otherFailures = checklistResponses.filter(response => response.result === 'fail' && !criticalFailures.includes(response));
+      const readiness = {
+        estimateReady: criticalFailures.length === 0,
+        blockers: criticalFailures.map(response => ({ code: response.itemKey, message: response.notes || 'Critical survey item failed.' })),
+        warnings: otherFailures.map(response => ({ code: response.itemKey, message: response.notes || 'Survey item requires an estimating allowance or clarification.' })),
+        measurementCount: measurements.length,
+        evidenceCount: evidence.length,
+        checklistComplete: checklistResponses.length === template.items.length
+      };
+      const sourceMaterial = this.siteSurveySourceMaterial(opportunityId, evidenceIds);
+      const sourceHash = sha256Json(sourceMaterial);
+      const timestamp = nowIso();
+      const plannedSnapshot = fromJson(row.snapshot_json, {});
+      const snapshot = {
+        format: SITE_SURVEY_FORMAT,
+        surveyId,
+        opportunityId,
+        template,
+        plan: plannedSnapshot.plan || null,
+        submission: submissionInput,
+        sourceMaterial,
+        sourceHash,
+        readiness,
+        submittedAt: timestamp,
+        submittedBy: actor,
+        externalCommitments: 0
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        UPDATE opportunity_site_surveys
+        SET status = 'pending_approval', completed_at = ?, surveyor = ?, source_hash = ?, snapshot_hash = ?,
+          snapshot_json = ?, submission_entry_key = ?, submission_fingerprint = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND opportunity_id = ? AND status IN ('planned', 'in_progress')
+      `).run(
+        surveyedDate.toISOString(), surveyor, sourceHash, snapshotHash, snapshotJson, entryKey, fingerprint,
+        toJson({
+          ...fromJson(row.data_json, {}), scopeSummary, readiness, evidenceIds,
+          submittedBy: actor, submittedAt: timestamp, externalCommitments: 0
+        }), timestamp, surveyId, opportunityId
+      );
+      const approval = this.createApproval({
+        targetType: 'opportunity_site_survey',
+        targetId: surveyId,
+        approvalType: 'site_survey_review',
+        summary: `Approve preconstruction site survey for ${sourceMaterial.opportunity.title}`,
+        reason: scopeSummary,
+        data: {
+          opportunityId,
+          opportunityTitle: sourceMaterial.opportunity.title,
+          surveyor,
+          surveyedAt: surveyedDate.toISOString(),
+          templateVersion: template.version,
+          checklistItems: checklistResponses.length,
+          measurementCount: measurements.length,
+          evidenceCount: evidence.length,
+          estimateReady: readiness.estimateReady,
+          blockers: readiness.blockers,
+          warnings: readiness.warnings,
+          sourceHash,
+          snapshotHash,
+          stageMutation: readiness.estimateReady ? 'site_visit_to_estimating' : 'none',
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE opportunity_site_surveys SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), surveyId);
+      const survey = this.getOpportunitySiteSurvey(surveyId, { opportunityId });
+      this.audit({
+        entityType: 'opportunity_site_survey', entityId: surveyId, action: 'submit_opportunity_site_survey', actor,
+        before: this.mapOpportunitySiteSurvey(row), after: survey,
+        metadata: {
+          opportunityId, approvalId: approval.id, sourceHash, snapshotHash,
+          estimateReady: readiness.estimateReady, measurementCount: measurements.length,
+          evidenceCount: evidence.length, externalCommitments: 0
+        }
+      });
+      return { survey, approval, replayed: false };
+    });
+  }
+
+  applyOpportunitySiteSurveyApproval(surveyId) {
+    const row = this.db.prepare('SELECT * FROM opportunity_site_surveys WHERE id = ?').get(surveyId);
+    if (!row) throw ledgerInputError('site_survey_not_found', 'Opportunity site survey not found.', { surveyId }, 404);
+    if (row.status === 'approved') return this.getOpportunitySiteSurvey(surveyId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('site_survey_state_conflict', `A site survey cannot be approved from ${row.status}.`, { surveyId, status: row.status }, 409);
+    }
+    const before = this.getOpportunitySiteSurvey(surveyId);
+    if (!before.integrityValid || before.snapshot?.format !== SITE_SURVEY_FORMAT || !before.snapshot?.submission) {
+      throw ledgerInputError('site_survey_integrity_failed', 'The retained site-survey snapshot failed checksum verification.', { surveyId }, 409);
+    }
+    const template = siteSurveyTemplateSnapshot();
+    if (row.template_version !== template.version || row.template_hash !== sha256Json(template)) {
+      throw ledgerInputError('site_survey_template_stale', 'The site-survey template changed after submission.', { surveyId }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const approvalData = fromJson(approval?.data_json, {});
+    if (
+      !approval || approval.status !== 'approved' || approval.target_type !== 'opportunity_site_survey'
+      || approval.target_id !== surveyId || approvalData.sourceHash !== row.source_hash
+      || approvalData.snapshotHash !== row.snapshot_hash
+    ) {
+      throw ledgerInputError('site_survey_approval_invalid', 'The site survey lacks a matching source-bound approved decision.', { surveyId }, 409);
+    }
+    const currentSourceHash = sha256Json(this.siteSurveySourceMaterial(
+      row.opportunity_id,
+      before.snapshot.submission.evidenceIds || []
+    ));
+    if (currentSourceHash !== row.source_hash) {
+      throw ledgerInputError('site_survey_stale', 'Opportunity or retained evidence changed after the site survey was submitted.', {
+        surveyId, retainedSourceHash: row.source_hash, currentSourceHash
+      }, 409);
+    }
+    const timestamp = nowIso();
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    this.db.prepare(`
+      UPDATE opportunity_site_surveys SET status = 'superseded', updated_at = ?
+      WHERE opportunity_id = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.opportunity_id, surveyId);
+    this.db.prepare(`
+      UPDATE opportunity_site_surveys SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor },
+      externalCommitments: 0
+    }), timestamp, surveyId);
+    let stageAdvanced = false;
+    const opportunityBefore = this.mapOpportunity(this.requireOpportunity(row.opportunity_id));
+    if (before.snapshot.readiness?.estimateReady === true && opportunityBefore.stage === 'site_visit') {
+      this.db.prepare(`
+        UPDATE opportunities SET stage = 'estimating', probability_percent = MAX(probability_percent, 50), updated_at = ?
+        WHERE id = ? AND stage = 'site_visit'
+      `).run(timestamp, row.opportunity_id);
+      stageAdvanced = true;
+      const opportunityAfter = this.mapOpportunity(this.requireOpportunity(row.opportunity_id));
+      this.audit({
+        entityType: 'opportunity', entityId: row.opportunity_id, action: 'advance_opportunity_to_estimating', actor,
+        before: opportunityBefore, after: opportunityAfter,
+        metadata: { surveyId, approvalId: row.approval_id, sourceCurrent: true, externalCommitments: 0 }
+      });
+    }
+    const after = this.getOpportunitySiteSurvey(surveyId);
+    this.audit({
+      entityType: 'opportunity_site_survey', entityId: surveyId, action: 'approve_opportunity_site_survey', actor,
+      before, after,
+      metadata: {
+        opportunityId: row.opportunity_id, approvalId: row.approval_id,
+        sourceHash: row.source_hash, snapshotHash: row.snapshot_hash,
+        estimateReady: before.snapshot.readiness?.estimateReady === true,
+        stageAdvanced, externalCommitments: 0
+      }
+    });
+    return after;
+  }
+
+  siteSurveyForOpportunity(opportunityId) {
+    this.requireOpportunity(opportunityId);
+    const surveys = this.listOpportunitySiteSurveys({ opportunityId, limit: 100 });
+    const currentSurvey = surveys.find(survey => survey.status === 'approved') || null;
+    const pendingSurvey = surveys.find(survey => survey.status === 'pending_approval') || null;
+    const activeSurvey = pendingSurvey || surveys.find(survey => ['planned', 'in_progress'].includes(survey.status)) || null;
+    const latestSurvey = activeSurvey || currentSurvey || surveys[0] || null;
+    let stale = false;
+    if (latestSurvey?.snapshot?.submission) {
+      try {
+        stale = sha256Json(this.siteSurveySourceMaterial(
+          opportunityId,
+          latestSurvey.snapshot.submission.evidenceIds || []
+        )) !== latestSurvey.sourceHash;
+      } catch {
+        stale = true;
+      }
+    }
+    const approvedReady = Boolean(
+      currentSurvey?.integrityValid
+      && !stale
+      && currentSurvey.snapshot?.readiness?.estimateReady === true
+    );
+    return {
+      template: siteSurveyTemplateSnapshot(),
+      currentSurvey,
+      pendingSurvey,
+      activeSurvey,
+      latestSurvey,
+      surveys,
+      stale,
+      readiness: {
+        status: approvedReady ? 'ready' : pendingSurvey ? 'pending_approval' : activeSurvey ? activeSurvey.status : currentSurvey && stale ? 'stale' : 'required',
+        estimateReady: approvedReady,
+        blockers: latestSurvey?.snapshot?.readiness?.blockers || [],
+        warnings: latestSurvey?.snapshot?.readiness?.warnings || [],
+        approvalRequired: !approvedReady,
+        sourceCurrent: Boolean(latestSurvey && !stale),
+        integrityValid: latestSurvey?.integrityValid === true
+      },
+      approvalRequired: true,
+      externalCommitments: 0
+    };
+  }
+
+  siteSurveyRegister(options = {}) {
+    const surveys = this.listOpportunitySiteSurveys({ limit: options.surveyLimit || options.survey_limit || 5_000 });
+    const opportunities = this.listOpportunities({ includeClosed: true, limit: options.limit || 500 }).map(opportunity => ({
+      opportunity,
+      siteSurvey: this.siteSurveyForOpportunity(opportunity.id)
+    }));
+    const open = opportunities.filter(item => OPEN_OPPORTUNITY_STAGES.has(item.opportunity.stage));
+    return {
+      generatedAt: nowIso(),
+      template: siteSurveyTemplateSnapshot(),
+      surveys,
+      opportunities,
+      summary: {
+        open: open.length,
+        ready: open.filter(item => item.siteSurvey.readiness.estimateReady).length,
+        pendingApproval: open.filter(item => item.siteSurvey.pendingSurvey).length,
+        planned: open.filter(item => ['planned', 'in_progress'].includes(item.siteSurvey.activeSurvey?.status)).length,
+        missingOrStale: open.filter(item => !item.siteSurvey.readiness.estimateReady && !item.siteSurvey.pendingSurvey && !item.siteSurvey.activeSurvey).length
+      },
+      approvalRequired: true,
       externalCommitments: 0
     };
   }
@@ -36524,6 +37207,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'opportunity_site_survey') {
+        this.db.prepare(`
+          UPDATE opportunity_site_surveys
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM opportunity_site_surveys WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            },
+            externalCommitments: 0
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'performance_scorecard_target') {
         this.db.prepare(`
           UPDATE performance_scorecard_targets
@@ -36917,6 +37621,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyBidDecisionPolicyApproval(targetId);
     } else if (targetType === 'opportunity_bid_decision') {
       this.applyOpportunityBidDecisionApproval(targetId);
+    } else if (targetType === 'opportunity_site_survey') {
+      this.applyOpportunitySiteSurveyApproval(targetId);
     } else if (targetType === 'performance_scorecard_target') {
       this.applyPerformanceScorecardTargetApproval(targetId);
     } else if (targetType === 'performance_scorecard') {
@@ -41368,6 +42074,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       approvals: this.db.prepare('SELECT * FROM approvals WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapApproval(row)),
       weather: this.db.prepare('SELECT * FROM schedule_weather WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapWeather(row))
     };
+    const sourceOpportunityRow = this.db.prepare(`
+      SELECT opportunities.*, clients.name AS client_name, clients.company AS client_company,
+        clients.email AS client_email, clients.phone AS client_phone
+      FROM opportunities
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE opportunities.converted_job_id = ?
+      ORDER BY opportunities.updated_at DESC
+      LIMIT 1
+    `).get(jobId);
+    detail.preconstruction = sourceOpportunityRow
+      ? {
+          opportunity: this.mapOpportunity(sourceOpportunityRow),
+          siteSurvey: this.siteSurveyForOpportunity(sourceOpportunityRow.id)
+        }
+      : null;
     const approvedBaseline = detail.scheduleBaselines.find(baseline => baseline.status === 'approved') || null;
     const pendingBaseline = detail.scheduleBaselines.find(baseline => baseline.status === 'pending_approval') || null;
     const schedulePlan = this.calculateJobSchedule(jobId, {
@@ -41474,6 +42195,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       opportunity_fit_assessments: 'status',
       bid_decision_policies: 'status',
       opportunity_bid_decisions: 'status',
+      opportunity_site_surveys: 'status',
       performance_scorecard_targets: 'status',
       performance_scorecard_snapshots: 'status',
       production_baselines: 'status',
@@ -42794,6 +43516,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
     }
+    const siteSurveyOpportunities = this.db.prepare(`
+      SELECT id, title FROM opportunities
+      WHERE stage = 'site_visit'
+      ORDER BY updated_at DESC
+      LIMIT 10
+    `).all();
+    for (const record of siteSurveyOpportunities) {
+      const control = this.siteSurveyForOpportunity(record.id);
+      if (control.readiness.estimateReady || control.activeSurvey || control.pendingSurvey) continue;
+      const sourceHash = sha256Json(this.siteSurveySourceMaterial(record.id, []));
+      const idempotencyKey = `site-survey-review:${record.id}:${sourceHash.slice(0, 32)}`;
+      const existingReview = this.db.prepare('SELECT id FROM opportunity_activities WHERE idempotency_key = ?').get(idempotencyKey);
+      if (existingReview) continue;
+      actions.push({
+        type: 'review_site_survey',
+        opportunityId: record.id,
+        idempotencyKey,
+        sourceHash,
+        severity: control.latestSurvey?.status === 'rejected' || control.stale ? 'high' : 'medium',
+        title: record.title,
+        message: `${record.title} requires an operator-planned standard site survey before estimating. Automation will create only an internal review task.`
+      });
+    }
     const jobsWithoutAssignment = this.db.prepare(`
       SELECT jobs.id, jobs.title FROM jobs
       LEFT JOIN assignments ON assignments.job_id = jobs.id
@@ -42941,7 +43686,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     const jobsWithoutSiteVisits = this.db.prepare(`
-      SELECT jobs.id, jobs.title, jobs.priority, jobs.risk_level, jobs.estimated_cost
+      SELECT jobs.id, jobs.title, jobs.priority, jobs.risk_level, jobs.estimated_cost, jobs.updated_at
       FROM jobs
       LEFT JOIN site_visits
         ON site_visits.job_id = jobs.id
@@ -42958,7 +43703,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       LIMIT 5
     `).all();
     for (const job of jobsWithoutSiteVisits) {
-      actions.push({ type: 'schedule_site_visit', jobId: job.id, severity: ['critical', 'high'].includes(job.priority) ? 'high' : 'medium', message: `${job.title} needs a site visit before quote, dispatch, or client commitment.` });
+      const taskId = `task_${sha256Text(`site-visit-review:${job.id}:${job.updated_at}`).slice(0, 24)}`;
+      if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+      actions.push({
+        type: 'review_job_site_visit',
+        taskId,
+        jobId: job.id,
+        severity: ['critical', 'high'].includes(job.priority) ? 'high' : 'medium',
+        message: `${job.title} needs an internal site-visit review before quote, dispatch, or client commitment. No appointment will be created automatically.`
+      });
     }
 
     const today = nowIso().slice(0, 10);
@@ -45017,6 +45770,31 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         }
 
+        const siteSurveyReviews = preview.filter(action => action.type === 'review_site_survey').slice(0, 10);
+        for (const action of siteSurveyReviews) {
+          try {
+            const result = this.createOpportunityActivity(action.opportunityId, {
+              activityType: 'site_survey_review',
+              status: 'open',
+              summary: 'Plan and complete standard preconstruction site survey',
+              notes: 'Confirm the surveyor and appointment separately, upload private evidence, record all checklist responses and measurements, then submit the source-bound snapshot for office approval. This task cannot schedule, contact, submit, approve, or advance the opportunity.',
+              source: 'autonomous_cycle',
+              internalOnly: true,
+              idempotencyKey: action.idempotencyKey
+            }, { actor });
+            applied.push({
+              ...action,
+              activityId: result.activity.id,
+              status: result.replayed ? 'replayed' : 'task_created',
+              appointmentCreated: false,
+              surveySubmitted: false,
+              externalCommitments: 0
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
         const assignActions = preview.filter(action => action.type === 'assign_worker').slice(0, 3);
         for (const action of assignActions) {
           try {
@@ -45032,16 +45810,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         }
 
-        const siteVisits = preview.filter(action => action.type === 'schedule_site_visit').slice(0, 3);
-        for (const action of siteVisits) {
-          const siteVisit = this.createSiteVisit(action.jobId, {
-            status: 'scheduled',
-            visitType: 'site_survey',
-            notes: 'Autonomous draft site visit. Confirm time, client availability, and access before external commitment.',
-            source: 'autonomous_cycle'
-          }, { actor, audit: false });
-          applied.push({ ...action, siteVisitId: siteVisit.id, status: 'scheduled' });
-          this.audit({ entityType: 'site_visit', entityId: siteVisit.id, jobId: action.jobId, action: 'autonomous_schedule_site_visit', actor, after: siteVisit });
+        const siteVisitReviews = preview.filter(action => action.type === 'review_job_site_visit').slice(0, 3);
+        for (const action of siteVisitReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', appointmentCreated: false, externalCommitments: 0 });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: 'Review site visit requirement',
+            description: `${action.message} An operator must verify need, client availability, access, date, and assigned surveyor before creating any visit record or commitment.`,
+            status: 'open',
+            priority: action.severity,
+            source: 'autonomous_cycle',
+            data: { internalOnly: true, appointmentCreated: false, externalCommitments: 0 }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', appointmentCreated: false, externalCommitments: 0 });
+          this.audit({
+            entityType: 'task', entityId: task.id, jobId: action.jobId,
+            action: 'autonomous_create_site_visit_review_task', actor, after: task,
+            metadata: { appointmentCreated: false, externalCommitments: 0 }
+          });
         }
 
         const fieldReports = preview.filter(action => action.type === 'draft_field_report').slice(0, 3);
@@ -46750,6 +47539,45 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Opportunity bid/no-bid decision ${decision.id} cannot be verified: ${error.code || error.message}.` });
       }
     }
+    const opportunityEvidenceRows = this.db.prepare('SELECT * FROM opportunity_evidence ORDER BY created_at').all();
+    for (const evidenceRow of opportunityEvidenceRows) {
+      const evidence = this.mapOpportunityEvidence(evidenceRow);
+      if (evidence.status === 'stored' && evidence.storageRef && !/^[a-f0-9]{64}$/.test(evidence.contentHash || '')) {
+        issues.push({ severity: 'error', message: `Opportunity evidence ${evidence.id} lacks a valid retained SHA-256 digest.` });
+      }
+    }
+    const siteSurveyRows = this.db.prepare('SELECT * FROM opportunity_site_surveys ORDER BY created_at').all();
+    for (const surveyRow of siteSurveyRows) {
+      const survey = this.mapOpportunitySiteSurvey(surveyRow);
+      if (!survey.integrityValid) {
+        issues.push({ severity: 'error', message: `Opportunity site survey ${survey.id} failed retained snapshot verification.` });
+        continue;
+      }
+      if (survey.status === 'approved' || survey.status === 'pending_approval') {
+        const requiredApprovalStatus = survey.status === 'approved' ? 'approved' : 'pending';
+        const approval = this.db.prepare(`
+          SELECT * FROM approvals
+          WHERE id = ? AND target_type = 'opportunity_site_survey' AND target_id = ? AND status = ?
+        `).get(survey.approvalId, survey.id, requiredApprovalStatus);
+        const approvalData = fromJson(approval?.data_json, {});
+        if (!approval || approvalData.sourceHash !== survey.sourceHash || approvalData.snapshotHash !== survey.snapshotHash) {
+          issues.push({ severity: 'error', message: `Opportunity site survey ${survey.id} lacks its matching source-bound ${requiredApprovalStatus} approval.` });
+        }
+      }
+      if (survey.snapshot?.submission && ['pending_approval', 'approved'].includes(survey.status)) {
+        try {
+          const currentSourceHash = sha256Json(this.siteSurveySourceMaterial(
+            survey.opportunityId,
+            survey.snapshot.submission.evidenceIds || []
+          ));
+          if (currentSourceHash !== survey.sourceHash) {
+            issues.push({ severity: 'warning', message: `Opportunity site survey ${survey.id} is stale because opportunity or evidence data changed.` });
+          }
+        } catch (error) {
+          issues.push({ severity: 'error', message: `Opportunity site survey ${survey.id} cannot be source-verified: ${error.code || error.message}.` });
+        }
+      }
+    }
     const approvedPerformanceTargetsWithoutApproval = Number(this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM performance_scorecard_targets targets
@@ -47945,6 +48773,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         opportunityFitAssessments: this.count('opportunity_fit_assessments'),
         bidDecisionPolicies: this.count('bid_decision_policies'),
         opportunityBidDecisions: this.count('opportunity_bid_decisions'),
+        opportunityEvidence: this.count('opportunity_evidence'),
+        opportunitySiteSurveys: this.count('opportunity_site_surveys'),
+        approvedOpportunitySiteSurveys: Number(this.db.prepare("SELECT COUNT(*) AS count FROM opportunity_site_surveys WHERE status = 'approved'").get().count || 0),
         bidPackages: this.count('bid_packages'),
         bidPackageParticipants: this.count('bid_package_participants'),
         bidCommitments: Number(this.db.prepare('SELECT COUNT(*) AS count FROM bid_packages WHERE purchase_order_id IS NOT NULL').get().count || 0),
@@ -48137,6 +48968,63 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ),
       entryKey: row.entry_key,
       entryFingerprint: row.entry_fingerprint,
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOpportunityEvidence(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      opportunityId: row.opportunity_id,
+      type: row.type,
+      title: row.title,
+      filename: row.filename,
+      mimeType: row.mime_type,
+      sizeBytes: normalizeNumber(row.size_bytes, 0),
+      storageRef: row.storage_ref,
+      status: row.status,
+      contentHash: row.content_hash || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOpportunitySiteSurvey(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const template = snapshot?.template || null;
+    return {
+      id: row.id,
+      opportunityId: row.opportunity_id,
+      status: row.status,
+      templateVersion: Math.round(normalizeNumber(row.template_version, 0)),
+      templateHash: row.template_hash,
+      scheduledAt: row.scheduled_at,
+      completedAt: row.completed_at,
+      surveyor: row.surveyor,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === SITE_SURVEY_FORMAT
+        && snapshot.surveyId === row.id
+        && snapshot.opportunityId === row.opportunity_id
+        && snapshot.sourceHash === row.source_hash
+        && template?.version === Math.round(normalizeNumber(row.template_version, 0))
+        && sha256Json(template) === row.template_hash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      scheduleEntryKey: row.schedule_entry_key,
+      scheduleFingerprint: row.schedule_fingerprint,
+      submissionEntryKey: row.submission_entry_key || null,
+      submissionFingerprint: row.submission_fingerprint || null,
       approvalId: row.approval_id || null,
       data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
@@ -51543,6 +52431,31 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.override = data.override === true || mapped?.snapshot?.override === true;
       preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'opportunity_site_survey') {
+      const row = this.db.prepare('SELECT * FROM opportunity_site_surveys WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapOpportunitySiteSurvey(row) : null;
+      primaryEffect = `Approve the preconstruction site survey for ${data.opportunityTitle || 'the opportunity'}.`;
+      addEffect(`Retain ${data.checklistItems ?? mapped?.snapshot?.submission?.checklistResponses?.length ?? 0} checklist responses, ${data.measurementCount ?? mapped?.snapshot?.submission?.measurements?.length ?? 0} measurements, and ${data.evidenceCount ?? mapped?.snapshot?.submission?.evidenceIds?.length ?? 0} private evidence file(s).`);
+      if (data.estimateReady === true || mapped?.snapshot?.readiness?.estimateReady === true) {
+        addEffect('Advance an opportunity still at site visit to estimating and expose the approved survey to its converted job.');
+      } else {
+        addEffect('Retain the reviewed survey without advancing to estimating until its critical blockers are resolved in a new survey.');
+      }
+      addSafeguard('Approval is refused if opportunity details, the standard template, any evidence metadata, or any retained checksum changed after submission.');
+      addSafeguard('Does not schedule an external appointment, contact a client, promise a date, create a quote or job, commit spend, or publish evidence.');
+      riskLevel = (data.blockers || mapped?.snapshot?.readiness?.blockers || []).length ? 'high' : 'medium';
+      preview.opportunityId = mapped?.opportunityId || data.opportunityId || null;
+      preview.opportunityTitle = data.opportunityTitle || null;
+      preview.surveyor = mapped?.surveyor || data.surveyor || null;
+      preview.surveyedAt = mapped?.completedAt || data.surveyedAt || null;
+      preview.templateVersion = mapped?.templateVersion || data.templateVersion || null;
+      preview.measurementCount = data.measurementCount ?? mapped?.snapshot?.submission?.measurements?.length ?? 0;
+      preview.evidenceCount = data.evidenceCount ?? mapped?.snapshot?.submission?.evidenceIds?.length ?? 0;
+      preview.estimateReady = data.estimateReady === true || mapped?.snapshot?.readiness?.estimateReady === true;
+      preview.blockers = data.blockers || mapped?.snapshot?.readiness?.blockers || [];
+      preview.warnings = data.warnings || mapped?.snapshot?.readiness?.warnings || [];
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'performance_scorecard_target') {
       const row = this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapPerformanceScorecardTarget(row) : null;
@@ -51668,6 +52581,9 @@ module.exports = {
   BID_DECISION_CRITERIA,
   BID_DECISION_GATES,
   MARKET_FIT_CRITERIA,
+  SITE_SURVEY_FORMAT,
+  SITE_SURVEY_TEMPLATE,
+  siteSurveyTemplateSnapshot,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS,
   AUDIT_CHAIN_ID,
