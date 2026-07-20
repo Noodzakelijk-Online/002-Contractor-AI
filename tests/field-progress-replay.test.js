@@ -25,7 +25,7 @@ function fixture(t) {
 test('operating ledger rejects unknown persistence options instead of falling back to live data', () => {
   assert.throws(
     () => new ContractorOperatingLedger({ filename: 'wrong-option.sqlite' }),
-    /Unsupported operating-ledger option\(s\): filename\. Use dbFile/
+    /Unsupported operating-ledger option\(s\): filename\. Supported options are dbFile, databaseUrl, stateProvider, logger, and clock\./
   );
 });
 
