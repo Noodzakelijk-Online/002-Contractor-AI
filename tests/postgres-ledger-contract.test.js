@@ -1167,7 +1167,8 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       rationale: 'The retained hosted evidence supports investing in this pursuit.'
     }, { actor: 'postgres_contract_test' });
     assert.equal(bidDecision.decision.status, 'pending_approval');
-    assert.equal(bidDecision.decision.snapshot.evaluation.recommendation, 'bid');
+    assert.equal(bidDecision.decision.recommendation, 'bid');
+    assert.equal(bidDecision.decision.snapshot.recommendation, 'bid');
     assert.equal(ledger.getOpportunity(opportunity.id).stage, 'estimating');
     ledger.resolveApproval(bidDecision.approval.id, {
       status: 'approved',
