@@ -52,6 +52,11 @@ function trendIcon(metric) {
   return <Minus size={15} aria-hidden="true" />
 }
 
+function evidenceSummary(metric) {
+  if (metric.availability === 'historical_state_not_retained') return 'Historical position unavailable'
+  return `${metric.sampleSize} source${metric.sampleSize === 1 ? '' : 's'}`
+}
+
 export default function PerformanceScorecard({
   scorecard,
   request,
@@ -258,7 +263,7 @@ export default function PerformanceScorecard({
                   <tr key={metric.key}>
                     <th scope="row">
                       <span>{metric.label}</span>
-                      <small>{metric.comparison === 'at_least' ? 'Minimum' : 'Maximum'} threshold</small>
+                      <small>{metric.basis === 'point_in_time' ? 'Point-in-time position' : 'Reporting-period measure'} | {metric.comparison === 'at_least' ? 'Minimum' : 'Maximum'} threshold</small>
                     </th>
                     <td><strong>{metricValue(metric.value, metric.unit)}</strong></td>
                     <td>{metricValue(metric.targetValue, metric.unit)}<small>{metric.targetSource === 'approved_revision' ? 'Approved revision' : 'Default policy'}</small></td>
@@ -267,8 +272,10 @@ export default function PerformanceScorecard({
                     </td>
                     <td>
                       <details>
-                        <summary>{metric.sampleSize} source{metric.sampleSize === 1 ? '' : 's'}</summary>
-                        <span>{metric.evidenceIds.length ? metric.evidenceIds.join(', ') : 'No retained source IDs'}</span>
+                        <summary>{evidenceSummary(metric)}</summary>
+                        <span>{metric.availability === 'historical_state_not_retained'
+                          ? 'Use the retained scorecard snapshot for the period-end operating position.'
+                          : metric.evidenceIds.length ? metric.evidenceIds.join(', ') : 'No retained source IDs'}</span>
                       </details>
                     </td>
                     <td><span className={`performance-status performance-status-${metric.status}`}>{statusLabel(metric.status)}</span></td>

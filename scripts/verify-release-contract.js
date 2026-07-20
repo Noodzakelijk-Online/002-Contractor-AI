@@ -145,6 +145,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '049_contractor_balanced_scorecard'")) {
     failures.push('Canonical Contractor Balanced Scorecard migration is missing.');
   }
+  if (!ledgerSource.includes("sourceScope: 'material_metric_inputs/v2'")) {
+    failures.push('Performance scorecards do not declare material-input source hashing.');
+  }
+  if (!serverSource.includes("historicalPointInTime: 'retained_snapshots_only'")) {
+    failures.push('Performance scorecards do not declare retained-snapshot historical point-in-time policy.');
+  }
 
   const hostedEnvironment = fs.readFileSync(path.join(root, '.env.hosted.example'), 'utf8');
   for (const key of REQUIRED_HOSTED_ENV_KEYS) {

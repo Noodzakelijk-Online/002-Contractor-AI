@@ -25,6 +25,8 @@ delete process.env.CONTRACTOR_AI_AUTH_TOKEN;
 delete process.env.DASHBOARD_AUTH_TOKEN;
 
 const app = require('../server');
+const scorecardPeriodEnd = new Date().toISOString().slice(0, 10);
+const historicalPeriodEnd = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
 
 async function request(baseUrl, route, token, options = {}) {
   const response = await fetch(`${baseUrl}${route}`, {
@@ -48,14 +50,19 @@ test('performance scorecard API enforces roles, target governance, immutable sna
   });
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
-  const fieldRead = await request(baseUrl, '/api/ledger/performance-scorecard?periodEnd=2026-07-20&weeks=13', tokens.field_worker.token);
+  const fieldRead = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${scorecardPeriodEnd}&weeks=13`, tokens.field_worker.token);
   assert.equal(fieldRead.response.status, 403);
-  const approverRead = await request(baseUrl, '/api/ledger/performance-scorecard?periodEnd=2026-07-20&weeks=13', tokens.approver);
+  const approverRead = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${scorecardPeriodEnd}&weeks=13`, tokens.approver);
   assert.equal(approverRead.response.status, 200, JSON.stringify(approverRead.body));
   assert.equal(approverRead.body.scorecard.perspectives.length, 10);
   assert.equal(approverRead.body.scorecard.metrics.length, 20);
   assert.equal(approverRead.body.scorecard.summary.noData, 20);
-  const invalidWeeks = await request(baseUrl, '/api/ledger/performance-scorecard?periodEnd=2026-07-20&weeks=2', tokens.office_operator);
+  const historicalRead = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${historicalPeriodEnd}&weeks=13`, tokens.approver);
+  assert.equal(historicalRead.response.status, 200, JSON.stringify(historicalRead.body));
+  assert.equal(historicalRead.body.scorecard.metrics.filter(metric => metric.availability === 'historical_state_not_retained').length, 9);
+  assert.equal(historicalRead.body.scorecard.sourceBasis.pointInTime.available, false);
+  assert.ok(historicalRead.body.scorecard.warnings.some(warning => warning.code === 'performance_historical_point_in_time_unavailable'));
+  const invalidWeeks = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${scorecardPeriodEnd}&weeks=2`, tokens.office_operator);
   assert.equal(invalidWeeks.response.status, 400);
   assert.equal(invalidWeeks.body.error.code, 'performance_scorecard_weeks_invalid');
 
@@ -64,7 +71,7 @@ test('performance scorecard API enforces roles, target governance, immutable sna
     targetValue: 40,
     entryKey: 'performance-api-win-target-0001',
     reason: 'Align the commercial threshold with the approved annual operating plan.',
-    periodEnd: '2026-07-20',
+    periodEnd: scorecardPeriodEnd,
     weeks: 13
   };
   const deniedTarget = await request(baseUrl, '/api/ledger/performance-scorecard/targets', tokens.approver, {
@@ -85,7 +92,7 @@ test('performance scorecard API enforces roles, target governance, immutable sna
   assert.equal(targetReplay.body.replayed, true);
   assert.equal(targetReplay.body.target.id, target.body.target.id);
   const blockedSnapshot = await request(baseUrl, '/api/ledger/performance-scorecard/snapshots', tokens.office_operator, {
-    method: 'POST', body: JSON.stringify({ periodEnd: '2026-07-20', weeks: 13 })
+    method: 'POST', body: JSON.stringify({ periodEnd: scorecardPeriodEnd, weeks: 13 })
   });
   assert.equal(blockedSnapshot.response.status, 409);
   assert.equal(blockedSnapshot.body.error.code, 'performance_scorecard_not_ready');
@@ -99,14 +106,14 @@ test('performance scorecard API enforces roles, target governance, immutable sna
   assert.equal(approvedTarget.response.status, 200, JSON.stringify(approvedTarget.body));
 
   const prepared = await request(baseUrl, '/api/ledger/performance-scorecard/snapshots', tokens.office_operator, {
-    method: 'POST', body: JSON.stringify({ periodEnd: '2026-07-20', weeks: 13 })
+    method: 'POST', body: JSON.stringify({ periodEnd: scorecardPeriodEnd, weeks: 13 })
   });
   assert.equal(prepared.response.status, 201, JSON.stringify(prepared.body));
   assert.equal(prepared.body.snapshot.status, 'pending_approval');
   assert.equal(prepared.body.snapshot.integrityValid, true);
   assert.equal(prepared.body.approval.targetType, 'performance_scorecard');
   const preparedReplay = await request(baseUrl, '/api/ledger/performance-scorecard/snapshots', tokens.office_operator, {
-    method: 'POST', body: JSON.stringify({ periodEnd: '2026-07-20', weeks: 13 })
+    method: 'POST', body: JSON.stringify({ periodEnd: scorecardPeriodEnd, weeks: 13 })
   });
   assert.equal(preparedReplay.response.status, 201, JSON.stringify(preparedReplay.body));
   assert.equal(preparedReplay.body.replayed, true);
@@ -135,14 +142,14 @@ test('performance scorecard API enforces roles, target governance, immutable sna
   });
   assert.equal(rejected.response.status, 200, JSON.stringify(rejected.body));
   const currentRequest = await request(baseUrl, '/api/ledger/performance-scorecard/snapshots', tokens.office_operator, {
-    method: 'POST', body: JSON.stringify({ periodEnd: '2026-07-20', weeks: 13 })
+    method: 'POST', body: JSON.stringify({ periodEnd: scorecardPeriodEnd, weeks: 13 })
   });
   assert.equal(currentRequest.response.status, 201, JSON.stringify(currentRequest.body));
   const approvedSnapshot = await request(baseUrl, `/api/ledger/approvals/${currentRequest.body.approval.id}/resolve`, tokens.approver, {
     method: 'POST', body: JSON.stringify({ status: 'approved', resolvedBy: 'Performance approver', reason: 'Current evidence, targets, gaps, and period verified.' })
   });
   assert.equal(approvedSnapshot.response.status, 200, JSON.stringify(approvedSnapshot.body));
-  const current = await request(baseUrl, '/api/ledger/performance-scorecard?periodEnd=2026-07-20&weeks=13', tokens.office_operator);
+  const current = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${scorecardPeriodEnd}&weeks=13`, tokens.office_operator);
   assert.equal(current.response.status, 200, JSON.stringify(current.body));
   assert.equal(current.body.scorecard.snapshotCurrent, true);
   assert.equal(current.body.scorecard.activeSnapshot.scorecardNumber, currentRequest.body.snapshot.scorecardNumber);
@@ -162,6 +169,10 @@ test('performance scorecard API enforces roles, target governance, immutable sna
   assert.equal(capabilities.response.status, 200, JSON.stringify(capabilities.body));
   assert.equal(capabilities.body.capabilities.performanceScorecard.metricCount, 20);
   assert.equal(capabilities.body.capabilities.performanceScorecard.perspectives.length, 10);
+  assert.equal(capabilities.body.capabilities.performanceScorecard.sourceHashScope, 'material_metric_inputs');
+  assert.equal(capabilities.body.capabilities.performanceScorecard.pointInTimeMetricCount, 9);
+  assert.equal(capabilities.body.capabilities.performanceScorecard.pointInTimeMetrics.length, 9);
+  assert.equal(capabilities.body.capabilities.performanceScorecard.historicalPointInTime, 'retained_snapshots_only');
   assert.equal(capabilities.body.capabilities.performanceScorecard.missingEvidencePasses, false);
   assert.equal(capabilities.body.capabilities.requestSafety.performanceTargetRevision, 'approval_gated_versioned');
 });

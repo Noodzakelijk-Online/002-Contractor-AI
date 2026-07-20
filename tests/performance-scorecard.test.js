@@ -5,9 +5,15 @@ const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
 
-function temporaryLedger(t) {
+const SCORECARD_PERIOD_END = '2026-06-30';
+const SCORECARD_PERIOD_END_CLOCK = () => new Date('2026-06-30T23:59:59.000Z');
+
+function temporaryLedger(t, options = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-performance-scorecard-'));
-  const ledger = new ContractorOperatingLedger({ dbFile: path.join(directory, 'ledger.sqlite') });
+  const ledger = new ContractorOperatingLedger({
+    dbFile: path.join(directory, 'ledger.sqlite'),
+    clock: options.clock || SCORECARD_PERIOD_END_CLOCK
+  });
   t.after(() => {
     ledger.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -22,7 +28,7 @@ function insert(database, table, row) {
 }
 
 function createJob(ledger, title, status = 'in_progress') {
-  return ledger.createIntake({
+  const job = ledger.createIntake({
     title,
     client: { name: `${title} Client` },
     status,
@@ -30,6 +36,9 @@ function createJob(ledger, title, status = 'in_progress') {
     targetCompletion: '2026-08-31',
     assignAutomatically: false
   }, { actor: 'scorecard-test' });
+  ledger.db.prepare("UPDATE jobs SET created_at = '2026-01-01T09:00:00.000Z', updated_at = '2026-01-01T09:00:00.000Z' WHERE id = ?")
+    .run(job.id);
+  return job;
 }
 
 function seedPerformanceEvidence(ledger) {
@@ -183,7 +192,7 @@ function seedPerformanceEvidence(ledger) {
 test('Contractor Balanced Scorecard derives all ten perspectives and freezes source-current results', t => {
   const ledger = temporaryLedger(t);
   const { active } = seedPerformanceEvidence(ledger);
-  let scorecard = ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 });
+  let scorecard = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   assert.equal(scorecard.perspectives.length, 10);
   assert.equal(scorecard.metrics.length, 20);
   assert.equal(scorecard.targets.effective.length, 20);
@@ -233,31 +242,31 @@ test('Contractor Balanced Scorecard derives all ten perspectives and freezes sou
     }),
     error => error.code === 'performance_target_replay_conflict' && error.statusCode === 409
   );
-  scorecard = ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 });
+  scorecard = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   assert.equal(scorecard.ready, false);
   assert.ok(scorecard.blockers.some(blocker => blocker.code === 'performance_target_revisions_pending'));
   ledger.resolveApproval(target.approval.id, { status: 'approved', resolvedBy: 'owner', reason: 'Threshold and management basis verified.' });
-  scorecard = ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 });
+  scorecard = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   assert.equal(scorecard.metrics.find(metric => metric.key === 'recordable_incidents').targetValue, 1);
   assert.equal(scorecard.metrics.find(metric => metric.key === 'recordable_incidents').status, 'on_track');
 
-  const requested = ledger.requestPerformanceScorecardSnapshot({ periodEnd: '2026-06-30', weeks: 13 }, { actor: 'office' });
+  const requested = ledger.requestPerformanceScorecardSnapshot({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 }, { actor: 'office' });
   assert.match(requested.snapshot.scorecardNumber, /^BSC-\d{4}-000001$/);
   assert.equal(requested.snapshot.status, 'pending_approval');
   assert.equal(requested.snapshot.integrityValid, true);
   assert.equal(requested.approval.targetType, 'performance_scorecard');
   assert.ok(requested.approval.decision.safeguards.some(item => /missing evidence never counts as passing/i.test(item)));
-  assert.equal(ledger.requestPerformanceScorecardSnapshot({ periodEnd: '2026-06-30', weeks: 13 }).replayed, true);
+  assert.equal(ledger.requestPerformanceScorecardSnapshot({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 }).replayed, true);
   ledger.resolveApproval(requested.approval.id, { status: 'approved', resolvedBy: 'owner', reason: 'Metric evidence, gaps, targets, and reporting period verified.' });
-  assert.equal(ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 }).snapshotCurrent, true);
+  assert.equal(ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 }).snapshotCurrent, true);
 
   insert(ledger.db, 'incident_records', {
     id: 'incident-late', job_id: active.id, incident_type: 'injury', title: 'Late source change', status: 'open', severity: 'medium',
     reported_by: 'site', occurred_at: '2026-06-20T09:00:00.000Z', resolved_at: null, approval_id: null, data_json: '{}',
     created_at: '2026-06-20T09:00:00.000Z', updated_at: '2026-06-20T09:00:00.000Z'
   });
-  assert.equal(ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 }).snapshotCurrent, false);
-  const revised = ledger.requestPerformanceScorecardSnapshot({ periodEnd: '2026-06-30', weeks: 13 });
+  assert.equal(ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 }).snapshotCurrent, false);
+  const revised = ledger.requestPerformanceScorecardSnapshot({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   ledger.db.prepare("UPDATE safety_checks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = 'safety-current-open'")
     .run('2026-06-21T09:00:00.000Z', '2026-06-21T09:00:00.000Z');
   assert.throws(
@@ -271,6 +280,39 @@ test('Contractor Balanced Scorecard derives all ten perspectives and freezes sou
     false,
     JSON.stringify(diagnostics.issues, null, 2)
   );
+});
+
+test('historical scorecards omit mutable point-in-time state and ignore unrelated post-period records', t => {
+  const ledger = temporaryLedger(t, { clock: () => new Date('2026-07-20T12:00:00.000Z') });
+  const { active } = seedPerformanceEvidence(ledger);
+  const before = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
+  const pointInTime = before.metrics.filter(metric => metric.basis === 'point_in_time');
+
+  assert.equal(pointInTime.length, 9);
+  assert.equal(pointInTime.every(metric => metric.status === 'no_data'), true);
+  assert.equal(pointInTime.every(metric => metric.availability === 'historical_state_not_retained'), true);
+  assert.equal(before.metrics.find(metric => metric.key === 'inspection_pass_rate_pct').value, 50);
+  assert.equal(before.sourceBasis.sourceScope, 'material_metric_inputs/v2');
+  assert.equal(before.sourceBasis.pointInTime.available, false);
+  assert.ok(before.warnings.some(warning => warning.code === 'performance_historical_point_in_time_unavailable'));
+
+  insert(ledger.db, 'incident_records', {
+    id: 'incident-after-period', job_id: active.id, incident_type: 'injury', title: 'Outside reporting period', status: 'open', severity: 'medium',
+    reported_by: 'site', occurred_at: '2026-07-10T09:00:00.000Z', resolved_at: null, approval_id: null, data_json: '{}',
+    created_at: '2026-07-10T09:00:00.000Z', updated_at: '2026-07-10T09:00:00.000Z'
+  });
+  ledger.db.prepare("UPDATE tools SET status = 'maintenance', updated_at = '2026-07-15T09:00:00.000Z' WHERE id = 'tool-idle'").run();
+  const afterUnrelatedChanges = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
+  assert.equal(afterUnrelatedChanges.sourceHash, before.sourceHash);
+
+  insert(ledger.db, 'incident_records', {
+    id: 'incident-late-period-evidence', job_id: active.id, incident_type: 'injury', title: 'Late retained period evidence', status: 'open', severity: 'medium',
+    reported_by: 'site', occurred_at: '2026-06-20T09:00:00.000Z', resolved_at: null, approval_id: null, data_json: '{}',
+    created_at: '2026-07-18T09:00:00.000Z', updated_at: '2026-07-18T09:00:00.000Z'
+  });
+  const afterMaterialChange = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
+  assert.notEqual(afterMaterialChange.sourceHash, before.sourceHash);
+  assert.equal(afterMaterialChange.metrics.find(metric => metric.key === 'recordable_incidents').value, 2);
 });
 
 test('portfolio margin skips active jobs that cannot satisfy cost-forecast readiness', t => {
@@ -298,7 +340,7 @@ test('portfolio margin skips active jobs that cannot satisfy cost-forecast readi
     forecastCalls += 1;
     return calculateCostForecast(...args);
   };
-  const scorecard = ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 });
+  const scorecard = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   const margin = scorecard.metrics.find(metric => metric.key === 'portfolio_margin_pct');
   assert.equal(forecastCalls, 1);
   assert.equal(margin.value, 20);
@@ -307,12 +349,12 @@ test('portfolio margin skips active jobs that cannot satisfy cost-forecast readi
 
 test('empty scorecards expose missing evidence and tampered snapshots fail diagnostics', t => {
   const ledger = temporaryLedger(t);
-  const empty = ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 13 });
+  const empty = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   assert.equal(empty.summary.overallScore, 0);
   assert.equal(empty.summary.dataCoveragePct, 0);
   assert.equal(empty.summary.noData, 20);
   assert.equal(empty.metrics.every(metric => metric.status === 'no_data'), true);
-  const requested = ledger.requestPerformanceScorecardSnapshot({ periodEnd: '2026-06-30', weeks: 13 });
+  const requested = ledger.requestPerformanceScorecardSnapshot({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   const row = ledger.db.prepare('SELECT snapshot_json FROM performance_scorecard_snapshots WHERE id = ?').get(requested.snapshot.id);
   const tampered = JSON.parse(row.snapshot_json);
   tampered.summary.overallScore = 100;
@@ -331,7 +373,7 @@ test('scorecard period validation and target bounds reject malformed requests', 
   const ledger = temporaryLedger(t);
   assert.throws(() => ledger.calculatePerformanceScorecard({ periodEnd: 'not-a-date', weeks: 13 }), error => error.code === 'performance_scorecard_period_invalid');
   assert.throws(() => ledger.calculatePerformanceScorecard({ periodEnd: '2099-12-31', weeks: 13 }), error => error.code === 'performance_scorecard_period_future');
-  assert.throws(() => ledger.calculatePerformanceScorecard({ periodEnd: '2026-06-30', weeks: 3 }), error => error.code === 'performance_scorecard_weeks_invalid');
+  assert.throws(() => ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 3 }), error => error.code === 'performance_scorecard_weeks_invalid');
   assert.throws(
     () => ledger.requestPerformanceScorecardTarget({ metricKey: 'unknown', targetValue: 1, entryKey: 'performance-invalid-target', reason: 'Invalid metric should fail.' }),
     error => error.code === 'performance_metric_invalid'

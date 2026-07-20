@@ -1030,6 +1030,18 @@ const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
   { key: 'environmental_approval_rate_pct', perspective: 'sustainability', label: 'Environmental records approved', unit: 'percent', comparison: 'at_least', target: 95 },
   { key: 'emissions_evidence_coverage_pct', perspective: 'sustainability', label: 'Emissions evidence coverage', unit: 'percent', comparison: 'at_least', target: 100 }
 ]);
+const PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS = Object.freeze([
+  'open_nonconformances',
+  'overdue_active_jobs',
+  'assignment_coverage_pct',
+  'portfolio_margin_pct',
+  'overdue_receivable_rate_pct',
+  'follow_up_compliance_pct',
+  'equipment_utilization_pct',
+  'permit_validity_pct',
+  'trade_partner_compliance_pct'
+]);
+const PERFORMANCE_SCORECARD_POINT_IN_TIME_METRIC_SET = new Set(PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS);
 const PRODUCTION_BASELINE_FORMAT = 'contractor-ai-production-baseline/v1';
 const WEEKLY_TIMESHEET_FORMAT = 'contractor-ai-weekly-timesheet/v1';
 const TIMESHEET_EXPORT_FORMAT = 'contractor-ai-timesheet-export/v1';
@@ -3923,15 +3935,16 @@ const LEDGER_SCHEMA_MIGRATIONS = [
 
 class ContractorOperatingLedger {
   constructor(options = {}) {
-    const unknownOptions = Object.keys(options).filter(key => !['dbFile', 'databaseUrl', 'stateProvider', 'logger'].includes(key));
+    const unknownOptions = Object.keys(options).filter(key => !['dbFile', 'databaseUrl', 'stateProvider', 'logger', 'clock'].includes(key));
     if (unknownOptions.length) {
-      throw new Error(`Unsupported operating-ledger option(s): ${unknownOptions.join(', ')}. Use dbFile for the SQLite path.`);
+      throw new Error(`Unsupported operating-ledger option(s): ${unknownOptions.join(', ')}. Supported options are dbFile, databaseUrl, stateProvider, logger, and clock.`);
     }
-    const { dbFile, databaseUrl, stateProvider, logger } = options;
+    const { dbFile, databaseUrl, stateProvider, logger, clock } = options;
     this.dbFile = dbFile || path.join(__dirname, 'data', 'contractor-ledger.sqlite');
     this.databaseMode = databaseUrl ? 'postgres' : 'sqlite';
     this.stateProvider = typeof stateProvider === 'function' ? stateProvider : () => ({ jobs: [], workers: [], tools: [] });
     this.logger = typeof logger === 'function' ? logger : () => {};
+    this.clock = typeof clock === 'function' ? clock : () => new Date();
     this.transactionDepth = 0;
     if (databaseUrl) {
       this.db = new PostgresSyncDatabase({ connectionString: databaseUrl });
@@ -10748,6 +10761,13 @@ class ContractorOperatingLedger {
     if (row.status !== 'draft' || row.quote_id || row.snapshot_hash) {
       throw ledgerInputError('takeoff_read_only', 'Converted or cancelled takeoffs are immutable.', null, 409);
     }
+  }
+
+  currentTimeIso() {
+    const value = this.clock();
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) throw new Error('Operating-ledger clock returned an invalid date.');
+    return date.toISOString();
   }
 
   refreshTakeoffTotals(takeoffId) {
@@ -24738,12 +24758,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   calculatePerformanceScorecard(options = {}) {
+    const calculationDate = this.currentTimeIso().slice(0, 10);
     const periodEnd = this.cashFlowDate(
-      options.periodEnd || options.period_end || nowIso().slice(0, 10),
+      options.periodEnd || options.period_end || calculationDate,
       'Scorecard period end',
       'performance_scorecard_period_invalid'
     );
-    if (periodEnd > nowIso().slice(0, 10)) {
+    if (periodEnd > calculationDate) {
       throw ledgerInputError('performance_scorecard_period_future', 'Scorecard period end cannot be in the future.');
     }
     const weeks = Number(options.weeks ?? PERFORMANCE_SCORECARD_DEFAULT_WEEKS);
@@ -24764,13 +24785,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const percent = (numerator, denominator) => denominator > 0
       ? roundMeasurement(numerator / denominator * 100, 1)
       : null;
-    const compact = (rows, fields) => rows.map(row => Object.fromEntries([
-      ['id', row.id],
-      ...fields.map(field => [field, row[field] ?? null])
-    ]));
+    const pointInTimeAvailable = periodEnd === calculationDate;
     const excludedJobStatuses = new Set(['cancelled', 'canceled', 'rejected', 'void']);
     const activeJobStatuses = new Set(['completed', 'archived', 'cancelled', 'canceled', 'rejected', 'void']);
-    const jobs = this.db.prepare('SELECT * FROM jobs ORDER BY id').all();
+    const jobs = this.db.prepare('SELECT * FROM jobs ORDER BY id').all().filter(row => {
+      const createdDate = dateOnly(row.created_at);
+      return !createdDate || createdDate <= periodEnd;
+    });
     const operationalJobs = jobs.filter(row => !excludedJobStatuses.has(normalizeStatus(row.status, '')));
     const activeJobs = operationalJobs.filter(row => !activeJobStatuses.has(normalizeStatus(row.status, '')));
     const incidents = this.db.prepare('SELECT * FROM incident_records ORDER BY id').all();
@@ -24798,7 +24819,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       WHERE status IN ('approved', 'locked', 'baseline') AND budget_amount > 0
     `).all().map(row => row.job_id));
     const portfolioForecasts = [];
-    for (const job of activeJobs.filter(row => forecastEligibleJobIds.has(row.id))) {
+    for (const job of pointInTimeAvailable ? activeJobs.filter(row => forecastEligibleJobIds.has(row.id)) : []) {
       try {
         const forecast = this.calculateCostForecast(job.id);
         if (forecast.ready && forecast.summary.contractValue > 0 && forecast.summary.projectedMarginPercent !== null) {
@@ -24815,7 +24836,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
     }
 
-    const metricInputs = (start, end, currentWindow) => {
+    const metricInputs = (start, end, includePointInTime) => {
       const periodIncidents = incidents.filter(row => operationalJobIds.has(row.job_id)
         && inWindow(row.occurred_at || row.created_at, start, end)
         && !['cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
@@ -24901,28 +24922,28 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         recordable_incidents: { value: operationalJobs.length ? periodIncidents.length : null, sampleSize: operationalJobs.length, evidenceIds: periodIncidents.map(row => row.id), periodBased: true },
         safety_action_closure_pct: { value: percent(closedSafetyChecks.length, periodSafetyChecks.length), sampleSize: periodSafetyChecks.length, numerator: closedSafetyChecks.length, denominator: periodSafetyChecks.length, evidenceIds: periodSafetyChecks.map(row => row.id), periodBased: true },
         inspection_pass_rate_pct: { value: percent(passedInspections.length, periodInspections.length), sampleSize: periodInspections.length, numerator: passedInspections.length, denominator: periodInspections.length, evidenceIds: periodInspections.map(row => row.id), periodBased: true },
-        open_nonconformances: { value: currentWindow && activeJobs.length ? openNcrs.length : null, sampleSize: currentWindow ? activeJobs.length : 0, evidenceIds: currentWindow ? openNcrs.map(row => row.id) : [], periodBased: false },
+        open_nonconformances: { value: includePointInTime && activeJobs.length ? openNcrs.length : null, sampleSize: includePointInTime ? activeJobs.length : 0, evidenceIds: includePointInTime ? openNcrs.map(row => row.id) : [], periodBased: false },
         on_time_completion_pct: { value: percent(completedOnTime.length, completedJobs.length), sampleSize: completedJobs.length, numerator: completedOnTime.length, denominator: completedJobs.length, evidenceIds: completedJobs.map(row => row.id), periodBased: true },
-        overdue_active_jobs: { value: currentWindow && activeJobs.length ? overdueJobs.length : null, sampleSize: currentWindow ? activeJobs.length : 0, evidenceIds: currentWindow ? overdueJobs.map(row => row.id) : [], periodBased: false },
+        overdue_active_jobs: { value: includePointInTime && activeJobs.length ? overdueJobs.length : null, sampleSize: includePointInTime ? activeJobs.length : 0, evidenceIds: includePointInTime ? overdueJobs.map(row => row.id) : [], periodBased: false },
         warranty_resolution_pct: { value: percent(resolvedWarranty.length, periodWarranty.length), sampleSize: periodWarranty.length, numerator: resolvedWarranty.length, denominator: periodWarranty.length, evidenceIds: periodWarranty.map(row => row.id), periodBased: true },
         handover_delivery_pct: { value: percent(completedJobs.filter(row => handoverDeliveredJobIds.has(row.id)).length, completedJobs.length), sampleSize: completedJobs.length, numerator: completedJobs.filter(row => handoverDeliveredJobIds.has(row.id)).length, denominator: completedJobs.length, evidenceIds: completedJobs.map(row => row.id), periodBased: true },
         billable_utilization_pct: { value: percent(billableHours, totalHours), sampleSize: periodTimesheets.length, numerator: roundMeasurement(billableHours, 2), denominator: roundMeasurement(totalHours, 2), evidenceIds: periodTimesheets.map(row => row.id), periodBased: true },
-        assignment_coverage_pct: { value: currentWindow ? percent(assignedJobIds.size, activeJobs.length) : null, sampleSize: currentWindow ? activeJobs.length : 0, numerator: currentWindow ? assignedJobIds.size : null, denominator: currentWindow ? activeJobs.length : null, evidenceIds: currentWindow ? [...assignedJobIds].sort() : [], periodBased: false },
-        portfolio_margin_pct: { value: currentWindow ? (portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length ? roundMeasurement(portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).reduce((sum, row) => sum + row.projectedMarginPercent, 0) / portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length, 1) : null) : null, sampleSize: currentWindow ? portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length : 0, evidenceIds: currentWindow ? portfolioForecasts.map(row => row.jobId) : [], periodBased: false },
-        overdue_receivable_rate_pct: { value: currentWindow ? percent(overdueInvoices.length, outstandingInvoices.length) : null, sampleSize: currentWindow ? outstandingInvoices.length : 0, numerator: currentWindow ? overdueInvoices.length : null, denominator: currentWindow ? outstandingInvoices.length : null, evidenceIds: currentWindow ? outstandingInvoices.map(row => row.id) : [], periodBased: false },
+        assignment_coverage_pct: { value: includePointInTime ? percent(assignedJobIds.size, activeJobs.length) : null, sampleSize: includePointInTime ? activeJobs.length : 0, numerator: includePointInTime ? assignedJobIds.size : null, denominator: includePointInTime ? activeJobs.length : null, evidenceIds: includePointInTime ? [...assignedJobIds].sort() : [], periodBased: false },
+        portfolio_margin_pct: { value: includePointInTime ? (portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length ? roundMeasurement(portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).reduce((sum, row) => sum + row.projectedMarginPercent, 0) / portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length, 1) : null) : null, sampleSize: includePointInTime ? portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length : 0, evidenceIds: includePointInTime ? portfolioForecasts.map(row => row.jobId) : [], periodBased: false },
+        overdue_receivable_rate_pct: { value: includePointInTime ? percent(overdueInvoices.length, outstandingInvoices.length) : null, sampleSize: includePointInTime ? outstandingInvoices.length : 0, numerator: includePointInTime ? overdueInvoices.length : null, denominator: includePointInTime ? outstandingInvoices.length : null, evidenceIds: includePointInTime ? outstandingInvoices.map(row => row.id) : [], periodBased: false },
         opportunity_win_rate_pct: { value: percent(wonOpportunities.length, decidedOpportunities.length), sampleSize: decidedOpportunities.length, numerator: wonOpportunities.length, denominator: decidedOpportunities.length, evidenceIds: decidedOpportunities.map(row => row.id), periodBased: true },
-        follow_up_compliance_pct: { value: currentWindow ? percent(compliantFollowUps.length, openOpportunities.length) : null, sampleSize: currentWindow ? openOpportunities.length : 0, numerator: currentWindow ? compliantFollowUps.length : null, denominator: currentWindow ? openOpportunities.length : null, evidenceIds: currentWindow ? openOpportunities.map(row => row.id) : [], periodBased: false },
-        equipment_utilization_pct: { value: currentWindow ? percent(activeTools.filter(row => utilizedToolIds.has(row.id)).length, activeTools.length) : null, sampleSize: currentWindow ? activeTools.length : 0, numerator: currentWindow ? activeTools.filter(row => utilizedToolIds.has(row.id)).length : null, denominator: currentWindow ? activeTools.length : null, evidenceIds: currentWindow ? activeTools.map(row => row.id) : [], periodBased: false },
+        follow_up_compliance_pct: { value: includePointInTime ? percent(compliantFollowUps.length, openOpportunities.length) : null, sampleSize: includePointInTime ? openOpportunities.length : 0, numerator: includePointInTime ? compliantFollowUps.length : null, denominator: includePointInTime ? openOpportunities.length : null, evidenceIds: includePointInTime ? openOpportunities.map(row => row.id) : [], periodBased: false },
+        equipment_utilization_pct: { value: includePointInTime ? percent(activeTools.filter(row => utilizedToolIds.has(row.id)).length, activeTools.length) : null, sampleSize: includePointInTime ? activeTools.length : 0, numerator: includePointInTime ? activeTools.filter(row => utilizedToolIds.has(row.id)).length : null, denominator: includePointInTime ? activeTools.length : null, evidenceIds: includePointInTime ? activeTools.map(row => row.id) : [], periodBased: false },
         equipment_return_compliance_pct: { value: percent(onTimeReturns.length, returnedSessions.length), sampleSize: returnedSessions.length, numerator: onTimeReturns.length, denominator: returnedSessions.length, evidenceIds: returnedSessions.map(row => row.id), periodBased: true },
-        permit_validity_pct: { value: currentWindow ? percent(validPermits.length, activePermits.length) : null, sampleSize: currentWindow ? activePermits.length : 0, numerator: currentWindow ? validPermits.length : null, denominator: currentWindow ? activePermits.length : null, evidenceIds: currentWindow ? activePermits.map(row => row.id) : [], periodBased: false },
-        trade_partner_compliance_pct: { value: currentWindow ? percent(compliantPartners.length, activePartners.length) : null, sampleSize: currentWindow ? activePartners.length : 0, numerator: currentWindow ? compliantPartners.length : null, denominator: currentWindow ? activePartners.length : null, evidenceIds: currentWindow ? activePartners.map(row => row.id) : [], periodBased: false },
+        permit_validity_pct: { value: includePointInTime ? percent(validPermits.length, activePermits.length) : null, sampleSize: includePointInTime ? activePermits.length : 0, numerator: includePointInTime ? validPermits.length : null, denominator: includePointInTime ? activePermits.length : null, evidenceIds: includePointInTime ? activePermits.map(row => row.id) : [], periodBased: false },
+        trade_partner_compliance_pct: { value: includePointInTime ? percent(compliantPartners.length, activePartners.length) : null, sampleSize: includePointInTime ? activePartners.length : 0, numerator: includePointInTime ? compliantPartners.length : null, denominator: includePointInTime ? activePartners.length : null, evidenceIds: includePointInTime ? activePartners.map(row => row.id) : [], periodBased: false },
         environmental_approval_rate_pct: { value: percent(approvedEnvironmental.length, periodEnvironmental.length), sampleSize: periodEnvironmental.length, numerator: approvedEnvironmental.length, denominator: periodEnvironmental.length, evidenceIds: periodEnvironmental.map(row => row.id), periodBased: true },
         emissions_evidence_coverage_pct: { value: percent(evidenceCovered.length, periodEnvironmental.length), sampleSize: periodEnvironmental.length, numerator: evidenceCovered.length, denominator: periodEnvironmental.length, evidenceIds: periodEnvironmental.map(row => row.id), periodBased: true }
       };
       return values;
     };
 
-    const currentInputs = metricInputs(periodStart, periodEnd, true);
+    const currentInputs = metricInputs(periodStart, periodEnd, pointInTimeAvailable);
     const priorInputs = metricInputs(priorPeriodStart, priorPeriodEnd, false);
     const targetRegister = this.listPerformanceScorecardTargets({ includeHistory: true });
     const targetByMetric = new Map(targetRegister.effective.map(target => [target.metricKey, target]));
@@ -24960,6 +24981,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         numerator: input.numerator ?? null,
         denominator: input.denominator ?? null,
         evidenceIds: input.evidenceIds,
+        basis: PERFORMANCE_SCORECARD_POINT_IN_TIME_METRIC_SET.has(definition.key) ? 'point_in_time' : 'reporting_period',
+        availability: value === null || value === undefined
+          ? (PERFORMANCE_SCORECARD_POINT_IN_TIME_METRIC_SET.has(definition.key) && !pointInTimeAvailable ? 'historical_state_not_retained' : 'no_retained_evidence')
+          : 'available',
         score,
         status: value === null || value === undefined ? 'no_data' : meetsTarget ? 'on_track' : score >= 90 ? 'watch' : 'off_track'
       };
@@ -24999,32 +25024,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const targetHash = sha256Json(targetBasis);
     const sourceBasis = {
       format: PERFORMANCE_SCORECARD_FORMAT,
+      sourceScope: 'material_metric_inputs/v2',
       periodStart,
       periodEnd,
       priorPeriodStart,
       priorPeriodEnd,
       weeks,
-      evidence: {
-        jobs: compact(jobs, ['status', 'target_completion', 'scheduled_end', 'contract_value', 'updated_at', 'data_json']),
-        incidents: compact(incidents, ['job_id', 'status', 'severity', 'occurred_at', 'updated_at']),
-        safetyChecks: compact(safetyChecks, ['job_id', 'status', 'due_at', 'completed_at', 'updated_at']),
-        checklistSubmissions: compact(checklistSubmissions, ['job_id', 'status', 'result', 'submitted_at', 'updated_at']),
-        nonconformances: compact(nonconformances, ['job_id', 'status', 'closed_at', 'updated_at']),
-        warrantyClaims: compact(warrantyClaims, ['job_id', 'status', 'resolved_at', 'created_at', 'updated_at']),
-        handoverCommunications: compact(communications.filter(row => fromJson(row.data_json, {}).source === 'handover_issue_package'), ['job_id', 'status', 'sent_at', 'updated_at', 'data_json']),
-        timesheets: compact(timesheets, ['worker_id', 'period_start', 'period_end', 'status', 'total_hours', 'billable_hours', 'source_hash', 'updated_at']),
-        assignments: compact(assignments, ['job_id', 'worker_id', 'status', 'scheduled_start', 'scheduled_end', 'updated_at']),
-        invoices: compact(invoices, ['job_id', 'status', 'total', 'due_at', 'updated_at']),
-        payments: compact(payments, ['invoice_id', 'status', 'amount', 'paid_at', 'updated_at']),
-        opportunities: compact(opportunities, ['stage', 'next_follow_up_at', 'updated_at']),
-        tools: compact(tools, ['status', 'updated_at']),
-        custodySessions: compact(custodySessions, ['tool_id', 'status', 'due_back_at', 'returned_at', 'updated_at']),
-        permits: compact(permits, ['job_id', 'status', 'valid_from', 'expires_at', 'updated_at']),
-        tradePartners: compact(partners, ['status', 'insurance_expires_at', 'vca_expires_at', 'updated_at']),
-        environmentalActivities: compact(environmentalActivities, ['job_id', 'status', 'activity_date', 'factor_source', 'factor_reference', 'evidence_reference', 'evidence_document_id', 'updated_at']),
-        portfolioForecasts
+      pointInTime: {
+        available: pointInTimeAvailable,
+        asOfDate: periodEnd,
+        historicalPolicy: 'retained_snapshots_only'
       },
-      metrics: metrics.map(metric => ({ key: metric.key, value: metric.value, priorValue: metric.priorValue, sampleSize: metric.sampleSize, evidenceIds: metric.evidenceIds }))
+      portfolioForecasts,
+      metrics: metrics.map(metric => ({
+        key: metric.key,
+        basis: metric.basis,
+        availability: metric.availability,
+        value: metric.value,
+        priorValue: metric.priorValue,
+        sampleSize: metric.sampleSize,
+        numerator: metric.numerator,
+        denominator: metric.denominator,
+        evidenceIds: metric.evidenceIds
+      }))
     };
     const sourceHash = sha256Json(sourceBasis);
     const snapshots = this.db.prepare(`
@@ -25039,6 +25061,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       targetIds: targetRegister.pending.map(target => target.id)
     }] : [];
     const warnings = [];
+    const historicalPointInTimeCount = metrics.filter(metric => metric.availability === 'historical_state_not_retained').length;
+    if (historicalPointInTimeCount) warnings.push({
+      code: 'performance_historical_point_in_time_unavailable',
+      message: `${historicalPointInTimeCount} point-in-time KPI(s) are unavailable for a past period because mutable operating state is not reconstructed. Use retained snapshots for historical positions.`
+    });
     if (summary.noData) warnings.push({ code: 'performance_metrics_missing_data', message: `${summary.noData} of ${summary.metricCount} KPI(s) lack retained evidence for this period.` });
     if (summary.offTrack) warnings.push({ code: 'performance_metrics_off_track', message: `${summary.offTrack} KPI(s) are materially below target.` });
     return {
@@ -25069,6 +25096,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         targetChanges: 'approval_gated',
         missingEvidencePasses: false,
         immutableSnapshots: true,
+        sourceHashScope: 'material_metric_inputs',
+        historicalPointInTime: 'retained_snapshots_only',
         externalCommitmentsCreated: 0,
         fundsMoved: false,
         messagesSent: false
@@ -50021,6 +50050,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 module.exports = {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
+  PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS,
   AUDIT_CHAIN_ID,
   AUDIT_CHAIN_FORMAT,

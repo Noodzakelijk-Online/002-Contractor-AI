@@ -6,7 +6,12 @@ const crypto = require('crypto');
 const zlib = require('node:zlib');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
-const { ContractorOperatingLedger, LEDGER_CAPABILITY_BLUEPRINT, JOB_OPERATING_PLAYBOOKS } = require('./operating-ledger');
+const {
+  ContractorOperatingLedger,
+  LEDGER_CAPABILITY_BLUEPRINT,
+  PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
+  JOB_OPERATING_PLAYBOOKS
+} = require('./operating-ledger');
 const { OpenMeteoWeatherService } = require('./weather-service');
 const { EvidenceStorageError, createEvidenceStorage } = require('./evidence-storage');
 const { verifySqliteBackupDatabase } = require('./scripts/restore-local-backup');
@@ -6763,6 +6768,10 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         metricCount: 20,
         periodWeeks: { default: 13, minimum: 4, maximum: 52 },
         priorPeriodComparison: true,
+        sourceHashScope: 'material_metric_inputs',
+        pointInTimeMetrics: PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
+        pointInTimeMetricCount: PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS.length,
+        historicalPointInTime: 'retained_snapshots_only',
         missingEvidencePasses: false,
         targetRevisions: 'approval_gated_versioned',
         immutableSnapshots: true,

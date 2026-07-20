@@ -13,6 +13,17 @@ test('operator governs KPI targets and freezes the Contractor Balanced Scorecard
   await expect(scorecard.getByText('20 governed KPIs')).toBeVisible();
   await expect(scorecard.getByText('No data', { exact: true }).first()).toBeVisible();
 
+  const today = new Date().toISOString().slice(0, 10);
+  const historicalPeriodEnd = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  await scorecard.getByLabel('Period end').fill(historicalPeriodEnd);
+  await scorecard.getByRole('button', { name: 'Recalculate' }).click();
+  await expect(scorecard.getByText(/9 point-in-time KPI\(s\) are unavailable for a past period/)).toBeVisible();
+  await scorecard.getByRole('tab', { name: /^Quality/ }).click();
+  await expect(scorecard.getByText('Historical position unavailable').first()).toBeVisible();
+  await scorecard.getByLabel('Period end').fill(today);
+  await scorecard.getByRole('button', { name: 'Recalculate' }).click();
+  await expect(scorecard.getByText(/point-in-time KPI\(s\) are unavailable for a past period/)).toHaveCount(0);
+
   for (const name of ['Safety', 'Quality', 'Delivery', 'Customer', 'People', 'Financial', 'Commercial', 'Assets', 'Compliance', 'Sustainability']) {
     await scorecard.getByRole('tab', { name: new RegExp(`^${name}`) }).click();
     await expect(scorecard.getByTestId('performance-metric-table').locator('tbody tr')).toHaveCount(2);
