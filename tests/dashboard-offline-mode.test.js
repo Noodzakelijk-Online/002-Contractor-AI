@@ -9,6 +9,7 @@ const dashboardSource = [
   fs.readFileSync(path.join(__dirname, '..', 'dashboard-format.js'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'JobWorkspaceControls.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'ResourcesWorkspace.jsx'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, '..', 'components', 'AuditHistory.jsx'), 'utf8'),
 ].join('\n');
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
@@ -23,8 +24,10 @@ test('React dashboard uses ledger endpoints instead of cached or simulated contr
 
 test('large navigation and job controls are loaded through local suspense boundaries', () => {
   assert.match(dashboardRootSource, /lazy\(\(\) => import\('\.\/components\/ResourcesWorkspace'\)\)/);
+  assert.match(dashboardRootSource, /const AuditHistory = lazy\(\(\) => import\('\.\/components\/AuditHistory'\)\)/);
   assert.match(dashboardRootSource, /const loadJobWorkspaceControls = \(\) => import\('\.\/components\/JobWorkspaceControls'\)/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="resource controls">/);
+  assert.match(dashboardRootSource, /<LazyControlBoundary label="audit history">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="job controls" mode="job">/);
