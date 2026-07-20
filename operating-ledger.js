@@ -108,6 +108,7 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
 
 const LEDGER_CAPABILITY_REQUIREMENTS = {
   preconstruction: [
+    { key: 'market_fit', label: 'Approved ICP and service-area policy', table: 'market_fit_profiles', readyStatuses: ['approved'], ledgerOnly: true },
     { key: 'intake', label: 'Client intake', table: 'job_requests', detailKey: 'request' },
     { key: 'bid_package', label: 'Bid / tender package', table: 'bid_packages', detailKey: 'bidPackages' },
     { key: 'takeoff', label: 'Quantity takeoff', table: 'takeoff_sheets', detailKey: 'takeoffs' },
@@ -1007,6 +1008,15 @@ const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
 const CASH_FLOW_FORECAST_FORMAT = 'contractor-ai-cash-flow-forecast/v1';
 const CASH_FLOW_FORECAST_WEEKS = 13;
 const PERFORMANCE_SCORECARD_FORMAT = 'contractor-ai-performance-scorecard/v1';
+const MARKET_FIT_PROFILE_FORMAT = 'contractor-ai-market-fit-profile/v1';
+const MARKET_FIT_ASSESSMENT_FORMAT = 'contractor-ai-market-fit-assessment/v1';
+const MARKET_FIT_CRITERIA = Object.freeze([
+  { key: 'service', label: 'Service fit', weight: 30 },
+  { key: 'service_area', label: 'Service-area fit', weight: 30 },
+  { key: 'job_value', label: 'Job-value fit', weight: 20 },
+  { key: 'client_segment', label: 'Client-segment fit', weight: 10 },
+  { key: 'source_channel', label: 'Lead-source fit', weight: 10 }
+]);
 const PERFORMANCE_SCORECARD_DEFAULT_WEEKS = 13;
 const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
   { key: 'recordable_incidents', perspective: 'safety', label: 'Recordable incidents', unit: 'count', comparison: 'at_most', target: 0 },
@@ -3930,6 +3940,54 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON performance_scorecard_snapshots(status, version_number DESC);
       `);
     }
+  },
+  {
+    version: '050_governed_market_fit',
+    description: 'Retain approval-gated Ideal Customer Profile and service-area policy revisions with source-bound opportunity fit assessments.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS market_fit_profiles (
+          id TEXT PRIMARY KEY,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          profile_name TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_market_fit_one_approved
+          ON market_fit_profiles(status)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_market_fit_profile_status
+          ON market_fit_profiles(status, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS opportunity_fit_assessments (
+          id TEXT PRIMARY KEY,
+          opportunity_id TEXT NOT NULL REFERENCES opportunities(id),
+          profile_id TEXT NOT NULL REFERENCES market_fit_profiles(id),
+          status TEXT NOT NULL DEFAULT 'retained',
+          score REAL NOT NULL,
+          recommendation TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_opportunity_fit_history
+          ON opportunity_fit_assessments(opportunity_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_opportunity_fit_profile
+          ON opportunity_fit_assessments(profile_id, recommendation, created_at DESC);
+      `);
+    }
   }
 ];
 
@@ -5582,7 +5640,7 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
-    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots'].includes(table)) {
+    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots', 'market_fit_profiles'].includes(table)) {
       return { from: `${table} AS records`, condition: '1 = 1' };
     }
     if (table === 'jobs') {
@@ -6295,6 +6353,7 @@ class ContractorOperatingLedger {
         convertedJobId: null,
         data: {
           notes: normalizeText(payload.notes, '') || null,
+          clientSegment: normalizeText(payload.clientSegment || payload.client_segment, '') || null,
           externalCommitments: 0
         },
         createdAt: timestamp,
@@ -6376,6 +6435,9 @@ class ContractorOperatingLedger {
         ...before.data,
         ...(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {}),
         notes: payload.notes === undefined ? before.data?.notes || null : normalizeText(payload.notes, '') || null,
+        clientSegment: payload.clientSegment === undefined && payload.client_segment === undefined
+          ? before.data?.clientSegment || null
+          : normalizeText(payload.clientSegment || payload.client_segment, '') || null,
         externalCommitments: 0
       };
       this.db.prepare(`
@@ -6461,6 +6523,7 @@ class ContractorOperatingLedger {
       ? this.listJobs({ includeArchived: true, limit: 500 }).find(job => job.id === opportunity.convertedJobId) || null
       : null;
     opportunity.bidPackages = this.listBidPackages({ opportunityId, includeClosed: true, limit: 100 });
+    opportunity.marketFit = this.assessOpportunityMarketFit(opportunityId);
     return opportunity;
   }
 
@@ -6490,6 +6553,412 @@ class ContractorOperatingLedger {
         weightedValue: roundMoney(open.reduce((sum, opportunity) => sum + opportunity.weightedValue, 0))
       },
       stages
+    };
+  }
+
+  normalizeMarketFitProfile(payload = {}, versionNumber = 1, actor = 'Contractor.AI') {
+    const normalizeList = (value, field, { required = true, max = 50 } = {}) => {
+      const raw = Array.isArray(value)
+        ? value
+        : String(value || '').split(/[\n,;]/);
+      const unique = [];
+      const seen = new Set();
+      for (const item of raw) {
+        const label = normalizeText(typeof item === 'object' ? item?.label || item?.value || item?.key : item, '');
+        if (!label) continue;
+        const key = label.toLocaleLowerCase('en-US');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(label);
+      }
+      if (required && unique.length === 0) {
+        throw ledgerInputError('market_fit_profile_incomplete', `${field} requires at least one retained value.`, { field });
+      }
+      if (unique.length > max) {
+        throw ledgerInputError('market_fit_profile_limit', `${field} supports at most ${max} values.`, { field, max });
+      }
+      return unique;
+    };
+    const profileName = normalizeText(payload.profileName || payload.profile_name || payload.name, '');
+    if (profileName.length < 2 || profileName.length > 120) {
+      throw ledgerInputError('market_fit_profile_name_invalid', 'The market-fit profile name must contain 2 to 120 characters.');
+    }
+    const services = normalizeList(payload.services || payload.serviceLines || payload.service_lines, 'services');
+    const clientSegments = normalizeList(payload.clientSegments || payload.client_segments, 'clientSegments');
+    const sourceChannels = normalizeList(payload.sourceChannels || payload.source_channels, 'sourceChannels');
+    const rawAreas = payload.serviceAreas || payload.service_areas;
+    if (!Array.isArray(rawAreas) || rawAreas.length === 0 || rawAreas.length > 100) {
+      throw ledgerInputError('market_fit_service_areas_invalid', 'The service-area matrix requires 1 to 100 rows.');
+    }
+    const areaKeys = new Set();
+    const serviceAreas = rawAreas.map((area, index) => {
+      if (!area || typeof area !== 'object' || Array.isArray(area)) {
+        throw ledgerInputError('market_fit_service_area_invalid', `Service-area row ${index + 1} must be an object.`);
+      }
+      const label = normalizeText(area.label || area.name, '');
+      if (label.length < 2 || label.length > 120) {
+        throw ledgerInputError('market_fit_service_area_label_invalid', `Service-area row ${index + 1} needs a 2 to 120 character label.`);
+      }
+      const key = normalizeText(area.key, label)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 80);
+      if (!key || areaKeys.has(key)) {
+        throw ledgerInputError('market_fit_service_area_key_invalid', `Service-area row ${index + 1} has a missing or duplicate key.`, { key });
+      }
+      areaKeys.add(key);
+      const countries = normalizeList(area.countries || area.country || 'NL', `serviceAreas[${index}].countries`, { max: 20 })
+        .map(country => country.toUpperCase());
+      const postalPrefixes = normalizeList(area.postalPrefixes || area.postal_prefixes, `serviceAreas[${index}].postalPrefixes`, { required: false, max: 100 })
+        .map(prefix => prefix.toUpperCase().replace(/\s+/g, ''));
+      const cities = normalizeList(area.cities, `serviceAreas[${index}].cities`, { required: false, max: 100 });
+      if (!postalPrefixes.length && !cities.length) {
+        throw ledgerInputError('market_fit_service_area_evidence_invalid', `Service-area row ${index + 1} requires at least one postal prefix or city.`);
+      }
+      const priority = normalizeStatus(area.priority, 'primary');
+      if (!['primary', 'secondary', 'exception'].includes(priority)) {
+        throw ledgerInputError('market_fit_service_area_priority_invalid', `Service-area row ${index + 1} priority must be primary, secondary, or exception.`);
+      }
+      const maxTravelMinutes = area.maxTravelMinutes === undefined && area.max_travel_minutes === undefined
+        ? null
+        : Math.round(normalizeNumber(area.maxTravelMinutes ?? area.max_travel_minutes, -1));
+      if (maxTravelMinutes !== null && (maxTravelMinutes < 0 || maxTravelMinutes > 480)) {
+        throw ledgerInputError('market_fit_travel_limit_invalid', 'Maximum service-area travel time must be between 0 and 480 minutes.');
+      }
+      return { key, label, countries, postalPrefixes, cities, priority, maxTravelMinutes };
+    });
+    const minJobValue = roundMoney(normalizeNumber(payload.minJobValue ?? payload.min_job_value, 0));
+    const maxJobValue = roundMoney(normalizeNumber(payload.maxJobValue ?? payload.max_job_value, 1_000_000_000));
+    if (minJobValue < 0 || maxJobValue <= 0 || maxJobValue < minJobValue) {
+      throw ledgerInputError('market_fit_value_range_invalid', 'The job-value range must be non-negative and the maximum cannot be below the minimum.');
+    }
+    const fitThreshold = roundMeasurement(normalizeNumber(payload.fitThreshold ?? payload.fit_threshold, 70), 1);
+    if (fitThreshold < 0 || fitThreshold > 100) {
+      throw ledgerInputError('market_fit_threshold_invalid', 'The fit threshold must be between 0 and 100.');
+    }
+    return {
+      format: MARKET_FIT_PROFILE_FORMAT,
+      versionNumber,
+      profileName,
+      criteria: MARKET_FIT_CRITERIA,
+      policy: {
+        services,
+        clientSegments,
+        sourceChannels,
+        minJobValue,
+        maxJobValue,
+        fitThreshold,
+        allowUnlistedServices: normalizeBoolean(payload.allowUnlistedServices ?? payload.allow_unlisted_services, false),
+        allowOutOfArea: normalizeBoolean(payload.allowOutOfArea ?? payload.allow_out_of_area, false),
+        serviceAreas
+      },
+      governance: {
+        requestedBy: actor,
+        advisoryOnly: true,
+        automaticRejection: false,
+        externalCommitments: 0
+      }
+    };
+  }
+
+  listMarketFitProfiles(options = {}) {
+    const includeHistory = normalizeBoolean(options.includeHistory ?? options.include_history, false);
+    return this.db.prepare(`
+      SELECT * FROM market_fit_profiles
+      ${includeHistory ? '' : "WHERE status IN ('pending_approval', 'approved')"}
+      ORDER BY version_number DESC
+    `).all().map(row => this.mapMarketFitProfile(row));
+  }
+
+  getMarketFitProfile(profileId) {
+    const row = this.db.prepare('SELECT * FROM market_fit_profiles WHERE id = ?').get(profileId);
+    if (!row) throw ledgerInputError('market_fit_profile_not_found', 'Market-fit profile not found.', { profileId }, 404);
+    const profile = this.mapMarketFitProfile(row);
+    if (!profile.integrityValid) {
+      throw ledgerInputError('market_fit_profile_integrity_failed', 'The retained market-fit profile failed checksum verification.', { profileId }, 409);
+    }
+    return profile;
+  }
+
+  activeMarketFitProfile() {
+    const row = this.db.prepare("SELECT * FROM market_fit_profiles WHERE status = 'approved' ORDER BY version_number DESC LIMIT 1").get();
+    return row ? this.getMarketFitProfile(row.id) : null;
+  }
+
+  requestMarketFitProfile(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('market_fit_entry_key_invalid', 'A market-fit policy revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('market_fit_reason_invalid', 'A market-fit policy revision requires a reason between 8 and 500 characters.');
+      }
+      const replay = this.db.prepare('SELECT * FROM market_fit_profiles WHERE entry_key = ?').get(entryKey);
+      const versionNumber = replay
+        ? Math.round(normalizeNumber(replay.version_number, 1))
+        : Number(this.db.prepare('SELECT COALESCE(MAX(version_number), 0) AS value FROM market_fit_profiles').get()?.value || 0) + 1;
+      const snapshot = this.normalizeMarketFitProfile(payload, versionNumber, actor);
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const fingerprint = sha256Json({ snapshot, reason });
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('market_fit_replay_conflict', 'This market-fit entryKey was already used with different policy values.', { entryKey, profileId: replay.id }, 409);
+        }
+        const profile = this.getMarketFitProfile(replay.id);
+        return {
+          profile,
+          approval: profile.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(profile.approvalId)) : null,
+          replayed: true
+        };
+      }
+      const pending = this.db.prepare("SELECT id, approval_id FROM market_fit_profiles WHERE status = 'pending_approval' ORDER BY version_number DESC LIMIT 1").get();
+      if (pending) {
+        throw ledgerInputError('market_fit_profile_pending', 'Resolve the pending market-fit policy revision first.', { profileId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const timestamp = nowIso();
+      const id = makeId('marketfit');
+      this.db.prepare(`
+        INSERT INTO market_fit_profiles (
+          id, version_number, status, profile_name, entry_key, entry_fingerprint,
+          snapshot_hash, snapshot_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, 'pending_approval', ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(id, versionNumber, snapshot.profileName, entryKey, fingerprint, snapshotHash, snapshotJson,
+        toJson({ reason, requestedBy: actor, externalCommitments: 0 }), timestamp, timestamp);
+      const approval = this.createApproval({
+        targetType: 'market_fit_profile',
+        targetId: id,
+        approvalType: 'market_fit_policy_revision',
+        summary: `Approve market-fit policy ${snapshot.profileName} v${versionNumber}`,
+        reason,
+        data: {
+          profileName: snapshot.profileName,
+          versionNumber,
+          services: snapshot.policy.services.length,
+          clientSegments: snapshot.policy.clientSegments.length,
+          serviceAreas: snapshot.policy.serviceAreas.length,
+          fitThreshold: snapshot.policy.fitThreshold,
+          snapshotHash,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE market_fit_profiles SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const retained = this.getMarketFitProfile(id);
+      this.audit({
+        entityType: 'market_fit_profile', entityId: id, action: 'request_market_fit_profile_approval', actor, after: retained,
+        metadata: { approvalId: approval.id, versionNumber, snapshotHash, externalCommitments: 0 }
+      });
+      return { profile: retained, approval, replayed: false };
+    });
+  }
+
+  applyMarketFitProfileApproval(profileId) {
+    const row = this.db.prepare('SELECT * FROM market_fit_profiles WHERE id = ?').get(profileId);
+    if (!row) throw ledgerInputError('market_fit_profile_not_found', 'Market-fit profile not found.', { profileId }, 404);
+    if (row.status === 'approved') return this.getMarketFitProfile(profileId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('market_fit_profile_state_conflict', `Market-fit profile cannot be approved from ${row.status}.`, { profileId, status: row.status }, 409);
+    }
+    const profile = this.getMarketFitProfile(profileId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'market_fit_profile' || approval.target_id !== profileId) {
+      throw ledgerInputError('market_fit_approval_invalid', 'The market-fit profile lacks a matching approved decision.', { profileId }, 409);
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE market_fit_profiles SET status = 'superseded', updated_at = ? WHERE status = 'approved' AND id <> ?").run(timestamp, profileId);
+    this.db.prepare(`
+      UPDATE market_fit_profiles SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, profileId);
+    const after = this.getMarketFitProfile(profileId);
+    this.audit({
+      entityType: 'market_fit_profile', entityId: profileId, action: 'approve_market_fit_profile', actor,
+      before: profile, after,
+      metadata: { approvalId: row.approval_id, versionNumber: row.version_number, snapshotHash: row.snapshot_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  assessOpportunityMarketFit(opportunityId, options = {}) {
+    const opportunity = this.mapOpportunity(this.requireOpportunity(opportunityId));
+    const profile = options.profile || this.activeMarketFitProfile();
+    if (!profile) {
+      return {
+        format: MARKET_FIT_ASSESSMENT_FORMAT,
+        status: 'unconfigured', opportunityId, profile: null, score: null, recommendation: 'review',
+        criteria: [], blockers: [], evidenceGaps: ['approved_market_fit_profile'],
+        sourceHash: sha256Json({ opportunityId, opportunityUpdatedAt: opportunity.updatedAt, profileId: null }),
+        advisoryOnly: true, externalCommitments: 0
+      };
+    }
+    const policy = profile.snapshot.policy;
+    const material = {
+      opportunityId: opportunity.id,
+      opportunityUpdatedAt: opportunity.updatedAt,
+      service: opportunity.service || null,
+      country: normalizeText(opportunity.country, 'NL').toUpperCase(),
+      postalCode: normalizeText(opportunity.postalCode, '').toUpperCase().replace(/\s+/g, ''),
+      city: normalizeText(opportunity.city, '').toLocaleLowerCase('en-US'),
+      estimatedValue: roundMoney(opportunity.estimatedValue),
+      clientSegment: normalizeText(opportunity.data?.clientSegment, ''),
+      sourceChannel: normalizeText(opportunity.sourceChannel, ''),
+      profileId: profile.id,
+      profileVersion: profile.versionNumber,
+      profileSnapshotHash: profile.snapshotHash
+    };
+    const comparable = value => normalizeText(value, '').toLocaleLowerCase('en-US');
+    const allowed = (values, value) => values.some(item => comparable(item) === comparable(value));
+    const result = (definition, status, explanation, evidence = null) => ({
+      ...definition,
+      status,
+      awardedWeight: status === 'match' ? definition.weight : 0,
+      explanation,
+      evidence
+    });
+    const service = !material.service
+      ? result(MARKET_FIT_CRITERIA[0], 'missing_evidence', 'Retain the requested service before qualification.')
+      : allowed(policy.services, material.service) || policy.allowUnlistedServices
+        ? result(MARKET_FIT_CRITERIA[0], 'match', allowed(policy.services, material.service) ? 'The requested service is in the approved ICP.' : 'The approved policy permits unlisted services.', material.service)
+        : result(MARKET_FIT_CRITERIA[0], 'miss', 'The requested service is outside the approved ICP.', material.service);
+    const matchingArea = policy.serviceAreas.find(area => {
+      if (!area.countries.includes(material.country)) return false;
+      const postalMatch = material.postalCode && area.postalPrefixes.some(prefix => material.postalCode.startsWith(prefix));
+      const cityMatch = material.city && area.cities.some(city => comparable(city) === material.city);
+      return postalMatch || cityMatch;
+    }) || null;
+    const serviceArea = !material.postalCode && !material.city
+      ? result(MARKET_FIT_CRITERIA[1], 'missing_evidence', 'Retain a postal code or city before service-area qualification.')
+      : matchingArea || policy.allowOutOfArea
+        ? result(MARKET_FIT_CRITERIA[1], 'match', matchingArea ? `The opportunity is in ${matchingArea.label}.` : 'The approved policy permits out-of-area work.', matchingArea?.key || 'policy_exception')
+        : result(MARKET_FIT_CRITERIA[1], 'miss', 'The opportunity is outside every approved service-area row.', `${material.postalCode || ''} ${opportunity.city || ''}`.trim());
+    const jobValue = material.estimatedValue <= 0
+      ? result(MARKET_FIT_CRITERIA[2], 'missing_evidence', 'Retain an estimated job value before qualification.')
+      : material.estimatedValue >= policy.minJobValue && material.estimatedValue <= policy.maxJobValue
+        ? result(MARKET_FIT_CRITERIA[2], 'match', 'The estimated value is within the approved job-size band.', material.estimatedValue)
+        : result(MARKET_FIT_CRITERIA[2], 'miss', 'The estimated value is outside the approved job-size band.', material.estimatedValue);
+    const clientSegment = !material.clientSegment
+      ? result(MARKET_FIT_CRITERIA[3], 'missing_evidence', 'Retain the client segment before qualification.')
+      : allowed(policy.clientSegments, material.clientSegment)
+        ? result(MARKET_FIT_CRITERIA[3], 'match', 'The client segment is in the approved ICP.', material.clientSegment)
+        : result(MARKET_FIT_CRITERIA[3], 'miss', 'The client segment is outside the approved ICP.', material.clientSegment);
+    const sourceChannel = !material.sourceChannel
+      ? result(MARKET_FIT_CRITERIA[4], 'missing_evidence', 'Retain the lead source before qualification.')
+      : allowed(policy.sourceChannels, material.sourceChannel)
+        ? result(MARKET_FIT_CRITERIA[4], 'match', 'The lead source is approved for this ICP.', material.sourceChannel)
+        : result(MARKET_FIT_CRITERIA[4], 'miss', 'The lead source is outside the approved ICP.', material.sourceChannel);
+    const criteria = [service, serviceArea, jobValue, clientSegment, sourceChannel];
+    const score = roundMeasurement(criteria.reduce((sum, criterion) => sum + criterion.awardedWeight, 0), 1);
+    const blockers = criteria.filter(criterion => criterion.status === 'miss').map(criterion => criterion.key);
+    const evidenceGaps = criteria.filter(criterion => criterion.status === 'missing_evidence').map(criterion => criterion.key);
+    const recommendation = blockers.length ? 'decline' : evidenceGaps.length || score < policy.fitThreshold ? 'review' : 'pursue';
+    return {
+      format: MARKET_FIT_ASSESSMENT_FORMAT,
+      status: 'calculated',
+      opportunityId,
+      opportunity: { id: opportunity.id, title: opportunity.title, clientName: opportunity.client?.name || null, stage: opportunity.stage },
+      profile: { id: profile.id, profileName: profile.profileName, versionNumber: profile.versionNumber, snapshotHash: profile.snapshotHash },
+      score,
+      threshold: policy.fitThreshold,
+      recommendation,
+      criteria,
+      blockers,
+      evidenceGaps,
+      sourceHash: sha256Json(material),
+      advisoryOnly: true,
+      automaticRejection: false,
+      externalCommitments: 0
+    };
+  }
+
+  listOpportunityFitAssessments(options = {}) {
+    const opportunityId = normalizeText(options.opportunityId || options.opportunity_id, '');
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM opportunity_fit_assessments
+      WHERE (? = '' OR opportunity_id = ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(opportunityId, opportunityId, limit).map(row => this.mapOpportunityFitAssessment(row));
+  }
+
+  retainOpportunityFitAssessment(opportunityId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('market_fit_assessment_entry_key_invalid', 'A retained fit assessment requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const assessment = this.assessOpportunityMarketFit(opportunityId);
+      if (!assessment.profile) {
+        throw ledgerInputError('market_fit_profile_required', 'Approve an ICP and service-area policy before retaining opportunity fit.', { opportunityId }, 409);
+      }
+      const fingerprint = sha256Json({ opportunityId, sourceHash: assessment.sourceHash, profileId: assessment.profile.id });
+      const replay = this.db.prepare('SELECT * FROM opportunity_fit_assessments WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('market_fit_assessment_replay_conflict', 'This fit-assessment entryKey was already used for different evidence.', { entryKey, assessmentId: replay.id }, 409);
+        }
+        return { assessment: this.mapOpportunityFitAssessment(replay), replayed: true };
+      }
+      const timestamp = nowIso();
+      const id = makeId('fit');
+      const snapshotJson = toJson({ ...assessment, retainedAt: timestamp, retainedBy: actor });
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO opportunity_fit_assessments (
+          id, opportunity_id, profile_id, status, score, recommendation, source_hash,
+          snapshot_hash, snapshot_json, entry_key, entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'retained', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, opportunityId, assessment.profile.id, assessment.score, assessment.recommendation,
+        assessment.sourceHash, snapshotHash, snapshotJson, entryKey, fingerprint,
+        toJson({ retainedBy: actor, advisoryOnly: true, externalCommitments: 0 }), timestamp, timestamp);
+      const retained = this.mapOpportunityFitAssessment(this.db.prepare('SELECT * FROM opportunity_fit_assessments WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'opportunity_fit_assessment', entityId: id, action: 'retain_opportunity_market_fit', actor, after: retained,
+        metadata: { opportunityId, profileId: assessment.profile.id, sourceHash: assessment.sourceHash, recommendation: assessment.recommendation, externalCommitments: 0 }
+      });
+      return { assessment: retained, replayed: false };
+    });
+  }
+
+  marketFitRegister(options = {}) {
+    const profiles = this.listMarketFitProfiles({ includeHistory: true });
+    const activeProfile = profiles.find(profile => profile.status === 'approved') || null;
+    const pendingProfiles = profiles.filter(profile => profile.status === 'pending_approval');
+    const assessments = this.listOpportunityFitAssessments({ limit: options.assessmentLimit || options.assessment_limit || 5_000 });
+    const latestByOpportunity = new Map();
+    for (const assessment of assessments) {
+      if (!latestByOpportunity.has(assessment.opportunityId)) latestByOpportunity.set(assessment.opportunityId, assessment);
+    }
+    const opportunities = this.listOpportunities({ includeClosed: true, limit: options.limit || 500 }).map(opportunity => {
+      const evaluation = this.assessOpportunityMarketFit(opportunity.id, { profile: activeProfile });
+      const retained = latestByOpportunity.get(opportunity.id) || null;
+      return { opportunity, evaluation, retained, stale: Boolean(retained && retained.sourceHash !== evaluation.sourceHash) };
+    });
+    const open = opportunities.filter(item => OPEN_OPPORTUNITY_STAGES.has(item.opportunity.stage));
+    return {
+      policy: { activeProfile, pendingProfiles, profiles },
+      assessments,
+      opportunities,
+      summary: {
+        configured: Boolean(activeProfile),
+        open: open.length,
+        pursue: open.filter(item => item.evaluation.recommendation === 'pursue').length,
+        review: open.filter(item => item.evaluation.recommendation === 'review').length,
+        decline: open.filter(item => item.evaluation.recommendation === 'decline').length,
+        missingOrStale: open.filter(item => !item.retained || item.stale).length
+      },
+      criteria: MARKET_FIT_CRITERIA,
+      advisoryOnly: true,
+      externalCommitments: 0
     };
   }
 
@@ -35314,6 +35783,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'market_fit_profile') {
+        this.db.prepare(`
+          UPDATE market_fit_profiles
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM market_fit_profiles WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'performance_scorecard_target') {
         this.db.prepare(`
           UPDATE performance_scorecard_targets
@@ -35701,6 +36190,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyCostForecastApproval(targetId);
     } else if (targetType === 'cash_flow_forecast') {
       this.applyCashFlowForecastApproval(targetId);
+    } else if (targetType === 'market_fit_profile') {
+      this.applyMarketFitProfileApproval(targetId);
     } else if (targetType === 'performance_scorecard_target') {
       this.applyPerformanceScorecardTargetApproval(targetId);
     } else if (targetType === 'performance_scorecard') {
@@ -41493,6 +41984,52 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         message: `${opportunity.title} for ${opportunity.client_name} needs an internal follow-up draft (${overdueHours}h overdue). No message will be sent.`
       });
     }
+    const marketFitProfile = this.activeMarketFitProfile();
+    if (marketFitProfile) {
+      const openOpportunities = this.db.prepare(`
+        SELECT id FROM opportunities
+        WHERE stage IN ('new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating')
+        ORDER BY updated_at DESC
+        LIMIT 10
+      `).all();
+      for (const record of openOpportunities) {
+        const evaluation = this.assessOpportunityMarketFit(record.id, { profile: marketFitProfile });
+        const latest = this.db.prepare(`
+          SELECT * FROM opportunity_fit_assessments
+          WHERE opportunity_id = ?
+          ORDER BY created_at DESC LIMIT 1
+        `).get(record.id);
+        if (!latest || latest.source_hash !== evaluation.sourceHash) {
+          actions.push({
+            type: 'retain_market_fit_assessment',
+            opportunityId: record.id,
+            profileId: marketFitProfile.id,
+            idempotencyKey: `market-fit:${record.id}:${evaluation.sourceHash.slice(0, 32)}`,
+            severity: evaluation.recommendation === 'decline' ? 'high' : 'medium',
+            recommendation: evaluation.recommendation,
+            score: evaluation.score,
+            message: `Retain the current ${evaluation.score}% market-fit assessment for ${evaluation.opportunity.title}. No lead decision or external action will occur.`
+          });
+          continue;
+        }
+        if (evaluation.recommendation !== 'pursue') {
+          const idempotencyKey = `market-fit-review:${record.id}:${evaluation.sourceHash.slice(0, 32)}`;
+          const existingReview = this.db.prepare('SELECT id FROM opportunity_activities WHERE idempotency_key = ?').get(idempotencyKey);
+          if (!existingReview) {
+            actions.push({
+              type: 'review_market_fit',
+              opportunityId: record.id,
+              idempotencyKey,
+              severity: evaluation.recommendation === 'decline' ? 'high' : 'medium',
+              recommendation: evaluation.recommendation,
+              score: evaluation.score,
+              title: evaluation.opportunity.title,
+              message: `${evaluation.opportunity.title} requires an internal market-fit review. The advisory result cannot reject or contact the lead.`
+            });
+          }
+        }
+      }
+    }
     const jobsWithoutAssignment = this.db.prepare(`
       SELECT jobs.id, jobs.title FROM jobs
       LEFT JOIN assignments ON assignments.job_id = jobs.id
@@ -43667,6 +44204,37 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         }
 
+        const marketFitAssessments = preview.filter(action => action.type === 'retain_market_fit_assessment').slice(0, 10);
+        for (const action of marketFitAssessments) {
+          try {
+            const result = this.retainOpportunityFitAssessment(action.opportunityId, {
+              entryKey: action.idempotencyKey,
+              actor
+            }, { actor });
+            applied.push({ ...action, assessmentId: result.assessment.id, status: result.replayed ? 'replayed' : 'retained' });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
+        const marketFitReviews = preview.filter(action => action.type === 'review_market_fit').slice(0, 10);
+        for (const action of marketFitReviews) {
+          try {
+            const result = this.createOpportunityActivity(action.opportunityId, {
+              activityType: 'market_fit_review',
+              status: 'open',
+              summary: `Review ${action.recommendation} market-fit result`,
+              notes: `Advisory score ${action.score}%. Confirm missing evidence, policy exceptions, and the operator decision. This task cannot reject or contact the lead.`,
+              source: 'autonomous_cycle',
+              internalOnly: true,
+              idempotencyKey: action.idempotencyKey
+            }, { actor });
+            applied.push({ ...action, activityId: result.activity.id, status: result.replayed ? 'replayed' : 'task_created' });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
         const assignActions = preview.filter(action => action.type === 'assign_worker').slice(0, 3);
         for (const action of assignActions) {
           try {
@@ -45316,6 +45884,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Cash-flow forecast ${cashFlowRow.forecast_number} cannot be recalculated: ${error.message}` });
       }
     }
+    const approvedMarketFitProfilesWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM market_fit_profiles profiles
+      LEFT JOIN approvals ON approvals.id = profiles.approval_id
+      WHERE profiles.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'market_fit_profile' OR approvals.target_id <> profiles.id
+        )
+    `).get().count || 0);
+    if (approvedMarketFitProfilesWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedMarketFitProfilesWithoutApproval} approved market-fit profile(s) lack a matching approval decision.` });
+    }
+    const marketFitProfileRows = this.db.prepare('SELECT * FROM market_fit_profiles ORDER BY version_number').all();
+    for (const profileRow of marketFitProfileRows) {
+      const profile = this.mapMarketFitProfile(profileRow);
+      if (!profile.integrityValid) {
+        issues.push({ severity: 'error', message: `Market-fit profile v${profile.versionNumber} failed retained snapshot verification.` });
+      }
+    }
+    const marketFitAssessmentRows = this.db.prepare('SELECT * FROM opportunity_fit_assessments ORDER BY created_at').all();
+    for (const assessmentRow of marketFitAssessmentRows) {
+      const assessment = this.mapOpportunityFitAssessment(assessmentRow);
+      if (!assessment.integrityValid) {
+        issues.push({ severity: 'error', message: `Opportunity fit assessment ${assessment.id} failed retained snapshot verification.` });
+        continue;
+      }
+      try {
+        const current = this.assessOpportunityMarketFit(assessment.opportunityId, { profile: this.getMarketFitProfile(assessment.profileId) });
+        if (current.sourceHash !== assessment.sourceHash) {
+          issues.push({ severity: 'warning', message: `Opportunity fit assessment ${assessment.id} is stale because material opportunity or policy evidence changed.` });
+        }
+      } catch (error) {
+        issues.push({ severity: 'error', message: `Opportunity fit assessment ${assessment.id} cannot be verified: ${error.code || error.message}.` });
+      }
+    }
     const approvedPerformanceTargetsWithoutApproval = Number(this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM performance_scorecard_targets targets
@@ -46507,6 +47111,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         clients: this.count('clients'),
         opportunities: this.count('opportunities'),
         opportunityActivities: this.count('opportunity_activities'),
+        marketFitProfiles: this.count('market_fit_profiles'),
+        opportunityFitAssessments: this.count('opportunity_fit_assessments'),
         bidPackages: this.count('bid_packages'),
         bidPackageParticipants: this.count('bid_package_participants'),
         bidCommitments: Number(this.db.prepare('SELECT COUNT(*) AS count FROM bid_packages WHERE purchase_order_id IS NOT NULL').get().count || 0),
@@ -46610,6 +47216,65 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       vatNumber: row.vat_number,
       preferredLanguage: row.preferred_language,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapMarketFitProfile(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      profileName: row.profile_name,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === MARKET_FIT_PROFILE_FORMAT
+        && snapshot.versionNumber === Math.round(normalizeNumber(row.version_number, 0))
+        && snapshot.profileName === row.profile_name
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapOpportunityFitAssessment(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    return {
+      id: row.id,
+      opportunityId: row.opportunity_id,
+      profileId: row.profile_id,
+      status: row.status,
+      score: roundMeasurement(row.score, 1),
+      recommendation: row.recommendation,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === MARKET_FIT_ASSESSMENT_FORMAT
+        && snapshot.opportunityId === row.opportunity_id
+        && snapshot.profile?.id === row.profile_id
+        && snapshot.sourceHash === row.source_hash
+        && roundMeasurement(snapshot.score, 1) === roundMeasurement(row.score, 1)
+        && snapshot.recommendation === row.recommendation
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -49928,6 +50593,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.negativeWeeks = data.negativeWeeks ?? null;
       preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'market_fit_profile') {
+      const row = this.db.prepare('SELECT * FROM market_fit_profiles WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapMarketFitProfile(row) : null;
+      primaryEffect = `Approve Ideal Customer Profile and service-area policy ${mapped?.profileName || data.profileName || ''}.`;
+      addEffect(`Activate policy version ${mapped?.versionNumber || data.versionNumber || ''} for deterministic opportunity qualification.`);
+      addEffect(`Use ${data.services ?? mapped?.snapshot?.policy?.services?.length ?? 0} service line(s), ${data.clientSegments ?? mapped?.snapshot?.policy?.clientSegments?.length ?? 0} client segment(s), and ${data.serviceAreas ?? mapped?.snapshot?.policy?.serviceAreas?.length ?? 0} service-area row(s).`);
+      addSafeguard('Supersedes only the prior approved policy. Historical policies and retained opportunity assessments remain immutable.');
+      addSafeguard('Fit recommendations are advisory only. Approval cannot reject a lead, contact a client, promise a date, commit spend, or create a job.');
+      riskLevel = 'high';
+      preview.profileName = mapped?.profileName || data.profileName || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.fitThreshold = data.fitThreshold ?? mapped?.snapshot?.policy?.fitThreshold ?? null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+      preview.serviceAreas = mapped?.snapshot?.policy?.serviceAreas || [];
     } else if (targetType === 'performance_scorecard_target') {
       const row = this.db.prepare('SELECT * FROM performance_scorecard_targets WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapPerformanceScorecardTarget(row) : null;
@@ -50050,6 +50729,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 module.exports = {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
+  MARKET_FIT_CRITERIA,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS,
   AUDIT_CHAIN_ID,

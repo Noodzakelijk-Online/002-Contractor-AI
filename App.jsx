@@ -82,6 +82,7 @@ const ResourcesWorkspace = lazy(() => import('./components/ResourcesWorkspace'))
 const AuditHistory = lazy(() => import('./components/AuditHistory'))
 const CashFlowForecastControl = lazy(() => import('./components/CashFlowForecastControl'))
 const PerformanceScorecard = lazy(() => import('./components/PerformanceScorecard'))
+const MarketFitControl = lazy(() => import('./components/MarketFitControl'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
@@ -680,6 +681,9 @@ function emptyOpportunityDraft(opportunity = null) {
     description: opportunity?.description || '',
     address: opportunity?.address || '',
     city: opportunity?.city || '',
+    postalCode: opportunity?.postalCode || '',
+    country: opportunity?.country || 'NL',
+    clientSegment: opportunity?.data?.clientSegment || '',
     estimatedValue: opportunity ? String(opportunity.estimatedValue || '') : '',
     probabilityPercent: opportunity ? String(opportunity.probabilityPercent ?? 10) : '10',
     targetDecisionAt: toLocalDateTimeInput(opportunity?.targetDecisionAt),
@@ -961,14 +965,16 @@ function reconcileJobCollections(data, job) {
 
 async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false) {
   if (section === 'pipeline') {
-    const [opportunities, bids, partners] = await Promise.all([
+    const [opportunities, marketFit, bids, partners] = await Promise.all([
       api('/api/ledger/opportunities?includeClosed=true&limit=500'),
+      api('/api/ledger/market-fit?limit=500'),
       api('/api/ledger/bid-packages?includeClosed=true&limit=500'),
       api('/api/ledger/trade-partners?includeRetired=true&limit=500'),
     ])
     return {
       opportunities: opportunities.opportunities || [],
       opportunityForecast: opportunities.forecast || null,
+      marketFit: marketFit.marketFit || null,
       bidPackages: bids.bidPackages || [],
       bidPackageSummary: bids.summary || {},
       tradePartners: partners.partners || [],
@@ -1400,11 +1406,13 @@ function PipelineWorkspace({
   onViewChange,
   opportunities,
   forecast,
+  marketFit,
   bidPackages,
   bidSummary,
   selectedBidPackage,
   selectedOpportunity,
   canCoordinate,
+  canManagePolicy,
   canApprove,
   submitting,
   onCreate,
@@ -1413,6 +1421,8 @@ function PipelineWorkspace({
   onFollowUp,
   onCompleteActivity,
   onConvert,
+  onRequestMarketFitPolicy,
+  onRetainMarketFitAssessment,
   onOpenJob,
   onCreateBidPackage,
   onSelectBidPackage,
@@ -1475,6 +1485,17 @@ function PipelineWorkspace({
 
       {view === 'opportunities' ? (
         <>
+
+      <LazyControlBoundary label="market-fit controls">
+        <MarketFitControl
+          marketFit={marketFit}
+          canManagePolicy={canManagePolicy}
+          canCoordinate={canCoordinate}
+          submitting={submitting}
+          onRequestPolicy={onRequestMarketFitPolicy}
+          onRetainAssessment={onRetainMarketFitAssessment}
+        />
+      </LazyControlBoundary>
 
       <section className="panel pipeline-panel">
         <div className="panel-heading pipeline-heading">
@@ -1608,6 +1629,16 @@ function PipelineWorkspace({
               <strong>{selectedOpportunity.convertedJob?.title || 'Not converted'}</strong>
             </div>
           </div>
+          {selectedOpportunity.marketFit ? (
+            <div className={`pipeline-market-fit status-${selectedOpportunity.marketFit.recommendation || 'review'}`}>
+              <Target size={15} />
+              <strong>{formatStatus(selectedOpportunity.marketFit.recommendation || 'review')}</strong>
+              <span>
+                {Number.isFinite(Number(selectedOpportunity.marketFit.score)) ? `${selectedOpportunity.marketFit.score}% fit` : 'Policy setup required'}
+                {selectedOpportunity.marketFit.evidenceGaps?.length ? ` / ${selectedOpportunity.marketFit.evidenceGaps.length} evidence gap(s)` : ''}
+              </span>
+            </div>
+          ) : null}
           {selectedOpportunity.description ? <p className="pipeline-description">{selectedOpportunity.description}</p> : null}
           <div className="pipeline-activity-heading">
             <div>
@@ -2869,6 +2900,7 @@ function App() {
   const sessionCapabilities = data?.session?.operator?.capabilities
   const capabilities = useMemo(() => sessionCapabilities || {}, [sessionCapabilities])
   const canCoordinate = !fieldScoped && capabilities.intake === true
+  const canManageMarketFitPolicy = operator.role === 'owner'
   const operationCapabilities = data?.operationsCapabilities?.capabilities || null
   const evidenceStorageCapability = operationCapabilities?.evidenceStorage || null
   const exportValidationAvailable = operationCapabilities?.export?.integrity === 'sha256'
@@ -3550,6 +3582,45 @@ function App() {
     sectionRef.current = 'jobs'
     setSection('jobs')
     void openJobWorkspace(linkedJob)
+  }
+
+  async function requestMarketFitPolicy(payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/market-fit/profiles', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => (current ? { ...current, marketFit: result.marketFit || current.marketFit } : current))
+      notify('Market-fit policy revision retained for approval.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function retainMarketFitAssessment(opportunityId, sourceHash) {
+    setSubmitting(true)
+    setError('')
+    try {
+      await api(`/api/ledger/opportunities/${encodeURIComponent(opportunityId)}/market-fit-assessments`, {
+        method: 'POST',
+        body: JSON.stringify({ entryKey: `fit:${opportunityId}:${String(sourceHash || '').slice(0, 32)}` }),
+      })
+      const result = await api('/api/ledger/market-fit?limit=500')
+      setData((current) => (current ? { ...current, marketFit: result.marketFit || current.marketFit } : current))
+      notify('Current opportunity fit retained in the ledger.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   function openBidPackageEditor() {
@@ -9515,11 +9586,13 @@ function App() {
                 onViewChange={setPipelineView}
                 opportunities={data.opportunities || EMPTY_LIST}
                 forecast={data.opportunityForecast}
+                marketFit={data.marketFit}
                 bidPackages={data.bidPackages || EMPTY_LIST}
                 bidSummary={data.bidPackageSummary || {}}
                 selectedBidPackage={selectedBidPackage}
                 selectedOpportunity={selectedOpportunity}
                 canCoordinate={canCoordinate}
+                canManagePolicy={canManageMarketFitPolicy}
                 canApprove={capabilities.approvals === true}
                 submitting={submitting}
                 onCreate={() => openOpportunityEditor()}
@@ -9528,6 +9601,8 @@ function App() {
                 onFollowUp={openOpportunityActivity}
                 onCompleteActivity={completeOpportunityActivity}
                 onConvert={convertOpportunity}
+                onRequestMarketFitPolicy={requestMarketFitPolicy}
+                onRetainMarketFitAssessment={retainMarketFitAssessment}
                 onOpenJob={openOpportunityJob}
                 onCreateBidPackage={openBidPackageEditor}
                 onSelectBidPackage={selectBidPackage}
@@ -14824,6 +14899,14 @@ function App() {
                   />
                 </label>
                 <label>
+                  Client segment
+                  <input
+                    value={opportunityDraft.clientSegment}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, clientSegment: event.target.value })}
+                    placeholder="Homeowner, housing association..."
+                  />
+                </label>
+                <label>
                   Estimated value
                   <input
                     type="number"
@@ -14868,6 +14951,22 @@ function App() {
                   <input
                     value={opportunityDraft.city}
                     onChange={(event) => setOpportunityDraft({ ...opportunityDraft, city: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Postal code
+                  <input
+                    value={opportunityDraft.postalCode}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, postalCode: event.target.value })}
+                    placeholder="6811 AA"
+                  />
+                </label>
+                <label>
+                  Country
+                  <input
+                    value={opportunityDraft.country}
+                    onChange={(event) => setOpportunityDraft({ ...opportunityDraft, country: event.target.value })}
+                    placeholder="NL"
                   />
                 </label>
                 {opportunityDraft.stage === 'lost' ? (

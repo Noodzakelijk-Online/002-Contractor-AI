@@ -260,7 +260,7 @@ test('daywork API enforces field scope and separate acknowledgement and commerci
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
   assert.equal(diagnostics.body.diagnostics.counts.dayworkTickets, 1);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '049_contractor_balanced_scorecard');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '050_governed_market_fit');
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities', { token: tokens.owner });
   assert.equal(capabilities.response.status, 200);

@@ -186,6 +186,20 @@ test('backup verification rejects a migration 049 ledger with missing performanc
   );
 });
 
+test('backup verification rejects a migration 050 ledger with missing governed market-fit constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-market-fit-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Governed market-fit schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_opportunity_fit_profile');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /governed market-fit constraints are incomplete: idx_opportunity_fit_profile/i
+  );
+});
+
 test('backup verification rejects a migration 032 ledger with missing production-control constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-production-control-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

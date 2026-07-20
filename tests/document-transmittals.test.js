@@ -179,7 +179,7 @@ test('migration 023 upgrades a 022 ledger with the transmittal contract', t => {
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(upgraded.migrationStatus().currentVersion, '050_governed_market_fit');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
     for (const table of ['transmittal_number_sequences', 'document_transmittals', 'transmittal_receipts']) {
       assert.ok(upgraded.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));

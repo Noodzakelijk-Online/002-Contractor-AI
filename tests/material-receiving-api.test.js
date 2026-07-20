@@ -150,5 +150,5 @@ test('material receiving API retains exact field evidence and approval-backed re
   assert.equal(finalJob.body.job.materials[0].status, 'needed');
   const diagnostics = await request(baseUrl, '/api/ledger/debug');
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '049_contractor_balanced_scorecard');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '050_governed_market_fit');
 });

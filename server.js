@@ -9,6 +9,7 @@ const { pipeline } = require('node:stream/promises');
 const {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
+  MARKET_FIT_CRITERIA,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS
 } = require('./operating-ledger');
@@ -2398,6 +2399,44 @@ app.post('/api/ledger/opportunities', (req, res) => {
       actor: actorFromRequest(req, 'pipeline')
     }),
     forecast: operatingLedger.opportunityForecast()
+  }), 201);
+});
+
+app.get('/api/ledger/market-fit', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    marketFit: operatingLedger.marketFitRegister(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/market-fit/profiles', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can request an ICP and service-area policy revision.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestMarketFitProfile(req.body || {}, {
+      actor: actorFromRequest(req, 'market_fit_policy')
+    }),
+    marketFit: operatingLedger.marketFitRegister()
+  }), 201);
+});
+
+app.get('/api/ledger/opportunities/:id/market-fit', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    evaluation: operatingLedger.assessOpportunityMarketFit(req.params.id),
+    assessments: operatingLedger.listOpportunityFitAssessments({ opportunityId: req.params.id, limit: 100 })
+  }));
+});
+
+app.post('/api/ledger/opportunities/:id/market-fit-assessments', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.retainOpportunityFitAssessment(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'market_fit_assessment')
+    }),
+    evaluation: operatingLedger.assessOpportunityMarketFit(req.params.id)
   }), 201);
 });
 
@@ -5834,6 +5873,8 @@ function operationalExport() {
     organization: operatingLedger.getOrganizationProfile(),
     opportunities: operatingLedger.listOpportunities({ includeClosed: true, limit: 500 }),
     opportunityActivities: operatingLedger.listOpportunityActivities({ limit: 1_000 }),
+    marketFitProfiles: operatingLedger.listMarketFitProfiles({ includeHistory: true }),
+    opportunityFitAssessments: operatingLedger.listOpportunityFitAssessments({ limit: 5_000 }),
     bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
     bidPackageParticipants: operatingLedger.listBidPackageParticipants({ limit: 5_000 }),
     takeoffSheets: operatingLedger.listAllTakeoffs({ limit: 5_000 }),
@@ -5920,6 +5961,8 @@ function validateOperationalExport(snapshot) {
     'cashFlowForecastSnapshots',
     'performanceScorecardTargets',
     'performanceScorecardSnapshots',
+    'marketFitProfiles',
+    'opportunityFitAssessments',
     'attendanceSessions',
     'attendanceAdjustments',
     'weeklyTimesheets',
@@ -5989,6 +6032,8 @@ function validateOperationalExport(snapshot) {
       cashFlowForecastSnapshots: Array.isArray(snapshot.cashFlowForecastSnapshots) ? snapshot.cashFlowForecastSnapshots.length : 0,
       performanceScorecardTargets: Array.isArray(snapshot.performanceScorecardTargets) ? snapshot.performanceScorecardTargets.length : 0,
       performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
+      marketFitProfiles: Array.isArray(snapshot.marketFitProfiles) ? snapshot.marketFitProfiles.length : 0,
+      opportunityFitAssessments: Array.isArray(snapshot.opportunityFitAssessments) ? snapshot.opportunityFitAssessments.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
       productionEntries: snapshot.productionEntries.length,
       dayworkTickets: Array.isArray(snapshot.dayworkTickets) ? snapshot.dayworkTickets.length : 0,
@@ -6616,6 +6661,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         cashFlowForecastSnapshot: 'source_current_approval_gated',
         performanceTargetRevision: 'approval_gated_versioned',
         performanceScorecardSnapshot: 'source_and_target_current_approval_gated',
+        marketFitPolicyRevision: 'owner_requested_approval_gated_versioned',
+        opportunityFitAssessment: 'source_bound_exact_replay',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
@@ -6779,6 +6826,18 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         targetCurrentApprovalRequired: true,
         fundsMoved: false,
         messagesSent: false,
+        externalCommitments: 0
+      },
+      marketFit: {
+        framework: 'ideal_customer_profile_and_service_area_matrix',
+        criteria: MARKET_FIT_CRITERIA,
+        policyRevisions: 'owner_requested_approval_gated_versioned',
+        assessmentMode: 'deterministic_source_bound_advisory',
+        retainedAssessments: true,
+        autonomousAssessment: 'internal_ledger_only',
+        automaticRejection: false,
+        messagesSent: false,
+        jobsCreated: false,
         externalCommitments: 0
       },
       productionControl: {

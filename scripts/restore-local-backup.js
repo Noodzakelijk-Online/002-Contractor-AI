@@ -913,6 +913,25 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('050_governed_market_fit')) {
+        for (const table of ['market_fit_profiles', 'opportunity_fit_assessments']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup governed market-fit schema is incomplete: ${table}.`);
+          }
+        }
+        const profileColumns = new Set(database.prepare('PRAGMA table_info(market_fit_profiles)').all().map(row => row.name));
+        for (const column of ['version_number', 'status', 'profile_name', 'entry_key', 'entry_fingerprint', 'snapshot_hash', 'snapshot_json', 'approval_id']) {
+          if (!profileColumns.has(column)) throw new Error(`Backup governed market-fit schema is incomplete: market_fit_profiles.${column}.`);
+        }
+        const assessmentColumns = new Set(database.prepare('PRAGMA table_info(opportunity_fit_assessments)').all().map(row => row.name));
+        for (const column of ['opportunity_id', 'profile_id', 'score', 'recommendation', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint']) {
+          if (!assessmentColumns.has(column)) throw new Error(`Backup governed market-fit schema is incomplete: opportunity_fit_assessments.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_market_fit_one_approved', 'idx_market_fit_profile_status', 'idx_opportunity_fit_history', 'idx_opportunity_fit_profile']) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup governed market-fit constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

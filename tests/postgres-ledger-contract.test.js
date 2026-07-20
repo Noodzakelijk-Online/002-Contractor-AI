@@ -1094,10 +1094,33 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(fullAudit.some(entry => entry.action === 'apply_job_restore'));
     assert.ok(fullAudit.some(entry => entry.action === 'release_tool_reservation' && entry.actor === 'postgres_contract_test'));
 
+    const marketFitPolicy = ledger.requestMarketFitProfile({
+      entryKey: 'postgres-market-fit-policy-0001',
+      reason: 'Verify governed market-fit policy on PostgreSQL.',
+      profileName: 'PostgreSQL Arnhem focus',
+      services: ['Renovation'],
+      clientSegments: ['Homeowner'],
+      sourceChannels: ['Referral'],
+      minJobValue: 5000,
+      maxJobValue: 100000,
+      fitThreshold: 70,
+      serviceAreas: [{ label: 'Arnhem', country: 'NL', postalPrefixes: ['68'], cities: ['Arnhem'] }]
+    }, { actor: 'postgres_contract_test' });
+    ledger.resolveApproval(marketFitPolicy.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_contract_test',
+      reason: 'Hosted ICP and service area verified.'
+    });
     const opportunity = ledger.createOpportunity({
       title: 'PostgreSQL preconstruction contract',
       client: { name: 'PostgreSQL opportunity client' },
       stage: 'estimating',
+      service: 'Renovation',
+      clientSegment: 'Homeowner',
+      sourceChannel: 'Referral',
+      postalCode: '6811AA',
+      city: 'Arnhem',
+      country: 'NL',
       estimatedValue: 48000,
       probabilityPercent: 55,
       nextFollowUpAt: '2027-01-15T09:00:00.000Z'
@@ -1110,6 +1133,11 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     }, { actor: 'postgres_contract_test' });
     assert.equal(opportunityActivity.replayed, false);
     assert.equal(opportunityActivity.activity.opportunityId, opportunity.id);
+    const marketFitAssessment = ledger.retainOpportunityFitAssessment(opportunity.id, {
+      entryKey: 'postgres-market-fit-assessment-0001'
+    }, { actor: 'postgres_contract_test' });
+    assert.equal(marketFitAssessment.assessment.integrityValid, true);
+    assert.equal(marketFitAssessment.assessment.snapshot.recommendation, 'pursue');
     const opportunityConversion = ledger.convertOpportunityToJob(opportunity.id, {}, { actor: 'postgres_contract_test' });
     assert.equal(opportunityConversion.replayed, false);
     assert.equal(opportunityConversion.opportunity.convertedJobId, opportunityConversion.job.id);
@@ -1405,7 +1433,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(migrations.currentVersion, '050_governed_market_fit');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1486,7 +1514,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('049_contractor_balanced_scorecard'));
+  assert.deepEqual(versions, Array(4).fill('050_governed_market_fit'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -1526,9 +1554,16 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
     const opportunityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name IN ('opportunities', 'opportunity_activities')
+      WHERE table_schema = 'public' AND table_name IN ('opportunities', 'opportunity_activities', 'market_fit_profiles', 'opportunity_fit_assessments')
     `).rows[0];
-    assert.equal(Number(opportunityTableCount.count), 2);
+    assert.equal(Number(opportunityTableCount.count), 4);
+    const marketFitIndexCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN ('idx_market_fit_one_approved', 'idx_market_fit_profile_status', 'idx_opportunity_fit_history', 'idx_opportunity_fit_profile')
+    `).rows[0];
+    assert.equal(Number(marketFitIndexCount.count), 4);
     const inspectionChecklistTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -2023,7 +2058,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2376,7 +2411,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2484,7 +2519,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2583,7 +2618,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2670,7 +2705,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
   } finally {
     ledger?.close();
   }
@@ -2775,7 +2810,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -2841,7 +2876,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
   } finally {
     ledger.close();
   }
@@ -2896,7 +2931,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '049_contractor_balanced_scorecard');
+    assert.equal(ledger.migrationStatus().currentVersion, '050_governed_market_fit');
   } finally {
     ledger.close();
   }

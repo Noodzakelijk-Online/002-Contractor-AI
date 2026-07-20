@@ -7,6 +7,7 @@ const REQUIRED_PATHS = [
   'ClientPortal.css',
   'ClientPortal.jsx',
   'components/CashFlowForecastControl.jsx',
+  'components/MarketFitControl.jsx',
   'components/PerformanceScorecard.jsx',
   'Dockerfile',
   'docker-compose.hosted.yml',
@@ -119,6 +120,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.get('/api/ledger/performance-scorecard'",
     "app.post('/api/ledger/performance-scorecard/targets'",
     "app.post('/api/ledger/performance-scorecard/snapshots'",
+    "app.get('/api/ledger/market-fit'",
+    "app.post('/api/ledger/market-fit/profiles'",
+    "app.post('/api/ledger/opportunities/:id/market-fit-assessments'",
     "app.get('/api/ledger/bid-packages'",
     "app.post('/api/ledger/bid-packages/:id/commitment'",
     "app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package'",
@@ -144,6 +148,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!ledgerSource.includes("version: '049_contractor_balanced_scorecard'")) {
     failures.push('Canonical Contractor Balanced Scorecard migration is missing.');
+  }
+  if (!ledgerSource.includes("version: '050_governed_market_fit'")) {
+    failures.push('Canonical governed market-fit migration is missing.');
+  }
+  if (!serverSource.includes("assessmentMode: 'deterministic_source_bound_advisory'")) {
+    failures.push('Market-fit capability does not declare deterministic advisory assessment semantics.');
   }
   if (!ledgerSource.includes("sourceScope: 'material_metric_inputs/v2'")) {
     failures.push('Performance scorecards do not declare material-input source hashing.');
