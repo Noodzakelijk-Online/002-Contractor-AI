@@ -4,6 +4,8 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const { riskRegisterPayload } = require('./risk-register-fixture');
+
 const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-quote-api-'));
 process.env.NODE_ENV = 'test';
 process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
@@ -118,11 +120,25 @@ test('organization and quote issue APIs enforce role, approval, and download bou
   });
   assert.equal(scopeApproved.response.status, 200, JSON.stringify(scopeApproved.body));
 
+  const risk = await jsonRequest(baseUrl, `/api/ledger/jobs/${jobId}/risk-register/revisions`, {
+    method: 'POST',
+    headers: headers('office', true),
+    body: JSON.stringify(riskRegisterPayload('quote-issue-api-risk-0001', scope.body.revision.id))
+  });
+  assert.equal(risk.response.status, 201, JSON.stringify(risk.body));
+  const riskApproved = await jsonRequest(baseUrl, `/api/ledger/approvals/${risk.body.approval.id}/resolve`, {
+    method: 'POST',
+    headers: headers('approver', true),
+    body: JSON.stringify({ status: 'approved', reason: 'Risk ownership and premortem controls verified.' })
+  });
+  assert.equal(riskApproved.response.status, 200, JSON.stringify(riskApproved.body));
+
   const quote = await jsonRequest(baseUrl, `/api/ledger/jobs/${jobId}/quote`, {
     method: 'POST',
     headers: headers('office', true),
     body: JSON.stringify({
       commercialScopeRevisionId: scope.body.revision.id,
+      riskRegisterRevisionId: risk.body.revision.id,
       validUntil: '2026-10-31',
       lineItems: [{ description: 'Retained API scope', quantity: 2, unitPrice: 350 }]
     })

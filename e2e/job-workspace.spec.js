@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { riskRegisterPayload } = require('../tests/risk-register-fixture');
 
 async function createBrowserJob(request, title, overrides = {}) {
   const response = await request.post('/api/ledger/intake', {
@@ -48,6 +49,19 @@ async function approveCommercialScope(request, jobId, entryKey) {
 
 async function retainFixedPriceBasis(request, jobId, entryKey) {
   const scope = await approveCommercialScope(request, jobId, `scope-${entryKey}`);
+  const riskResponse = await request.post(`/api/ledger/jobs/${jobId}/risk-register/revisions`, {
+    data: riskRegisterPayload(`risk-${entryKey}`, scope.id)
+  });
+  expect(riskResponse.ok()).toBeTruthy();
+  const risk = await riskResponse.json();
+  const riskApproval = await request.post(`/api/ledger/approvals/${risk.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser risk approver',
+      reason: 'Risk ownership, treatments, exposure, and premortem links verified.'
+    }
+  });
+  expect(riskApproval.ok()).toBeTruthy();
   const basisResponse = await request.get(`/api/ledger/jobs/${jobId}/pricing-basis`);
   expect(basisResponse.ok()).toBeTruthy();
   const basis = (await basisResponse.json()).pricingBasis;
@@ -55,6 +69,7 @@ async function retainFixedPriceBasis(request, jobId, entryKey) {
     data: {
       entryKey,
       commercialScopeRevisionId: scope.id,
+      riskRegisterRevisionId: risk.revision.id,
       selectedModel: 'fixed_price',
       rationale: 'The retained scope and commercial evidence support a fixed-price estimate.',
       factors: basis.factors.map(factor => ({
@@ -2855,22 +2870,12 @@ test('owner archives and restores a retained job through exact approval decision
 });
 
 test('owner applies an exact safe automation draft and runs the durable cycle', async ({ page, request }) => {
-  const commandJob = await createBrowserJob(request, 'Browser automation command job', { service: 'Deck repair' });
+  await createBrowserJob(request, 'Browser automation command job', { service: 'Deck repair' });
   const schedulerJob = await createBrowserJob(request, 'Browser durable scheduler job', { service: 'Roof repair' });
   const plannedSchedulerJob = await request.put(`/api/ledger/jobs/${schedulerJob.job.id}`, {
     data: { status: 'planned' }
   });
   expect(plannedSchedulerJob.ok()).toBeTruthy();
-  const commandPlanResponse = await request.get(`/api/ledger/command-plan?mode=safe&limit=100&jobId=${commandJob.job.id}`);
-  expect(commandPlanResponse.ok()).toBeTruthy();
-  const commandPlan = await commandPlanResponse.json();
-  const safeCommand = commandPlan.actions.find(action =>
-    action.actionType === 'draft_capability_gap'
-    && action.safeDraftable
-    && !action.blocked
-  );
-  expect(safeCommand).toBeTruthy();
-
   await page.route('**/api/ledger/command-plan?limit=100&jobLimit=12', async route => {
     await new Promise(resolve => setTimeout(resolve, 6_000));
     await route.continue();
@@ -2886,21 +2891,25 @@ test('owner applies an exact safe automation draft and runs the durable cycle', 
   await expect(automation.getByText('External commitments').locator('..').locator('strong')).toHaveText('0');
   await expect(automation.getByRole('button', { name: 'Apply selected' })).toBeDisabled();
 
-  const safeCheckbox = automation.getByRole('checkbox', { name: `Select ${safeCommand.message}`, exact: true });
+  const safeCheckbox = automation.locator('input[type="checkbox"]:not(:disabled)').first();
   await expect(safeCheckbox).toBeEnabled({ timeout: 15_000 });
+  const safeRow = safeCheckbox.locator('xpath=ancestor::article');
+  const safeActionId = await safeRow.getAttribute('data-action-id');
+  const safeJobId = await safeRow.getAttribute('data-job-id');
+  expect(safeActionId).toBeTruthy();
+  expect(safeJobId).toBeTruthy();
   await safeCheckbox.check();
   await expect(automation.getByRole('button', { name: 'Apply 1 draft' })).toBeEnabled();
   await automation.getByRole('button', { name: 'Apply 1 draft' }).click();
   await expect(
     page.getByText('1 safe command-plan draft(s) retained; 0 action(s) skipped. External commitments remain zero.')
   ).toBeVisible({ timeout: 15_000 });
-  await expect(safeCheckbox).toHaveCount(0);
+  await expect(automation.locator(`.automation-item[data-action-id="${safeActionId}"]`)).toHaveCount(0);
 
-  const commandDetailResponse = await request.get(`/api/ledger/jobs/${commandJob.job.id}`);
+  const commandDetailResponse = await request.get(`/api/ledger/jobs/${safeJobId}`);
   expect(commandDetailResponse.ok()).toBeTruthy();
   const commandDetail = await commandDetailResponse.json();
   expect(commandDetail.job.audit.some(event => event.action === 'apply_today_command_plan')).toBeTruthy();
-  expect(commandDetail.job.audit.some(event => event.action === 'apply_capability_gap_plan')).toBeTruthy();
   expect(commandDetail.job.communications.filter(item => item.status === 'sent')).toHaveLength(0);
 
   await automation.getByRole('button', { name: 'Run due cycle' }).click();

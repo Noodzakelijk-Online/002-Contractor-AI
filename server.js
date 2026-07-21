@@ -11,6 +11,8 @@ const {
   LEDGER_CAPABILITY_BLUEPRINT,
   BID_DECISION_CRITERIA,
   BID_DECISION_GATES,
+  RISK_REGISTER_CATEGORIES,
+  RISK_RESPONSE_STRATEGIES,
   PRICING_BASIS_FACTORS,
   MARKET_FIT_CRITERIA,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
@@ -1932,6 +1934,7 @@ app.get('/api/session', (req, res) => {
         takeoffs: !fieldWorker,
         estimateRates: !fieldWorker,
         commercialScope: !fieldWorker,
+        riskRegister: !fieldWorker,
         pricingBasis: !fieldWorker,
         schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
@@ -2973,6 +2976,24 @@ app.post('/api/ledger/jobs/:id/commercial-scope/revisions', (req, res) => {
       actor: actorFromRequest(req, 'commercial')
     }),
     commercialScope: operatingLedger.commercialScopeForJob(req.params.id),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/risk-register', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    riskRegister: operatingLedger.riskRegisterForJob(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/risk-register/revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestRiskRegisterRevision(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    riskRegister: operatingLedger.riskRegisterForJob(req.params.id),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
 });
@@ -6130,6 +6151,7 @@ function operationalExport() {
     opportunityBidDecisions: operatingLedger.listOpportunityBidDecisions({ limit: 5_000 }),
     estimateRatePolicies: operatingLedger.listEstimateRatePolicies({ includeHistory: true }),
     commercialScopeRevisions: operatingLedger.listCommercialScopeRevisions({ limit: 5_000 }),
+    riskRegisterRevisions: operatingLedger.listRiskRegisterRevisions({ limit: 5_000 }),
     pricingBasisDecisions: operatingLedger.listPricingBasisDecisions({ limit: 5_000 }),
     opportunityEvidence: operatingLedger.listOpportunityEvidence({ limit: 5_000 }),
     opportunitySiteSurveys: operatingLedger.listOpportunitySiteSurveys({ limit: 5_000 }),
@@ -6225,6 +6247,7 @@ function validateOperationalExport(snapshot) {
     'opportunityBidDecisions',
     'estimateRatePolicies',
     'commercialScopeRevisions',
+    'riskRegisterRevisions',
     'pricingBasisDecisions',
     'opportunityEvidence',
     'opportunitySiteSurveys',
@@ -6303,6 +6326,7 @@ function validateOperationalExport(snapshot) {
       opportunityBidDecisions: Array.isArray(snapshot.opportunityBidDecisions) ? snapshot.opportunityBidDecisions.length : 0,
       estimateRatePolicies: Array.isArray(snapshot.estimateRatePolicies) ? snapshot.estimateRatePolicies.length : 0,
       commercialScopeRevisions: Array.isArray(snapshot.commercialScopeRevisions) ? snapshot.commercialScopeRevisions.length : 0,
+      riskRegisterRevisions: Array.isArray(snapshot.riskRegisterRevisions) ? snapshot.riskRegisterRevisions.length : 0,
       pricingBasisDecisions: Array.isArray(snapshot.pricingBasisDecisions) ? snapshot.pricingBasisDecisions.length : 0,
       opportunityEvidence: Array.isArray(snapshot.opportunityEvidence) ? snapshot.opportunityEvidence.length : 0,
       opportunitySiteSurveys: Array.isArray(snapshot.opportunitySiteSurveys) ? snapshot.opportunitySiteSurveys.length : 0,
@@ -6964,6 +6988,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         commercialScopeRevision: 'source_current_approval_gated_versioned',
         commercialScopeEntryKey: 'durable_exact_replay',
         quoteCommercialScopeApproval: 'source_current_required',
+        riskRegisterRevision: 'source_current_approval_gated_versioned',
+        riskRegisterEntryKey: 'durable_exact_replay',
+        riskRegisterPremortem: 'linked_failure_modes_required',
+        riskRegisterScoring: 'server_derived_probability_impact_and_exposure',
+        quoteRiskRegisterApproval: 'source_current_required',
         pricingBasisDecision: 'versioned_source_bound_exact_replay',
         pricingBasisOverride: 'explicit_reason_retained',
         quotePricingBasisApproval: 'source_current_required',
@@ -7186,6 +7215,26 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         quoteApproval: 'current_approved_scope_required',
         issuePackage: 'structured_scope_schedule_included',
         autonomousAuthoring: false,
+        messagesSent: false,
+        contractsCommitted: false,
+        externalCommitments: 0
+      },
+      riskManagement: {
+        framework: 'project_risk_register_and_premortem',
+        categories: [...RISK_REGISTER_CATEGORIES],
+        probabilityScale: [1, 2, 3, 4, 5],
+        impactScale: [1, 2, 3, 4, 5],
+        responseStrategies: [...RISK_RESPONSE_STRATEGIES],
+        riskScores: 'server_derived_probability_times_impact',
+        expectedMonetaryValue: 'server_derived_residual_probability_times_cost_exposure',
+        highResidualRiskControl: 'explicit_acceptance_or_escalation_reason',
+        premortemLinkage: 'every_failure_mode_links_to_retained_risk',
+        sourceBinding: ['approved_commercial_scope', 'job', 'takeoff', 'approved_site_survey', 'current_drawings', 'approved_client_selections'],
+        revisionHistory: 'immutable_approval_gated_supersession',
+        pricingBinding: 'revision_snapshot_and_source_hash',
+        quoteBinding: 'revision_snapshot_and_source_hash',
+        autonomousAuthoring: false,
+        observedFieldIncidentsSeparate: true,
         messagesSent: false,
         contractsCommitted: false,
         externalCommitments: 0

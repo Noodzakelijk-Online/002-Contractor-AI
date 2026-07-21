@@ -9,6 +9,7 @@ const { spawnSync } = require('node:child_process');
 const { Client } = require('pg');
 const { ContractorOperatingLedger, BID_DECISION_CRITERIA, BID_DECISION_GATES, PRICING_BASIS_FACTORS } = require('../operating-ledger');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
+const { approveLowRiskRegister } = require('./risk-register-fixture');
 const {
   migrateLocalBackupToHosted,
   orderedSelfReferentialRows,
@@ -443,9 +444,11 @@ function createBackupFixture(t, suffix = 'success') {
     targetMarginPercent: 20
   }, { actor: 'migration_fixture' });
   const commercialScope = approveCommercialScope(source, job.id, suffix);
+  const riskRegister = approveLowRiskRegister(source, job.id, commercialScope, `migration-risk-register-${suffix}`);
   const pricingDecision = source.retainPricingBasisDecision(job.id, {
     entryKey: `migration-pricing-basis-${suffix}`,
     commercialScopeRevisionId: commercialScope.id,
+    riskRegisterRevisionId: riskRegister.id,
     factors: PRICING_BASIS_FACTORS.map(factor => ({
       key: factor.key,
       status: 'yes',
@@ -929,7 +932,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1057,7 +1060,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '056_commercial_scope_revisions');
+  assert.equal(migration.migrationVersion, '057_governed_risk_register');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1236,6 +1239,12 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedCommercialScope.currentRevision.snapshotHash, fixture.commercialScope.snapshotHash);
     assert.equal(migratedCommercialScope.currentRevision.integrityValid, true);
     assert.equal(migratedCommercialScope.stale, false);
+    const migratedRiskRegister = hosted.riskRegisterForJob(fixture.job.id);
+    assert.equal(migratedRiskRegister.currentRevision.id, fixture.riskRegister.id);
+    assert.equal(migratedRiskRegister.currentRevision.sourceHash, fixture.riskRegister.sourceHash);
+    assert.equal(migratedRiskRegister.currentRevision.snapshotHash, fixture.riskRegister.snapshotHash);
+    assert.equal(migratedRiskRegister.currentRevision.integrityValid, true);
+    assert.equal(migratedRiskRegister.stale, false);
     const migratedPricingBasis = hosted.pricingBasisForJob(fixture.job.id);
     assert.equal(migratedPricingBasis.currentDecision.id, fixture.pricingDecision.id);
     assert.equal(migratedPricingBasis.currentDecision.selectedModel, 'fixed_price');
@@ -1246,6 +1255,9 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedQuote.commercialScope.revisionId, fixture.commercialScope.id);
     assert.equal(migratedQuote.commercialScopeIntegrityValid, true);
     assert.equal(migratedQuote.commercialScopeCurrent, true);
+    assert.equal(migratedQuote.riskRegister.revisionId, fixture.riskRegister.id);
+    assert.equal(migratedQuote.riskRegisterIntegrityValid, true);
+    assert.equal(migratedQuote.riskRegisterCurrent, true);
     assert.equal(migratedQuote.pricingBasisIntegrityValid, true);
     assert.equal(migratedQuote.pricingBasisCurrent, true);
     const migratedOrderUbl = hosted.getPurchaseOrderIssueDocument(fixture.bidOrderPackage.ublDocument.id, { audit: false });

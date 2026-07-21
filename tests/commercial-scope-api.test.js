@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { PRICING_BASIS_FACTORS } = require('../operating-ledger');
+const { riskRegisterPayload } = require('./risk-register-fixture');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-commercial-scope-api-'));
 const tokens = {
@@ -68,10 +69,11 @@ function scopePayload(entryKey) {
   };
 }
 
-function pricingPayload(scopeRevisionId) {
+function pricingPayload(scopeRevisionId, riskRegisterRevisionId) {
   return {
     entryKey: 'commercial-scope-api-pricing-0001',
     commercialScopeRevisionId: scopeRevisionId,
+    ...(riskRegisterRevisionId ? { riskRegisterRevisionId } : {}),
     selectedModel: 'fixed_price',
     rationale: 'Approved written scope and estimate evidence support fixed-price delivery.',
     factors: PRICING_BASIS_FACTORS.map(factor => ({
@@ -145,8 +147,17 @@ test('commercial-scope API enforces roles, approval order, quote binding, export
   assert.equal(register.body.commercialScope.ready, true);
   assert.equal(register.body.commercialScope.currentRevision.id, requested.body.revision.id);
 
+  const riskRequest = await request(baseUrl, `/api/ledger/jobs/${jobId}/risk-register/revisions`, tokens.office_operator, {
+    method: 'POST', body: JSON.stringify(riskRegisterPayload('commercial-scope-api-risk-0001', requested.body.revision.id))
+  });
+  assert.equal(riskRequest.response.status, 201, JSON.stringify(riskRequest.body));
+  const riskApproval = await request(baseUrl, `/api/ledger/approvals/${riskRequest.body.approval.id}/resolve`, tokens.approver, {
+    method: 'POST', body: JSON.stringify({ status: 'approved', reason: 'Project risk and premortem evidence verified.' })
+  });
+  assert.equal(riskApproval.response.status, 200, JSON.stringify(riskApproval.body));
+
   const retainedPricing = await request(baseUrl, `/api/ledger/jobs/${jobId}/pricing-decisions`, tokens.office_operator, {
-    method: 'POST', body: JSON.stringify(pricingPayload(requested.body.revision.id))
+    method: 'POST', body: JSON.stringify(pricingPayload(requested.body.revision.id, riskRequest.body.revision.id))
   });
   assert.equal(retainedPricing.response.status, 201, JSON.stringify(retainedPricing.body));
   assert.equal(retainedPricing.body.decision.snapshot.source.commercialScope.revisionId, requested.body.revision.id);
@@ -155,6 +166,7 @@ test('commercial-scope API enforces roles, approval order, quote binding, export
     method: 'POST',
     body: JSON.stringify({
       commercialScopeRevisionId: requested.body.revision.id,
+      riskRegisterRevisionId: riskRequest.body.revision.id,
       pricingDecisionId: retainedPricing.body.decision.id,
       currency: 'EUR',
       lineItems: [{ description: 'API retained renovation package', quantity: 1, unitPrice: 16_000 }]

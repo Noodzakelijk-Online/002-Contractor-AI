@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger, PRICING_BASIS_FACTORS } = require('../operating-ledger');
+const { approveLowRiskRegister } = require('./risk-register-fixture');
 
 function temporaryLedger(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-pricing-basis-'));
@@ -79,7 +80,9 @@ function approveScope(ledger, jobId, entryKey) {
   ledger.resolveApproval(requested.approval.id, {
     status: 'approved', resolvedBy: 'commercial-approver', reason: 'Written scope verified.'
   });
-  return ledger.getCommercialScopeRevision(requested.revision.id);
+  const scope = ledger.getCommercialScopeRevision(requested.revision.id);
+  approveLowRiskRegister(ledger, jobId, scope, `${entryKey}-risk`);
+  return scope;
 }
 
 test('pricing-basis decision tree is deterministic and requires evidence for overrides', t => {
@@ -233,7 +236,7 @@ test('quotes retain pricing intent and approval rolls back atomically after supe
   ledger.db.prepare('UPDATE pricing_basis_decisions SET snapshot_json = ? WHERE id = ?').run(row.snapshot_json, timeAndMaterials.id);
 });
 
-test('migration 056 survives restart and diagnostics verify retained pricing decisions', t => {
+test('migration 057 survives restart and diagnostics verify retained pricing decisions', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-pricing-basis-restart-'));
   const dbFile = path.join(directory, 'ledger.sqlite');
   const ledger = new ContractorOperatingLedger({ dbFile });
@@ -247,12 +250,12 @@ test('migration 056 survives restart and diagnostics verify retained pricing dec
   createTakeoff(ledger, job.id);
   approveScope(ledger, job.id, 'pricing-basis-scope-restart-0001');
   const retained = ledger.retainPricingBasisDecision(job.id, decisionPayload('pricing-basis-restart-0001'));
-  assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
+  assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
   assert.equal(ledger.diagnose().valid, true);
   ledger.close();
 
   restarted = new ContractorOperatingLedger({ dbFile });
-  assert.equal(restarted.migrationStatus().currentVersion, '056_commercial_scope_revisions');
+  assert.equal(restarted.migrationStatus().currentVersion, '057_governed_risk_register');
   assert.equal(restarted.getPricingBasisDecision(retained.decision.id).integrityValid, true);
   assert.equal(restarted.diagnose().counts.pricingBasisDecisions, 1);
   assert.equal(restarted.diagnose().valid, true);

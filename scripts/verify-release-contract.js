@@ -147,6 +147,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/ledger/jobs/:id/takeoffs'",
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/rate-build-up'",
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert'",
+    "app.get('/api/ledger/jobs/:id/risk-register'",
+    "app.post('/api/ledger/jobs/:id/risk-register/revisions'",
     "app.get('/api/ledger/jobs/:id/pricing-basis'",
     "app.post('/api/ledger/jobs/:id/pricing-decisions'",
     "app.post('/api/ledger/upload'",
@@ -192,6 +194,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '056_commercial_scope_revisions'")) {
     failures.push('Canonical commercial-scope revision migration is missing.');
   }
+  if (!ledgerSource.includes("version: '057_governed_risk_register'")) {
+    failures.push('Canonical governed risk-register migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }
@@ -218,6 +223,15 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes("quoteCommercialScopeApproval: 'source_current_required'")) {
     failures.push('Quote approval does not declare current commercial-scope source enforcement.');
+  }
+  if (!serverSource.includes("framework: 'project_risk_register_and_premortem'")) {
+    failures.push('Risk-management capability does not declare its project risk-register and premortem framework.');
+  }
+  if (!serverSource.includes("quoteRiskRegisterApproval: 'source_current_required'")) {
+    failures.push('Quote approval does not declare current project risk-register enforcement.');
+  }
+  if (!serverSource.includes('autonomousAuthoring: false')) {
+    failures.push('Risk-management capability does not explicitly prohibit autonomous risk authoring.');
   }
   if (!serverSource.includes("siteSurveyApproval: 'source_current_approval_gated'")) {
     failures.push('Site-survey capability does not declare source-current approval semantics.');

@@ -51,6 +51,7 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   let workspace = page.getByTestId('job-workspace');
   let commercial = workspace.getByTestId('commercial-control');
   let scopeControl = commercial.getByTestId('commercial-scope-control');
+  let riskControl = commercial.getByTestId('project-risk-register-control');
   let basisControl = commercial.getByTestId('pricing-basis-control');
   let assessBasis = commercial.getByRole('button', { name: 'Assess basis' });
   let newEstimate = commercial.getByRole('button', { name: 'New estimate' });
@@ -101,12 +102,15 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   workspace = page.getByTestId('job-workspace');
   commercial = workspace.getByTestId('commercial-control');
   scopeControl = commercial.getByTestId('commercial-scope-control');
+  riskControl = commercial.getByTestId('project-risk-register-control');
   basisControl = commercial.getByTestId('pricing-basis-control');
   assessBasis = commercial.getByRole('button', { name: 'Assess basis' });
   newEstimate = commercial.getByRole('button', { name: 'New estimate' });
   await expect(scopeControl).toContainText('Approved + current');
   await expect(scopeControl).toContainText(/1 allowances totaling.*900/);
-  await expect(assessBasis).toBeEnabled();
+  await expect(riskControl).toContainText('Project risk register not retained');
+  await expect(riskControl.getByRole('button', { name: 'Run premortem' })).toBeEnabled();
+  await expect(assessBasis).toBeDisabled();
   await expect(newEstimate).toBeDisabled();
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -127,6 +131,70 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   await scopeDialog.getByRole('button', { name: 'Cancel' }).click();
 
   await page.setViewportSize({ width: 1440, height: 900 });
+  await riskControl.getByRole('button', { name: 'Run premortem' }).click();
+  const riskDialog = page.getByTestId('project-risk-register-form');
+  await expect(riskDialog.getByRole('heading', { name: 'Project risk register and premortem' })).toBeVisible();
+  await riskDialog.getByLabel('Register title').fill('Kitchen renovation project risks');
+  await riskDialog.getByLabel('Facilitator').fill('Browser project manager');
+  await riskDialog.getByLabel('Failure statement').fill('The kitchen renovation missed its target because access and client selections were not controlled.');
+  await riskDialog.getByLabel('Participants').fill('Browser estimator\nBrowser project manager');
+  const riskRow = riskDialog.getByTestId('project-risk-row-0');
+  await riskRow.getByLabel('Title').fill('Client selection arrives late');
+  await riskRow.getByLabel('Owner').fill('Browser project manager');
+  await riskRow.getByLabel('Cause').fill('The client selection deadline is not actively tracked.');
+  await riskRow.getByLabel('Risk event').fill('The retained wall tile is not selected before procurement release.');
+  await riskRow.getByLabel('Consequence').fill('Procurement and installation dates move beyond the target sequence.');
+  await riskRow.getByLabel('Mitigation action').fill('Review selections weekly and escalate before the retained deadline.');
+  await riskRow.getByLabel('Contingency action').fill('Resequence unaffected work while the selection remains unresolved.');
+  await riskRow.getByLabel('Trigger or early warning').fill('No approved selection exists five working days before procurement.');
+  await riskRow.getByLabel('Cost exposure').fill('1000');
+  await riskRow.getByLabel('Schedule days').fill('3');
+  await riskRow.getByLabel('Evidence reference').fill('Scope allowance schedule S-01');
+  await riskRow.getByLabel('Failure mode').fill('The missing tile selection stopped the planned installation sequence.');
+  await riskRow.getByLabel('Early warning', { exact: true }).fill('The client had not approved the tile by the escalation date.');
+  await riskRow.getByLabel('Prevention').fill('Confirm the tile decision and evidence before procurement release.');
+  await expect(riskDialog.getByLabel('Draft project risk summary')).toContainText(/Expected exposure.*300/s);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const riskGeometry = await riskDialog.evaluate(element => ({
+    left: element.getBoundingClientRect().left,
+    right: element.getBoundingClientRect().right,
+    viewportWidth: window.innerWidth,
+    pageWidth: document.documentElement.scrollWidth,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth
+  }));
+  expect(riskGeometry.left).toBeGreaterThanOrEqual(0);
+  expect(riskGeometry.right).toBeLessThanOrEqual(riskGeometry.viewportWidth);
+  expect(riskGeometry.pageWidth).toBeLessThanOrEqual(riskGeometry.viewportWidth);
+  expect(riskGeometry.scrollWidth).toBeLessThanOrEqual(riskGeometry.clientWidth);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await riskDialog.getByRole('button', { name: 'Request approval' }).click();
+  await expect(riskDialog).toBeHidden();
+  await expect(page.getByText(/Project risk register v1 retained for approval/i)).toBeVisible();
+  await expect(riskControl).toContainText('Project risk review awaiting approval');
+  await expect(assessBasis).toBeDisabled();
+
+  await riskControl.getByRole('button', { name: 'Review risks' }).click();
+  await approveQueueItem(
+    page,
+    'Approve project risk register Kitchen renovation project risks v1',
+    'Risk ownership, treatments, expected exposure, and linked premortem failure mode verified.'
+  );
+
+  await openJob();
+  workspace = page.getByTestId('job-workspace');
+  commercial = workspace.getByTestId('commercial-control');
+  scopeControl = commercial.getByTestId('commercial-scope-control');
+  riskControl = commercial.getByTestId('project-risk-register-control');
+  basisControl = commercial.getByTestId('pricing-basis-control');
+  assessBasis = commercial.getByRole('button', { name: 'Assess basis' });
+  newEstimate = commercial.getByRole('button', { name: 'New estimate' });
+  await expect(riskControl).toContainText('Kitchen renovation project risks');
+  await expect(riskControl).toContainText('Approved + current');
+  await expect(riskControl).toContainText(/1 risks.*0 high residual.*300.*1 premortem modes/);
+  await expect(assessBasis).toBeEnabled();
+
   await assessBasis.click();
   const pricingDialog = page.getByTestId('pricing-basis-form');
   await completeFactorEvidence(pricingDialog);
@@ -157,9 +225,12 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   workspace = page.getByTestId('job-workspace');
   commercial = workspace.getByTestId('commercial-control');
   scopeControl = commercial.getByTestId('commercial-scope-control');
+  riskControl = commercial.getByTestId('project-risk-register-control');
   basisControl = commercial.getByTestId('pricing-basis-control');
   await expect(scopeControl).toContainText('Commercial scope requires revision');
   await expect(scopeControl).toContainText('Source changed');
+  await expect(riskControl).toContainText('Project risk review requires revision');
+  await expect(riskControl).toContainText('Source changed');
   await expect(basisControl).toContainText('Commercial basis requires reassessment');
   await expect(commercial.getByRole('button', { name: 'Reassess' })).toBeDisabled();
   await expect(commercial.getByRole('button', { name: 'New estimate' })).toBeDisabled();
@@ -176,6 +247,8 @@ test('operator governs written scope, allowances, pricing, responsive review, an
     reconciliationMethod: 'actual_cost_variation'
   });
   expect(detail.job.commercialScope.stale).toBe(true);
+  expect(detail.job.riskRegister.stale).toBe(true);
   expect(detail.job.pricingBasis.stale).toBe(true);
   expect(detail.job.commercialScopeRevisions).toHaveLength(1);
+  expect(detail.job.riskRegisterRevisions).toHaveLength(1);
 });

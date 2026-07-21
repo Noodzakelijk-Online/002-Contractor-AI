@@ -486,6 +486,81 @@ function emptyScopeAllowance(index = 0) {
   }
 }
 
+function emptyProjectRisk(index = 0) {
+  return {
+    riskKey: `RISK-${String(index + 1).padStart(2, '0')}`,
+    category: 'schedule',
+    title: '',
+    cause: '',
+    event: '',
+    consequence: '',
+    owner: '',
+    probability: '3',
+    impact: '3',
+    responseStrategy: 'mitigate',
+    mitigationAction: '',
+    contingencyAction: '',
+    trigger: '',
+    dueAt: '',
+    residualProbability: '2',
+    residualImpact: '2',
+    costExposureAmount: '0',
+    scheduleExposureDays: '0',
+    status: 'open',
+    acceptanceReason: '',
+    evidenceReference: '',
+    failureMode: '',
+    earlyWarning: '',
+    prevention: '',
+  }
+}
+
+function projectRiskDraft(job = {}, register = {}) {
+  const snapshot = register.currentRevision?.snapshot || register.latestRevision?.snapshot || {}
+  const failureModes = snapshot.premortem?.failureModes || EMPTY_LIST
+  const risks = (snapshot.risks || EMPTY_LIST).map((risk) => {
+    const failureMode = failureModes.find((item) => item.riskKey === risk.riskKey) || {}
+    return {
+      ...emptyProjectRisk(),
+      ...risk,
+      probability: String(risk.probability ?? 3),
+      impact: String(risk.impact ?? 3),
+      residualProbability: String(risk.residualProbability ?? 2),
+      residualImpact: String(risk.residualImpact ?? 2),
+      costExposureAmount: String(risk.costExposureAmount ?? 0),
+      scheduleExposureDays: String(risk.scheduleExposureDays ?? 0),
+      dueAt: risk.dueAt ? String(risk.dueAt).slice(0, 10) : '',
+      acceptanceReason: risk.acceptanceReason || '',
+      evidenceReference: risk.evidenceReference || '',
+      failureMode: failureMode.failureMode || '',
+      earlyWarning: failureMode.earlyWarning || '',
+      prevention: failureMode.prevention || '',
+    }
+  })
+  return {
+    title: snapshot.title || `${job.title || 'Project'} risk register`,
+    workshopDate: snapshot.premortem?.workshopDate ? String(snapshot.premortem.workshopDate).slice(0, 10) : new Date().toISOString().slice(0, 10),
+    failureStatement: snapshot.premortem?.failureStatement || '',
+    facilitator: snapshot.premortem?.facilitator || '',
+    participants: (snapshot.premortem?.participants || EMPTY_LIST).join('\n'),
+    risks: risks.length ? risks : [emptyProjectRisk()],
+    reason: register.currentRevision ? '' : 'Retain the initial project risk register and premortem before pricing.',
+  }
+}
+
+function projectRiskScore(risk, residual = false) {
+  const probability = Number(residual ? risk.residualProbability : risk.probability) || 0
+  const impact = Number(residual ? risk.residualImpact : risk.impact) || 0
+  return probability * impact
+}
+
+function projectRiskBand(score) {
+  if (score >= 20) return 'critical'
+  if (score >= 15) return 'high'
+  if (score >= 8) return 'medium'
+  return 'low'
+}
+
 function pricingBasisDraft(pricingBasis = {}) {
   const definitions = pricingBasis.factors?.length ? pricingBasis.factors : FALLBACK_PRICING_BASIS_FACTORS
   const retained = pricingBasis.currentDecision?.snapshot?.factors || EMPTY_LIST
@@ -1439,6 +1514,7 @@ function CommercialControl({
   onRecordChangeDelivery,
   onOpenApprovals,
   onRequestCommercialScope,
+  onRequestRiskRegister,
   onRetainPricingBasis,
 }) {
   const quotes = job.quotes || EMPTY_LIST
@@ -1454,6 +1530,11 @@ function CommercialControl({
   const pendingFor = (targetType, targetId) =>
     pendingApprovals.find((approval) => approval.targetType === targetType && approval.targetId === targetId)
   const pendingScopeApproval = pendingScope ? pendingFor('commercial_scope', pendingScope.id) : null
+  const riskRegister = useMemo(() => job.riskRegister || {}, [job.riskRegister])
+  const currentRiskRegister = riskRegister.currentRevision || null
+  const pendingRiskRegister = riskRegister.pendingRevision || null
+  const riskRegisterReady = Boolean(currentRiskRegister && riskRegister.stale !== true)
+  const pendingRiskApproval = pendingRiskRegister ? pendingFor('risk_register', pendingRiskRegister.id) : null
   const acceptedQuote = quotes.find((quote) => quote.status === 'accepted')
   const acceptedChanges = changeOrders.filter((changeOrder) => changeOrder.status === 'accepted')
   const acceptedChangeNet = acceptedChanges.reduce((sum, changeOrder) => sum + Number(changeOrder.amount || 0), 0)
@@ -1461,6 +1542,8 @@ function CommercialControl({
   const acceptedPricingModel = acceptedQuote?.pricingModel || job.data?.commercialPricingModel || null
   const [editingCommercialScope, setEditingCommercialScope] = useState(false)
   const [scopeDraft, setScopeDraft] = useState(() => commercialScopeDraft(job, commercialScope))
+  const [editingRiskRegister, setEditingRiskRegister] = useState(false)
+  const [riskDraft, setRiskDraft] = useState(() => projectRiskDraft(job, riskRegister))
   const [editingPricingBasis, setEditingPricingBasis] = useState(false)
   const [pricingDraft, setPricingDraft] = useState(() => pricingBasisDraft(pricingBasis))
   const pricingPreview = useMemo(() => pricingBasisPreview(pricingDraft.factors), [pricingDraft.factors])
@@ -1470,6 +1553,29 @@ function CommercialControl({
     && ['fixed_price', 'time_and_materials'].includes(pricingDraft.selectedModel)
     && pricingDraft.rationale.trim().length >= 8
     && (!pricingOverride || pricingDraft.overrideReason.trim().length >= 12)
+  const riskDraftReady = riskDraft.title.trim().length >= 3
+    && riskDraft.workshopDate
+    && riskDraft.failureStatement.trim().length >= 12
+    && riskDraft.facilitator.trim().length >= 2
+    && scopeLines(riskDraft.participants).length > 0
+    && riskDraft.reason.trim().length >= 8
+    && riskDraft.risks.length > 0
+    && riskDraft.risks.every((risk) => {
+      const residualScore = projectRiskScore(risk, true)
+      return risk.riskKey.trim().length > 0
+        && risk.title.trim().length >= 3
+        && risk.cause.trim().length >= 8
+        && risk.event.trim().length >= 8
+        && risk.consequence.trim().length >= 8
+        && risk.owner.trim().length >= 2
+        && risk.mitigationAction.trim().length >= 8
+        && risk.contingencyAction.trim().length >= 8
+        && risk.trigger.trim().length >= 8
+        && risk.failureMode.trim().length >= 8
+        && risk.earlyWarning.trim().length >= 8
+        && risk.prevention.trim().length >= 8
+        && (residualScore < 15 || risk.acceptanceReason.trim().length >= 8)
+    })
   const scopeAllowanceTotal = scopeDraft.allowances.reduce((sum, allowance) => {
     const quantity = Number(allowance.quantity)
     const unitRate = Number(allowance.unitRate)
@@ -1499,6 +1605,10 @@ function CommercialControl({
   useEffect(() => {
     if (!editingPricingBasis) setPricingDraft(pricingBasisDraft(pricingBasis))
   }, [editingPricingBasis, job.id, currentPricingBasis?.id, pricingBasis, pricingBasis.stale])
+
+  useEffect(() => {
+    if (!editingRiskRegister) setRiskDraft(projectRiskDraft(job, riskRegister))
+  }, [editingRiskRegister, job, riskRegister, currentRiskRegister?.id, pendingRiskRegister?.id])
 
   function openCommercialScopeEditor() {
     setScopeDraft(commercialScopeDraft(job, commercialScope))
@@ -1565,6 +1675,7 @@ function CommercialControl({
     const retained = await onRetainPricingBasis({
       entryKey: `pricing-basis:${job.id}:${Date.now()}`,
       commercialScopeRevisionId: currentScope?.id || null,
+      riskRegisterRevisionId: currentRiskRegister?.id || null,
       selectedModel: pricingDraft.selectedModel,
       rationale: pricingDraft.rationale.trim(),
       overrideReason: pricingOverride ? pricingDraft.overrideReason.trim() : null,
@@ -1575,6 +1686,61 @@ function CommercialControl({
       })),
     })
     if (retained) setEditingPricingBasis(false)
+  }
+
+  function updateProjectRisk(index, patch) {
+    setRiskDraft((current) => ({
+      ...current,
+      risks: current.risks.map((risk, riskIndex) => riskIndex === index ? { ...risk, ...patch } : risk),
+    }))
+  }
+
+  async function submitRiskRegister(event) {
+    event.preventDefault()
+    if (!riskDraftReady) return
+    const result = await onRequestRiskRegister({
+      entryKey: `risk-register:${job.id}:${Date.now()}`,
+      commercialScopeRevisionId: currentScope?.id || null,
+      title: riskDraft.title.trim(),
+      currency: 'EUR',
+      risks: riskDraft.risks.map((risk) => ({
+        riskKey: risk.riskKey.trim().toUpperCase(),
+        category: risk.category,
+        title: risk.title.trim(),
+        cause: risk.cause.trim(),
+        event: risk.event.trim(),
+        consequence: risk.consequence.trim(),
+        owner: risk.owner.trim(),
+        probability: Number(risk.probability),
+        impact: Number(risk.impact),
+        responseStrategy: risk.responseStrategy,
+        mitigationAction: risk.mitigationAction.trim(),
+        contingencyAction: risk.contingencyAction.trim(),
+        trigger: risk.trigger.trim(),
+        dueAt: risk.dueAt || null,
+        residualProbability: Number(risk.residualProbability),
+        residualImpact: Number(risk.residualImpact),
+        costExposureAmount: Number(risk.costExposureAmount) || 0,
+        scheduleExposureDays: Number(risk.scheduleExposureDays) || 0,
+        status: risk.status,
+        acceptanceReason: risk.acceptanceReason.trim() || null,
+        evidenceReference: risk.evidenceReference.trim() || null,
+      })),
+      premortem: {
+        workshopDate: riskDraft.workshopDate,
+        failureStatement: riskDraft.failureStatement.trim(),
+        facilitator: riskDraft.facilitator.trim(),
+        participants: scopeLines(riskDraft.participants),
+        failureModes: riskDraft.risks.map((risk) => ({
+          riskKey: risk.riskKey.trim().toUpperCase(),
+          failureMode: risk.failureMode.trim(),
+          earlyWarning: risk.earlyWarning.trim(),
+          prevention: risk.prevention.trim(),
+        })),
+      },
+      reason: riskDraft.reason.trim(),
+    })
+    if (result) setEditingRiskRegister(false)
   }
 
   return (
@@ -1613,6 +1779,33 @@ function CommercialControl({
           </button>
         ) : null}
       </div>
+      <div className={`project-risk-strip ${riskRegisterReady ? 'project-risk-active' : 'project-risk-missing'}`} data-testid="project-risk-register-control">
+        <TriangleAlert size={18} />
+        <div className="project-risk-copy">
+          <div>
+            <strong>{riskRegisterReady ? currentRiskRegister.title : pendingRiskRegister ? 'Project risk review awaiting approval' : riskRegister.stale ? 'Project risk review requires revision' : 'Project risk register not retained'}</strong>
+            {currentRiskRegister ? <span className="tag">v{currentRiskRegister.versionNumber}</span> : null}
+            {pendingRiskRegister ? <span className="tag tag-amber">v{pendingRiskRegister.versionNumber} pending</span> : null}
+          </div>
+          <span>
+            {riskRegisterReady
+              ? `${currentRiskRegister.riskCount} risks / ${currentRiskRegister.highRiskCount} high residual / ${rateMoney(currentRiskRegister.totalExpectedValue, currentRiskRegister.currency)} expected exposure / ${currentRiskRegister.snapshot?.summary?.premortemFailureModeCount || 0} premortem modes`
+              : pendingRiskRegister
+                ? 'Pricing and quote approval remain blocked until an approver verifies ownership, treatments, exposure, and premortem links.'
+                : 'Run the premortem, identify causes, events, consequences, owners, triggers, treatments, and residual exposure before pricing.'}
+          </span>
+        </div>
+        {riskRegister.stale ? <span className="tag tag-amber">Source changed</span> : riskRegisterReady ? <span className="tag tag-green">Approved + current</span> : null}
+        {pendingRiskApproval && canApprove ? (
+          <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingRiskApproval.id })}>
+            <ShieldCheck size={14} />Review risks
+          </button>
+        ) : canCoordinate ? (
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || Boolean(pendingRiskRegister)} title={!commercialScopeReady ? 'Approve the commercial scope first' : pendingRiskRegister ? 'Resolve the pending risk revision first' : 'Prepare a source-bound project risk review'} onClick={() => { setRiskDraft(projectRiskDraft(job, riskRegister)); setEditingRiskRegister(true) }}>
+            <ClipboardPenLine size={14} />{currentRiskRegister ? 'Revise risks' : 'Run premortem'}
+          </button>
+        ) : null}
+      </div>
       <div className={`pricing-basis-strip ${pricingBasisReady ? 'pricing-basis-active' : 'pricing-basis-missing'}`} data-testid="pricing-basis-control">
         <GitBranch size={18} />
         <div className="pricing-basis-copy">
@@ -1629,7 +1822,7 @@ function CommercialControl({
         </div>
         {pricingBasis.stale ? <span className="tag tag-amber">Source changed</span> : pricingBasisReady ? <span className="tag tag-green">Source current</span> : null}
         {canCoordinate ? (
-          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady} title={commercialScopeReady ? 'Assess the current approved scope' : 'Approve a current commercial scope revision first'} onClick={openPricingBasisEditor}>
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !riskRegisterReady} title={commercialScopeReady && riskRegisterReady ? 'Assess the current approved scope and project risk register' : 'Approve a current commercial scope and project risk register first'} onClick={openPricingBasisEditor}>
             <ClipboardPenLine size={14} />
             {currentPricingBasis ? 'Reassess' : 'Assess basis'}
           </button>
@@ -1661,7 +1854,7 @@ function CommercialControl({
       </div>
       {canCoordinate ? (
         <div className="commercial-actions">
-          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !pricingBasisReady} title={commercialScopeReady && pricingBasisReady ? `Create a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'Approve a current scope revision and retain a current pricing-basis decision first'} onClick={onNewQuote}>
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !riskRegisterReady || !pricingBasisReady} title={commercialScopeReady && riskRegisterReady && pricingBasisReady ? `Create a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'Approve current scope and risk revisions and retain a current pricing-basis decision first'} onClick={onNewQuote}>
             <Plus size={15} />
             New estimate
           </button>
@@ -1739,6 +1932,97 @@ function CommercialControl({
             <div className="modal-actions">
               <button type="button" className="secondary-button" onClick={() => setEditingCommercialScope(false)}>Cancel</button>
               <button className="primary-button" disabled={submitting || !scopeDraftReady}><ShieldCheck size={15} />{submitting ? 'Requesting...' : 'Request approval'}</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {editingRiskRegister ? (
+        <div className="modal-backdrop project-risk-backdrop" role="presentation">
+          <form className="modal project-risk-modal" role="dialog" aria-modal="true" aria-labelledby="project-risk-title" data-testid="project-risk-register-form" onSubmit={submitRiskRegister}>
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Approval-gated project review</p>
+                <h2 id="project-risk-title">Project risk register and premortem</h2>
+                <p>{job.title} / source-bound revision {Number(currentRiskRegister?.versionNumber || 0) + 1}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close project risk register" onClick={() => setEditingRiskRegister(false)}><X size={17} /></button>
+            </div>
+            <div className="project-risk-modal-body">
+              <div className="project-risk-summary" aria-label="Draft project risk summary">
+                <div><span>Risks</span><strong>{riskDraft.risks.length}</strong></div>
+                <div><span>High residual</span><strong>{riskDraft.risks.filter((risk) => projectRiskScore(risk, true) >= 15).length}</strong></div>
+                <div><span>Expected exposure</span><strong>{rateMoney(riskDraft.risks.reduce((sum, risk) => sum + ((Number(risk.costExposureAmount) || 0) * ({ 1: 0.1, 2: 0.3, 3: 0.5, 4: 0.7, 5: 0.9 }[Number(risk.residualProbability)] || 0)), 0))}</strong></div>
+                <div><span>Schedule exposure</span><strong>{Math.max(0, ...riskDraft.risks.map((risk) => Number(risk.scheduleExposureDays) || 0))} days</strong></div>
+              </div>
+              <section className="premortem-workshop" aria-labelledby="premortem-workshop-title">
+                <div className="commercial-line-heading">
+                  <div><h3 id="premortem-workshop-title">Premortem workshop</h3><p>Assume the project failed, then link each failure mode to a controlled risk.</p></div>
+                </div>
+                <div className="premortem-fields">
+                  <label>Register title<input required minLength="3" maxLength="160" value={riskDraft.title} onChange={(event) => setRiskDraft({ ...riskDraft, title: event.target.value })} /></label>
+                  <label>Workshop date<input required type="date" value={riskDraft.workshopDate} onChange={(event) => setRiskDraft({ ...riskDraft, workshopDate: event.target.value })} /></label>
+                  <label>Facilitator<input required minLength="2" maxLength="160" value={riskDraft.facilitator} onChange={(event) => setRiskDraft({ ...riskDraft, facilitator: event.target.value })} /></label>
+                  <label className="project-risk-wide">Failure statement<textarea required minLength="12" maxLength="2000" rows={3} value={riskDraft.failureStatement} onChange={(event) => setRiskDraft({ ...riskDraft, failureStatement: event.target.value })} placeholder="The project failed because..." /></label>
+                  <label className="project-risk-wide">Participants<textarea required rows={3} value={riskDraft.participants} onChange={(event) => setRiskDraft({ ...riskDraft, participants: event.target.value })} placeholder="One participant per line" /></label>
+                </div>
+              </section>
+              <section className="project-risk-editor" aria-labelledby="project-risk-editor-title">
+                <div className="commercial-line-heading">
+                  <div><h3 id="project-risk-editor-title">Risk treatments and failure modes</h3><p>Probability and impact use a 1 to 5 scale. Scores and monetary exposure are recalculated by the server.</p></div>
+                  <button type="button" className="secondary-button" onClick={() => setRiskDraft((current) => ({ ...current, risks: [...current.risks, emptyProjectRisk(current.risks.length)] }))}><Plus size={14} />Add risk</button>
+                </div>
+                <div className="project-risk-list">
+                  {riskDraft.risks.map((risk, index) => {
+                    const inherentScore = projectRiskScore(risk)
+                    const residualScore = projectRiskScore(risk, true)
+                    return (
+                      <fieldset className="project-risk-row" key={`${risk.riskKey}-${index}`} data-testid={`project-risk-row-${index}`}>
+                        <legend>Risk {index + 1}</legend>
+                        <div className="project-risk-score" aria-label={`Risk ${index + 1} scores`}>
+                          <span className={`risk-band risk-band-${projectRiskBand(inherentScore)}`}>Inherent {inherentScore}</span>
+                          <ChevronRight size={15} />
+                          <span className={`risk-band risk-band-${projectRiskBand(residualScore)}`}>Residual {residualScore}</span>
+                        </div>
+                        <label>Key<input required maxLength="40" value={risk.riskKey} onChange={(event) => updateProjectRisk(index, { riskKey: event.target.value.toUpperCase() })} /></label>
+                        <label>Category<select value={risk.category} onChange={(event) => updateProjectRisk(index, { category: event.target.value })}><option value="commercial">Commercial</option><option value="contract">Contract</option><option value="design">Design</option><option value="site_condition">Site condition</option><option value="schedule">Schedule</option><option value="resource">Resource</option><option value="supply_chain">Supply chain</option><option value="financial">Financial</option><option value="safety">Safety</option><option value="quality">Quality</option><option value="environment">Environment</option><option value="regulatory">Regulatory</option><option value="client">Client</option><option value="third_party">Third party</option><option value="other">Other</option></select></label>
+                        <label className="project-risk-title-field">Title<input required minLength="3" maxLength="160" value={risk.title} onChange={(event) => updateProjectRisk(index, { title: event.target.value })} /></label>
+                        <label>Owner<input required minLength="2" maxLength="160" value={risk.owner} onChange={(event) => updateProjectRisk(index, { owner: event.target.value })} /></label>
+                        <label>Probability<select value={risk.probability} onChange={(event) => updateProjectRisk(index, { probability: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label>Impact<select value={risk.impact} onChange={(event) => updateProjectRisk(index, { impact: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label className="project-risk-wide">Cause<textarea required minLength="8" maxLength="1000" rows={2} value={risk.cause} onChange={(event) => updateProjectRisk(index, { cause: event.target.value })} /></label>
+                        <label className="project-risk-wide">Risk event<textarea required minLength="8" maxLength="1000" rows={2} value={risk.event} onChange={(event) => updateProjectRisk(index, { event: event.target.value })} /></label>
+                        <label className="project-risk-wide">Consequence<textarea required minLength="8" maxLength="1000" rows={2} value={risk.consequence} onChange={(event) => updateProjectRisk(index, { consequence: event.target.value })} /></label>
+                        <label>Response<select value={risk.responseStrategy} onChange={(event) => updateProjectRisk(index, { responseStrategy: event.target.value })}><option value="avoid">Avoid</option><option value="mitigate">Mitigate</option><option value="transfer">Transfer</option><option value="accept">Accept</option></select></label>
+                        <label>Status<select value={risk.status} onChange={(event) => updateProjectRisk(index, { status: event.target.value })}><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="treatment_due">Treatment due</option><option value="accepted">Accepted</option><option value="closed">Closed</option></select></label>
+                        <label>Treatment due<input type="date" value={risk.dueAt} onChange={(event) => updateProjectRisk(index, { dueAt: event.target.value })} /></label>
+                        <label className="project-risk-wide">Mitigation action<textarea required minLength="8" maxLength="2000" rows={2} value={risk.mitigationAction} onChange={(event) => updateProjectRisk(index, { mitigationAction: event.target.value })} /></label>
+                        <label className="project-risk-wide">Contingency action<textarea required minLength="8" maxLength="2000" rows={2} value={risk.contingencyAction} onChange={(event) => updateProjectRisk(index, { contingencyAction: event.target.value })} /></label>
+                        <label className="project-risk-wide">Trigger or early warning<textarea required minLength="8" maxLength="1000" rows={2} value={risk.trigger} onChange={(event) => updateProjectRisk(index, { trigger: event.target.value })} /></label>
+                        <label>Residual probability<select value={risk.residualProbability} onChange={(event) => updateProjectRisk(index, { residualProbability: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label>Residual impact<select value={risk.residualImpact} onChange={(event) => updateProjectRisk(index, { residualImpact: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label>Cost exposure<input type="number" min="0" max="1000000000" step="0.01" value={risk.costExposureAmount} onChange={(event) => updateProjectRisk(index, { costExposureAmount: event.target.value })} /></label>
+                        <label>Schedule days<input type="number" min="0" max="10000" step="0.25" value={risk.scheduleExposureDays} onChange={(event) => updateProjectRisk(index, { scheduleExposureDays: event.target.value })} /></label>
+                        {residualScore >= 15 || risk.responseStrategy === 'accept' || risk.status === 'accepted' ? <label className="project-risk-wide risk-acceptance">Acceptance or escalation reason<textarea required minLength="8" maxLength="1000" rows={2} value={risk.acceptanceReason} onChange={(event) => updateProjectRisk(index, { acceptanceReason: event.target.value })} /></label> : null}
+                        <label className="project-risk-wide">Evidence reference<input maxLength="500" value={risk.evidenceReference} onChange={(event) => updateProjectRisk(index, { evidenceReference: event.target.value })} /></label>
+                        <div className="premortem-link-heading"><TriangleAlert size={15} /><strong>Linked premortem failure mode</strong></div>
+                        <label className="project-risk-wide">Failure mode<textarea required minLength="8" maxLength="1000" rows={2} value={risk.failureMode} onChange={(event) => updateProjectRisk(index, { failureMode: event.target.value })} /></label>
+                        <label className="project-risk-wide">Early warning<textarea required minLength="8" maxLength="1000" rows={2} value={risk.earlyWarning} onChange={(event) => updateProjectRisk(index, { earlyWarning: event.target.value })} /></label>
+                        <label className="project-risk-wide">Prevention<textarea required minLength="8" maxLength="2000" rows={2} value={risk.prevention} onChange={(event) => updateProjectRisk(index, { prevention: event.target.value })} /></label>
+                        <button type="button" className="icon-button project-risk-remove" aria-label={`Remove risk ${index + 1}`} disabled={riskDraft.risks.length === 1} onClick={() => setRiskDraft((current) => ({ ...current, risks: current.risks.filter((_, riskIndex) => riskIndex !== index) }))}><X size={15} /></button>
+                      </fieldset>
+                    )
+                  })}
+                </div>
+              </section>
+              {riskRegister.revisions?.length ? (
+                <details className="project-risk-history"><summary>Revision history ({riskRegister.revisions.length})</summary><div>{riskRegister.revisions.map((revision) => <span key={revision.id}>v{revision.versionNumber} / {formatStatus(revision.status)} / {revision.riskCount} risks / {formatDateTime(revision.updatedAt)}</span>)}</div></details>
+              ) : null}
+              <label className="pricing-basis-textarea">Revision reason<textarea required minLength="8" maxLength="500" value={riskDraft.reason} onChange={(event) => setRiskDraft({ ...riskDraft, reason: event.target.value })} placeholder="Explain why this project risk review is being requested." /></label>
+              <p className="workflow-note">Approval makes this the exact risk source for pricing and quotes. Automation may flag the missing review, but it cannot author risks, accept liability, promise dates, commit spend, issue a quote, send a message, invoice, or move funds.</p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setEditingRiskRegister(false)}>Cancel</button>
+              <button className="primary-button" disabled={submitting || !riskDraftReady}><ShieldCheck size={15} />{submitting ? 'Requesting...' : 'Request approval'}</button>
             </div>
           </form>
         </div>
@@ -1826,6 +2110,8 @@ function CommercialControl({
                   && !issuePackage
                   && quote.commercialScopeIntegrityValid === true
                   && quote.commercialScopeCurrent === true
+                  && quote.riskRegisterIntegrityValid === true
+                  && quote.riskRegisterCurrent === true
                   && quote.pricingBasisIntegrityValid !== false
                   && quote.pricingBasisCurrent !== false
                 return (
@@ -1838,6 +2124,9 @@ function CommercialControl({
                         {quote.commercialScope ? <span className="tag">Scope v{quote.commercialScope.versionNumber}</span> : null}
                         {quote.commercialScopeIntegrityValid === false ? <span className="tag tag-red">Scope integrity failed</span> : null}
                         {issueApproval && quote.commercialScopeCurrent === false ? <span className="tag tag-amber">Scope revision required</span> : null}
+                        {quote.riskRegister ? <span className="tag">Risk v{quote.riskRegister.versionNumber}</span> : null}
+                        {quote.riskRegisterIntegrityValid === false ? <span className="tag tag-red">Risk integrity failed</span> : null}
+                        {issueApproval && quote.riskRegisterCurrent === false ? <span className="tag tag-amber">Risk review required</span> : null}
                         {quote.pricingBasisIntegrityValid === false ? <span className="tag tag-red">Basis integrity failed</span> : null}
                         {issueApproval && quote.pricingBasisCurrent === false ? <span className="tag tag-amber">Reassessment required</span> : null}
                       </div>
@@ -4038,7 +4327,7 @@ function AutomationControl({
             (action.jobId ? { id: action.jobId, title: action.jobTitle || 'Ledger job' } : null)
           const selectable = action.safeDraftable && !action.blocked
           return (
-            <article className="automation-item" key={action.id}>
+            <article className="automation-item" key={action.id} data-action-id={action.id} data-job-id={action.jobId || ''}>
               <label className="automation-select">
                 <input
                   type="checkbox"

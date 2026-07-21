@@ -122,6 +122,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
       ledgerOnly: true
     },
     { key: 'commercial_scope', label: 'Approved scope, assumptions, exclusions, and allowances', table: 'commercial_scope_revisions', detailKey: 'commercialScope', readyStatuses: ['approved'] },
+    { key: 'risk_register', label: 'Approved project risk register and premortem', table: 'risk_register_revisions', detailKey: 'riskRegister', readyStatuses: ['approved'] },
     { key: 'pricing_basis', label: 'Current fixed-price or time-and-materials decision', table: 'pricing_basis_decisions', detailKey: 'pricingBasis', readyStatuses: ['current'] },
     { key: 'quote', label: 'Quote or estimate', table: 'quotes', detailKey: 'quotes' },
     { key: 'site_visit', label: 'Site visit / survey', table: 'site_visits', detailKey: 'siteVisits' },
@@ -131,6 +132,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ],
   'project-execution': [
     { key: 'job', label: 'Job package', table: 'jobs', detailKey: 'id' },
+    { key: 'risk_register', label: 'Current project risk register and premortem', table: 'risk_register_revisions', detailKey: 'riskRegister', readyStatuses: ['approved'] },
     { key: 'tasks', label: 'Tasks', table: 'job_tasks', detailKey: 'tasks' },
     { key: 'schedule', label: 'Route or schedule plan', table: 'route_plans', detailKey: 'routePlans' },
     { key: 'daywork', label: 'Daywork / meerwerk tickets', table: 'daywork_tickets', detailKey: 'dayworkTickets' },
@@ -721,6 +723,7 @@ function capabilityRequirementActionTarget(requirementKey) {
     intake: 'job_update_form',
     bid_package: 'bid_package_form',
     commercial_scope: 'commercial_scope_form',
+    risk_register: 'risk_register_form',
     pricing_basis: 'pricing_basis_form',
     quote: 'quote_form',
     site_visit: 'site_visit_form',
@@ -788,7 +791,6 @@ function capabilityRequirementActionTarget(requirementKey) {
 
 const CAPABILITY_SAFE_SCAFFOLD_REQUIREMENTS = new Set([
   'bid_package',
-  'quote',
   'materials',
   'tasks',
   'schedule',
@@ -1115,6 +1117,11 @@ const UNIT_RATE_BUILD_UP_FORMAT = 'contractor-ai-unit-rate-build-up/v1';
 const COMMERCIAL_SCOPE_FORMAT = 'contractor-ai-commercial-scope/v1';
 const COMMERCIAL_SCOPE_ALLOWANCE_TYPES = new Set(['selection_allowance', 'provisional_sum', 'unit_rate']);
 const COMMERCIAL_SCOPE_RECONCILIATION_METHODS = new Set(['fixed_included', 'actual_cost_variation', 'remeasured_unit_rate']);
+const RISK_REGISTER_FORMAT = 'contractor-ai-risk-register/v1';
+const RISK_REGISTER_CATEGORIES = new Set(['commercial', 'contract', 'design', 'site_condition', 'schedule', 'resource', 'supply_chain', 'financial', 'safety', 'quality', 'environment', 'regulatory', 'client', 'third_party', 'other']);
+const RISK_RESPONSE_STRATEGIES = new Set(['avoid', 'mitigate', 'transfer', 'accept']);
+const RISK_RECORD_STATUSES = new Set(['open', 'monitoring', 'treatment_due', 'accepted', 'closed']);
+const RISK_PROBABILITY_PERCENT = Object.freeze({ 1: 10, 2: 30, 3: 50, 4: 70, 5: 90 });
 const PRICING_BASIS_DECISION_FORMAT = 'contractor-ai-pricing-basis-decision/v1';
 const PRICING_BASIS_FACTORS = Object.freeze([
   { key: 'scope_defined', label: 'Scope is fully defined', weight: 15, critical: true },
@@ -1825,6 +1832,166 @@ function normalizeCommercialScopeContent(payload = {}) {
     allowanceTotal: roundMoney(allowances.reduce((sum, allowance) => sum + allowance.amount, 0)),
     noAllowanceReason: allowanceMode === 'none' ? noAllowanceReason : null,
     clarificationDeadline: clarificationDeadline || null
+  };
+}
+
+function normalizeRiskText(value, label, options = {}) {
+  const text = normalizeText(value, '');
+  const minimum = options.minimum ?? 3;
+  const maximum = options.maximum ?? 1_000;
+  if (text.length < minimum || text.length > maximum) {
+    throw ledgerInputError('risk_register_text_invalid', `${label} must contain between ${minimum} and ${maximum} characters.`, { field: options.field || label });
+  }
+  return text;
+}
+
+function normalizeRiskScale(value, label) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > 5) {
+    throw ledgerInputError('risk_register_scale_invalid', `${label} must be an integer from 1 to 5.`, { field: label });
+  }
+  return number;
+}
+
+function riskScoreBand(score) {
+  if (score >= 20) return 'critical';
+  if (score >= 15) return 'high';
+  if (score >= 8) return 'medium';
+  return 'low';
+}
+
+function normalizeRiskRegisterContent(payload = {}) {
+  const title = normalizeRiskText(payload.title || payload.name || 'Project risk register', 'Risk-register title', { minimum: 3, maximum: 160, field: 'title' });
+  const currency = normalizeCommercialCurrency(payload.currency || 'EUR');
+  const rawRisks = payload.risks;
+  if (!Array.isArray(rawRisks) || rawRisks.length < 1 || rawRisks.length > 100) {
+    throw ledgerInputError('risk_register_risks_invalid', 'A project risk register must contain between 1 and 100 explicit risks.');
+  }
+  const risks = rawRisks.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw ledgerInputError('risk_register_risk_invalid', `Risk ${index + 1} must be an object.`);
+    }
+    const riskKey = normalizeText(value.riskKey || value.risk_key || value.key, `RISK-${String(index + 1).padStart(2, '0')}`).toUpperCase();
+    if (!/^[A-Z0-9][A-Z0-9._-]{0,39}$/.test(riskKey)) {
+      throw ledgerInputError('risk_register_key_invalid', `Risk ${index + 1} requires a safe key of 1 to 40 characters.`);
+    }
+    const category = normalizeStatus(value.category, 'other');
+    if (!RISK_REGISTER_CATEGORIES.has(category)) {
+      throw ledgerInputError('risk_register_category_invalid', `Risk ${riskKey} has an unsupported category.`);
+    }
+    const responseStrategy = normalizeStatus(value.responseStrategy || value.response_strategy, 'mitigate');
+    if (!RISK_RESPONSE_STRATEGIES.has(responseStrategy)) {
+      throw ledgerInputError('risk_register_response_invalid', `Risk ${riskKey} has an unsupported response strategy.`);
+    }
+    const status = normalizeStatus(value.status, 'open');
+    if (!RISK_RECORD_STATUSES.has(status)) {
+      throw ledgerInputError('risk_register_status_invalid', `Risk ${riskKey} has an unsupported status.`);
+    }
+    const probability = normalizeRiskScale(value.probability, `Risk ${riskKey} probability`);
+    const impact = normalizeRiskScale(value.impact, `Risk ${riskKey} impact`);
+    const residualProbability = normalizeRiskScale(value.residualProbability ?? value.residual_probability ?? probability, `Risk ${riskKey} residual probability`);
+    const residualImpact = normalizeRiskScale(value.residualImpact ?? value.residual_impact ?? impact, `Risk ${riskKey} residual impact`);
+    const costExposureAmount = roundMoney(value.costExposureAmount ?? value.cost_exposure_amount ?? 0);
+    const scheduleExposureDays = roundMeasurement(value.scheduleExposureDays ?? value.schedule_exposure_days ?? 0, 2);
+    if (costExposureAmount < 0 || costExposureAmount > 1_000_000_000 || scheduleExposureDays < 0 || scheduleExposureDays > 10_000) {
+      throw ledgerInputError('risk_register_exposure_invalid', `Risk ${riskKey} has an invalid cost or schedule exposure.`);
+    }
+    const dueAt = normalizeText(value.dueAt || value.due_at, '');
+    if (dueAt && Number.isNaN(Date.parse(dueAt))) {
+      throw ledgerInputError('risk_register_due_invalid', `Risk ${riskKey} has an invalid treatment due date.`);
+    }
+    const inherentScore = probability * impact;
+    const residualScore = residualProbability * residualImpact;
+    const acceptanceReason = normalizeText(value.acceptanceReason || value.acceptance_reason, '');
+    if ((responseStrategy === 'accept' || status === 'accepted' || residualScore >= 15) && (acceptanceReason.length < 8 || acceptanceReason.length > 1_000)) {
+      throw ledgerInputError('risk_register_acceptance_required', `Risk ${riskKey} requires an explicit acceptance or escalation reason because it is accepted or remains high exposure.`, { riskKey, residualScore });
+    }
+    return {
+      riskKey,
+      category,
+      title: normalizeRiskText(value.title || value.name, `Risk ${riskKey} title`, { minimum: 3, maximum: 160 }),
+      cause: normalizeRiskText(value.cause, `Risk ${riskKey} cause`, { minimum: 8, maximum: 1_000 }),
+      event: normalizeRiskText(value.event || value.riskEvent || value.risk_event, `Risk ${riskKey} event`, { minimum: 8, maximum: 1_000 }),
+      consequence: normalizeRiskText(value.consequence || value.impactDescription, `Risk ${riskKey} consequence`, { minimum: 8, maximum: 1_000 }),
+      owner: normalizeRiskText(value.owner || value.ownerName || value.owner_name, `Risk ${riskKey} owner`, { minimum: 2, maximum: 160 }),
+      probability,
+      impact,
+      inherentScore,
+      inherentBand: riskScoreBand(inherentScore),
+      responseStrategy,
+      mitigationAction: normalizeRiskText(value.mitigationAction || value.mitigation_action, `Risk ${riskKey} mitigation action`, { minimum: 8, maximum: 2_000 }),
+      contingencyAction: normalizeRiskText(value.contingencyAction || value.contingency_action, `Risk ${riskKey} contingency action`, { minimum: 8, maximum: 2_000 }),
+      trigger: normalizeRiskText(value.trigger || value.earlyWarning || value.early_warning, `Risk ${riskKey} trigger`, { minimum: 8, maximum: 1_000 }),
+      dueAt: dueAt || null,
+      residualProbability,
+      residualImpact,
+      residualScore,
+      residualBand: riskScoreBand(residualScore),
+      costExposureAmount,
+      expectedMonetaryValue: roundMoney(costExposureAmount * (RISK_PROBABILITY_PERCENT[residualProbability] / 100)),
+      scheduleExposureDays,
+      status,
+      acceptanceReason: acceptanceReason || null,
+      evidenceReference: normalizeText(value.evidenceReference || value.evidence_reference, '') || null
+    };
+  });
+  const keys = risks.map(risk => risk.riskKey);
+  if (new Set(keys).size !== keys.length) {
+    throw ledgerInputError('risk_register_key_duplicate', 'Every project risk requires a unique key.');
+  }
+  const rawPremortem = payload.premortem;
+  if (!rawPremortem || typeof rawPremortem !== 'object' || Array.isArray(rawPremortem)) {
+    throw ledgerInputError('risk_register_premortem_required', 'A structured premortem is required with the project risk register.');
+  }
+  const workshopDate = normalizeText(rawPremortem.workshopDate || rawPremortem.workshop_date, '');
+  if (!workshopDate || Number.isNaN(Date.parse(workshopDate))) {
+    throw ledgerInputError('risk_register_premortem_date_invalid', 'The premortem requires a valid workshop date.');
+  }
+  const rawParticipants = rawPremortem.participants;
+  if (!Array.isArray(rawParticipants) || rawParticipants.length < 1 || rawParticipants.length > 20) {
+    throw ledgerInputError('risk_register_premortem_participants_invalid', 'The premortem must identify between 1 and 20 participants.');
+  }
+  const participants = rawParticipants.map((participant, index) => normalizeRiskText(participant, `Premortem participant ${index + 1}`, { minimum: 2, maximum: 160 }));
+  const rawFailureModes = rawPremortem.failureModes || rawPremortem.failure_modes;
+  if (!Array.isArray(rawFailureModes) || rawFailureModes.length < 1 || rawFailureModes.length > 50) {
+    throw ledgerInputError('risk_register_failure_modes_invalid', 'The premortem must contain between 1 and 50 failure modes.');
+  }
+  const failureModes = rawFailureModes.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw ledgerInputError('risk_register_failure_mode_invalid', `Premortem failure mode ${index + 1} must be an object.`);
+    }
+    const riskKey = normalizeText(value.riskKey || value.risk_key, '').toUpperCase();
+    if (!keys.includes(riskKey)) {
+      throw ledgerInputError('risk_register_failure_mode_link_invalid', `Premortem failure mode ${index + 1} must link to a retained risk key.`, { riskKey });
+    }
+    return {
+      riskKey,
+      failureMode: normalizeRiskText(value.failureMode || value.failure_mode || value.title, `Premortem failure mode ${index + 1}`, { minimum: 8, maximum: 1_000 }),
+      earlyWarning: normalizeRiskText(value.earlyWarning || value.early_warning, `Premortem early warning ${index + 1}`, { minimum: 8, maximum: 1_000 }),
+      prevention: normalizeRiskText(value.prevention || value.preventiveAction || value.preventive_action, `Premortem prevention ${index + 1}`, { minimum: 8, maximum: 2_000 })
+    };
+  });
+  const highRiskCount = risks.filter(risk => risk.residualScore >= 15 && !['closed'].includes(risk.status)).length;
+  return {
+    title,
+    currency,
+    risks,
+    premortem: {
+      workshopDate: new Date(workshopDate).toISOString(),
+      failureStatement: normalizeRiskText(rawPremortem.failureStatement || rawPremortem.failure_statement, 'Premortem failure statement', { minimum: 12, maximum: 2_000 }),
+      facilitator: normalizeRiskText(rawPremortem.facilitator, 'Premortem facilitator', { minimum: 2, maximum: 160 }),
+      participants,
+      failureModes
+    },
+    summary: {
+      riskCount: risks.length,
+      openRiskCount: risks.filter(risk => risk.status !== 'closed').length,
+      highRiskCount,
+      criticalRiskCount: risks.filter(risk => risk.residualScore >= 20 && risk.status !== 'closed').length,
+      totalExpectedValue: roundMoney(risks.reduce((sum, risk) => sum + risk.expectedMonetaryValue, 0)),
+      maximumScheduleExposureDays: roundMeasurement(Math.max(0, ...risks.map(risk => risk.scheduleExposureDays)), 2),
+      premortemFailureModeCount: failureModes.length
+    }
   };
 }
 
@@ -4796,6 +4963,46 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON commercial_scope_revisions(job_id, version_number DESC);
         CREATE INDEX IF NOT EXISTS idx_commercial_scope_approval
           ON commercial_scope_revisions(approval_id, status)
+          WHERE approval_id IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '057_governed_risk_register',
+    description: 'Retain approval-gated project risk registers and premortems and bind downstream commercial decisions to the exact approved revision.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS risk_register_revisions (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          title TEXT NOT NULL,
+          currency TEXT NOT NULL,
+          risk_count INTEGER NOT NULL,
+          high_risk_count INTEGER NOT NULL,
+          total_expected_value REAL NOT NULL DEFAULT 0,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_register_one_approved
+          ON risk_register_revisions(job_id)
+          WHERE status = 'approved';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_register_one_pending
+          ON risk_register_revisions(job_id)
+          WHERE status = 'pending_approval';
+        CREATE INDEX IF NOT EXISTS idx_risk_register_job_history
+          ON risk_register_revisions(job_id, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_risk_register_approval
+          ON risk_register_revisions(approval_id, status)
           WHERE approval_id IS NOT NULL;
       `);
     }
@@ -12673,7 +12880,7 @@ class ContractorOperatingLedger {
             lineItems: quoteLineItems,
             subtotal: quoteBasis,
             validUntil: payload.validUntil || payload.quote?.validUntil
-          }, { actor, audit: false })
+          }, { actor, audit: false, source: { type: 'intake_estimate' } })
         : null;
 
       const materials = (Array.isArray(payload.materials) ? payload.materials : [])
@@ -14071,7 +14278,7 @@ class ContractorOperatingLedger {
     return scope.currentRevision;
   }
 
-  pricingBasisSource(jobId) {
+  riskRegisterSource(jobId) {
     const source = this.commercialScopeSource(jobId);
     const scopeRow = this.db.prepare("SELECT * FROM commercial_scope_revisions WHERE job_id = ? AND status = 'approved' ORDER BY version_number DESC LIMIT 1").get(jobId);
     const scopeRevision = scopeRow ? this.mapCommercialScopeRevision(scopeRow) : null;
@@ -14084,6 +14291,237 @@ class ContractorOperatingLedger {
         snapshotHash: scopeRevision.snapshotHash,
         integrityValid: scopeRevision.integrityValid,
         sourceCurrent: scopeRevision.sourceHash === sha256Json(source)
+      } : null
+    };
+  }
+
+  listRiskRegisterRevisions(options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM risk_register_revisions
+      WHERE (? = '' OR job_id = ?)
+      ORDER BY job_id, version_number DESC
+      LIMIT ?
+    `).all(jobId, jobId, limit).map(row => this.mapRiskRegisterRevision(row));
+  }
+
+  getRiskRegisterRevision(revisionId) {
+    const row = this.db.prepare('SELECT * FROM risk_register_revisions WHERE id = ?').get(revisionId);
+    if (!row) throw ledgerInputError('risk_register_revision_not_found', 'Project risk-register revision not found.', { revisionId }, 404);
+    const revision = this.mapRiskRegisterRevision(row);
+    if (!revision.integrityValid) {
+      throw ledgerInputError('risk_register_integrity_failed', 'The retained project risk-register revision failed checksum verification.', { revisionId }, 409);
+    }
+    return revision;
+  }
+
+  requestRiskRegisterRevision(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('risk_register_entry_key_invalid', 'A risk-register revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason || payload.revisionReason || payload.revision_reason, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('risk_register_reason_invalid', 'A risk-register revision requires a reason between 8 and 500 characters.');
+      }
+      const commercialScopeRevision = this.assertCommercialScopeCurrent(jobId, payload.commercialScopeRevisionId || payload.commercial_scope_revision_id || null);
+      const content = normalizeRiskRegisterContent(payload);
+      const source = this.riskRegisterSource(jobId);
+      if (source.commercialScope?.revisionId !== commercialScopeRevision.id || source.commercialScope?.sourceCurrent !== true) {
+        throw ledgerInputError('risk_register_scope_stale', 'The risk register must use the exact current approved commercial scope revision.', { jobId, revisionId: commercialScopeRevision.id }, 409);
+      }
+      const sourceHash = sha256Json(source);
+      const fingerprint = sha256Json({ jobId, sourceHash, content, reason });
+      const replay = this.db.prepare('SELECT * FROM risk_register_revisions WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('risk_register_replay_conflict', 'This risk-register entryKey was already used with different evidence or assessments.', { entryKey, revisionId: replay.id }, 409);
+        }
+        const revision = this.getRiskRegisterRevision(replay.id);
+        return {
+          revision,
+          approval: revision.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(revision.approvalId)) : null,
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      const pending = this.db.prepare("SELECT id, approval_id FROM risk_register_revisions WHERE job_id = ? AND status = 'pending_approval'").get(jobId);
+      if (pending) {
+        throw ledgerInputError('risk_register_revision_pending', 'Resolve the pending project risk-register revision before requesting another.', { revisionId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const versionNumber = Number(this.db.prepare('SELECT COALESCE(MAX(version_number), 0) AS value FROM risk_register_revisions WHERE job_id = ?').get(jobId)?.value || 0) + 1;
+      const timestamp = nowIso();
+      const id = makeId('riskregister');
+      const snapshot = {
+        format: RISK_REGISTER_FORMAT,
+        revisionId: id,
+        jobId,
+        versionNumber,
+        source,
+        sourceHash,
+        ...content,
+        governance: {
+          approvalRequired: true,
+          pricingBindingRequired: true,
+          quoteBindingRequired: true,
+          autonomousAuthoring: false,
+          externalCommitments: 0
+        },
+        retainedAt: timestamp,
+        retainedBy: actor
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO risk_register_revisions (
+          id, job_id, version_number, status, title, currency, risk_count, high_risk_count,
+          total_expected_value, source_hash, snapshot_hash, snapshot_json, entry_key,
+          entry_fingerprint, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id, jobId, versionNumber, content.title, content.currency, content.summary.riskCount,
+        content.summary.highRiskCount, content.summary.totalExpectedValue, sourceHash, snapshotHash,
+        snapshotJson, entryKey, fingerprint,
+        toJson({ reason, requestedBy: actor, commercialScopeRevisionId: commercialScopeRevision.id, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'risk_register',
+        targetId: id,
+        jobId,
+        approvalType: 'risk_register_revision',
+        summary: `Approve project risk register ${content.title} v${versionNumber}`,
+        reason,
+        data: {
+          revisionId: id,
+          versionNumber,
+          title: content.title,
+          currency: content.currency,
+          riskCount: content.summary.riskCount,
+          openRiskCount: content.summary.openRiskCount,
+          highRiskCount: content.summary.highRiskCount,
+          criticalRiskCount: content.summary.criticalRiskCount,
+          totalExpectedValue: content.summary.totalExpectedValue,
+          maximumScheduleExposureDays: content.summary.maximumScheduleExposureDays,
+          premortemFailureModeCount: content.summary.premortemFailureModeCount,
+          sourceHash,
+          snapshotHash,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE risk_register_revisions SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const revision = this.getRiskRegisterRevision(id);
+      this.audit({
+        entityType: 'risk_register', entityId: id, jobId, action: 'request_risk_register_revision', actor,
+        after: revision,
+        metadata: { approvalId: approval.id, versionNumber, sourceHash, snapshotHash, highRiskCount: content.summary.highRiskCount, externalCommitments: 0 }
+      });
+      return { revision, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyRiskRegisterApproval(revisionId) {
+    const row = this.db.prepare('SELECT * FROM risk_register_revisions WHERE id = ?').get(revisionId);
+    if (!row) throw ledgerInputError('risk_register_revision_not_found', 'Project risk-register revision not found.', { revisionId }, 404);
+    if (row.status === 'approved') return this.getRiskRegisterRevision(revisionId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('risk_register_state_conflict', `Project risk register cannot be approved from ${row.status}.`, { revisionId, status: row.status }, 409);
+    }
+    const before = this.getRiskRegisterRevision(revisionId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'risk_register' || approval.target_id !== revisionId) {
+      throw ledgerInputError('risk_register_approval_invalid', 'The project risk register lacks a matching approved decision.', { revisionId }, 409);
+    }
+    const currentSourceHash = sha256Json(this.riskRegisterSource(row.job_id));
+    if (currentSourceHash !== row.source_hash) {
+      throw ledgerInputError('risk_register_source_stale', 'Commercial scope, takeoff, survey, drawing, or client-selection evidence changed after this risk-register revision was requested.', {
+        revisionId, retainedSourceHash: row.source_hash, currentSourceHash
+      }, 409);
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE risk_register_revisions SET status = 'superseded', updated_at = ? WHERE job_id = ? AND status = 'approved' AND id <> ?").run(timestamp, row.job_id, revisionId);
+    this.db.prepare(`
+      UPDATE risk_register_revisions SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, revisionId);
+    const after = this.getRiskRegisterRevision(revisionId);
+    this.audit({
+      entityType: 'risk_register', entityId: revisionId, jobId: row.job_id, action: 'approve_risk_register_revision', actor,
+      before, after,
+      metadata: { approvalId: row.approval_id, versionNumber: row.version_number, sourceHash: row.source_hash, snapshotHash: row.snapshot_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  riskRegisterForJob(jobId) {
+    this.requireJob(jobId, { allowInactive: true });
+    const revisions = this.listRiskRegisterRevisions({ jobId, limit: 500 });
+    const currentRevision = revisions.find(revision => revision.status === 'approved') || null;
+    const pendingRevision = revisions.find(revision => revision.status === 'pending_approval') || null;
+    const currentSourceHash = sha256Json(this.riskRegisterSource(jobId));
+    const stale = Boolean(currentRevision && (!currentRevision.integrityValid || currentRevision.sourceHash !== currentSourceHash));
+    const pendingStale = Boolean(pendingRevision && (!pendingRevision.integrityValid || pendingRevision.sourceHash !== currentSourceHash));
+    return {
+      format: RISK_REGISTER_FORMAT,
+      currentRevision,
+      pendingRevision,
+      latestRevision: pendingRevision || currentRevision || revisions[0] || null,
+      revisions,
+      currentSourceHash,
+      stale,
+      pendingStale,
+      ready: Boolean(currentRevision && !stale),
+      approvalRequired: true,
+      pricingBindingRequired: true,
+      quoteBindingRequired: true,
+      autonomousAuthoring: false,
+      externalCommitments: 0
+    };
+  }
+
+  assertRiskRegisterCurrent(jobId, revisionId = null) {
+    const register = this.riskRegisterForJob(jobId);
+    const normalizedId = normalizeText(revisionId, register.currentRevision?.id || '');
+    if (!normalizedId || !register.currentRevision) {
+      throw ledgerInputError('risk_register_required', 'Approve a current project risk register and premortem before assessing pricing or preparing a quote.', { jobId }, 409);
+    }
+    if (register.currentRevision.id !== normalizedId) {
+      throw ledgerInputError('risk_register_revision_stale', 'The selected project risk-register revision is not the current approved revision.', {
+        jobId, revisionId: normalizedId, currentRevisionId: register.currentRevision.id
+      }, 409);
+    }
+    if (register.stale) {
+      throw ledgerInputError('risk_register_source_stale', 'Commercial scope, takeoff, survey, drawing, or client-selection evidence changed after the risk register was approved.', {
+        jobId, revisionId: normalizedId, retainedSourceHash: register.currentRevision.sourceHash, currentSourceHash: register.currentSourceHash
+      }, 409);
+    }
+    return register.currentRevision;
+  }
+
+  pricingBasisSource(jobId) {
+    const source = this.riskRegisterSource(jobId);
+    const scopeRevision = source.commercialScope;
+    const riskRow = this.db.prepare("SELECT * FROM risk_register_revisions WHERE job_id = ? AND status = 'approved' ORDER BY version_number DESC LIMIT 1").get(jobId);
+    const riskRevision = riskRow ? this.mapRiskRegisterRevision(riskRow) : null;
+    return {
+      ...source,
+      commercialScope: scopeRevision,
+      riskRegister: riskRevision ? {
+        revisionId: riskRevision.id,
+        versionNumber: riskRevision.versionNumber,
+        sourceHash: riskRevision.sourceHash,
+        snapshotHash: riskRevision.snapshotHash,
+        integrityValid: riskRevision.integrityValid,
+        sourceCurrent: riskRevision.sourceHash === sha256Json(source),
+        highRiskCount: riskRevision.highRiskCount,
+        totalExpectedValue: riskRevision.totalExpectedValue
       } : null
     };
   }
@@ -14225,7 +14663,15 @@ class ContractorOperatingLedger {
         throw ledgerInputError('pricing_basis_rationale_invalid', 'A pricing-basis decision requires a rationale between 8 and 1,000 characters.');
       }
       const commercialScopeRevision = this.assertCommercialScopeCurrent(jobId, payload.commercialScopeRevisionId || payload.commercial_scope_revision_id || null);
+      const riskRegisterRevision = this.assertRiskRegisterCurrent(jobId, payload.riskRegisterRevisionId || payload.risk_register_revision_id || null);
       const evaluation = this.evaluatePricingBasisDecision(jobId, payload, { strict: true });
+      const changeRiskFactor = evaluation.factors.find(factor => factor.key === 'change_risk_low');
+      if (changeRiskFactor?.status === 'yes' && riskRegisterRevision.highRiskCount > 0) {
+        throw ledgerInputError('pricing_basis_risk_conflict', 'Change risk cannot be marked low while the approved project risk register contains open high or critical residual risks.', {
+          riskRegisterRevisionId: riskRegisterRevision.id,
+          highRiskCount: riskRegisterRevision.highRiskCount
+        }, 409);
+      }
       const override = selectedModel !== evaluation.recommendation;
       const overrideReason = normalizeText(payload.overrideReason || payload.override_reason, '');
       if (override && (overrideReason.length < 12 || overrideReason.length > 500)) {
@@ -14277,7 +14723,7 @@ class ContractorOperatingLedger {
         after: decision,
         metadata: {
           versionNumber, recommendation: evaluation.recommendation, selectedModel, score: evaluation.score,
-          override, commercialScopeRevisionId: commercialScopeRevision.id,
+          override, commercialScopeRevisionId: commercialScopeRevision.id, riskRegisterRevisionId: riskRegisterRevision.id,
           sourceHash: evaluation.sourceHash, snapshotHash, externalCommitments: 0
         }
       });
@@ -14380,6 +14826,65 @@ class ContractorOperatingLedger {
     const state = this.quoteCommercialScopeState(row.job_id, binding);
     if (!state?.integrityValid || !state.current || revision.id !== binding.revisionId) {
       throw ledgerInputError('quote_commercial_scope_invalid', 'The quote no longer matches its retained current commercial scope revision.', { quoteId, revisionId: binding.revisionId }, 409);
+    }
+    return revision;
+  }
+
+  riskRegisterQuoteBinding(revision) {
+    return revision ? {
+      format: RISK_REGISTER_FORMAT,
+      revisionId: revision.id,
+      versionNumber: revision.versionNumber,
+      title: revision.title,
+      currency: revision.currency,
+      riskCount: revision.riskCount,
+      highRiskCount: revision.highRiskCount,
+      totalExpectedValue: revision.totalExpectedValue,
+      revisionSourceHash: revision.sourceHash,
+      revisionSnapshotHash: revision.snapshotHash
+    } : null;
+  }
+
+  quoteRiskRegisterState(jobId, binding) {
+    if (!binding) return null;
+    const row = binding.revisionId
+      ? this.db.prepare('SELECT * FROM risk_register_revisions WHERE id = ? AND job_id = ?').get(binding.revisionId, jobId)
+      : null;
+    const revision = row ? this.mapRiskRegisterRevision(row) : null;
+    const integrityValid = Boolean(
+      revision?.integrityValid
+      && binding.format === RISK_REGISTER_FORMAT
+      && binding.revisionSnapshotHash === revision.snapshotHash
+      && binding.revisionSourceHash === revision.sourceHash
+      && normalizeNumber(binding.versionNumber, 0) === revision.versionNumber
+      && binding.currency === revision.currency
+      && normalizeNumber(binding.riskCount, 0) === revision.riskCount
+      && normalizeNumber(binding.highRiskCount, 0) === revision.highRiskCount
+      && roundMoney(binding.totalExpectedValue) === revision.totalExpectedValue
+    );
+    let current = false;
+    if (integrityValid && revision.status === 'approved') {
+      try {
+        const register = this.riskRegisterForJob(jobId);
+        current = register.ready && register.currentRevision?.id === revision.id;
+      } catch {
+        current = false;
+      }
+    }
+    return { ...binding, integrityValid, current };
+  }
+
+  assertQuoteRiskRegisterCurrent(quoteId) {
+    const row = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(quoteId);
+    if (!row) throw ledgerInputError('quote_not_found', 'Quote not found.', { quoteId }, 404);
+    const binding = fromJson(row.data_json, {}).riskRegister || null;
+    if (!binding) {
+      throw ledgerInputError('quote_risk_register_required', 'The quote must bind to an approved current project risk-register revision.', { quoteId }, 409);
+    }
+    const revision = this.assertRiskRegisterCurrent(row.job_id, binding.revisionId);
+    const state = this.quoteRiskRegisterState(row.job_id, binding);
+    if (!state?.integrityValid || !state.current || revision.id !== binding.revisionId) {
+      throw ledgerInputError('quote_risk_register_invalid', 'The quote no longer matches its retained current project risk-register revision.', { quoteId, revisionId: binding.revisionId }, 409);
     }
     return revision;
   }
@@ -14555,22 +15060,50 @@ class ContractorOperatingLedger {
         ''
       );
       const pricingDecision = pricingDecisionId ? this.assertPricingBasisDecisionCurrent(jobId, pricingDecisionId) : null;
-      const pricingScopeRevisionId = pricingDecision?.snapshot?.source?.commercialScope?.revisionId || null;
-      const requestedScopeRevisionId = normalizeText(
-        payload.commercialScopeRevisionId || payload.commercial_scope_revision_id || options.commercialScopeRevisionId || options.commercial_scope_revision_id,
-        pricingScopeRevisionId || ''
+      const preconstructionDraft = !pricingDecision && (
+        (options.audit === false && options.source?.type === 'intake_estimate')
+        || options.source?.type === 'quantity_takeoff'
       );
-      if (pricingDecision && requestedScopeRevisionId !== pricingScopeRevisionId) {
-        throw ledgerInputError('quote_commercial_scope_pricing_conflict', 'The quote scope revision must match the exact approved scope used by its pricing-basis decision.', {
-          pricingDecisionId: pricingDecision.id,
-          pricingScopeRevisionId,
-          requestedScopeRevisionId: requestedScopeRevisionId || null
-        }, 409);
+      let commercialScope = null;
+      let riskRegister = null;
+      if (!preconstructionDraft) {
+        const pricingScopeRevisionId = pricingDecision?.snapshot?.source?.commercialScope?.revisionId || null;
+        const pricingRiskRevisionId = pricingDecision?.snapshot?.source?.riskRegister?.revisionId || null;
+        const requestedRiskRevisionId = normalizeText(
+          payload.riskRegisterRevisionId || payload.risk_register_revision_id || options.riskRegisterRevisionId || options.risk_register_revision_id,
+          pricingRiskRevisionId || ''
+        );
+        const riskRegisterRevision = this.assertRiskRegisterCurrent(jobId, requestedRiskRevisionId || null);
+        if (pricingDecision && riskRegisterRevision.id !== pricingRiskRevisionId) {
+          throw ledgerInputError('quote_risk_register_pricing_conflict', 'The quote risk-register revision must match the exact approved revision used by its pricing-basis decision.', {
+            pricingDecisionId: pricingDecision.id,
+            pricingRiskRevisionId,
+            requestedRiskRevisionId: riskRegisterRevision.id
+          }, 409);
+        }
+        const riskScopeRevisionId = riskRegisterRevision.snapshot?.source?.commercialScope?.revisionId || null;
+        const requestedScopeRevisionId = normalizeText(
+          payload.commercialScopeRevisionId || payload.commercial_scope_revision_id || options.commercialScopeRevisionId || options.commercial_scope_revision_id,
+          pricingScopeRevisionId || riskScopeRevisionId || ''
+        );
+        if (pricingDecision && requestedScopeRevisionId !== pricingScopeRevisionId) {
+          throw ledgerInputError('quote_commercial_scope_pricing_conflict', 'The quote scope revision must match the exact approved scope used by its pricing-basis decision.', {
+            pricingDecisionId: pricingDecision.id,
+            pricingScopeRevisionId,
+            requestedScopeRevisionId: requestedScopeRevisionId || null
+          }, 409);
+        }
+        if (requestedScopeRevisionId !== riskScopeRevisionId) {
+          throw ledgerInputError('quote_commercial_scope_risk_conflict', 'The quote scope revision must match the exact approved scope assessed by its project risk register.', {
+            riskRegisterRevisionId: riskRegisterRevision.id,
+            riskScopeRevisionId,
+            requestedScopeRevisionId: requestedScopeRevisionId || null
+          }, 409);
+        }
+        const commercialScopeRevision = this.assertCommercialScopeCurrent(jobId, requestedScopeRevisionId);
+        commercialScope = this.commercialScopeQuoteBinding(commercialScopeRevision);
+        riskRegister = this.riskRegisterQuoteBinding(riskRegisterRevision);
       }
-      const commercialScopeRevision = requestedScopeRevisionId
-        ? this.assertCommercialScopeCurrent(jobId, requestedScopeRevisionId)
-        : null;
-      const commercialScope = this.commercialScopeQuoteBinding(commercialScopeRevision);
       const pricingBasis = pricingDecision ? {
         format: PRICING_BASIS_DECISION_FORMAT,
         decisionId: pricingDecision.id,
@@ -14599,7 +15132,7 @@ class ContractorOperatingLedger {
         total,
         validUntil,
         toJson(lineItems, []),
-        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null, commercialScope, pricingBasis }),
+        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null, commercialScope, riskRegister, pricingBasis }),
         timestamp,
         timestamp
       );
@@ -14611,7 +15144,7 @@ class ContractorOperatingLedger {
         approvalType: 'quote_issue',
         summary: `Approve quote ${id} for ${total.toFixed(2)} ${currency}`,
         reason: 'Quotes must be approved before sending externally.',
-        data: { subtotal, taxAmount, total, taxRate, currency, lineItems, commercialScope, pricingBasis }
+        data: { subtotal, taxAmount, total, taxRate, currency, lineItems, commercialScope, riskRegister, pricingBasis }
       }, { actor, audit: false });
       this.db.prepare('UPDATE quotes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
 
@@ -14655,6 +15188,7 @@ class ContractorOperatingLedger {
           throw error;
         }
         const commercialScopeRevision = this.assertQuoteCommercialScopeCurrent(quoteId);
+        this.assertQuoteRiskRegisterCurrent(quoteId);
         this.assertQuotePricingBasisCurrent(quoteId);
         const organization = this.getOrganizationProfile();
         if (!organization.readiness.ready) {
@@ -38946,6 +39480,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'risk_register') {
+        this.db.prepare(`
+          UPDATE risk_register_revisions
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM risk_register_revisions WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'opportunity_bid_decision') {
         this.db.prepare(`
           UPDATE opportunity_bid_decisions
@@ -39327,6 +39881,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyBidPackageSelection(targetId, timestamp);
     } else if (targetType === 'quote') {
       this.assertQuoteCommercialScopeCurrent(targetId);
+      this.assertQuoteRiskRegisterCurrent(targetId);
       this.assertQuotePricingBasisCurrent(targetId);
       this.db.prepare("UPDATE quotes SET status = 'approved', updated_at = ? WHERE id = ? AND status IN ('draft', 'pending_approval')").run(timestamp, targetId);
       this.db.prepare("UPDATE jobs SET approval_state = 'quote_approved', phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM quotes WHERE id = ?)")
@@ -39400,6 +39955,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyEstimateRatePolicyApproval(targetId);
     } else if (targetType === 'commercial_scope') {
       this.applyCommercialScopeApproval(targetId);
+    } else if (targetType === 'risk_register') {
+      this.applyRiskRegisterApproval(targetId);
     } else if (targetType === 'opportunity_bid_decision') {
       this.applyOpportunityBidDecisionApproval(targetId);
     } else if (targetType === 'opportunity_site_survey') {
@@ -43782,6 +44339,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       throw error;
     }
     const commercialScope = this.commercialScopeForJob(jobId);
+    const riskRegister = this.riskRegisterForJob(jobId);
     const pricingBasis = this.pricingBasisForJob(jobId);
     const detail = {
       ...this.mapJob(row),
@@ -43792,6 +44350,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       takeoffs: this.listTakeoffs(jobId),
       commercialScope,
       commercialScopeRevisions: commercialScope.revisions,
+      riskRegister,
+      riskRegisterRevisions: riskRegister.revisions,
       pricingBasis,
       pricingDecisions: pricingBasis.decisions,
       quotes: this.db.prepare('SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapQuote(row)),
@@ -43994,6 +44554,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       opportunity_bid_decisions: 'status',
       estimate_rate_policies: 'status',
       commercial_scope_revisions: 'status',
+      risk_register_revisions: 'status',
       opportunity_site_surveys: 'status',
       performance_scorecard_targets: 'status',
       performance_scorecard_snapshots: 'status',
@@ -44049,6 +44610,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const pendingRevision = jobDetail.commercialScope?.pendingRevision || null;
       const covered = Boolean(currentRevision || pendingRevision);
       const ready = Boolean(currentRevision && jobDetail.commercialScope?.stale !== true);
+      const openCount = ready ? 0 : covered ? 1 : 0;
+      return {
+        ...requirement,
+        ...automation,
+        count: covered ? 1 : 0,
+        openCount,
+        covered,
+        status: ready ? 'ready' : covered ? 'action_required' : 'missing'
+      };
+    }
+    if (jobDetail && requirement.key === 'risk_register') {
+      const currentRevision = jobDetail.riskRegister?.currentRevision || null;
+      const pendingRevision = jobDetail.riskRegister?.pendingRevision || null;
+      const covered = Boolean(currentRevision || pendingRevision);
+      const ready = Boolean(currentRevision && jobDetail.riskRegister?.stale !== true);
       const openCount = ready ? 0 : covered ? 1 : 0;
       return {
         ...requirement,
@@ -49398,6 +49974,38 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
       }
     }
+    const riskRegisterRows = this.db.prepare('SELECT * FROM risk_register_revisions ORDER BY job_id, version_number').all();
+    for (const riskRow of riskRegisterRows) {
+      const revision = this.mapRiskRegisterRevision(riskRow);
+      if (!['pending_approval', 'approved', 'superseded', 'rejected'].includes(revision.status)) {
+        issues.push({ severity: 'error', message: `Project risk-register revision ${revision.id} has an unsupported lifecycle status.` });
+      }
+      if (!revision.integrityValid) {
+        issues.push({ severity: 'error', message: `Project risk-register revision ${revision.id} failed retained snapshot verification.` });
+        continue;
+      }
+      if (['pending_approval', 'approved'].includes(revision.status)) {
+        const requiredApprovalStatus = revision.status === 'approved' ? 'approved' : 'pending';
+        const approval = revision.approvalId
+          ? this.db.prepare(`
+              SELECT * FROM approvals
+              WHERE id = ? AND target_type = 'risk_register' AND target_id = ? AND status = ?
+            `).get(revision.approvalId, revision.id, requiredApprovalStatus)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (!approval || approvalData.sourceHash !== revision.sourceHash || approvalData.snapshotHash !== revision.snapshotHash) {
+          issues.push({ severity: 'error', message: `Project risk-register revision ${revision.id} lacks its matching source-bound ${requiredApprovalStatus} approval.` });
+        }
+        try {
+          const currentSourceHash = sha256Json(this.riskRegisterSource(revision.jobId));
+          if (currentSourceHash !== revision.sourceHash) {
+            issues.push({ severity: 'warning', message: `Project risk-register revision ${revision.id} is stale because commercial scope or supporting source evidence changed.` });
+          }
+        } catch (error) {
+          issues.push({ severity: 'error', message: `Project risk-register revision ${revision.id} cannot be source-verified: ${error.code || error.message}.` });
+        }
+      }
+    }
     const pricingDecisionRows = this.db.prepare('SELECT * FROM pricing_basis_decisions ORDER BY job_id, version_number').all();
     for (const decisionRow of pricingDecisionRows) {
       const decision = this.mapPricingBasisDecision(decisionRow);
@@ -49431,6 +50039,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
       } else if (quoteData.pricingBasis) {
         issues.push({ severity: 'error', message: `Priced quote ${quoteRow.id} lacks its required commercial-scope binding.` });
+      }
+      if (quoteData.riskRegister) {
+        const quote = this.mapQuote(quoteRow);
+        if (quote.riskRegisterIntegrityValid !== true) {
+          issues.push({ severity: 'error', message: `Quote ${quote.id} failed retained project risk-register verification.` });
+        } else if (['draft', 'pending_approval'].includes(quote.status) && quote.riskRegisterCurrent !== true) {
+          issues.push({ severity: 'warning', message: `Quote ${quote.id} cannot be approved until its project risk-register revision is refreshed.` });
+        }
+      } else if (quoteData.pricingBasis) {
+        issues.push({ severity: 'warning', message: `Legacy priced quote ${quoteRow.id} has no governed project risk-register binding and must be recreated before approval.` });
       }
       if (!quoteData.pricingBasis) continue;
       const quote = this.mapQuote(quoteRow);
@@ -50725,6 +51343,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         opportunityBidDecisions: this.count('opportunity_bid_decisions'),
         estimateRatePolicies: this.count('estimate_rate_policies'),
         commercialScopeRevisions: this.count('commercial_scope_revisions'),
+        riskRegisterRevisions: this.count('risk_register_revisions'),
         pricingBasisDecisions: this.count('pricing_basis_decisions'),
         unitRateBuildUps: Number(this.db.prepare('SELECT COUNT(*) AS count FROM takeoff_items WHERE rate_build_up_hash IS NOT NULL').get().count || 0),
         opportunityEvidence: this.count('opportunity_evidence'),
@@ -51463,6 +52082,50 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapRiskRegisterRevision(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const versionNumber = Math.round(normalizeNumber(row.version_number, 0));
+    const riskCount = Math.round(normalizeNumber(row.risk_count, 0));
+    const highRiskCount = Math.round(normalizeNumber(row.high_risk_count, 0));
+    const totalExpectedValue = roundMoney(row.total_expected_value);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      versionNumber,
+      status: row.status,
+      title: row.title,
+      currency: row.currency,
+      riskCount,
+      highRiskCount,
+      totalExpectedValue,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === RISK_REGISTER_FORMAT
+        && snapshot.revisionId === row.id
+        && snapshot.jobId === row.job_id
+        && snapshot.versionNumber === versionNumber
+        && snapshot.title === row.title
+        && snapshot.currency === row.currency
+        && normalizeNumber(snapshot.summary?.riskCount, 0) === riskCount
+        && normalizeNumber(snapshot.summary?.highRiskCount, 0) === highRiskCount
+        && roundMoney(snapshot.summary?.totalExpectedValue) === totalExpectedValue
+        && snapshot.sourceHash === row.source_hash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapPricingBasisDecision(row) {
     if (!row) return null;
     const snapshotJson = normalizeText(row.snapshot_json, '');
@@ -51503,6 +52166,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   mapQuote(row) {
     const data = fromJson(row.data_json);
     const commercialScope = this.quoteCommercialScopeState(row.job_id, data?.commercialScope || null);
+    const riskRegister = this.quoteRiskRegisterState(row.job_id, data?.riskRegister || null);
     const pricingBasis = this.quotePricingBasisState(row.job_id, data?.pricingBasis || null);
     return {
       id: row.id,
@@ -51519,6 +52183,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       commercialScope,
       commercialScopeIntegrityValid: commercialScope?.integrityValid ?? null,
       commercialScopeCurrent: commercialScope?.current ?? null,
+      riskRegister,
+      riskRegisterIntegrityValid: riskRegister?.integrityValid ?? null,
+      riskRegisterCurrent: riskRegister?.current ?? null,
       pricingModel: pricingBasis?.selectedModel || null,
       pricingBasis,
       pricingBasisIntegrityValid: pricingBasis?.integrityValid ?? null,
@@ -54559,6 +55226,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.currency = mapped?.currency || data.currency || null;
       preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'risk_register') {
+      const row = this.db.prepare('SELECT * FROM risk_register_revisions WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapRiskRegisterRevision(row) : null;
+      const summary = mapped?.snapshot?.summary || data;
+      primaryEffect = `Approve project risk register ${mapped?.title || data.title || ''}.`;
+      addEffect(`Activate revision ${mapped?.versionNumber || data.versionNumber || ''} with ${summary.riskCount || 0} retained risk(s), including ${summary.highRiskCount || 0} open high or critical residual risk(s).`);
+      addEffect(`Bind future pricing decisions and quotes to server-derived expected exposure of ${roundMoney(summary.totalExpectedValue).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} and ${summary.premortemFailureModeCount || 0} premortem failure mode(s).`);
+      addSafeguard('Approval is refused if the approved scope, takeoff, site survey, drawing, or client-selection evidence changed after the revision request.');
+      addSafeguard('Does not auto-author risks, accept external liability, issue a quote, promise schedule, authorize work, commit spend, send a message, invoice, or move funds.');
+      riskLevel = (summary.highRiskCount || 0) > 0 ? 'high' : 'medium';
+      preview.title = mapped?.title || data.title || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.summary = summary;
+      preview.risks = mapped?.snapshot?.risks || [];
+      preview.premortem = mapped?.snapshot?.premortem || null;
+      preview.currency = mapped?.currency || data.currency || null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'opportunity_bid_decision') {
       const row = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapOpportunityBidDecision(row) : null;
@@ -54733,6 +55418,9 @@ module.exports = {
   BID_DECISION_CRITERIA,
   BID_DECISION_GATES,
   COMMERCIAL_SCOPE_FORMAT,
+  RISK_REGISTER_FORMAT,
+  RISK_REGISTER_CATEGORIES,
+  RISK_RESPONSE_STRATEGIES,
   PRICING_BASIS_DECISION_FORMAT,
   PRICING_BASIS_FACTORS,
   MARKET_FIT_CRITERIA,

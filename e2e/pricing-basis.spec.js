@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { riskRegisterPayload } = require('../tests/risk-register-fixture');
 
 async function createJob(request, title) {
   const response = await request.post('/api/ledger/intake', {
@@ -55,6 +56,19 @@ async function approveCommercialScope(request, jobId, entryKey) {
     }
   });
   expect(approved.ok()).toBeTruthy();
+  const riskRequested = await request.post(`/api/ledger/jobs/${jobId}/risk-register/revisions`, {
+    data: riskRegisterPayload(`${entryKey}-risk`, body.revision.id)
+  });
+  expect(riskRequested.ok()).toBeTruthy();
+  const risk = await riskRequested.json();
+  const riskApproved = await request.post(`/api/ledger/approvals/${risk.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser risk approver',
+      reason: 'Risk ownership, treatments, exposure, and premortem links verified.'
+    }
+  });
+  expect(riskApproved.ok()).toBeTruthy();
   return body.revision;
 }
 

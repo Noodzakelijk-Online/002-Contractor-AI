@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { riskRegisterPayload } = require('../tests/risk-register-fixture');
 
 async function approveCommercialScope(request, jobId, entryKey) {
   const response = await request.post(`/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
@@ -29,7 +30,7 @@ async function approveCommercialScope(request, jobId, entryKey) {
   return body.revision;
 }
 
-async function retainFixedPriceBasis(request, jobId, entryKey, commercialScopeRevisionId) {
+async function retainFixedPriceBasis(request, jobId, entryKey, commercialScopeRevisionId, riskRegisterRevisionId) {
   const basisResponse = await request.get(`/api/ledger/jobs/${jobId}/pricing-basis`);
   expect(basisResponse.ok()).toBeTruthy();
   const basis = (await basisResponse.json()).pricingBasis;
@@ -37,6 +38,7 @@ async function retainFixedPriceBasis(request, jobId, entryKey, commercialScopeRe
     data: {
       entryKey,
       commercialScopeRevisionId,
+      riskRegisterRevisionId,
       selectedModel: 'fixed_price',
       rationale: 'The measured scope and governed rate evidence support a fixed-price estimate.',
       factors: basis.factors.map(factor => ({
@@ -173,7 +175,20 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(workBreakdown).toContainText('2.818,75');
 
   const commercialScope = await approveCommercialScope(request, intake.job.id, `browser-takeoff-scope-${key}`);
-  await retainFixedPriceBasis(request, intake.job.id, `browser-takeoff-basis-${key}`, commercialScope.id);
+  const riskResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/risk-register/revisions`, {
+    data: riskRegisterPayload(`browser-takeoff-risk-${key}`, commercialScope.id)
+  });
+  expect(riskResponse.ok()).toBeTruthy();
+  const risk = await riskResponse.json();
+  const riskApproval = await request.post(`/api/ledger/approvals/${risk.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser risk approver',
+      reason: 'Risk ownership, treatments, exposure, and premortem links verified.'
+    }
+  });
+  expect(riskApproval.ok()).toBeTruthy();
+  await retainFixedPriceBasis(request, intake.job.id, `browser-takeoff-basis-${key}`, commercialScope.id, risk.revision.id);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();

@@ -155,7 +155,7 @@ test('pre-task plans require source-current approval and every frozen crew ackno
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
   const diagnostics = ledger.diagnose();
   assert.equal(diagnostics.valid, true, JSON.stringify(diagnostics.issues));
-  assert.equal(diagnostics.migrations.currentVersion, '056_commercial_scope_revisions');
+  assert.equal(diagnostics.migrations.currentVersion, '057_governed_risk_register');
   assert.equal(diagnostics.counts.preTaskPlans, 1);
   assert.equal(diagnostics.counts.preTaskPlanAttendees, 2);
 });
@@ -228,6 +228,6 @@ test('pre-task plans survive a restart with exact snapshots and acknowledgement 
   assert.equal(retained.prerequisitesCurrent, true);
   assert.equal(retained.attendanceSummary.acknowledged, 1);
   assert.equal(retained.attendees.find(attendee => attendee.workerId === workers[0].id).integrityValid, true);
-  assert.equal(restarted.migrationStatus().currentVersion, '056_commercial_scope_revisions');
+  assert.equal(restarted.migrationStatus().currentVersion, '057_governed_risk_register');
   restarted.close();
 });

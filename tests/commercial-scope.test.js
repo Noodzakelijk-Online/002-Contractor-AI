@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger, PRICING_BASIS_FACTORS } = require('../operating-ledger');
+const { approveLowRiskRegister } = require('./risk-register-fixture');
 
 function temporaryLedger(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-commercial-scope-'));
@@ -107,7 +108,9 @@ function approveScope(ledger, jobId, entryKey, overrides = {}) {
     resolvedBy: 'commercial-approver',
     reason: 'Written scope, source evidence, exclusions, and allowances verified.'
   });
-  return ledger.getCommercialScopeRevision(requested.revision.id);
+  const scope = ledger.getCommercialScopeRevision(requested.revision.id);
+  approveLowRiskRegister(ledger, jobId, scope, `${entryKey}-risk`);
+  return scope;
 }
 
 function configureOrganization(ledger) {
@@ -244,6 +247,7 @@ test('quotes bind the exact approved scope and issue packages render written ter
   assert.equal(ledger.listApprovals({ status: 'pending' }).some(approval => approval.id === quote.approvalId), true);
 
   const secondScope = ledger.getCommercialScopeRevision(secondRequest.revision.id);
+  approveLowRiskRegister(ledger, job.id, secondScope, 'commercial-scope-quote-risk-0002');
   const secondBasis = ledger.retainPricingBasisDecision(job.id, pricingPayload('commercial-scope-pricing-0002', secondScope.id), { actor: 'estimator' }).decision;
   const currentQuote = ledger.createQuote(job.id, {
     commercialScopeRevisionId: secondScope.id,
@@ -269,7 +273,7 @@ test('quotes bind the exact approved scope and issue packages render written ter
   assert.match(downloaded.html, /actual cost variation/);
 });
 
-test('migration 056 survives restart and diagnostics verify retained scope revisions', t => {
+test('migration 057 survives restart and diagnostics verify retained scope revisions', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-commercial-scope-restart-'));
   const dbFile = path.join(directory, 'ledger.sqlite');
   const ledger = new ContractorOperatingLedger({ dbFile });
@@ -281,12 +285,12 @@ test('migration 056 survives restart and diagnostics verify retained scope revis
   });
   const { job } = createJob(ledger);
   const revision = approveScope(ledger, job.id, 'commercial-scope-restart-0001');
-  assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
+  assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
   assert.equal(ledger.diagnose().valid, true);
   ledger.close();
 
   restarted = new ContractorOperatingLedger({ dbFile });
-  assert.equal(restarted.migrationStatus().currentVersion, '056_commercial_scope_revisions');
+  assert.equal(restarted.migrationStatus().currentVersion, '057_governed_risk_register');
   assert.equal(restarted.getCommercialScopeRevision(revision.id).integrityValid, true);
   assert.equal(restarted.commercialScopeForJob(job.id).ready, true);
   assert.equal(restarted.diagnose().counts.commercialScopeRevisions, 1);

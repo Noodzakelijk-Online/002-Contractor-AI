@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const { riskRegisterPayload } = require('./risk-register-fixture');
+
 function loadServerWithEnv(env = {}) {
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-auth-'));
   process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
@@ -609,7 +611,7 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
       headers: ownerHeaders,
       body: JSON.stringify({ actionIds: [capabilityCommand.id], limit: 1, actor: 'owner-role-test' })
     });
-    assert.equal(ownerCommandApply.response.status, 201);
+    assert.equal(ownerCommandApply.response.status, 201, JSON.stringify({ action: capabilityCommand, response: ownerCommandApply.body }));
     assert.equal(ownerCommandApply.body.summary.selected, 1);
     assert.equal(ownerCommandApply.body.summary.externalCommitments, 0);
 
@@ -1072,11 +1074,29 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     });
     assert.equal(scopeApproval.response.status, 200);
 
+    const riskRequest = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/risk-register/revisions`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify(riskRegisterPayload('auth-role-risk-register-0001', scopeRequest.body.revision.id))
+    });
+    assert.equal(riskRequest.response.status, 201);
+    const riskApproval = await request(baseUrl, `/api/ledger/approvals/${riskRequest.body.approval.id}/resolve`, {
+      method: 'POST',
+      headers: approverHeaders,
+      body: JSON.stringify({
+        status: 'approved',
+        resolvedBy: 'Approver role',
+        reason: 'Risk ownership, treatment controls, and premortem links verified.'
+      })
+    });
+    assert.equal(riskApproval.response.status, 200);
+
     const quote = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/quote`, {
       method: 'POST',
       headers: ownerHeaders,
       body: JSON.stringify({
         commercialScopeRevisionId: scopeRequest.body.revision.id,
+        riskRegisterRevisionId: riskRequest.body.revision.id,
         subtotal: 1200,
         taxRate: 21
       })

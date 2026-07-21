@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
+const { approveLowRiskRegister } = require('./risk-register-fixture');
 
 function temporaryLedger(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-commercial-'));
@@ -47,7 +48,9 @@ function approveCommercialScope(ledger, jobId, entryKey) {
     resolvedBy: 'commercial-scope-approver',
     reason: 'Written scope, assumptions, exclusions, and allowance position verified.'
   });
-  return ledger.getCommercialScopeRevision(requested.revision.id);
+  const scope = ledger.getCommercialScopeRevision(requested.revision.id);
+  approveLowRiskRegister(ledger, jobId, scope, `${entryKey}-risk`);
+  return scope;
 }
 
 test('intake without a commercial basis does not invent a zero-value quote', t => {
@@ -69,6 +72,7 @@ test('intake without a commercial basis does not invent a zero-value quote', t =
 test('commercial totals are server-derived and rejected approvals close the draft', t => {
   const ledger = temporaryLedger(t);
   const job = createCommercialJob(ledger);
+  approveCommercialScope(ledger, job.id, 'commercial-contract-totals-scope-0001');
   const quote = ledger.createQuote(job.id, {
     currency: 'EUR',
     taxRate: 21,

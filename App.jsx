@@ -5951,6 +5951,11 @@ function App() {
       return
     }
     const pricingDecision = selectedJob?.pricingBasis?.currentDecision
+    const riskRegisterRevision = selectedJob?.riskRegister?.currentRevision
+    if (!riskRegisterRevision || selectedJob?.riskRegister?.stale === true) {
+      setError('Approve a current project risk register and premortem before preparing the estimate.')
+      return
+    }
     if (!pricingDecision || selectedJob?.pricingBasis?.stale === true) {
       setError('Retain a current fixed-price or time-and-materials decision before preparing the estimate.')
       return
@@ -5966,6 +5971,7 @@ function App() {
             validUntil: takeoffConversionDraft.validUntil,
             notes: takeoffConversionDraft.notes.trim() || null,
             commercialScopeRevisionId: commercialScopeRevision.id,
+            riskRegisterRevisionId: riskRegisterRevision.id,
             pricingDecisionId: pricingDecision.id,
           }),
         },
@@ -5986,6 +5992,10 @@ function App() {
     if (!selectedJob) return
     if (mode === 'quote' && selectedJob.commercialScope?.ready !== true) {
       setError('Approve a current scope, assumptions, exclusions, and allowances revision before creating an estimate.')
+      return
+    }
+    if (mode === 'quote' && selectedJob.riskRegister?.ready !== true) {
+      setError('Approve a current project risk register and premortem before creating an estimate.')
       return
     }
     if (mode === 'quote' && (!selectedJob.pricingBasis?.currentDecision || selectedJob.pricingBasis?.stale === true)) {
@@ -6059,6 +6069,7 @@ function App() {
         mode === 'quote'
           ? {
               commercialScopeRevisionId: selectedJob?.commercialScope?.currentRevision?.id || null,
+              riskRegisterRevisionId: selectedJob?.riskRegister?.currentRevision?.id || null,
               pricingDecisionId: selectedJob?.pricingBasis?.currentDecision?.id || null,
               currency: 'EUR',
               taxRate: Number(draft.taxRate),
@@ -6156,6 +6167,27 @@ function App() {
       setSelectedJob(result.job)
       await refresh()
       notify(`Commercial scope v${result.revision.versionNumber} retained for approval. Pricing remains blocked until review.`)
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestRiskRegisterRevision(payload) {
+    if (!selectedJobId) return false
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/risk-register/revisions`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      await refresh()
+      notify(`Project risk register v${result.revision.versionNumber} retained for approval. Pricing remains blocked until review.`)
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -13959,6 +13991,7 @@ function App() {
                       onRecordChangeDelivery={openChangeOrderDelivery}
                       onOpenApprovals={openApprovals}
                       onRequestCommercialScope={requestCommercialScopeRevision}
+                      onRequestRiskRegister={requestRiskRegisterRevision}
                       onRetainPricingBasis={retainPricingBasisDecision}
                     />
                   ) : null}

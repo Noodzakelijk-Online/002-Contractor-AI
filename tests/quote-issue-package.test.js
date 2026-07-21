@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
+const { approveLowRiskRegister } = require('./risk-register-fixture');
 
 function temporaryLedger(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-quote-package-'));
@@ -59,6 +60,7 @@ function approvedQuote(ledger) {
     reason: 'Establish the written scope for quote package testing.'
   }, { actor: 'office-commercial' });
   ledger.resolveApproval(scopeRequest.approval.id, { status: 'approved', resolvedBy: 'commercial-approver', reason: 'Written scope verified.' });
+  approveLowRiskRegister(ledger, job.id, ledger.getCommercialScopeRevision(scopeRequest.revision.id), `quote-package-risk:${job.id}`);
   const quote = ledger.createQuote(job.id, {
     commercialScopeRevisionId: scopeRequest.revision.id,
     currency: 'EUR',
@@ -97,7 +99,7 @@ test('business identity is durable, validated, and reports commercial issue read
   assert.equal(retained.data.quoteTerms, organizationPayload().quoteTerms);
 
   assert.equal(ledger.getOrganizationProfile().legalName, retained.legalName);
-  assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
+  assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
 });
 

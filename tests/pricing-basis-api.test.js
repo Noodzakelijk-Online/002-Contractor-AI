@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { PRICING_BASIS_FACTORS } = require('../operating-ledger');
+const { riskRegisterPayload } = require('./risk-register-fixture');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-pricing-basis-api-'));
 const tokens = {
@@ -95,6 +96,15 @@ test('pricing-basis API enforces roles, quote source currency, export, and capab
     method: 'POST', body: JSON.stringify({ status: 'approved', reason: 'Written commercial scope verified.' })
   });
   assert.equal(scopeApproval.response.status, 200, JSON.stringify(scopeApproval.body));
+  const riskRequest = await request(baseUrl, `/api/ledger/jobs/${jobId}/risk-register/revisions`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify(riskRegisterPayload('pricing-basis-api-risk-0001', scopeRequest.body.revision.id))
+  });
+  assert.equal(riskRequest.response.status, 201, JSON.stringify(riskRequest.body));
+  const riskApproval = await request(baseUrl, `/api/ledger/approvals/${riskRequest.body.approval.id}/resolve`, tokens.approver, {
+    method: 'POST', body: JSON.stringify({ status: 'approved', reason: 'Project risk and premortem evidence verified.' })
+  });
+  assert.equal(riskApproval.response.status, 200, JSON.stringify(riskApproval.body));
 
   const fieldRead = await request(baseUrl, `/api/ledger/jobs/${jobId}/pricing-basis`, tokens.field_worker.token);
   assert.equal(fieldRead.response.status, 403);
@@ -106,6 +116,7 @@ test('pricing-basis API enforces roles, quote source currency, export, and capab
   const fixedPayload = {
     entryKey: 'pricing-basis-api-0001',
     commercialScopeRevisionId: scopeRequest.body.revision.id,
+    riskRegisterRevisionId: riskRequest.body.revision.id,
     factors: factors(),
     selectedModel: 'fixed_price',
     rationale: 'Complete retained evidence supports a fixed-price commercial commitment.'

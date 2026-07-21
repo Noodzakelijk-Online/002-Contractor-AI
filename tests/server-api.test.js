@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const { riskRegisterPayload } = require('./risk-register-fixture');
+
 const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-api-'));
 process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
 process.env.LEDGER_DB_FILE = path.join(stateDirectory, 'ledger.sqlite');
@@ -637,10 +639,25 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
     })
   });
   assert.equal(approvedScope.response.status, 200);
+  const riskRequest = await request(baseUrl, `/api/ledger/jobs/${jobId}/risk-register/revisions`, {
+    method: 'POST',
+    body: JSON.stringify(riskRegisterPayload('server-api-risk-register-0001', scopeRequest.body.revision.id))
+  });
+  assert.equal(riskRequest.response.status, 201);
+  const approvedRisk = await request(baseUrl, `/api/ledger/approvals/${riskRequest.body.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'approved',
+      resolvedBy: 'Risk Approver',
+      reason: 'Risk ownership, response controls, and premortem links verified.'
+    })
+  });
+  assert.equal(approvedRisk.response.status, 200);
   const scopedQuote = await request(baseUrl, `/api/ledger/jobs/${jobId}/quote`, {
     method: 'POST',
     body: JSON.stringify({
       commercialScopeRevisionId: scopeRequest.body.revision.id,
+      riskRegisterRevisionId: riskRequest.body.revision.id,
       taxRate: 21,
       lineItems: [
         { description: 'Cabinet removal', quantity: 1, unitPrice: 650 },
