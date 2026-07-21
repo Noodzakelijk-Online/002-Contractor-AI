@@ -1024,6 +1024,19 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup pricing-basis constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('056_commercial_scope_revisions')) {
+        if (!retainedTables.has('commercial_scope_revisions')) {
+          throw new Error('Backup commercial-scope schema is incomplete: commercial_scope_revisions.');
+        }
+        const scopeColumns = new Set(database.prepare('PRAGMA table_info(commercial_scope_revisions)').all().map(row => row.name));
+        for (const column of ['job_id', 'version_number', 'status', 'title', 'currency', 'allowance_total', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint', 'approval_id']) {
+          if (!scopeColumns.has(column)) throw new Error(`Backup commercial-scope schema is incomplete: commercial_scope_revisions.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_commercial_scope_one_approved', 'idx_commercial_scope_one_pending', 'idx_commercial_scope_job_history', 'idx_commercial_scope_approval']) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup commercial-scope constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

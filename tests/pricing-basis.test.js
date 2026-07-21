@@ -64,9 +64,28 @@ function createTakeoff(ledger, jobId) {
   }, { actor: 'estimator' });
 }
 
+function approveScope(ledger, jobId, entryKey) {
+  const requested = ledger.requestCommercialScopeRevision(jobId, {
+    entryKey,
+    title: 'Pricing-basis commercial scope',
+    scopeSummary: 'Complete the measured renovation within the retained work boundary.',
+    inclusions: ['Complete the measured installation package.'],
+    assumptions: ['Existing site services remain usable.'],
+    exclusions: ['Hazardous-material removal is excluded.'],
+    allowanceMode: 'none',
+    noAllowanceReason: 'No provisional sums or selection allowances apply.',
+    reason: 'Establish the written scope before selecting the pricing basis.'
+  }, { actor: 'estimator' });
+  ledger.resolveApproval(requested.approval.id, {
+    status: 'approved', resolvedBy: 'commercial-approver', reason: 'Written scope verified.'
+  });
+  return ledger.getCommercialScopeRevision(requested.revision.id);
+}
+
 test('pricing-basis decision tree is deterministic and requires evidence for overrides', t => {
   const { ledger } = temporaryLedger(t);
   const job = createJob(ledger);
+  approveScope(ledger, job.id, 'pricing-basis-scope-tree-0001');
 
   const fixed = ledger.evaluatePricingBasisDecision(job.id, { factors: factors() }, { strict: true });
   assert.equal(fixed.score, 100);
@@ -113,6 +132,7 @@ test('pricing-basis decisions are replay-safe, versioned, and stale when estimat
   assert.equal(missingCoverage.status, 'missing');
   assert.equal(missingCoverage.covered, false);
   const takeoff = createTakeoff(ledger, job.id);
+  approveScope(ledger, job.id, 'pricing-basis-scope-version-0001');
   const payload = decisionPayload('pricing-basis-version-0001');
   const first = ledger.retainPricingBasisDecision(job.id, payload, { actor: 'estimator' });
   const readyCoverage = ledger.ledgerCapabilityCoverage({ jobDetail: ledger.getJobDetail(job.id) })
@@ -155,6 +175,7 @@ test('quotes retain pricing intent and approval rolls back atomically after supe
   const { ledger } = temporaryLedger(t);
   const job = createJob(ledger);
   const takeoff = createTakeoff(ledger, job.id);
+  approveScope(ledger, job.id, 'pricing-basis-scope-quote-0001');
   const fixed = ledger.retainPricingBasisDecision(job.id, decisionPayload('pricing-basis-quote-0001'), { actor: 'estimator' }).decision;
   const converted = ledger.convertTakeoffToQuote(job.id, takeoff.id, {
     pricingDecisionId: fixed.id,
@@ -212,7 +233,7 @@ test('quotes retain pricing intent and approval rolls back atomically after supe
   ledger.db.prepare('UPDATE pricing_basis_decisions SET snapshot_json = ? WHERE id = ?').run(row.snapshot_json, timeAndMaterials.id);
 });
 
-test('migration 055 survives restart and diagnostics verify retained pricing decisions', t => {
+test('migration 056 survives restart and diagnostics verify retained pricing decisions', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-pricing-basis-restart-'));
   const dbFile = path.join(directory, 'ledger.sqlite');
   const ledger = new ContractorOperatingLedger({ dbFile });
@@ -224,13 +245,14 @@ test('migration 055 survives restart and diagnostics verify retained pricing dec
   });
   const job = createJob(ledger);
   createTakeoff(ledger, job.id);
+  approveScope(ledger, job.id, 'pricing-basis-scope-restart-0001');
   const retained = ledger.retainPricingBasisDecision(job.id, decisionPayload('pricing-basis-restart-0001'));
-  assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+  assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
   assert.equal(ledger.diagnose().valid, true);
   ledger.close();
 
   restarted = new ContractorOperatingLedger({ dbFile });
-  assert.equal(restarted.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+  assert.equal(restarted.migrationStatus().currentVersion, '056_commercial_scope_revisions');
   assert.equal(restarted.getPricingBasisDecision(retained.decision.id).integrityValid, true);
   assert.equal(restarted.diagnose().counts.pricingBasisDecisions, 1);
   assert.equal(restarted.diagnose().valid, true);

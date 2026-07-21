@@ -29,16 +29,47 @@ async function completeFactorEvidence(dialog, status = 'yes') {
   }
 }
 
+async function approveCommercialScope(request, jobId, entryKey) {
+  const requested = await request.post(`/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
+    data: {
+      entryKey,
+      title: 'Browser pricing written scope',
+      scopeSummary: 'Deliver the retained interior renovation work within the recorded project boundary.',
+      inclusions: ['Complete the retained interior renovation work.'],
+      assumptions: ['The recorded access and source evidence remain current.'],
+      exclusions: ['Latent hazardous materials and concealed structural repairs are excluded.'],
+      clientResponsibilities: ['Provide clear access before mobilisation.'],
+      contractorResponsibilities: ['Retain installation and completion evidence.'],
+      allowanceMode: 'none',
+      noAllowanceReason: 'The retained browser pricing scope contains no allowances.',
+      reason: 'Establish the current written commercial basis before pricing.'
+    }
+  });
+  expect(requested.ok()).toBeTruthy();
+  const body = await requested.json();
+  const approved = await request.post(`/api/ledger/approvals/${body.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser commercial approver',
+      reason: 'Written scope, assumptions, exclusions, source evidence, and allowance position verified.'
+    }
+  });
+  expect(approved.ok()).toBeTruthy();
+  return body.revision;
+}
+
 test('operator retains source-bound fixed-price and T&M decisions with governed override evidence', async ({ page, request }) => {
   const key = Date.now();
   const title = `Browser pricing basis ${key}`;
   const intake = await createJob(request, title);
+  await approveCommercialScope(request, intake.job.id, `browser-pricing-scope-${key}-01`);
 
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
   const commercial = workspace.getByTestId('commercial-control');
+  const scopeControl = commercial.getByTestId('commercial-scope-control');
   const basisControl = commercial.getByTestId('pricing-basis-control');
   const newEstimate = commercial.getByRole('button', { name: 'New estimate' });
 
@@ -108,9 +139,20 @@ test('operator retains source-bound fixed-price and T&M decisions with governed 
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   await expect(workspace.getByRole('heading', { name: title })).toBeVisible();
+  await expect(scopeControl).toContainText('Commercial scope requires revision');
+  await expect(scopeControl).toContainText('Source changed');
   await expect(basisControl).toContainText('Commercial basis requires reassessment');
   await expect(basisControl).toContainText('Source changed');
   await expect(newEstimate).toBeDisabled();
+  await expect(commercial.getByRole('button', { name: 'Reassess' })).toBeDisabled();
+
+  await approveCommercialScope(request, intake.job.id, `browser-pricing-scope-${key}-02`);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await page.getByRole('button', { name: `Open ${title}` }).first().click();
+  await expect(workspace.getByRole('heading', { name: title })).toBeVisible();
+  await expect(scopeControl).toContainText('Approved + current');
+  await expect(commercial.getByRole('button', { name: 'Reassess' })).toBeEnabled();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await commercial.getByRole('button', { name: 'Reassess' }).click();

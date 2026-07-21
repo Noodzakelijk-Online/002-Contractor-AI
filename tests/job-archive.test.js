@@ -25,12 +25,15 @@ async function resolvePendingApprovals(baseUrl, jobId) {
   const detail = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}`);
   assert.equal(detail.response.status, 200);
   for (const approval of detail.body.job.approvals.filter(item => item.status === 'pending')) {
+    const rejectUnscopedQuote = approval.targetType === 'quote';
     const resolved = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(approval.id)}/resolve`, {
       method: 'POST',
       body: JSON.stringify({
-        status: 'approved',
+        status: rejectUnscopedQuote ? 'rejected' : 'approved',
         resolvedBy: 'Lifecycle test approver',
-        reason: 'Existing retained decision reviewed before lifecycle archive.'
+        reason: rejectUnscopedQuote
+          ? 'Legacy draft has no approved written scope and is closed before archive.'
+          : 'Existing retained decision reviewed before lifecycle archive.'
       })
     });
     assert.equal(resolved.response.status, 200);
@@ -279,7 +282,7 @@ test('job archive and restore are reversible approval-gated ledger workflows', a
   const restoredDashboard = await request(baseUrl, '/api/ledger/dashboard');
   assert.equal(restoredDashboard.response.status, 200);
   assert.ok(restoredDashboard.body.dashboard.workload.openTasks > 0);
-  assert.ok(restoredDashboard.body.dashboard.metrics.approvedQuotes > 0);
+  assert.equal(restoredDashboard.body.dashboard.metrics.approvedQuotes, 0);
   assert.ok(restoredDashboard.body.dashboard.money.quotedValue > 0);
   const restoredProjectCapability = restoredDashboard.body.dashboard.capabilities.find(item => item.key === 'project-execution');
   assert.equal(restoredProjectCapability.requirements.find(item => item.key === 'job').count, 1);
@@ -515,7 +518,7 @@ test('portal revocation migration normalizes legacy inactive job access on resta
     assert.equal(migratedAccess.status, 'revoked');
     assert.equal(migratedAccess.data.revocation.actor, 'ledger_migration');
     assert.match(migratedAccess.data.revocation.reason, /retained job is inactive/i);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
     assert.ok(ledger.listAudit({ entityId: access.id, limit: 100 }).some(event => (
       event.action === 'revoke_client_portal_access'
       && event.actor === 'ledger_migration'

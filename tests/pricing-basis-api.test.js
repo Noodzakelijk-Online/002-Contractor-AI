@@ -76,6 +76,26 @@ test('pricing-basis API enforces roles, quote source currency, export, and capab
   assert.equal(intake.response.status, 201, JSON.stringify(intake.body));
   const jobId = intake.body.job.id;
 
+  const scopeRequest = await request(baseUrl, `/api/ledger/jobs/${jobId}/commercial-scope/revisions`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      entryKey: 'pricing-basis-api-scope-0001',
+      title: 'API pricing-basis scope',
+      scopeSummary: 'Complete the retained API renovation within the agreed work boundary.',
+      inclusions: ['Complete the retained renovation package.'],
+      assumptions: ['Existing services remain usable.'],
+      exclusions: ['Hazardous-material removal is excluded.'],
+      allowanceMode: 'none',
+      noAllowanceReason: 'No provisional sums or selection allowances apply.',
+      reason: 'Establish the written scope before pricing-basis assessment.'
+    })
+  });
+  assert.equal(scopeRequest.response.status, 201, JSON.stringify(scopeRequest.body));
+  const scopeApproval = await request(baseUrl, `/api/ledger/approvals/${scopeRequest.body.approval.id}/resolve`, tokens.approver, {
+    method: 'POST', body: JSON.stringify({ status: 'approved', reason: 'Written commercial scope verified.' })
+  });
+  assert.equal(scopeApproval.response.status, 200, JSON.stringify(scopeApproval.body));
+
   const fieldRead = await request(baseUrl, `/api/ledger/jobs/${jobId}/pricing-basis`, tokens.field_worker.token);
   assert.equal(fieldRead.response.status, 403);
   const approverRead = await request(baseUrl, `/api/ledger/jobs/${jobId}/pricing-basis`, tokens.approver);
@@ -85,6 +105,7 @@ test('pricing-basis API enforces roles, quote source currency, export, and capab
 
   const fixedPayload = {
     entryKey: 'pricing-basis-api-0001',
+    commercialScopeRevisionId: scopeRequest.body.revision.id,
     factors: factors(),
     selectedModel: 'fixed_price',
     rationale: 'Complete retained evidence supports a fixed-price commercial commitment.'

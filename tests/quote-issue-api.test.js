@@ -95,10 +95,34 @@ test('organization and quote issue APIs enforce role, approval, and download bou
   assert.equal(intake.response.status, 201);
   const jobId = intake.body.job.id;
 
+  const scope = await jsonRequest(baseUrl, `/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
+    method: 'POST',
+    headers: headers('office', true),
+    body: JSON.stringify({
+      entryKey: 'quote-issue-api-scope-0001',
+      title: 'API quote issue scope',
+      scopeSummary: 'Complete the retained API quote issue work within the agreed boundary.',
+      inclusions: ['Complete the retained API scope.'],
+      assumptions: ['Existing services remain usable.'],
+      exclusions: ['Hazardous-material removal is excluded.'],
+      allowanceMode: 'none',
+      noAllowanceReason: 'No provisional sums or selection allowances apply.',
+      reason: 'Establish the written scope before quote issue testing.'
+    })
+  });
+  assert.equal(scope.response.status, 201, JSON.stringify(scope.body));
+  const scopeApproved = await jsonRequest(baseUrl, `/api/ledger/approvals/${scope.body.approval.id}/resolve`, {
+    method: 'POST',
+    headers: headers('approver', true),
+    body: JSON.stringify({ status: 'approved', reason: 'Written scope verified.' })
+  });
+  assert.equal(scopeApproved.response.status, 200, JSON.stringify(scopeApproved.body));
+
   const quote = await jsonRequest(baseUrl, `/api/ledger/jobs/${jobId}/quote`, {
     method: 'POST',
     headers: headers('office', true),
     body: JSON.stringify({
+      commercialScopeRevisionId: scope.body.revision.id,
       validUntil: '2026-10-31',
       lineItems: [{ description: 'Retained API scope', quantity: 2, unitPrice: 350 }]
     })

@@ -1,12 +1,42 @@
 const { test, expect } = require('@playwright/test');
 
-async function retainFixedPriceBasis(request, jobId, entryKey) {
+async function approveCommercialScope(request, jobId, entryKey) {
+  const response = await request.post(`/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
+    data: {
+      entryKey,
+      title: 'Measured floor-finish written scope',
+      scopeSummary: 'Deliver the measured floor-finish work represented by the current governed takeoff.',
+      inclusions: ['Supply and install the measured ceramic floor tiles.'],
+      assumptions: ['Drawing A-101 P02 and retained dimensions remain current.'],
+      exclusions: ['Substrate remediation and latent hazardous materials are excluded.'],
+      clientResponsibilities: ['Provide clear access before mobilisation.'],
+      contractorResponsibilities: ['Retain measurement, installation, and completion evidence.'],
+      allowanceMode: 'none',
+      noAllowanceReason: 'The measured floor-finish scope contains no allowances.',
+      reason: 'Bind pricing and the estimate to the current measured scope.'
+    }
+  });
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  const approval = await request.post(`/api/ledger/approvals/${body.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser commercial approver',
+      reason: 'Written scope, assumptions, exclusions, takeoff source, and allowance position verified.'
+    }
+  });
+  expect(approval.ok()).toBeTruthy();
+  return body.revision;
+}
+
+async function retainFixedPriceBasis(request, jobId, entryKey, commercialScopeRevisionId) {
   const basisResponse = await request.get(`/api/ledger/jobs/${jobId}/pricing-basis`);
   expect(basisResponse.ok()).toBeTruthy();
   const basis = (await basisResponse.json()).pricingBasis;
   const response = await request.post(`/api/ledger/jobs/${jobId}/pricing-decisions`, {
     data: {
       entryKey,
+      commercialScopeRevisionId,
       selectedModel: 'fixed_price',
       rationale: 'The measured scope and governed rate evidence support a fixed-price estimate.',
       factors: basis.factors.map(factor => ({
@@ -142,7 +172,8 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(sheet.getByText(/Labour.*40,00.*overhead.*15,00.*cost.*82,00.*margin 20%/)).toBeVisible();
   await expect(workBreakdown).toContainText('2.818,75');
 
-  await retainFixedPriceBasis(request, intake.job.id, `browser-takeoff-basis-${key}`);
+  const commercialScope = await approveCommercialScope(request, intake.job.id, `browser-takeoff-scope-${key}`);
+  await retainFixedPriceBasis(request, intake.job.id, `browser-takeoff-basis-${key}`, commercialScope.id);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();

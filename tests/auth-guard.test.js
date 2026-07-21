@@ -1043,10 +1043,43 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(deniedUploadBody.error.code, 'field_job_scope_forbidden');
     assert.equal(fs.readdirSync(process.env.UPLOAD_DIR).length, storedEvidenceCount);
 
+    const scopeRequest = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/commercial-scope/revisions`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        entryKey: 'auth-role-commercial-scope-0001',
+        title: 'Role-governed written scope',
+        scopeSummary: 'Deliver the retained role-test renovation work.',
+        inclusions: ['Complete the retained renovation work.'],
+        assumptions: ['Site access remains available as recorded.'],
+        exclusions: ['Latent hazardous materials are excluded.'],
+        clientResponsibilities: ['Provide access before mobilisation.'],
+        contractorResponsibilities: ['Retain completion evidence.'],
+        allowanceMode: 'none',
+        noAllowanceReason: 'No allowances apply to the retained role-test scope.',
+        reason: 'Establish written scope before role-governed quote approval.'
+      })
+    });
+    assert.equal(scopeRequest.response.status, 201);
+    const scopeApproval = await request(baseUrl, `/api/ledger/approvals/${scopeRequest.body.approval.id}/resolve`, {
+      method: 'POST',
+      headers: approverHeaders,
+      body: JSON.stringify({
+        status: 'approved',
+        resolvedBy: 'Approver role',
+        reason: 'Written scope, assumptions, exclusions, and allowance position verified.'
+      })
+    });
+    assert.equal(scopeApproval.response.status, 200);
+
     const quote = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/quote`, {
       method: 'POST',
       headers: ownerHeaders,
-      body: JSON.stringify({ subtotal: 1200, taxRate: 21 })
+      body: JSON.stringify({
+        commercialScopeRevisionId: scopeRequest.body.revision.id,
+        subtotal: 1200,
+        taxRate: 21
+      })
     });
     assert.equal(quote.response.status, 201);
 

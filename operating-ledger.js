@@ -121,6 +121,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
       readyStatuses: ['approved'],
       ledgerOnly: true
     },
+    { key: 'commercial_scope', label: 'Approved scope, assumptions, exclusions, and allowances', table: 'commercial_scope_revisions', detailKey: 'commercialScope', readyStatuses: ['approved'] },
     { key: 'pricing_basis', label: 'Current fixed-price or time-and-materials decision', table: 'pricing_basis_decisions', detailKey: 'pricingBasis', readyStatuses: ['current'] },
     { key: 'quote', label: 'Quote or estimate', table: 'quotes', detailKey: 'quotes' },
     { key: 'site_visit', label: 'Site visit / survey', table: 'site_visits', detailKey: 'siteVisits' },
@@ -719,6 +720,8 @@ function capabilityRequirementActionTarget(requirementKey) {
   const targets = {
     intake: 'job_update_form',
     bid_package: 'bid_package_form',
+    commercial_scope: 'commercial_scope_form',
+    pricing_basis: 'pricing_basis_form',
     quote: 'quote_form',
     site_visit: 'site_visit_form',
     materials: 'material_form',
@@ -1109,6 +1112,9 @@ const MARKET_FIT_PROFILE_FORMAT = 'contractor-ai-market-fit-profile/v1';
 const MARKET_FIT_ASSESSMENT_FORMAT = 'contractor-ai-market-fit-assessment/v1';
 const ESTIMATE_RATE_POLICY_FORMAT = 'contractor-ai-estimate-rate-policy/v1';
 const UNIT_RATE_BUILD_UP_FORMAT = 'contractor-ai-unit-rate-build-up/v1';
+const COMMERCIAL_SCOPE_FORMAT = 'contractor-ai-commercial-scope/v1';
+const COMMERCIAL_SCOPE_ALLOWANCE_TYPES = new Set(['selection_allowance', 'provisional_sum', 'unit_rate']);
+const COMMERCIAL_SCOPE_RECONCILIATION_METHODS = new Set(['fixed_included', 'actual_cost_variation', 'remeasured_unit_rate']);
 const PRICING_BASIS_DECISION_FORMAT = 'contractor-ai-pricing-basis-decision/v1';
 const PRICING_BASIS_FACTORS = Object.freeze([
   { key: 'scope_defined', label: 'Scope is fully defined', weight: 15, critical: true },
@@ -1666,6 +1672,160 @@ function normalizeCommercialCurrency(value = 'EUR') {
     throw ledgerInputError('commercial_currency_invalid', 'Currency must be a three-letter ISO currency code.');
   }
   return currency;
+}
+
+function normalizeCommercialScopeList(value, label, options = {}) {
+  const minimum = options.minimum ?? 1;
+  const maximum = options.maximum ?? 50;
+  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) {
+    throw ledgerInputError(
+      'commercial_scope_list_invalid',
+      `${label} must contain between ${minimum} and ${maximum} explicit entries.`,
+      { field: options.field || label, minimum, maximum }
+    );
+  }
+  return value.map((entry, index) => {
+    const normalized = normalizeText(entry, '');
+    if (normalized.length < 3 || normalized.length > 500) {
+      throw ledgerInputError(
+        'commercial_scope_entry_invalid',
+        `${label} entry ${index + 1} must contain between 3 and 500 characters.`,
+        { field: options.field || label, index }
+      );
+    }
+    return normalized;
+  });
+}
+
+function normalizeCommercialScopeAllowance(value, index, currency) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw ledgerInputError('commercial_scope_allowance_invalid', `Allowance ${index + 1} must be an object.`);
+  }
+  const allowanceKey = normalizeText(value.allowanceKey || value.allowance_key || value.key, `ALLOW-${String(index + 1).padStart(2, '0')}`).toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9._-]{0,39}$/.test(allowanceKey)) {
+    throw ledgerInputError('commercial_scope_allowance_key_invalid', `Allowance ${index + 1} requires a safe key of 1 to 40 characters.`);
+  }
+  const allowanceType = normalizeStatus(value.allowanceType || value.allowance_type || value.type, 'selection_allowance');
+  if (!COMMERCIAL_SCOPE_ALLOWANCE_TYPES.has(allowanceType)) {
+    throw ledgerInputError('commercial_scope_allowance_type_invalid', `Allowance ${index + 1} has an unsupported type.`);
+  }
+  const reconciliationMethod = normalizeStatus(
+    value.reconciliationMethod || value.reconciliation_method,
+    allowanceType === 'unit_rate' ? 'remeasured_unit_rate' : 'actual_cost_variation'
+  );
+  if (!COMMERCIAL_SCOPE_RECONCILIATION_METHODS.has(reconciliationMethod)) {
+    throw ledgerInputError('commercial_scope_allowance_reconciliation_invalid', `Allowance ${index + 1} has an unsupported reconciliation method.`);
+  }
+  const title = normalizeText(value.title || value.name, '');
+  const description = normalizeText(value.description || value.scope, '');
+  const unit = normalizeText(value.unit, 'item');
+  const quantity = roundMeasurement(value.quantity ?? 1, 4);
+  const unitRate = roundMoney(value.unitRate ?? value.unit_rate ?? value.amount ?? 0);
+  if (title.length < 3 || title.length > 160) {
+    throw ledgerInputError('commercial_scope_allowance_title_invalid', `Allowance ${index + 1} title must contain between 3 and 160 characters.`);
+  }
+  if (description.length < 3 || description.length > 500) {
+    throw ledgerInputError('commercial_scope_allowance_description_invalid', `Allowance ${index + 1} description must contain between 3 and 500 characters.`);
+  }
+  if (unit.length < 1 || unit.length > 40 || !(quantity > 0) || quantity > 1_000_000 || unitRate < 0 || unitRate > 1_000_000_000) {
+    throw ledgerInputError('commercial_scope_allowance_value_invalid', `Allowance ${index + 1} requires a valid unit, positive quantity, and non-negative unit rate.`);
+  }
+  const selectionBy = normalizeStatus(value.selectionBy || value.selection_by, 'client');
+  if (!['client', 'contractor', 'joint'].includes(selectionBy)) {
+    throw ledgerInputError('commercial_scope_allowance_selection_invalid', `Allowance ${index + 1} selection responsibility must be client, contractor, or joint.`);
+  }
+  const dueAt = normalizeText(value.dueAt || value.due_at, '');
+  if (dueAt && Number.isNaN(Date.parse(dueAt))) {
+    throw ledgerInputError('commercial_scope_allowance_due_invalid', `Allowance ${index + 1} selection deadline is invalid.`);
+  }
+  const evidenceReference = normalizeText(value.evidenceReference || value.evidence_reference, '');
+  const notes = normalizeText(value.notes, '');
+  if (evidenceReference.length > 500 || notes.length > 1_000) {
+    throw ledgerInputError('commercial_scope_allowance_text_invalid', `Allowance ${index + 1} evidence or notes are too long.`);
+  }
+  return {
+    allowanceKey,
+    allowanceType,
+    title,
+    description,
+    quantity,
+    unit,
+    unitRate,
+    amount: roundMoney(quantity * unitRate),
+    currency,
+    reconciliationMethod,
+    selectionBy,
+    dueAt: dueAt || null,
+    evidenceReference: evidenceReference || null,
+    notes: notes || null
+  };
+}
+
+function normalizeCommercialScopeContent(payload = {}) {
+  const title = normalizeText(payload.title || payload.name, 'Commercial scope schedule');
+  const scopeSummary = normalizeText(payload.scopeSummary || payload.scope_summary || payload.summary, '');
+  if (title.length < 3 || title.length > 160) {
+    throw ledgerInputError('commercial_scope_title_invalid', 'Commercial scope title must contain between 3 and 160 characters.');
+  }
+  if (scopeSummary.length < 12 || scopeSummary.length > 4_000) {
+    throw ledgerInputError('commercial_scope_summary_invalid', 'Scope summary must contain between 12 and 4,000 characters.');
+  }
+  const inclusions = normalizeCommercialScopeList(payload.inclusions, 'Inclusions', { field: 'inclusions' });
+  const assumptions = normalizeCommercialScopeList(payload.assumptions, 'Assumptions', { field: 'assumptions' });
+  const exclusions = normalizeCommercialScopeList(payload.exclusions, 'Exclusions', { field: 'exclusions' });
+  const clientResponsibilities = normalizeCommercialScopeList(
+    payload.clientResponsibilities || payload.client_responsibilities || [],
+    'Client responsibilities',
+    { field: 'clientResponsibilities', minimum: 0 }
+  );
+  const contractorResponsibilities = normalizeCommercialScopeList(
+    payload.contractorResponsibilities || payload.contractor_responsibilities || [],
+    'Contractor responsibilities',
+    { field: 'contractorResponsibilities', minimum: 0 }
+  );
+  const currency = normalizeCommercialCurrency(payload.currency || 'EUR');
+  const rawAllowances = payload.allowances === undefined ? [] : payload.allowances;
+  if (!Array.isArray(rawAllowances) || rawAllowances.length > 30) {
+    throw ledgerInputError('commercial_scope_allowances_invalid', 'Allowances must be an array containing no more than 30 rows.');
+  }
+  const allowanceMode = normalizeStatus(payload.allowanceMode || payload.allowance_mode, rawAllowances.length ? 'defined' : 'none');
+  if (!['none', 'defined'].includes(allowanceMode)) {
+    throw ledgerInputError('commercial_scope_allowance_mode_invalid', 'Allowance mode must be none or defined.');
+  }
+  if (allowanceMode === 'defined' && rawAllowances.length < 1) {
+    throw ledgerInputError('commercial_scope_allowance_required', 'Defined allowance mode requires at least one allowance row.');
+  }
+  if (allowanceMode === 'none' && rawAllowances.length) {
+    throw ledgerInputError('commercial_scope_allowance_conflict', 'No-allowance mode cannot contain allowance rows.');
+  }
+  const allowances = rawAllowances.map((allowance, index) => normalizeCommercialScopeAllowance(allowance, index, currency));
+  const allowanceKeys = allowances.map(allowance => allowance.allowanceKey);
+  if (new Set(allowanceKeys).size !== allowanceKeys.length) {
+    throw ledgerInputError('commercial_scope_allowance_key_duplicate', 'Every allowance requires a unique key.');
+  }
+  const noAllowanceReason = normalizeText(payload.noAllowanceReason || payload.no_allowance_reason, '');
+  if (allowanceMode === 'none' && (noAllowanceReason.length < 8 || noAllowanceReason.length > 500)) {
+    throw ledgerInputError('commercial_scope_no_allowance_reason_required', 'No-allowance mode requires an explicit reason between 8 and 500 characters.');
+  }
+  const clarificationDeadline = normalizeText(payload.clarificationDeadline || payload.clarification_deadline, '');
+  if (clarificationDeadline && Number.isNaN(Date.parse(clarificationDeadline))) {
+    throw ledgerInputError('commercial_scope_clarification_deadline_invalid', 'The clarification deadline is invalid.');
+  }
+  return {
+    title,
+    scopeSummary,
+    inclusions,
+    assumptions,
+    exclusions,
+    clientResponsibilities,
+    contractorResponsibilities,
+    currency,
+    allowanceMode,
+    allowances,
+    allowanceTotal: roundMoney(allowances.reduce((sum, allowance) => sum + allowance.amount, 0)),
+    noAllowanceReason: allowanceMode === 'none' ? noAllowanceReason : null,
+    clarificationDeadline: clarificationDeadline || null
+  };
 }
 
 function estimateRateNumber(value, label, options = {}) {
@@ -4599,6 +4759,44 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON pricing_basis_decisions(job_id, version_number DESC);
         CREATE INDEX IF NOT EXISTS idx_pricing_basis_model_status
           ON pricing_basis_decisions(selected_model, status);
+      `);
+    }
+  },
+  {
+    version: '056_commercial_scope_revisions',
+    description: 'Retain approval-gated scope, assumptions, exclusions, and allowances and bind quotes to the exact approved revision.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS commercial_scope_revisions (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          title TEXT NOT NULL,
+          currency TEXT NOT NULL,
+          allowance_total REAL NOT NULL DEFAULT 0,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commercial_scope_one_approved
+          ON commercial_scope_revisions(job_id)
+          WHERE status = 'approved';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commercial_scope_one_pending
+          ON commercial_scope_revisions(job_id)
+          WHERE status = 'pending_approval';
+        CREATE INDEX IF NOT EXISTS idx_commercial_scope_job_history
+          ON commercial_scope_revisions(job_id, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_commercial_scope_approval
+          ON commercial_scope_revisions(approval_id, status)
+          WHERE approval_id IS NOT NULL;
       `);
     }
   }
@@ -13552,7 +13750,7 @@ class ContractorOperatingLedger {
       .map(row => this.mapTakeoffItem(row));
   }
 
-  pricingBasisSource(jobId) {
+  commercialEvidenceSource(jobId) {
     const job = this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
     if (!job) throw ledgerInputError('job_not_found', 'Ledger job not found.', { jobId }, 404);
     const sheets = this.db.prepare(`
@@ -13611,6 +13809,282 @@ class ContractorOperatingLedger {
         itemCount: estimateItemCount,
         hash: sha256Json(estimates)
       }
+    };
+  }
+
+  commercialScopeSource(jobId) {
+    const evidence = this.commercialEvidenceSource(jobId);
+    const opportunity = this.db.prepare(`
+      SELECT id FROM opportunities
+      WHERE converted_job_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(jobId);
+    const surveyRow = opportunity
+      ? this.db.prepare(`
+          SELECT * FROM opportunity_site_surveys
+          WHERE opportunity_id = ? AND status = 'approved'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `).get(opportunity.id)
+      : null;
+    const survey = surveyRow ? this.mapOpportunitySiteSurvey(surveyRow) : null;
+    const currentDrawings = this.listDrawingRevisions({ jobId, limit: 500 })
+      .filter(drawing => drawing.current === true)
+      .map(drawing => ({
+        id: drawing.id,
+        sheetNumber: drawing.sheetNumber,
+        revision: drawing.revision,
+        sourceHash: drawing.sourceHash,
+        snapshotHash: drawing.snapshotHash
+      }))
+      .sort((left, right) => String(left.sheetNumber).localeCompare(String(right.sheetNumber)));
+    const clientSelections = this.db.prepare(`
+      SELECT * FROM client_selections
+      WHERE job_id = ? AND status = 'approved'
+      ORDER BY id
+    `).all(jobId).map(row => this.mapClientSelection(row)).map(selection => ({
+      id: selection.id,
+      title: selection.title,
+      selectedOption: selection.selectedOption || selection.data?.selectedOption || null,
+      updatedAt: selection.updatedAt
+    }));
+    return {
+      ...evidence,
+      approvedSiteSurvey: survey ? {
+        id: survey.id,
+        opportunityId: survey.opportunityId,
+        sourceHash: survey.sourceHash,
+        snapshotHash: survey.snapshotHash
+      } : null,
+      currentDrawings,
+      approvedClientSelections: clientSelections
+    };
+  }
+
+  listCommercialScopeRevisions(options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM commercial_scope_revisions
+      WHERE (? = '' OR job_id = ?)
+      ORDER BY job_id, version_number DESC
+      LIMIT ?
+    `).all(jobId, jobId, limit).map(row => this.mapCommercialScopeRevision(row));
+  }
+
+  getCommercialScopeRevision(revisionId) {
+    const row = this.db.prepare('SELECT * FROM commercial_scope_revisions WHERE id = ?').get(revisionId);
+    if (!row) throw ledgerInputError('commercial_scope_revision_not_found', 'Commercial scope revision not found.', { revisionId }, 404);
+    const revision = this.mapCommercialScopeRevision(row);
+    if (!revision.integrityValid) {
+      throw ledgerInputError('commercial_scope_integrity_failed', 'The retained commercial scope revision failed checksum verification.', { revisionId }, 409);
+    }
+    return revision;
+  }
+
+  requestCommercialScopeRevision(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('commercial_scope_entry_key_invalid', 'A commercial scope revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason || payload.revisionReason || payload.revision_reason, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('commercial_scope_reason_invalid', 'A commercial scope revision requires a reason between 8 and 500 characters.');
+      }
+      const content = normalizeCommercialScopeContent(payload);
+      const source = this.commercialScopeSource(jobId);
+      const sourceHash = sha256Json(source);
+      const fingerprint = sha256Json({ jobId, sourceHash, content, reason });
+      const replay = this.db.prepare('SELECT * FROM commercial_scope_revisions WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('commercial_scope_replay_conflict', 'This commercial scope entryKey was already used with different evidence or terms.', { entryKey, revisionId: replay.id }, 409);
+        }
+        const revision = this.getCommercialScopeRevision(replay.id);
+        return {
+          revision,
+          approval: revision.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(revision.approvalId)) : null,
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      const pending = this.db.prepare("SELECT id, approval_id FROM commercial_scope_revisions WHERE job_id = ? AND status = 'pending_approval'").get(jobId);
+      if (pending) {
+        throw ledgerInputError('commercial_scope_revision_pending', 'Resolve the pending commercial scope revision before requesting another.', { revisionId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const versionNumber = Number(this.db.prepare('SELECT COALESCE(MAX(version_number), 0) AS value FROM commercial_scope_revisions WHERE job_id = ?').get(jobId)?.value || 0) + 1;
+      const timestamp = nowIso();
+      const id = makeId('scope');
+      const snapshot = {
+        format: COMMERCIAL_SCOPE_FORMAT,
+        revisionId: id,
+        jobId,
+        versionNumber,
+        source,
+        sourceHash,
+        ...content,
+        governance: {
+          approvalRequired: true,
+          quoteBindingRequired: true,
+          clientAcceptanceSeparate: true,
+          externalCommitments: 0
+        },
+        retainedAt: timestamp,
+        retainedBy: actor
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO commercial_scope_revisions (
+          id, job_id, version_number, status, title, currency, allowance_total,
+          source_hash, snapshot_hash, snapshot_json, entry_key, entry_fingerprint,
+          approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id, jobId, versionNumber, content.title, content.currency, content.allowanceTotal,
+        sourceHash, snapshotHash, snapshotJson, entryKey, fingerprint,
+        toJson({ reason, requestedBy: actor, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'commercial_scope',
+        targetId: id,
+        jobId,
+        approvalType: 'commercial_scope_revision',
+        summary: `Approve commercial scope ${content.title} v${versionNumber}`,
+        reason,
+        data: {
+          revisionId: id,
+          versionNumber,
+          title: content.title,
+          currency: content.currency,
+          inclusionCount: content.inclusions.length,
+          assumptionCount: content.assumptions.length,
+          exclusionCount: content.exclusions.length,
+          allowanceCount: content.allowances.length,
+          allowanceTotal: content.allowanceTotal,
+          sourceHash,
+          snapshotHash,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE commercial_scope_revisions SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const revision = this.getCommercialScopeRevision(id);
+      this.audit({
+        entityType: 'commercial_scope', entityId: id, jobId, action: 'request_commercial_scope_revision', actor,
+        after: revision,
+        metadata: { approvalId: approval.id, versionNumber, sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { revision, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyCommercialScopeApproval(revisionId) {
+    const row = this.db.prepare('SELECT * FROM commercial_scope_revisions WHERE id = ?').get(revisionId);
+    if (!row) throw ledgerInputError('commercial_scope_revision_not_found', 'Commercial scope revision not found.', { revisionId }, 404);
+    if (row.status === 'approved') return this.getCommercialScopeRevision(revisionId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('commercial_scope_state_conflict', `Commercial scope cannot be approved from ${row.status}.`, { revisionId, status: row.status }, 409);
+    }
+    const before = this.getCommercialScopeRevision(revisionId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'commercial_scope' || approval.target_id !== revisionId) {
+      throw ledgerInputError('commercial_scope_approval_invalid', 'The commercial scope lacks a matching approved decision.', { revisionId }, 409);
+    }
+    const currentSourceHash = sha256Json(this.commercialScopeSource(row.job_id));
+    if (currentSourceHash !== row.source_hash) {
+      throw ledgerInputError('commercial_scope_source_stale', 'Job, takeoff, survey, drawing, or selection evidence changed after this scope revision was requested.', {
+        revisionId,
+        retainedSourceHash: row.source_hash,
+        currentSourceHash
+      }, 409);
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE commercial_scope_revisions SET status = 'superseded', updated_at = ? WHERE job_id = ? AND status = 'approved' AND id <> ?")
+      .run(timestamp, row.job_id, revisionId);
+    this.db.prepare(`
+      UPDATE commercial_scope_revisions SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, revisionId);
+    const after = this.getCommercialScopeRevision(revisionId);
+    this.audit({
+      entityType: 'commercial_scope', entityId: revisionId, jobId: row.job_id, action: 'approve_commercial_scope_revision', actor,
+      before, after,
+      metadata: { approvalId: row.approval_id, versionNumber: row.version_number, sourceHash: row.source_hash, snapshotHash: row.snapshot_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  commercialScopeForJob(jobId) {
+    this.requireJob(jobId, { allowInactive: true });
+    const revisions = this.listCommercialScopeRevisions({ jobId, limit: 500 });
+    const currentRevision = revisions.find(revision => revision.status === 'approved') || null;
+    const pendingRevision = revisions.find(revision => revision.status === 'pending_approval') || null;
+    const currentSourceHash = sha256Json(this.commercialScopeSource(jobId));
+    const stale = Boolean(currentRevision && (!currentRevision.integrityValid || currentRevision.sourceHash !== currentSourceHash));
+    const pendingStale = Boolean(pendingRevision && (!pendingRevision.integrityValid || pendingRevision.sourceHash !== currentSourceHash));
+    return {
+      format: COMMERCIAL_SCOPE_FORMAT,
+      currentRevision,
+      pendingRevision,
+      latestRevision: pendingRevision || currentRevision || revisions[0] || null,
+      revisions,
+      currentSourceHash,
+      stale,
+      pendingStale,
+      ready: Boolean(currentRevision && !stale),
+      approvalRequired: true,
+      quoteBindingRequired: true,
+      externalCommitments: 0
+    };
+  }
+
+  assertCommercialScopeCurrent(jobId, revisionId = null) {
+    const scope = this.commercialScopeForJob(jobId);
+    const normalizedId = normalizeText(revisionId, scope.currentRevision?.id || '');
+    if (!normalizedId || !scope.currentRevision) {
+      throw ledgerInputError('commercial_scope_required', 'Approve a current scope, assumptions, exclusions, and allowances revision before assessing pricing or preparing a quote.', { jobId }, 409);
+    }
+    if (scope.currentRevision.id !== normalizedId) {
+      throw ledgerInputError('commercial_scope_revision_stale', 'The selected commercial scope revision is not the current approved revision.', {
+        jobId,
+        revisionId: normalizedId,
+        currentRevisionId: scope.currentRevision.id
+      }, 409);
+    }
+    if (scope.stale) {
+      throw ledgerInputError('commercial_scope_source_stale', 'Job, takeoff, survey, drawing, or selection evidence changed after the commercial scope was approved.', {
+        jobId,
+        revisionId: normalizedId,
+        retainedSourceHash: scope.currentRevision.sourceHash,
+        currentSourceHash: scope.currentSourceHash
+      }, 409);
+    }
+    return scope.currentRevision;
+  }
+
+  pricingBasisSource(jobId) {
+    const source = this.commercialScopeSource(jobId);
+    const scopeRow = this.db.prepare("SELECT * FROM commercial_scope_revisions WHERE job_id = ? AND status = 'approved' ORDER BY version_number DESC LIMIT 1").get(jobId);
+    const scopeRevision = scopeRow ? this.mapCommercialScopeRevision(scopeRow) : null;
+    return {
+      ...source,
+      commercialScope: scopeRevision ? {
+        revisionId: scopeRevision.id,
+        versionNumber: scopeRevision.versionNumber,
+        sourceHash: scopeRevision.sourceHash,
+        snapshotHash: scopeRevision.snapshotHash,
+        integrityValid: scopeRevision.integrityValid,
+        sourceCurrent: scopeRevision.sourceHash === sha256Json(source)
+      } : null
     };
   }
 
@@ -13750,6 +14224,7 @@ class ContractorOperatingLedger {
       if (rationale.length < 8 || rationale.length > 1_000) {
         throw ledgerInputError('pricing_basis_rationale_invalid', 'A pricing-basis decision requires a rationale between 8 and 1,000 characters.');
       }
+      const commercialScopeRevision = this.assertCommercialScopeCurrent(jobId, payload.commercialScopeRevisionId || payload.commercial_scope_revision_id || null);
       const evaluation = this.evaluatePricingBasisDecision(jobId, payload, { strict: true });
       const override = selectedModel !== evaluation.recommendation;
       const overrideReason = normalizeText(payload.overrideReason || payload.override_reason, '');
@@ -13802,7 +14277,8 @@ class ContractorOperatingLedger {
         after: decision,
         metadata: {
           versionNumber, recommendation: evaluation.recommendation, selectedModel, score: evaluation.score,
-          override, sourceHash: evaluation.sourceHash, snapshotHash, externalCommitments: 0
+          override, commercialScopeRevisionId: commercialScopeRevision.id,
+          sourceHash: evaluation.sourceHash, snapshotHash, externalCommitments: 0
         }
       });
       return { decision, replayed: false, externalCommitments: 0 };
@@ -13852,6 +14328,60 @@ class ContractorOperatingLedger {
       }, 409);
     }
     return decision;
+  }
+
+  commercialScopeQuoteBinding(revision) {
+    return revision ? {
+      format: COMMERCIAL_SCOPE_FORMAT,
+      revisionId: revision.id,
+      versionNumber: revision.versionNumber,
+      title: revision.title,
+      currency: revision.currency,
+      allowanceTotal: revision.allowanceTotal,
+      revisionSourceHash: revision.sourceHash,
+      revisionSnapshotHash: revision.snapshotHash
+    } : null;
+  }
+
+  quoteCommercialScopeState(jobId, binding) {
+    if (!binding) return null;
+    const row = binding.revisionId
+      ? this.db.prepare('SELECT * FROM commercial_scope_revisions WHERE id = ? AND job_id = ?').get(binding.revisionId, jobId)
+      : null;
+    const revision = row ? this.mapCommercialScopeRevision(row) : null;
+    const integrityValid = Boolean(
+      revision?.integrityValid
+      && binding.format === COMMERCIAL_SCOPE_FORMAT
+      && binding.revisionSnapshotHash === revision.snapshotHash
+      && binding.revisionSourceHash === revision.sourceHash
+      && normalizeNumber(binding.versionNumber, 0) === revision.versionNumber
+      && binding.currency === revision.currency
+      && roundMoney(binding.allowanceTotal) === revision.allowanceTotal
+    );
+    let current = false;
+    if (integrityValid && revision.status === 'approved') {
+      try {
+        current = this.commercialScopeForJob(jobId).ready && this.commercialScopeForJob(jobId).currentRevision?.id === revision.id;
+      } catch {
+        current = false;
+      }
+    }
+    return { ...binding, integrityValid, current };
+  }
+
+  assertQuoteCommercialScopeCurrent(quoteId) {
+    const row = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(quoteId);
+    if (!row) throw ledgerInputError('quote_not_found', 'Quote not found.', { quoteId }, 404);
+    const binding = fromJson(row.data_json, {}).commercialScope || null;
+    if (!binding) {
+      throw ledgerInputError('quote_commercial_scope_required', 'The quote must bind to an approved current commercial scope revision.', { quoteId }, 409);
+    }
+    const revision = this.assertCommercialScopeCurrent(row.job_id, binding.revisionId);
+    const state = this.quoteCommercialScopeState(row.job_id, binding);
+    if (!state?.integrityValid || !state.current || revision.id !== binding.revisionId) {
+      throw ledgerInputError('quote_commercial_scope_invalid', 'The quote no longer matches its retained current commercial scope revision.', { quoteId, revisionId: binding.revisionId }, 409);
+    }
+    return revision;
   }
 
   quotePricingBasisState(jobId, basis) {
@@ -14025,6 +14555,22 @@ class ContractorOperatingLedger {
         ''
       );
       const pricingDecision = pricingDecisionId ? this.assertPricingBasisDecisionCurrent(jobId, pricingDecisionId) : null;
+      const pricingScopeRevisionId = pricingDecision?.snapshot?.source?.commercialScope?.revisionId || null;
+      const requestedScopeRevisionId = normalizeText(
+        payload.commercialScopeRevisionId || payload.commercial_scope_revision_id || options.commercialScopeRevisionId || options.commercial_scope_revision_id,
+        pricingScopeRevisionId || ''
+      );
+      if (pricingDecision && requestedScopeRevisionId !== pricingScopeRevisionId) {
+        throw ledgerInputError('quote_commercial_scope_pricing_conflict', 'The quote scope revision must match the exact approved scope used by its pricing-basis decision.', {
+          pricingDecisionId: pricingDecision.id,
+          pricingScopeRevisionId,
+          requestedScopeRevisionId: requestedScopeRevisionId || null
+        }, 409);
+      }
+      const commercialScopeRevision = requestedScopeRevisionId
+        ? this.assertCommercialScopeCurrent(jobId, requestedScopeRevisionId)
+        : null;
+      const commercialScope = this.commercialScopeQuoteBinding(commercialScopeRevision);
       const pricingBasis = pricingDecision ? {
         format: PRICING_BASIS_DECISION_FORMAT,
         decisionId: pricingDecision.id,
@@ -14053,7 +14599,7 @@ class ContractorOperatingLedger {
         total,
         validUntil,
         toJson(lineItems, []),
-        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null, pricingBasis }),
+        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null, commercialScope, pricingBasis }),
         timestamp,
         timestamp
       );
@@ -14065,7 +14611,7 @@ class ContractorOperatingLedger {
         approvalType: 'quote_issue',
         summary: `Approve quote ${id} for ${total.toFixed(2)} ${currency}`,
         reason: 'Quotes must be approved before sending externally.',
-        data: { subtotal, taxAmount, total, taxRate, currency, lineItems, pricingBasis }
+        data: { subtotal, taxAmount, total, taxRate, currency, lineItems, commercialScope, pricingBasis }
       }, { actor, audit: false });
       this.db.prepare('UPDATE quotes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
 
@@ -14108,6 +14654,8 @@ class ContractorOperatingLedger {
           error.code = 'quote_not_approved_for_issue';
           throw error;
         }
+        const commercialScopeRevision = this.assertQuoteCommercialScopeCurrent(quoteId);
+        this.assertQuotePricingBasisCurrent(quoteId);
         const organization = this.getOrganizationProfile();
         if (!organization.readiness.ready) {
           const error = new Error('Complete the business identity before preparing a client quote package.');
@@ -14169,6 +14717,10 @@ class ContractorOperatingLedger {
             taxAmount: quote.taxAmount,
             total: quote.total,
             validUntil: quote.validUntil,
+            commercialScope: {
+              ...quote.commercialScope,
+              snapshot: commercialScopeRevision.snapshot
+            },
             pricingBasis: quote.pricingBasis ? {
               decisionId: quote.pricingBasis.decisionId,
               versionNumber: quote.pricingBasis.versionNumber,
@@ -14308,6 +14860,7 @@ class ContractorOperatingLedger {
     const client = snapshot.client || {};
     const job = snapshot.job || {};
     const quote = snapshot.quote || {};
+    const commercialScope = quote.commercialScope?.snapshot || {};
     const pricingBasis = quote.pricingBasis || null;
     const timeAndMaterials = pricingBasis?.selectedModel === 'time_and_materials';
     const pricingLabel = timeAndMaterials ? 'Time and materials' : pricingBasis?.selectedModel === 'fixed_price' ? 'Fixed price' : null;
@@ -14334,6 +14887,18 @@ class ContractorOperatingLedger {
         <td class="number">${escapeHtml(item.quantity)}</td>
         <td class="number">${escapeHtml(money(item.unitPrice))}</td>
         <td class="number">${escapeHtml(money(Number(item.quantity || 0) * Number(item.unitPrice || 0)))}</td>
+      </tr>`).join('');
+    const scopeList = values => (values || []).length
+      ? `<ul>${values.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`
+      : '<p class="muted">None retained.</p>';
+    const allowanceRows = (commercialScope.allowances || []).map(allowance => `
+      <tr>
+        <td><strong>${escapeHtml(allowance.title)}</strong><br><span class="muted">${escapeHtml(allowance.description)}</span></td>
+        <td>${escapeHtml(String(allowance.allowanceType || '').replace(/_/g, ' '))}</td>
+        <td class="number">${escapeHtml(allowance.quantity)} ${escapeHtml(allowance.unit)}</td>
+        <td class="number">${escapeHtml(money(allowance.unitRate))}</td>
+        <td>${escapeHtml(String(allowance.reconciliationMethod || '').replace(/_/g, ' '))}</td>
+        <td class="number">${escapeHtml(money(allowance.amount))}</td>
       </tr>`).join('');
     const organizationName = organization.tradingName || organization.legalName || 'Contractor';
     const organizationContact = [organization.email, organization.phone, organization.website].filter(Boolean).map(escapeHtml).join(' &middot; ');
@@ -14372,9 +14937,15 @@ class ContractorOperatingLedger {
     .totals div { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #e3e9e6; }
     .totals .grand { padding-top: 12px; color: #174d40; font-size: 18px; font-weight: 700; border-bottom: 0; }
     .terms { margin-top: 28px; padding: 17px; background: #f4f7f6; border-left: 4px solid #176b57; }
+    .scope-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; margin-top: 14px; }
+    .scope-block { min-width: 0; padding-top: 10px; border-top: 1px solid #dce5e1; }
+    .scope-block h3 { margin: 0 0 7px; color: #315449; font-size: 14px; }
+    ul { margin: 0; padding-left: 20px; }
+    li { margin: 3px 0; }
+    .scope-reference { color: #64736e; font-size: 11px; }
     footer { margin-top: 38px; padding-top: 16px; color: #6c7975; border-top: 1px solid #dce5e1; font-size: 10px; overflow-wrap: anywhere; }
     @media print { body { max-width: none; padding: 18mm; } }
-    @media (max-width: 650px) { body { padding: 22px; } header, .parties { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+    @media (max-width: 650px) { body { padding: 22px; } header, .parties, .scope-grid { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
   </style>
 </head>
 <body>
@@ -14387,7 +14958,20 @@ class ContractorOperatingLedger {
     <div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${siteAddress || 'Site address not retained'}</p><p class="muted">Job reference ${escapeHtml(job.id)}</p></div>
   </section>
   <h2>${timeAndMaterials ? 'Scope and budget estimate' : 'Scope and pricing'}</h2>
-  ${job.description ? `<p>${escapeHtml(job.description)}</p>` : ''}
+  ${commercialScope.scopeSummary ? `<p>${escapeHtml(commercialScope.scopeSummary)}</p>` : job.description ? `<p>${escapeHtml(job.description)}</p>` : ''}
+  <p class="scope-reference">Commercial scope revision ${escapeHtml(quote.commercialScope?.versionNumber || '')} &middot; SHA-256 ${escapeHtml(quote.commercialScope?.revisionSnapshotHash || '')}</p>
+  <section class="scope-grid">
+    <div class="scope-block"><h3>Included work</h3>${scopeList(commercialScope.inclusions)}</div>
+    <div class="scope-block"><h3>Assumptions</h3>${scopeList(commercialScope.assumptions)}</div>
+    <div class="scope-block"><h3>Exclusions</h3>${scopeList(commercialScope.exclusions)}</div>
+    <div class="scope-block"><h3>Client responsibilities</h3>${scopeList(commercialScope.clientResponsibilities)}</div>
+  </section>
+  <h2>Allowances and provisional sums</h2>
+  ${allowanceRows
+    ? `<table><thead><tr><th>Allowance</th><th>Type</th><th class="number">Quantity</th><th class="number">Unit rate</th><th>Reconciliation</th><th class="number">Amount</th></tr></thead><tbody>${allowanceRows}</tbody></table><div class="totals"><div class="grand"><span>Allowance total</span><strong>${escapeHtml(money(commercialScope.allowanceTotal))}</strong></div></div>`
+    : `<p>${escapeHtml(commercialScope.noAllowanceReason || 'No allowances are included in this scope revision.')}</p>`}
+  ${commercialScope.clarificationDeadline ? `<p><strong>Clarification deadline:</strong> ${escapeHtml(date(commercialScope.clarificationDeadline))}</p>` : ''}
+  <h2>Price schedule</h2>
   <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit price</th><th class="number">Amount</th></tr></thead><tbody>${lines}</tbody></table>
   <div class="totals"><div><span>${timeAndMaterials ? 'Estimated subtotal' : 'Subtotal'}</span><strong>${escapeHtml(money(quote.subtotal))}</strong></div><div><span>VAT (${escapeHtml(quote.taxRate)}%)</span><strong>${escapeHtml(money(quote.taxAmount))}</strong></div><div class="grand"><span>${timeAndMaterials ? 'Estimated total' : 'Total'}</span><strong>${escapeHtml(money(quote.total))}</strong></div></div>
   <section class="terms"><strong>Commercial terms</strong>${pricingLabel ? `<p><strong>Pricing model:</strong> ${escapeHtml(pricingLabel)}.</p><p>${escapeHtml(pricingExplanation)}</p>` : ''}<p>Payment term: ${escapeHtml(organization.paymentTermsDays || 30)} days.</p>${payment ? `<p>${payment}</p>` : ''}${quote.notes ? `<p>${escapeHtml(quote.notes)}</p>` : ''}${organization.quoteTerms ? `<p>${escapeHtml(organization.quoteTerms)}</p>` : ''}<p>Client acceptance is recorded separately and is not implied by receipt of this package.</p></section>
@@ -38342,6 +38926,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'commercial_scope') {
+        this.db.prepare(`
+          UPDATE commercial_scope_revisions
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM commercial_scope_revisions WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'opportunity_bid_decision') {
         this.db.prepare(`
           UPDATE opportunity_bid_decisions
@@ -38722,6 +39326,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (targetType === 'bid_package_selection') {
       this.applyBidPackageSelection(targetId, timestamp);
     } else if (targetType === 'quote') {
+      this.assertQuoteCommercialScopeCurrent(targetId);
       this.assertQuotePricingBasisCurrent(targetId);
       this.db.prepare("UPDATE quotes SET status = 'approved', updated_at = ? WHERE id = ? AND status IN ('draft', 'pending_approval')").run(timestamp, targetId);
       this.db.prepare("UPDATE jobs SET approval_state = 'quote_approved', phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM quotes WHERE id = ?)")
@@ -38793,6 +39398,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyBidDecisionPolicyApproval(targetId);
     } else if (targetType === 'estimate_rate_policy') {
       this.applyEstimateRatePolicyApproval(targetId);
+    } else if (targetType === 'commercial_scope') {
+      this.applyCommercialScopeApproval(targetId);
     } else if (targetType === 'opportunity_bid_decision') {
       this.applyOpportunityBidDecisionApproval(targetId);
     } else if (targetType === 'opportunity_site_survey') {
@@ -43174,6 +43781,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       error.statusCode = 404;
       throw error;
     }
+    const commercialScope = this.commercialScopeForJob(jobId);
     const pricingBasis = this.pricingBasisForJob(jobId);
     const detail = {
       ...this.mapJob(row),
@@ -43182,6 +43790,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       taskDependencies: this.db.prepare('SELECT * FROM task_dependencies WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapTaskDependency(row)),
       scheduleBaselines: this.db.prepare('SELECT * FROM schedule_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapScheduleBaseline(row)),
       takeoffs: this.listTakeoffs(jobId),
+      commercialScope,
+      commercialScopeRevisions: commercialScope.revisions,
       pricingBasis,
       pricingDecisions: pricingBasis.decisions,
       quotes: this.db.prepare('SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapQuote(row)),
@@ -43383,6 +43993,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       bid_decision_policies: 'status',
       opportunity_bid_decisions: 'status',
       estimate_rate_policies: 'status',
+      commercial_scope_revisions: 'status',
       opportunity_site_surveys: 'status',
       performance_scorecard_targets: 'status',
       performance_scorecard_snapshots: 'status',
@@ -43433,6 +44044,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   describeCapabilityRequirement(requirement = {}, jobDetail = null) {
     const automation = capabilityRequirementAutomation(requirement.key);
     if (jobDetail && requirement.ledgerOnly) return this.describeCapabilityRequirement(requirement, null);
+    if (jobDetail && requirement.key === 'commercial_scope') {
+      const currentRevision = jobDetail.commercialScope?.currentRevision || null;
+      const pendingRevision = jobDetail.commercialScope?.pendingRevision || null;
+      const covered = Boolean(currentRevision || pendingRevision);
+      const ready = Boolean(currentRevision && jobDetail.commercialScope?.stale !== true);
+      const openCount = ready ? 0 : covered ? 1 : 0;
+      return {
+        ...requirement,
+        ...automation,
+        count: covered ? 1 : 0,
+        openCount,
+        covered,
+        status: ready ? 'ready' : covered ? 'action_required' : 'missing'
+      };
+    }
     if (jobDetail && requirement.key === 'pricing_basis') {
       const currentDecision = jobDetail.pricingBasis?.currentDecision || null;
       const covered = Boolean(currentDecision);
@@ -48740,6 +49366,38 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Opportunity bid/no-bid decision ${decision.id} cannot be verified: ${error.code || error.message}.` });
       }
     }
+    const commercialScopeRows = this.db.prepare('SELECT * FROM commercial_scope_revisions ORDER BY job_id, version_number').all();
+    for (const scopeRow of commercialScopeRows) {
+      const revision = this.mapCommercialScopeRevision(scopeRow);
+      if (!['pending_approval', 'approved', 'superseded', 'rejected'].includes(revision.status)) {
+        issues.push({ severity: 'error', message: `Commercial scope revision ${revision.id} has an unsupported lifecycle status.` });
+      }
+      if (!revision.integrityValid) {
+        issues.push({ severity: 'error', message: `Commercial scope revision ${revision.id} failed retained snapshot verification.` });
+        continue;
+      }
+      if (['pending_approval', 'approved'].includes(revision.status)) {
+        const requiredApprovalStatus = revision.status === 'approved' ? 'approved' : 'pending';
+        const approval = revision.approvalId
+          ? this.db.prepare(`
+              SELECT * FROM approvals
+              WHERE id = ? AND target_type = 'commercial_scope' AND target_id = ? AND status = ?
+            `).get(revision.approvalId, revision.id, requiredApprovalStatus)
+          : null;
+        const approvalData = fromJson(approval?.data_json, {});
+        if (!approval || approvalData.sourceHash !== revision.sourceHash || approvalData.snapshotHash !== revision.snapshotHash) {
+          issues.push({ severity: 'error', message: `Commercial scope revision ${revision.id} lacks its matching source-bound ${requiredApprovalStatus} approval.` });
+        }
+        try {
+          const currentSourceHash = sha256Json(this.commercialScopeSource(revision.jobId));
+          if (currentSourceHash !== revision.sourceHash) {
+            issues.push({ severity: 'warning', message: `Commercial scope revision ${revision.id} is stale because job, takeoff, survey, drawing, or selection evidence changed.` });
+          }
+        } catch (error) {
+          issues.push({ severity: 'error', message: `Commercial scope revision ${revision.id} cannot be source-verified: ${error.code || error.message}.` });
+        }
+      }
+    }
     const pricingDecisionRows = this.db.prepare('SELECT * FROM pricing_basis_decisions ORDER BY job_id, version_number').all();
     for (const decisionRow of pricingDecisionRows) {
       const decision = this.mapPricingBasisDecision(decisionRow);
@@ -48764,6 +49422,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const pricedQuoteRows = this.db.prepare('SELECT * FROM quotes ORDER BY created_at').all();
     for (const quoteRow of pricedQuoteRows) {
       const quoteData = fromJson(quoteRow.data_json, {});
+      if (quoteData.commercialScope) {
+        const quote = this.mapQuote(quoteRow);
+        if (quote.commercialScopeIntegrityValid !== true) {
+          issues.push({ severity: 'error', message: `Quote ${quote.id} failed retained commercial-scope verification.` });
+        } else if (['draft', 'pending_approval'].includes(quote.status) && quote.commercialScopeCurrent !== true) {
+          issues.push({ severity: 'warning', message: `Quote ${quote.id} cannot be approved until its commercial scope revision is refreshed.` });
+        }
+      } else if (quoteData.pricingBasis) {
+        issues.push({ severity: 'error', message: `Priced quote ${quoteRow.id} lacks its required commercial-scope binding.` });
+      }
       if (!quoteData.pricingBasis) continue;
       const quote = this.mapQuote(quoteRow);
       if (quote.pricingBasisIntegrityValid !== true) {
@@ -50056,6 +50724,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         bidDecisionPolicies: this.count('bid_decision_policies'),
         opportunityBidDecisions: this.count('opportunity_bid_decisions'),
         estimateRatePolicies: this.count('estimate_rate_policies'),
+        commercialScopeRevisions: this.count('commercial_scope_revisions'),
         pricingBasisDecisions: this.count('pricing_basis_decisions'),
         unitRateBuildUps: Number(this.db.prepare('SELECT COUNT(*) AS count FROM takeoff_items WHERE rate_build_up_hash IS NOT NULL').get().count || 0),
         opportunityEvidence: this.count('opportunity_evidence'),
@@ -50756,6 +51425,44 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapCommercialScopeRevision(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const versionNumber = Math.round(normalizeNumber(row.version_number, 0));
+    const allowanceTotal = roundMoney(row.allowance_total);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      versionNumber,
+      status: row.status,
+      title: row.title,
+      currency: row.currency,
+      allowanceTotal,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === COMMERCIAL_SCOPE_FORMAT
+        && snapshot.revisionId === row.id
+        && snapshot.jobId === row.job_id
+        && snapshot.versionNumber === versionNumber
+        && snapshot.title === row.title
+        && snapshot.currency === row.currency
+        && roundMoney(snapshot.allowanceTotal) === allowanceTotal
+        && snapshot.sourceHash === row.source_hash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapPricingBasisDecision(row) {
     if (!row) return null;
     const snapshotJson = normalizeText(row.snapshot_json, '');
@@ -50795,6 +51502,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   mapQuote(row) {
     const data = fromJson(row.data_json);
+    const commercialScope = this.quoteCommercialScopeState(row.job_id, data?.commercialScope || null);
     const pricingBasis = this.quotePricingBasisState(row.job_id, data?.pricingBasis || null);
     return {
       id: row.id,
@@ -50808,6 +51516,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       validUntil: row.valid_until,
       approvalId: row.approval_id,
       lineItems: fromJson(row.line_items_json, []),
+      commercialScope,
+      commercialScopeIntegrityValid: commercialScope?.integrityValid ?? null,
+      commercialScopeCurrent: commercialScope?.current ?? null,
       pricingModel: pricingBasis?.selectedModel || null,
       pricingBasis,
       pricingBasisIntegrityValid: pricingBasis?.integrityValid ?? null,
@@ -53266,11 +53977,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const mapped = quote ? this.mapQuote(quote) : null;
       primaryEffect = `Approve quote${mapped ? ` for ${mapped.total.toFixed(2)} ${mapped.currency}` : ''}.`;
       addEffect('Mark the quote approved and move the job approval state forward.');
+      addSafeguard('Approval requires the exact retained commercial scope and pricing basis to remain current and checksum-valid.');
       addSafeguard('Does not send the quote to the client automatically.');
       riskLevel = 'high';
       preview.total = mapped?.total ?? data.total ?? null;
       preview.currency = mapped?.currency || 'EUR';
       preview.lineItems = mapped?.lineItems || data.lineItems || [];
+      preview.commercialScope = mapped?.commercialScope || data.commercialScope || null;
+      preview.pricingBasis = mapped?.pricingBasis || data.pricingBasis || null;
     } else if (targetType === 'invoice') {
       const invoice = this.db.prepare('SELECT * FROM invoices WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = invoice ? this.mapInvoice(invoice) : null;
@@ -53825,6 +54539,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.directCostPercent = mapped?.derived?.directCostPercent ?? data.directCostPercent ?? null;
       preview.targetMarginPercent = mapped?.snapshot?.targetMarginPercent ?? data.targetMarginPercent ?? null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'commercial_scope') {
+      const row = this.db.prepare('SELECT * FROM commercial_scope_revisions WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapCommercialScopeRevision(row) : null;
+      primaryEffect = `Approve commercial scope ${mapped?.title || data.title || ''}.`;
+      addEffect(`Activate revision ${mapped?.versionNumber || data.versionNumber || ''} with ${mapped?.snapshot?.inclusions?.length || data.inclusionCount || 0} inclusion(s), ${mapped?.snapshot?.assumptions?.length || data.assumptionCount || 0} assumption(s), and ${mapped?.snapshot?.exclusions?.length || data.exclusionCount || 0} exclusion(s).`);
+      addEffect(`Bind future pricing decisions and quotes to ${mapped?.snapshot?.allowances?.length || data.allowanceCount || 0} explicit allowance(s) totaling ${roundMoney(mapped?.allowanceTotal ?? data.allowanceTotal).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'}.`);
+      addSafeguard('Approval is refused if job, takeoff, site-survey, drawing, or client-selection evidence changed after the revision request.');
+      addSafeguard('Supersedes only the previous approved scope. It does not issue a quote, accept client terms, authorize changed work, commit spend or schedule, send a message, invoice, or move funds.');
+      riskLevel = 'high';
+      preview.title = mapped?.title || data.title || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.scopeSummary = mapped?.snapshot?.scopeSummary || null;
+      preview.inclusions = mapped?.snapshot?.inclusions || [];
+      preview.assumptions = mapped?.snapshot?.assumptions || [];
+      preview.exclusions = mapped?.snapshot?.exclusions || [];
+      preview.allowances = mapped?.snapshot?.allowances || [];
+      preview.allowanceTotal = mapped?.allowanceTotal ?? data.allowanceTotal ?? null;
+      preview.currency = mapped?.currency || data.currency || null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'opportunity_bid_decision') {
       const row = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapOpportunityBidDecision(row) : null;
@@ -53998,6 +54732,7 @@ module.exports = {
   LEDGER_CAPABILITY_BLUEPRINT,
   BID_DECISION_CRITERIA,
   BID_DECISION_GATES,
+  COMMERCIAL_SCOPE_FORMAT,
   PRICING_BASIS_DECISION_FORMAT,
   PRICING_BASIS_FACTORS,
   MARKET_FIT_CRITERIA,

@@ -17,13 +17,44 @@ async function createBrowserJob(request, title, overrides = {}) {
   return response.json();
 }
 
+async function approveCommercialScope(request, jobId, entryKey) {
+  const response = await request.post(`/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
+    data: {
+      entryKey,
+      title: 'Browser job written scope',
+      scopeSummary: 'Deliver the retained work within the recorded project boundary.',
+      inclusions: ['Complete the retained project work.'],
+      assumptions: ['Recorded access and site conditions remain current.'],
+      exclusions: ['Latent hazardous materials and concealed structural repairs are excluded.'],
+      clientResponsibilities: ['Provide clear access before mobilisation.'],
+      contractorResponsibilities: ['Retain completion and handover evidence.'],
+      allowanceMode: 'none',
+      noAllowanceReason: 'The retained browser job scope contains no allowances.',
+      reason: 'Establish the written commercial basis before pricing and quote approval.'
+    }
+  });
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  const approved = await request.post(`/api/ledger/approvals/${body.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser commercial approver',
+      reason: 'Written scope, assumptions, exclusions, source evidence, and allowance position verified.'
+    }
+  });
+  expect(approved.ok()).toBeTruthy();
+  return body.revision;
+}
+
 async function retainFixedPriceBasis(request, jobId, entryKey) {
+  const scope = await approveCommercialScope(request, jobId, `scope-${entryKey}`);
   const basisResponse = await request.get(`/api/ledger/jobs/${jobId}/pricing-basis`);
   expect(basisResponse.ok()).toBeTruthy();
   const basis = (await basisResponse.json()).pricingBasis;
   const response = await request.post(`/api/ledger/jobs/${jobId}/pricing-decisions`, {
     data: {
       entryKey,
+      commercialScopeRevisionId: scope.id,
       selectedModel: 'fixed_price',
       rationale: 'The retained scope and commercial evidence support a fixed-price estimate.',
       factors: basis.factors.map(factor => ({

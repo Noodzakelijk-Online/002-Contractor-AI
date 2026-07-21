@@ -47,7 +47,20 @@ function approvedQuote(ledger) {
     description: 'Prepare and install the retained scope.',
     assignAutomatically: false
   }, { actor: 'office-commercial' });
+  const scopeRequest = ledger.requestCommercialScopeRevision(job.id, {
+    entryKey: `quote-package-scope:${job.id}`,
+    title: 'Controlled kitchen renovation scope',
+    scopeSummary: 'Prepare and install the retained kitchen renovation scope.',
+    inclusions: ['Complete the retained preparation and installation work.'],
+    assumptions: ['Existing services remain usable.'],
+    exclusions: ['Hazardous-material removal is excluded.'],
+    allowanceMode: 'none',
+    noAllowanceReason: 'No provisional sums or selection allowances apply.',
+    reason: 'Establish the written scope for quote package testing.'
+  }, { actor: 'office-commercial' });
+  ledger.resolveApproval(scopeRequest.approval.id, { status: 'approved', resolvedBy: 'commercial-approver', reason: 'Written scope verified.' });
   const quote = ledger.createQuote(job.id, {
+    commercialScopeRevisionId: scopeRequest.revision.id,
     currency: 'EUR',
     taxRate: 21,
     validUntil: '2026-09-30',
@@ -84,7 +97,7 @@ test('business identity is durable, validated, and reports commercial issue read
   assert.equal(retained.data.quoteTerms, organizationPayload().quoteTerms);
 
   assert.equal(ledger.getOrganizationProfile().legalName, retained.legalName);
-  assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+  assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
 });
 

@@ -19,6 +19,30 @@ const {
 
 const connectionString = process.env.CONTRACTOR_AI_POSTGRES_TEST_URL;
 
+function approveCommercialScope(ledger, jobId, suffix, actor = 'migration_fixture') {
+  const requested = ledger.requestCommercialScopeRevision(jobId, {
+    entryKey: `migration-commercial-scope-${suffix}`,
+    title: 'Migration written commercial scope',
+    scopeSummary: 'Deliver the measured work represented by the retained quantity takeoff.',
+    inclusions: ['Supply and install the measured wall-finish work.'],
+    assumptions: ['The retained takeoff dimensions and access conditions remain current.'],
+    exclusions: ['Latent hazardous materials and concealed structural repairs are excluded.'],
+    clientResponsibilities: ['Provide unobstructed access before mobilisation.'],
+    contractorResponsibilities: ['Retain installation and completion evidence.'],
+    currency: 'EUR',
+    allowanceMode: 'none',
+    noAllowanceReason: 'The retained measured scope contains no provisional or selection allowances.',
+    clarificationDeadline: '2026-12-15',
+    reason: 'Retain the written commercial basis through the hosted migration.'
+  }, { actor });
+  ledger.resolveApproval(requested.approval.id, {
+    status: 'approved',
+    resolvedBy: `${actor}_approver`,
+    reason: 'Written scope, assumptions, exclusions, source evidence, and allowance position verified.'
+  });
+  return ledger.getCommercialScopeRevision(requested.revision.id);
+}
+
 function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
@@ -418,8 +442,10 @@ function createBackupFixture(t, suffix = 'success') {
     otherDirectCostPerUnit: 2,
     targetMarginPercent: 20
   }, { actor: 'migration_fixture' });
+  const commercialScope = approveCommercialScope(source, job.id, suffix);
   const pricingDecision = source.retainPricingBasisDecision(job.id, {
     entryKey: `migration-pricing-basis-${suffix}`,
+    commercialScopeRevisionId: commercialScope.id,
     factors: PRICING_BASIS_FACTORS.map(factor => ({
       key: factor.key,
       status: 'yes',
@@ -903,7 +929,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1031,7 +1057,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '055_pricing_basis_decisions');
+  assert.equal(migration.migrationVersion, '056_commercial_scope_revisions');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1204,6 +1230,12 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPursuit.currentDecision.integrityValid, true);
     assert.equal(migratedPursuit.stale, false);
     assert.equal(hosted.getOpportunity(fixture.pursuitOpportunity.id).stage, 'estimating');
+    const migratedCommercialScope = hosted.commercialScopeForJob(fixture.job.id);
+    assert.equal(migratedCommercialScope.currentRevision.id, fixture.commercialScope.id);
+    assert.equal(migratedCommercialScope.currentRevision.sourceHash, fixture.commercialScope.sourceHash);
+    assert.equal(migratedCommercialScope.currentRevision.snapshotHash, fixture.commercialScope.snapshotHash);
+    assert.equal(migratedCommercialScope.currentRevision.integrityValid, true);
+    assert.equal(migratedCommercialScope.stale, false);
     const migratedPricingBasis = hosted.pricingBasisForJob(fixture.job.id);
     assert.equal(migratedPricingBasis.currentDecision.id, fixture.pricingDecision.id);
     assert.equal(migratedPricingBasis.currentDecision.selectedModel, 'fixed_price');
@@ -1211,6 +1243,9 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPricingBasis.stale, false);
     const migratedQuote = detail.quotes.find(item => item.id === fixture.convertedTakeoff.quote.id);
     assert.equal(migratedQuote.pricingModel, 'fixed_price');
+    assert.equal(migratedQuote.commercialScope.id, fixture.commercialScope.id);
+    assert.equal(migratedQuote.commercialScopeIntegrityValid, true);
+    assert.equal(migratedQuote.commercialScopeCurrent, true);
     assert.equal(migratedQuote.pricingBasisIntegrityValid, true);
     assert.equal(migratedQuote.pricingBasisCurrent, true);
     const migratedOrderUbl = hosted.getPurchaseOrderIssueDocument(fixture.bidOrderPackage.ublDocument.id, { audit: false });

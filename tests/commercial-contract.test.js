@@ -28,6 +28,28 @@ function createCommercialJob(ledger) {
   }, { actor: 'office-commercial' });
 }
 
+function approveCommercialScope(ledger, jobId, entryKey) {
+  const requested = ledger.requestCommercialScopeRevision(jobId, {
+    entryKey,
+    title: 'Commercial contract written scope',
+    scopeSummary: 'Deliver the retained renovation work within the agreed project boundary.',
+    inclusions: ['Complete the priced renovation work.'],
+    assumptions: ['Access is available during the agreed working hours.'],
+    exclusions: ['Latent hazardous materials are excluded.'],
+    clientResponsibilities: ['Provide access before mobilisation.'],
+    contractorResponsibilities: ['Retain completion evidence.'],
+    allowanceMode: 'none',
+    noAllowanceReason: 'No provisional or selection allowances apply to this test scope.',
+    reason: 'Establish the written commercial basis before quote approval.'
+  }, { actor: 'office-commercial' });
+  ledger.resolveApproval(requested.approval.id, {
+    status: 'approved',
+    resolvedBy: 'commercial-scope-approver',
+    reason: 'Written scope, assumptions, exclusions, and allowance position verified.'
+  });
+  return ledger.getCommercialScopeRevision(requested.revision.id);
+}
+
 test('intake without a commercial basis does not invent a zero-value quote', t => {
   const ledger = temporaryLedger(t);
   const job = ledger.createIntake({
@@ -91,7 +113,9 @@ test('commercial totals are server-derived and rejected approvals close the draf
 test('client acceptance alone changes net contract value and preserves revisions', t => {
   const ledger = temporaryLedger(t);
   const job = createCommercialJob(ledger);
+  const scope = approveCommercialScope(ledger, job.id, 'commercial-contract-scope-0001');
   const quote = ledger.createQuote(job.id, {
+    commercialScopeRevisionId: scope.id,
     taxRate: 21,
     lineItems: [{ description: 'Accepted renovation scope', quantity: 1, unitPrice: 1200 }]
   }, { actor: 'office-commercial' });
@@ -191,7 +215,9 @@ test('client acceptance alone changes net contract value and preserves revisions
   assert.equal(detail.contractValue, 1400);
   assert.equal(detail.changeOrders.find(item => item.id === changeOrder.id).status, 'accepted');
 
+  const revisedScope = approveCommercialScope(ledger, job.id, 'commercial-contract-scope-0002');
   const revision = ledger.createQuote(job.id, {
+    commercialScopeRevisionId: revisedScope.id,
     taxRate: 21,
     lineItems: [{ description: 'Revised accepted scope', quantity: 1, unitPrice: 1500 }]
   }, { actor: 'office-commercial' });

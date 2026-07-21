@@ -144,6 +144,20 @@ test('backup verification rejects a migration 055 ledger with missing pricing-ba
   );
 });
 
+test('backup verification rejects a migration 056 ledger with missing commercial-scope constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-commercial-scope-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Commercial-scope schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_commercial_scope_one_approved');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /commercial-scope constraints are incomplete: idx_commercial_scope_one_approved/i
+  );
+});
+
 test('backup verification rejects a migration 028 ledger with missing bid-commitment constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-commitment-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

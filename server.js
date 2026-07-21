@@ -1931,6 +1931,7 @@ app.get('/api/session', (req, res) => {
         tenders: !fieldWorker,
         takeoffs: !fieldWorker,
         estimateRates: !fieldWorker,
+        commercialScope: !fieldWorker,
         pricingBasis: !fieldWorker,
         schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
@@ -2954,6 +2955,24 @@ app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert', (req, res) => {
     ...operatingLedger.convertTakeoffToQuote(req.params.id, req.params.takeoffId, req.body || {}, {
       actor: actorFromRequest(req, 'commercial')
     }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/commercial-scope', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    commercialScope: operatingLedger.commercialScopeForJob(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/commercial-scope/revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestCommercialScopeRevision(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    commercialScope: operatingLedger.commercialScopeForJob(req.params.id),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
 });
@@ -6110,6 +6129,7 @@ function operationalExport() {
     bidDecisionPolicies: operatingLedger.listBidDecisionPolicies({ includeHistory: true }),
     opportunityBidDecisions: operatingLedger.listOpportunityBidDecisions({ limit: 5_000 }),
     estimateRatePolicies: operatingLedger.listEstimateRatePolicies({ includeHistory: true }),
+    commercialScopeRevisions: operatingLedger.listCommercialScopeRevisions({ limit: 5_000 }),
     pricingBasisDecisions: operatingLedger.listPricingBasisDecisions({ limit: 5_000 }),
     opportunityEvidence: operatingLedger.listOpportunityEvidence({ limit: 5_000 }),
     opportunitySiteSurveys: operatingLedger.listOpportunitySiteSurveys({ limit: 5_000 }),
@@ -6204,6 +6224,7 @@ function validateOperationalExport(snapshot) {
     'bidDecisionPolicies',
     'opportunityBidDecisions',
     'estimateRatePolicies',
+    'commercialScopeRevisions',
     'pricingBasisDecisions',
     'opportunityEvidence',
     'opportunitySiteSurveys',
@@ -6281,6 +6302,7 @@ function validateOperationalExport(snapshot) {
       bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
       opportunityBidDecisions: Array.isArray(snapshot.opportunityBidDecisions) ? snapshot.opportunityBidDecisions.length : 0,
       estimateRatePolicies: Array.isArray(snapshot.estimateRatePolicies) ? snapshot.estimateRatePolicies.length : 0,
+      commercialScopeRevisions: Array.isArray(snapshot.commercialScopeRevisions) ? snapshot.commercialScopeRevisions.length : 0,
       pricingBasisDecisions: Array.isArray(snapshot.pricingBasisDecisions) ? snapshot.pricingBasisDecisions.length : 0,
       opportunityEvidence: Array.isArray(snapshot.opportunityEvidence) ? snapshot.opportunityEvidence.length : 0,
       opportunitySiteSurveys: Array.isArray(snapshot.opportunitySiteSurveys) ? snapshot.opportunitySiteSurveys.length : 0,
@@ -6939,6 +6961,9 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         labourBurdenBasis: 'explicit_assumptions_and_productive_utilization',
         overheadRecoveryBasis: 'labor_hour_or_direct_cost_percent',
         unitRateCommercialEffect: 'draft_takeoff_only',
+        commercialScopeRevision: 'source_current_approval_gated_versioned',
+        commercialScopeEntryKey: 'durable_exact_replay',
+        quoteCommercialScopeApproval: 'source_current_required',
         pricingBasisDecision: 'versioned_source_bound_exact_replay',
         pricingBasisOverride: 'explicit_reason_retained',
         quotePricingBasisApproval: 'source_current_required',
@@ -7148,6 +7173,21 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         draftTakeoffMutationOnly: true,
         workerDirectoryRatesAffected: false,
         quotesIssued: false,
+        externalCommitments: 0
+      },
+      commercialScope: {
+        framework: 'written_scope_assumptions_exclusions_allowances',
+        sections: ['scope_summary', 'inclusions', 'assumptions', 'exclusions', 'allowances', 'client_responsibilities'],
+        allowanceTypes: ['selection_allowance', 'provisional_sum', 'unit_rate'],
+        allowanceReconciliation: ['fixed_included', 'actual_cost_variation', 'remeasured_unit_rate'],
+        sourceBinding: ['job', 'takeoff', 'approved_site_survey', 'current_drawings', 'approved_client_selections'],
+        revisionHistory: 'immutable_approval_gated_supersession',
+        quoteBinding: 'revision_snapshot_and_source_hash',
+        quoteApproval: 'current_approved_scope_required',
+        issuePackage: 'structured_scope_schedule_included',
+        autonomousAuthoring: false,
+        messagesSent: false,
+        contractsCommitted: false,
         externalCommitments: 0
       },
       pricingBasis: {

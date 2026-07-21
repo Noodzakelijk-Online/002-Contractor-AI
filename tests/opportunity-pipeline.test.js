@@ -15,6 +15,28 @@ function temporaryLedger(t) {
   return ledger;
 }
 
+function approveCommercialScope(ledger, jobId, entryKey) {
+  const requested = ledger.requestCommercialScopeRevision(jobId, {
+    entryKey,
+    title: 'Converted opportunity written scope',
+    scopeSummary: 'Deliver the retained fit-out work represented by the accepted proposal basis.',
+    inclusions: ['Complete the retained office fit-out work.'],
+    assumptions: ['The client provides access during the agreed programme.'],
+    exclusions: ['Latent hazardous materials are excluded.'],
+    clientResponsibilities: ['Confirm access before mobilisation.'],
+    contractorResponsibilities: ['Retain completion and handover evidence.'],
+    allowanceMode: 'none',
+    noAllowanceReason: 'The retained fit-out proposal contains no allowances.',
+    reason: 'Establish the written basis before quote approval and client acceptance.'
+  }, { actor: 'office-pipeline' });
+  ledger.resolveApproval(requested.approval.id, {
+    status: 'approved',
+    resolvedBy: 'pipeline-scope-approver',
+    reason: 'Written scope, assumptions, exclusions, and allowance position verified.'
+  });
+  return ledger.getCommercialScopeRevision(requested.revision.id);
+}
+
 test('opportunity lifecycle retains forecast, loss evidence, activities, and autonomous internal follow-up drafts', t => {
   const ledger = temporaryLedger(t);
   const overdueAt = new Date(Date.now() - 26 * 60 * 60 * 1_000).toISOString();
@@ -98,7 +120,17 @@ test('opportunity conversion is replay-safe and verified quote acceptance is the
   assert.equal(replay.job.id, conversion.job.id);
   assert.equal(ledger.listJobs({ includeArchived: true }).length, 1);
 
-  const quote = conversion.job.quotes[0];
+  const legacyQuote = conversion.job.quotes[0];
+  ledger.resolveApproval(legacyQuote.approvalId, {
+    status: 'rejected',
+    resolvedBy: 'internal-approver',
+    reason: 'Replace the pre-scope draft with a source-bound commercial quote.'
+  });
+  const scope = approveCommercialScope(ledger, conversion.job.id, 'opportunity-conversion-scope-0001');
+  const quote = ledger.createQuote(conversion.job.id, {
+    commercialScopeRevisionId: scope.id,
+    lineItems: [{ description: 'Accepted fit-out scope', quantity: 1, unitPrice: 15_000 }]
+  }, { actor: 'office-pipeline' });
   ledger.resolveApproval(quote.approvalId, { status: 'approved', resolvedBy: 'internal-approver' });
   const acceptance = ledger.requestQuoteAcceptance(conversion.job.id, quote.id, {
     acceptedAt: '2026-07-15',

@@ -3078,7 +3078,11 @@ function App() {
     )
   const commercialDraftReady =
     commercialLinesValid &&
-    (commercialDraftMode !== 'quote' || Boolean(selectedJob?.pricingBasis?.currentDecision && selectedJob?.pricingBasis?.stale !== true)) &&
+    (commercialDraftMode !== 'quote' || Boolean(
+      selectedJob?.commercialScope?.ready === true
+      && selectedJob?.pricingBasis?.currentDecision
+      && selectedJob?.pricingBasis?.stale !== true
+    )) &&
     (commercialDraftMode !== 'change_order' ||
       (changeOrderDraft.title.trim().length >= 2 && changeOrderDraft.scopeDelta.trim().length >= 3))
   const takeoffPreviewQuantity = takeoffDraftQuantity(takeoffItemDraft)
@@ -5941,6 +5945,11 @@ function App() {
   async function convertTakeoff(event) {
     event.preventDefault()
     if (!selectedJobId || takeoffDialog?.mode !== 'convert') return
+    const commercialScopeRevision = selectedJob?.commercialScope?.currentRevision
+    if (!commercialScopeRevision || selectedJob?.commercialScope?.stale === true) {
+      setError('Approve a current scope, assumptions, exclusions, and allowances revision before preparing the estimate.')
+      return
+    }
     const pricingDecision = selectedJob?.pricingBasis?.currentDecision
     if (!pricingDecision || selectedJob?.pricingBasis?.stale === true) {
       setError('Retain a current fixed-price or time-and-materials decision before preparing the estimate.')
@@ -5956,6 +5965,7 @@ function App() {
           body: JSON.stringify({
             validUntil: takeoffConversionDraft.validUntil,
             notes: takeoffConversionDraft.notes.trim() || null,
+            commercialScopeRevisionId: commercialScopeRevision.id,
             pricingDecisionId: pricingDecision.id,
           }),
         },
@@ -5974,6 +5984,10 @@ function App() {
 
   function openCommercialDraft(mode) {
     if (!selectedJob) return
+    if (mode === 'quote' && selectedJob.commercialScope?.ready !== true) {
+      setError('Approve a current scope, assumptions, exclusions, and allowances revision before creating an estimate.')
+      return
+    }
     if (mode === 'quote' && (!selectedJob.pricingBasis?.currentDecision || selectedJob.pricingBasis?.stale === true)) {
       setError('Retain a current fixed-price or time-and-materials decision before creating an estimate.')
       return
@@ -6044,6 +6058,7 @@ function App() {
       const payload =
         mode === 'quote'
           ? {
+              commercialScopeRevisionId: selectedJob?.commercialScope?.currentRevision?.id || null,
               pricingDecisionId: selectedJob?.pricingBasis?.currentDecision?.id || null,
               currency: 'EUR',
               taxRate: Number(draft.taxRate),
@@ -6120,6 +6135,27 @@ function App() {
       setSelectedJob(result.job)
       await refresh()
       notify(`${formatStatus(result.decision.selectedModel)} pricing basis v${result.decision.versionNumber} retained. Estimates now bind to this exact decision.`)
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestCommercialScopeRevision(payload) {
+    if (!selectedJobId) return false
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/commercial-scope/revisions`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      await refresh()
+      notify(`Commercial scope v${result.revision.versionNumber} retained for approval. Pricing remains blocked until review.`)
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -13922,6 +13958,7 @@ function App() {
                       onRequestAcceptance={openCommercialAcceptance}
                       onRecordChangeDelivery={openChangeOrderDelivery}
                       onOpenApprovals={openApprovals}
+                      onRequestCommercialScope={requestCommercialScopeRevision}
                       onRetainPricingBasis={retainPricingBasisDecision}
                     />
                   ) : null}
@@ -14687,6 +14724,15 @@ function App() {
               <div className="commercial-draft-body">
                 {commercialDraftMode === 'quote' ? (
                   <>
+                    <div className="commercial-draft-pricing" data-testid="commercial-draft-scope">
+                      <ClipboardList size={16} />
+                      <div>
+                        <strong>{selectedJob?.commercialScope?.currentRevision?.title || 'Commercial scope required'}</strong>
+                        <span>
+                          Revision v{selectedJob?.commercialScope?.currentRevision?.versionNumber || '-'} / {selectedJob?.commercialScope?.currentRevision?.snapshot?.inclusions?.length || 0} inclusions / {selectedJob?.commercialScope?.currentRevision?.snapshot?.exclusions?.length || 0} exclusions / {selectedJob?.commercialScope?.currentRevision?.snapshot?.allowances?.length || 0} allowances / source current
+                        </span>
+                      </div>
+                    </div>
                     <div className="commercial-draft-pricing" data-testid="commercial-draft-pricing-basis">
                       <GitBranch size={16} />
                       <div>

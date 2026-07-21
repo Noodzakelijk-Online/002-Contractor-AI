@@ -611,9 +611,48 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
   assert.equal(invoice.response.status, 201);
   assert.ok(invoice.body.invoice.approvalId);
 
+  const scopeRequest = await request(baseUrl, `/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
+    method: 'POST',
+    body: JSON.stringify({
+      entryKey: 'server-api-commercial-scope-0001',
+      title: 'Kitchen refit written scope',
+      scopeSummary: 'Deliver the retained kitchen refit within the recorded project boundary.',
+      inclusions: ['Remove the retained cabinets and install the worktop package.'],
+      assumptions: ['The recorded site access and dimensions remain current.'],
+      exclusions: ['Latent hazardous materials and concealed structural repairs are excluded.'],
+      clientResponsibilities: ['Provide access before mobilisation.'],
+      contractorResponsibilities: ['Retain installation and completion evidence.'],
+      allowanceMode: 'none',
+      noAllowanceReason: 'The retained kitchen refit scope contains no allowances.',
+      reason: 'Establish written scope before approving the commercial quote.'
+    })
+  });
+  assert.equal(scopeRequest.response.status, 201);
+  const approvedScope = await request(baseUrl, `/api/ledger/approvals/${scopeRequest.body.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'approved',
+      resolvedBy: 'Scope Approver',
+      reason: 'Written scope, assumptions, exclusions, and allowance position verified.'
+    })
+  });
+  assert.equal(approvedScope.response.status, 200);
+  const scopedQuote = await request(baseUrl, `/api/ledger/jobs/${jobId}/quote`, {
+    method: 'POST',
+    body: JSON.stringify({
+      commercialScopeRevisionId: scopeRequest.body.revision.id,
+      taxRate: 21,
+      lineItems: [
+        { description: 'Cabinet removal', quantity: 1, unitPrice: 650 },
+        { description: 'Install worktop', quantity: 1, unitPrice: 1650 }
+      ]
+    })
+  });
+  assert.equal(scopedQuote.response.status, 201);
+
   const approvals = await request(baseUrl, '/api/ledger/approvals');
   assert.equal(approvals.response.status, 200);
-  const quoteApproval = approvals.body.approvals.find(approval => approval.jobId === jobId && approval.targetType === 'quote');
+  const quoteApproval = approvals.body.approvals.find(approval => approval.id === scopedQuote.body.quote.approvalId);
   assert.ok(quoteApproval);
 
   const topLevelApprovals = await request(baseUrl, '/api/ledger/approvals');

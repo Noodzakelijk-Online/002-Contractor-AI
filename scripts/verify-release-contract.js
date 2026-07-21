@@ -189,6 +189,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '055_pricing_basis_decisions'")) {
     failures.push('Canonical pricing-basis decision migration is missing.');
   }
+  if (!ledgerSource.includes("version: '056_commercial_scope_revisions'")) {
+    failures.push('Canonical commercial-scope revision migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }
@@ -209,6 +212,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes("framework: 'fixed_price_versus_time_and_materials_decision_tree'")) {
     failures.push('Pricing-basis capability does not declare its deterministic decision-tree framework.');
+  }
+  if (!serverSource.includes("framework: 'written_scope_assumptions_exclusions_allowances'")) {
+    failures.push('Commercial-scope capability does not declare its structured written-scope framework.');
+  }
+  if (!serverSource.includes("quoteCommercialScopeApproval: 'source_current_required'")) {
+    failures.push('Quote approval does not declare current commercial-scope source enforcement.');
   }
   if (!serverSource.includes("siteSurveyApproval: 'source_current_approval_gated'")) {
     failures.push('Site-survey capability does not declare source-current approval semantics.');

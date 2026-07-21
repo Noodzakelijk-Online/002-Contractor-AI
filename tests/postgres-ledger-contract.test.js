@@ -13,6 +13,30 @@ const {
 
 const connectionString = process.env.CONTRACTOR_AI_POSTGRES_TEST_URL;
 
+function approveCommercialScope(ledger, jobId, suffix, actor = 'postgres_contract_test') {
+  const requested = ledger.requestCommercialScopeRevision(jobId, {
+    entryKey: `postgres-commercial-scope-${suffix}`,
+    title: 'Hosted written commercial scope',
+    scopeSummary: 'Deliver the measured work represented by the current hosted quantity takeoff.',
+    inclusions: ['Supply and install the measured work.'],
+    assumptions: ['The retained dimensions and access conditions remain current.'],
+    exclusions: ['Latent hazardous materials and concealed structural repairs are excluded.'],
+    clientResponsibilities: ['Provide unobstructed access before mobilisation.'],
+    contractorResponsibilities: ['Retain installation and completion evidence.'],
+    currency: 'EUR',
+    allowanceMode: 'none',
+    noAllowanceReason: 'The measured hosted scope contains no provisional or selection allowances.',
+    clarificationDeadline: '2026-12-15',
+    reason: 'Establish the written commercial basis before hosted pricing and quote approval.'
+  }, { actor });
+  ledger.resolveApproval(requested.approval.id, {
+    status: 'approved',
+    resolvedBy: `${actor}_approver`,
+    reason: 'Written scope, assumptions, exclusions, source evidence, and allowance position verified.'
+  });
+  return ledger.getCommercialScopeRevision(requested.revision.id);
+}
+
 function startSynchronizedSchedulerClaimant({ root, schedulerKey, now }) {
   const script = `
     const { ContractorOperatingLedger } = require('./operating-ledger');
@@ -1366,8 +1390,14 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       title: 'Hosted pricing-basis takeoff',
       items: [{ description: 'Hosted measured work', quantity: 10, unit: 'hour', unitCost: 45, unitPrice: 75 }]
     }, { actor: 'postgres_contract_test' });
+    const hostedCommercialScope = approveCommercialScope(
+      ledger,
+      hostedForecastJob.id,
+      `forecast-${Date.now()}`
+    );
     const hostedPricingDecision = ledger.retainPricingBasisDecision(hostedForecastJob.id, {
       entryKey: `postgres-pricing-basis-${Date.now()}`,
+      commercialScopeRevisionId: hostedCommercialScope.id,
       factors: PRICING_BASIS_FACTORS.map(factor => ({
         key: factor.key,
         status: 'yes',
@@ -1377,6 +1407,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       rationale: 'Hosted retained evidence supports the fixed-price model.'
     }, { actor: 'postgres_contract_test' }).decision;
     const hostedPricedQuote = ledger.createQuote(hostedForecastJob.id, {
+      commercialScopeRevisionId: hostedCommercialScope.id,
       pricingDecisionId: hostedPricingDecision.id,
       lineItems: [{ description: 'Hosted fixed-price scope', quantity: 1, unitPrice: 750 }]
     }, { actor: 'postgres_contract_test' });
@@ -1386,6 +1417,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
       reason: 'Hosted fixed-price basis verified.'
     });
     assert.equal(ledger.getJobDetail(hostedForecastJob.id).quotes.find(item => item.id === hostedPricedQuote.id).pricingModel, 'fixed_price');
+    assert.equal(ledger.commercialScopeForJob(hostedForecastJob.id).stale, false);
     assert.equal(ledger.pricingBasisForJob(hostedForecastJob.id).stale, false);
     const hostedForecastBudget = ledger.createBudgetLine(hostedForecastJob.id, {
       status: 'baseline',
@@ -1499,7 +1531,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '055_pricing_basis_decisions');
+    assert.equal(migrations.currentVersion, '056_commercial_scope_revisions');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1580,7 +1612,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('055_pricing_basis_decisions'));
+  assert.deepEqual(versions, Array(4).fill('056_commercial_scope_revisions'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -1678,6 +1710,24 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
         AND indexname IN ('idx_pricing_basis_one_current', 'idx_pricing_basis_job_history', 'idx_pricing_basis_model_status')
     `).rows[0];
     assert.equal(Number(pricingBasisIndexCount.count), 3);
+    const commercialScopeTableCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'commercial_scope_revisions'
+    `).rows[0];
+    assert.equal(Number(commercialScopeTableCount.count), 1);
+    const commercialScopeIndexCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN (
+          'idx_commercial_scope_one_approved',
+          'idx_commercial_scope_one_pending',
+          'idx_commercial_scope_job_history',
+          'idx_commercial_scope_approval'
+        )
+    `).rows[0];
+    assert.equal(Number(commercialScopeIndexCount.count), 4);
     const siteSurveyIndexCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM pg_indexes
@@ -2186,7 +2236,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2589,7 +2639,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2697,7 +2747,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2796,7 +2846,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2883,7 +2933,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
   } finally {
     ledger?.close();
   }
@@ -2988,7 +3038,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -3054,7 +3104,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
   } finally {
     ledger.close();
   }
@@ -3109,7 +3159,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
+    assert.equal(ledger.migrationStatus().currentVersion, '056_commercial_scope_revisions');
   } finally {
     ledger.close();
   }

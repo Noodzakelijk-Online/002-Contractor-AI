@@ -434,6 +434,58 @@ function pricingModelLabel(value) {
   return 'Review required'
 }
 
+function commercialScopeDraft(job = {}, commercialScope = {}) {
+  const snapshot = commercialScope.currentRevision?.snapshot || commercialScope.latestRevision?.snapshot || {}
+  return {
+    title: snapshot.title || `${job.title || 'Project'} scope schedule`,
+    scopeSummary: snapshot.scopeSummary || job.description || '',
+    inclusions: (snapshot.inclusions || EMPTY_LIST).join('\n'),
+    assumptions: (snapshot.assumptions || EMPTY_LIST).join('\n'),
+    exclusions: (snapshot.exclusions || EMPTY_LIST).join('\n'),
+    clientResponsibilities: (snapshot.clientResponsibilities || EMPTY_LIST).join('\n'),
+    contractorResponsibilities: (snapshot.contractorResponsibilities || EMPTY_LIST).join('\n'),
+    allowanceMode: snapshot.allowanceMode || 'none',
+    noAllowanceReason: snapshot.noAllowanceReason || 'No provisional sums or selection allowances are included in this revision.',
+    clarificationDeadline: snapshot.clarificationDeadline ? String(snapshot.clarificationDeadline).slice(0, 10) : '',
+    allowances: (snapshot.allowances || EMPTY_LIST).map((allowance) => ({
+      allowanceKey: allowance.allowanceKey || '',
+      allowanceType: allowance.allowanceType || 'selection_allowance',
+      title: allowance.title || '',
+      description: allowance.description || '',
+      quantity: String(allowance.quantity ?? 1),
+      unit: allowance.unit || 'item',
+      unitRate: String(allowance.unitRate ?? ''),
+      reconciliationMethod: allowance.reconciliationMethod || 'actual_cost_variation',
+      selectionBy: allowance.selectionBy || 'client',
+      dueAt: allowance.dueAt ? String(allowance.dueAt).slice(0, 10) : '',
+      evidenceReference: allowance.evidenceReference || '',
+      notes: allowance.notes || '',
+    })),
+    reason: commercialScope.currentRevision ? '' : 'Establish the initial written commercial scope schedule.',
+  }
+}
+
+function scopeLines(value) {
+  return String(value || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+}
+
+function emptyScopeAllowance(index = 0) {
+  return {
+    allowanceKey: `ALLOW-${String(index + 1).padStart(2, '0')}`,
+    allowanceType: 'selection_allowance',
+    title: '',
+    description: '',
+    quantity: '1',
+    unit: 'item',
+    unitRate: '',
+    reconciliationMethod: 'actual_cost_variation',
+    selectionBy: 'client',
+    dueAt: '',
+    evidenceReference: '',
+    notes: '',
+  }
+}
+
 function pricingBasisDraft(pricingBasis = {}) {
   const definitions = pricingBasis.factors?.length ? pricingBasis.factors : FALLBACK_PRICING_BASIS_FACTORS
   const retained = pricingBasis.currentDecision?.snapshot?.factors || EMPTY_LIST
@@ -1386,21 +1438,29 @@ function CommercialControl({
   onRequestAcceptance,
   onRecordChangeDelivery,
   onOpenApprovals,
+  onRequestCommercialScope,
   onRetainPricingBasis,
 }) {
   const quotes = job.quotes || EMPTY_LIST
   const changeOrders = job.changeOrders || EMPTY_LIST
+  const commercialScope = useMemo(() => job.commercialScope || {}, [job.commercialScope])
+  const currentScope = commercialScope.currentRevision || null
+  const pendingScope = commercialScope.pendingRevision || null
+  const commercialScopeReady = Boolean(currentScope && commercialScope.stale !== true)
   const pricingBasis = useMemo(() => job.pricingBasis || {}, [job.pricingBasis])
   const currentPricingBasis = pricingBasis.currentDecision || null
   const pricingBasisReady = Boolean(currentPricingBasis && pricingBasis.stale !== true)
   const pendingApprovals = job.approvals?.filter((approval) => approval.status === 'pending') || EMPTY_LIST
   const pendingFor = (targetType, targetId) =>
     pendingApprovals.find((approval) => approval.targetType === targetType && approval.targetId === targetId)
+  const pendingScopeApproval = pendingScope ? pendingFor('commercial_scope', pendingScope.id) : null
   const acceptedQuote = quotes.find((quote) => quote.status === 'accepted')
   const acceptedChanges = changeOrders.filter((changeOrder) => changeOrder.status === 'accepted')
   const acceptedChangeNet = acceptedChanges.reduce((sum, changeOrder) => sum + Number(changeOrder.amount || 0), 0)
   const commercialCurrency = acceptedQuote?.currency || quotes[0]?.currency || 'EUR'
   const acceptedPricingModel = acceptedQuote?.pricingModel || job.data?.commercialPricingModel || null
+  const [editingCommercialScope, setEditingCommercialScope] = useState(false)
+  const [scopeDraft, setScopeDraft] = useState(() => commercialScopeDraft(job, commercialScope))
   const [editingPricingBasis, setEditingPricingBasis] = useState(false)
   const [pricingDraft, setPricingDraft] = useState(() => pricingBasisDraft(pricingBasis))
   const pricingPreview = useMemo(() => pricingBasisPreview(pricingDraft.factors), [pricingDraft.factors])
@@ -1410,10 +1470,82 @@ function CommercialControl({
     && ['fixed_price', 'time_and_materials'].includes(pricingDraft.selectedModel)
     && pricingDraft.rationale.trim().length >= 8
     && (!pricingOverride || pricingDraft.overrideReason.trim().length >= 12)
+  const scopeAllowanceTotal = scopeDraft.allowances.reduce((sum, allowance) => {
+    const quantity = Number(allowance.quantity)
+    const unitRate = Number(allowance.unitRate)
+    return sum + (Number.isFinite(quantity) && Number.isFinite(unitRate) ? quantity * unitRate : 0)
+  }, 0)
+  const scopeDraftReady = scopeDraft.title.trim().length >= 3
+    && scopeDraft.scopeSummary.trim().length >= 12
+    && scopeLines(scopeDraft.inclusions).length > 0
+    && scopeLines(scopeDraft.assumptions).length > 0
+    && scopeLines(scopeDraft.exclusions).length > 0
+    && scopeDraft.reason.trim().length >= 8
+    && (scopeDraft.allowanceMode === 'none'
+      ? scopeDraft.noAllowanceReason.trim().length >= 8 && scopeDraft.allowances.length === 0
+      : scopeDraft.allowances.length > 0 && scopeDraft.allowances.every((allowance) => (
+        allowance.allowanceKey.trim().length > 0
+        && allowance.title.trim().length >= 3
+        && allowance.description.trim().length >= 3
+        && Number(allowance.quantity) > 0
+        && Number(allowance.unitRate) >= 0
+        && allowance.unit.trim().length > 0
+      )))
+
+  useEffect(() => {
+    if (!editingCommercialScope) setScopeDraft(commercialScopeDraft(job, commercialScope))
+  }, [editingCommercialScope, job, commercialScope, currentScope?.id, pendingScope?.id])
 
   useEffect(() => {
     if (!editingPricingBasis) setPricingDraft(pricingBasisDraft(pricingBasis))
   }, [editingPricingBasis, job.id, currentPricingBasis?.id, pricingBasis, pricingBasis.stale])
+
+  function openCommercialScopeEditor() {
+    setScopeDraft(commercialScopeDraft(job, commercialScope))
+    setEditingCommercialScope(true)
+  }
+
+  function updateScopeAllowance(index, patch) {
+    setScopeDraft((current) => ({
+      ...current,
+      allowances: current.allowances.map((allowance, allowanceIndex) => allowanceIndex === index ? { ...allowance, ...patch } : allowance),
+    }))
+  }
+
+  async function submitCommercialScope(event) {
+    event.preventDefault()
+    if (!scopeDraftReady) return
+    const result = await onRequestCommercialScope({
+      entryKey: `commercial-scope:${job.id}:${Date.now()}`,
+      title: scopeDraft.title.trim(),
+      scopeSummary: scopeDraft.scopeSummary.trim(),
+      inclusions: scopeLines(scopeDraft.inclusions),
+      assumptions: scopeLines(scopeDraft.assumptions),
+      exclusions: scopeLines(scopeDraft.exclusions),
+      clientResponsibilities: scopeLines(scopeDraft.clientResponsibilities),
+      contractorResponsibilities: scopeLines(scopeDraft.contractorResponsibilities),
+      currency: 'EUR',
+      allowanceMode: scopeDraft.allowanceMode,
+      noAllowanceReason: scopeDraft.allowanceMode === 'none' ? scopeDraft.noAllowanceReason.trim() : null,
+      clarificationDeadline: scopeDraft.clarificationDeadline || null,
+      allowances: scopeDraft.allowanceMode === 'defined' ? scopeDraft.allowances.map((allowance) => ({
+        allowanceKey: allowance.allowanceKey.trim(),
+        allowanceType: allowance.allowanceType,
+        title: allowance.title.trim(),
+        description: allowance.description.trim(),
+        quantity: Number(allowance.quantity),
+        unit: allowance.unit.trim(),
+        unitRate: Number(allowance.unitRate),
+        reconciliationMethod: allowance.reconciliationMethod,
+        selectionBy: allowance.selectionBy,
+        dueAt: allowance.dueAt || null,
+        evidenceReference: allowance.evidenceReference.trim() || null,
+        notes: allowance.notes.trim() || null,
+      })) : [],
+      reason: scopeDraft.reason.trim(),
+    })
+    if (result) setEditingCommercialScope(false)
+  }
 
   function openPricingBasisEditor() {
     setPricingDraft(pricingBasisDraft(pricingBasis))
@@ -1432,6 +1564,7 @@ function CommercialControl({
     if (!pricingDraftReady) return
     const retained = await onRetainPricingBasis({
       entryKey: `pricing-basis:${job.id}:${Date.now()}`,
+      commercialScopeRevisionId: currentScope?.id || null,
       selectedModel: pricingDraft.selectedModel,
       rationale: pricingDraft.rationale.trim(),
       overrideReason: pricingOverride ? pricingDraft.overrideReason.trim() : null,
@@ -1453,6 +1586,33 @@ function CommercialControl({
           <p>Separate internal approval from retained client acceptance before contract value changes.</p>
         </div>
       </div>
+      <div className={`scope-definition-strip ${commercialScopeReady ? 'scope-definition-active' : 'scope-definition-missing'}`} data-testid="commercial-scope-control">
+        <ClipboardList size={18} />
+        <div className="scope-definition-copy">
+          <div>
+            <strong>{commercialScopeReady ? currentScope.title : pendingScope ? 'Commercial scope awaiting approval' : commercialScope.stale ? 'Commercial scope requires revision' : 'Commercial scope not retained'}</strong>
+            {currentScope ? <span className="tag">v{currentScope.versionNumber}</span> : null}
+            {pendingScope ? <span className="tag tag-amber">v{pendingScope.versionNumber} pending</span> : null}
+          </div>
+          <span>
+            {commercialScopeReady
+              ? `${currentScope.snapshot?.inclusions?.length || 0} inclusions / ${currentScope.snapshot?.assumptions?.length || 0} assumptions / ${currentScope.snapshot?.exclusions?.length || 0} exclusions / ${currentScope.snapshot?.allowances?.length || 0} allowances totaling ${rateMoney(currentScope.allowanceTotal, currentScope.currency)}`
+              : pendingScope
+                ? 'Pricing and quote approval remain blocked until an approver accepts this exact source-bound revision.'
+                : 'Write the promised work, assumptions, exclusions, responsibilities, and allowance reconciliation before selecting a pricing model.'}
+          </span>
+        </div>
+        {commercialScope.stale ? <span className="tag tag-amber">Source changed</span> : commercialScopeReady ? <span className="tag tag-green">Approved + current</span> : null}
+        {pendingScopeApproval && canApprove ? (
+          <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingScopeApproval.id })}>
+            <ShieldCheck size={14} />Review scope
+          </button>
+        ) : canCoordinate ? (
+          <button type="button" className="secondary-button" disabled={submitting || Boolean(pendingScope)} title={pendingScope ? 'Resolve the pending scope revision first' : currentScope ? 'Prepare a new source-bound revision' : 'Prepare the initial commercial scope'} onClick={openCommercialScopeEditor}>
+            <ClipboardPenLine size={14} />{currentScope ? 'Revise scope' : 'Write scope'}
+          </button>
+        ) : null}
+      </div>
       <div className={`pricing-basis-strip ${pricingBasisReady ? 'pricing-basis-active' : 'pricing-basis-missing'}`} data-testid="pricing-basis-control">
         <GitBranch size={18} />
         <div className="pricing-basis-copy">
@@ -1469,7 +1629,7 @@ function CommercialControl({
         </div>
         {pricingBasis.stale ? <span className="tag tag-amber">Source changed</span> : pricingBasisReady ? <span className="tag tag-green">Source current</span> : null}
         {canCoordinate ? (
-          <button type="button" className="secondary-button" disabled={submitting} onClick={openPricingBasisEditor}>
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady} title={commercialScopeReady ? 'Assess the current approved scope' : 'Approve a current commercial scope revision first'} onClick={openPricingBasisEditor}>
             <ClipboardPenLine size={14} />
             {currentPricingBasis ? 'Reassess' : 'Assess basis'}
           </button>
@@ -1501,7 +1661,7 @@ function CommercialControl({
       </div>
       {canCoordinate ? (
         <div className="commercial-actions">
-          <button type="button" className="secondary-button" disabled={submitting || !pricingBasisReady} title={pricingBasisReady ? `Create a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'Retain a current pricing-basis decision first'} onClick={onNewQuote}>
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !pricingBasisReady} title={commercialScopeReady && pricingBasisReady ? `Create a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'Approve a current scope revision and retain a current pricing-basis decision first'} onClick={onNewQuote}>
             <Plus size={15} />
             New estimate
           </button>
@@ -1509,6 +1669,78 @@ function CommercialControl({
             <Plus size={15} />
             Scope change
           </button>
+        </div>
+      ) : null}
+      {editingCommercialScope ? (
+        <div className="modal-backdrop commercial-scope-backdrop" role="presentation">
+          <form className="modal commercial-scope-modal" role="dialog" aria-modal="true" aria-labelledby="commercial-scope-title" data-testid="commercial-scope-form" onSubmit={submitCommercialScope}>
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Approval-gated contract schedule</p>
+                <h2 id="commercial-scope-title">Scope, assumptions, exclusions, and allowances</h2>
+                <p>{job.title} / source-bound revision {Number(currentScope?.versionNumber || 0) + 1}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close commercial scope" onClick={() => setEditingCommercialScope(false)}><X size={17} /></button>
+            </div>
+            <div className="commercial-scope-body">
+              <div className="commercial-scope-overview">
+                <label>Schedule title<input required minLength="3" maxLength="160" value={scopeDraft.title} onChange={(event) => setScopeDraft({ ...scopeDraft, title: event.target.value })} /></label>
+                <label>Clarification deadline<input type="date" value={scopeDraft.clarificationDeadline} onChange={(event) => setScopeDraft({ ...scopeDraft, clarificationDeadline: event.target.value })} /></label>
+                <label className="scope-wide">Scope summary<textarea required minLength="12" maxLength="4000" rows={4} value={scopeDraft.scopeSummary} onChange={(event) => setScopeDraft({ ...scopeDraft, scopeSummary: event.target.value })} placeholder="Describe the complete work boundary and intended outcome." /></label>
+              </div>
+              <div className="commercial-scope-lists">
+                <label>Included work<textarea required rows={6} value={scopeDraft.inclusions} onChange={(event) => setScopeDraft({ ...scopeDraft, inclusions: event.target.value })} placeholder="One explicit inclusion per line" /></label>
+                <label>Assumptions<textarea required rows={6} value={scopeDraft.assumptions} onChange={(event) => setScopeDraft({ ...scopeDraft, assumptions: event.target.value })} placeholder="One estimating or delivery assumption per line" /></label>
+                <label>Exclusions<textarea required rows={6} value={scopeDraft.exclusions} onChange={(event) => setScopeDraft({ ...scopeDraft, exclusions: event.target.value })} placeholder="One explicit exclusion per line" /></label>
+                <label>Client responsibilities<textarea rows={6} value={scopeDraft.clientResponsibilities} onChange={(event) => setScopeDraft({ ...scopeDraft, clientResponsibilities: event.target.value })} placeholder="Access, selections, utilities, approvals, or enabling work" /></label>
+                <label>Contractor responsibilities<textarea rows={6} value={scopeDraft.contractorResponsibilities} onChange={(event) => setScopeDraft({ ...scopeDraft, contractorResponsibilities: event.target.value })} placeholder="Protection, coordination, cleanup, evidence, or handover" /></label>
+              </div>
+              <fieldset className="pricing-model-fieldset scope-allowance-mode">
+                <legend>Allowance treatment</legend>
+                <div className="pricing-model-options">
+                  <label className={scopeDraft.allowanceMode === 'none' ? 'selected' : ''}><input type="radio" name="scope-allowance-mode" value="none" checked={scopeDraft.allowanceMode === 'none'} onChange={() => setScopeDraft({ ...scopeDraft, allowanceMode: 'none', allowances: [] })} /><span>No allowances</span></label>
+                  <label className={scopeDraft.allowanceMode === 'defined' ? 'selected' : ''}><input type="radio" name="scope-allowance-mode" value="defined" checked={scopeDraft.allowanceMode === 'defined'} onChange={() => setScopeDraft({ ...scopeDraft, allowanceMode: 'defined', allowances: scopeDraft.allowances.length ? scopeDraft.allowances : [emptyScopeAllowance()] })} /><span>Defined allowances</span></label>
+                </div>
+              </fieldset>
+              {scopeDraft.allowanceMode === 'none' ? (
+                <label className="scope-no-allowance">No-allowance statement<textarea required minLength="8" maxLength="500" rows={3} value={scopeDraft.noAllowanceReason} onChange={(event) => setScopeDraft({ ...scopeDraft, noAllowanceReason: event.target.value })} /></label>
+              ) : (
+                <section className="scope-allowance-section" aria-labelledby="scope-allowance-title">
+                  <div className="commercial-line-heading">
+                    <div><h3 id="scope-allowance-title">Allowances and provisional sums</h3><p>Each amount is server-recalculated from quantity and unit rate.</p></div>
+                    <button type="button" className="secondary-button" onClick={() => setScopeDraft((current) => ({ ...current, allowances: [...current.allowances, emptyScopeAllowance(current.allowances.length)] }))}><Plus size={14} />Add allowance</button>
+                  </div>
+                  <div className="scope-allowance-list">
+                    {scopeDraft.allowances.map((allowance, index) => (
+                      <fieldset className="scope-allowance-row" key={`${allowance.allowanceKey}-${index}`}>
+                        <legend>Allowance {index + 1}</legend>
+                        <label>Key<input required maxLength="40" value={allowance.allowanceKey} onChange={(event) => updateScopeAllowance(index, { allowanceKey: event.target.value.toUpperCase() })} /></label>
+                        <label>Type<select value={allowance.allowanceType} onChange={(event) => updateScopeAllowance(index, { allowanceType: event.target.value })}><option value="selection_allowance">Selection allowance</option><option value="provisional_sum">Provisional sum</option><option value="unit_rate">Unit rate</option></select></label>
+                        <label className="scope-allowance-title-field">Title<input required minLength="3" maxLength="160" value={allowance.title} onChange={(event) => updateScopeAllowance(index, { title: event.target.value })} /></label>
+                        <label className="scope-allowance-description">Description<textarea required minLength="3" maxLength="500" rows={2} value={allowance.description} onChange={(event) => updateScopeAllowance(index, { description: event.target.value })} /></label>
+                        <label>Quantity<input required type="number" min="0.0001" max="1000000" step="0.0001" value={allowance.quantity} onChange={(event) => updateScopeAllowance(index, { quantity: event.target.value })} /></label>
+                        <label>Unit<input required maxLength="40" value={allowance.unit} onChange={(event) => updateScopeAllowance(index, { unit: event.target.value })} /></label>
+                        <label>Unit rate<input required type="number" min="0" max="1000000000" step="0.01" value={allowance.unitRate} onChange={(event) => updateScopeAllowance(index, { unitRate: event.target.value })} /></label>
+                        <label>Reconciliation<select value={allowance.reconciliationMethod} onChange={(event) => updateScopeAllowance(index, { reconciliationMethod: event.target.value })}><option value="actual_cost_variation">Actual cost variation</option><option value="fixed_included">Fixed included amount</option><option value="remeasured_unit_rate">Remeasured unit rate</option></select></label>
+                        <label>Selection by<select value={allowance.selectionBy} onChange={(event) => updateScopeAllowance(index, { selectionBy: event.target.value })}><option value="client">Client</option><option value="contractor">Contractor</option><option value="joint">Joint</option></select></label>
+                        <label>Selection due<input type="date" value={allowance.dueAt} onChange={(event) => updateScopeAllowance(index, { dueAt: event.target.value })} /></label>
+                        <label className="scope-allowance-description">Evidence reference<input maxLength="500" value={allowance.evidenceReference} onChange={(event) => updateScopeAllowance(index, { evidenceReference: event.target.value })} placeholder="Drawing, survey, supplier quotation, or selection reference" /></label>
+                        <div className="scope-allowance-calculated"><span>Calculated amount</span><strong>{rateMoney((Number(allowance.quantity) || 0) * (Number(allowance.unitRate) || 0))}</strong></div>
+                        <button type="button" className="icon-button scope-allowance-remove" aria-label={`Remove allowance ${index + 1}`} onClick={() => setScopeDraft((current) => ({ ...current, allowances: current.allowances.filter((_, allowanceIndex) => allowanceIndex !== index) }))}><X size={15} /></button>
+                      </fieldset>
+                    ))}
+                  </div>
+                  <div className="scope-allowance-total"><span>Total retained allowance</span><strong>{rateMoney(scopeAllowanceTotal)}</strong></div>
+                </section>
+              )}
+              <label className="pricing-basis-textarea">Revision reason<textarea required minLength="8" maxLength="500" value={scopeDraft.reason} onChange={(event) => setScopeDraft({ ...scopeDraft, reason: event.target.value })} placeholder="Explain why this scope revision is being requested." /></label>
+              <p className="workflow-note">Approval activates this revision as the exact source for pricing and quotes. It does not send terms, accept client instructions, authorize changed work, commit spend or dates, invoice, or move funds.</p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setEditingCommercialScope(false)}>Cancel</button>
+              <button className="primary-button" disabled={submitting || !scopeDraftReady}><ShieldCheck size={15} />{submitting ? 'Requesting...' : 'Request approval'}</button>
+            </div>
+          </form>
         </div>
       ) : null}
       {editingPricingBasis ? (
@@ -1589,7 +1821,13 @@ function CommercialControl({
                     )
                   : null
                 const deliveryApproval = deliveryDraft ? pendingFor('communication', deliveryDraft.id) : null
-                const canPrepare = ['approved', 'accepted'].includes(quote.status) && canCoordinate && !issuePackage
+                const canPrepare = ['approved', 'accepted'].includes(quote.status)
+                  && canCoordinate
+                  && !issuePackage
+                  && quote.commercialScopeIntegrityValid === true
+                  && quote.commercialScopeCurrent === true
+                  && quote.pricingBasisIntegrityValid !== false
+                  && quote.pricingBasisCurrent !== false
                 return (
                   <div className="activity-row commercial-row" key={quote.id} data-testid={`commercial-quote-${quote.id}`}>
                     <div className="commercial-record">
@@ -1597,6 +1835,9 @@ function CommercialControl({
                         <strong>{currency.format(quote.subtotal || 0)} {quote.pricingModel === 'time_and_materials' ? 'budget net' : 'net'}</strong>
                         <span className={`status status-${quote.status}`}>{formatStatus(quote.status)}</span>
                         {quote.pricingModel ? <span className="tag">{pricingModelLabel(quote.pricingModel)}</span> : null}
+                        {quote.commercialScope ? <span className="tag">Scope v{quote.commercialScope.versionNumber}</span> : null}
+                        {quote.commercialScopeIntegrityValid === false ? <span className="tag tag-red">Scope integrity failed</span> : null}
+                        {issueApproval && quote.commercialScopeCurrent === false ? <span className="tag tag-amber">Scope revision required</span> : null}
                         {quote.pricingBasisIntegrityValid === false ? <span className="tag tag-red">Basis integrity failed</span> : null}
                         {issueApproval && quote.pricingBasisCurrent === false ? <span className="tag tag-amber">Reassessment required</span> : null}
                       </div>
@@ -1615,8 +1856,8 @@ function CommercialControl({
                         <button
                           type="button"
                           className="secondary-button"
-                          disabled={submitting || quote.pricingBasisIntegrityValid === false || quote.pricingBasisCurrent === false}
-                          title={quote.pricingBasisCurrent === false ? 'Reassess the pricing basis before approving this quote' : 'Review quote approval'}
+                          disabled={submitting || quote.commercialScopeIntegrityValid !== true || quote.commercialScopeCurrent !== true || quote.pricingBasisIntegrityValid === false || quote.pricingBasisCurrent === false}
+                          title={quote.commercialScopeCurrent === false ? 'Approve a current commercial scope revision before approving this quote' : quote.pricingBasisCurrent === false ? 'Reassess the pricing basis before approving this quote' : 'Review quote approval'}
                           onClick={() => onOpenApprovals({ approvalId: issueApproval.id })}
                         >
                           <ShieldCheck size={15} />
