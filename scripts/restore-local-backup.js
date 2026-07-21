@@ -994,6 +994,23 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error('Backup WBS takeoff constraints are incomplete: idx_takeoff_items_wbs.');
         }
       }
+      if (appliedMigrations.has('054_estimate_rate_buildups')) {
+        if (!retainedTables.has('estimate_rate_policies')) {
+          throw new Error('Backup estimating rate schema is incomplete: estimate_rate_policies.');
+        }
+        const policyColumns = new Set(database.prepare('PRAGMA table_info(estimate_rate_policies)').all().map(row => row.name));
+        for (const column of ['version_number', 'status', 'policy_name', 'currency', 'entry_key', 'entry_fingerprint', 'snapshot_hash', 'snapshot_json', 'approval_id']) {
+          if (!policyColumns.has(column)) throw new Error(`Backup estimating rate schema is incomplete: estimate_rate_policies.${column}.`);
+        }
+        const takeoffItemColumns = new Set(database.prepare('PRAGMA table_info(takeoff_items)').all().map(row => row.name));
+        for (const column of ['rate_policy_id', 'rate_build_up_hash']) {
+          if (!takeoffItemColumns.has(column)) throw new Error(`Backup estimating rate schema is incomplete: takeoff_items.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_estimate_rate_policy_one_approved', 'idx_estimate_rate_policy_status', 'idx_takeoff_items_rate_policy']) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup estimating rate constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

@@ -963,6 +963,46 @@
 .takeoff-item-money span { overflow-wrap: anywhere; color: #71817a; font-size: 9px; }
 .takeoff-item-actions { display: flex; align-items: center; gap: 5px; }
 .takeoff-item-actions .icon-button { width: 30px; height: 30px; }
+.estimate-rate-policy-strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 11px; min-width: 0; padding: 11px 13px; border: 1px solid #dce5e1; border-left: 3px solid #376f85; background: #f7fafb; }
+.estimate-rate-policy-strip > svg { color: #376f85; }
+.estimate-rate-policy-strip > div { display: grid; gap: 3px; min-width: 0; }
+.estimate-rate-policy-strip strong, .estimate-rate-policy-strip span { min-width: 0; overflow-wrap: anywhere; }
+.estimate-rate-policy-strip strong { color: #29443a; font-size: 11px; }
+.estimate-rate-policy-strip > div > span { color: #6c7c76; font-size: 9px; line-height: 1.45; }
+.estimate-rate-policy-strip > .tag { justify-self: end; }
+.estimate-rate-policy-strip > .secondary-button { min-height: 31px; padding: 0 10px; white-space: nowrap; }
+.estimate-rate-policy-strip.rate-policy-missing { border-left-color: #b47525; background: #fffaf1; }
+.estimate-rate-policy-strip.rate-policy-missing > svg { color: #a36a20; }
+.takeoff-rate-summary { color: #315f76 !important; }
+.estimate-rate-editor-wrap { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 24px; background: rgba(22, 34, 29, .52); }
+.estimate-rate-editor { display: grid; gap: 16px; width: min(880px, 100%); max-height: calc(100vh - 48px); overflow: auto; padding: 20px 22px; background: #fff; border: 1px solid #cfdcd6; border-radius: 7px; box-shadow: 0 24px 60px rgba(22, 42, 34, .24); }
+.estimate-rate-editor .panel-heading { position: sticky; top: -20px; z-index: 2; margin: -20px -22px 0; padding: 16px 22px; background: #f8faf9; border-bottom: 1px solid #dfe8e4; }
+.estimate-rate-editor .panel-heading > div { min-width: 0; }
+.estimate-rate-editor .panel-heading h3, .estimate-rate-editor .panel-heading p { overflow-wrap: anywhere; }
+.estimate-rate-editor .panel-heading h3 { font-size: 14px; }
+.estimate-rate-editor .panel-heading p { margin-top: 4px; color: #687a72; font-size: 10px; }
+.estimate-rate-policy-grid { grid-template-columns: minmax(0, 2fr) minmax(110px, .55fr) minmax(145px, .7fr); gap: 12px; }
+.estimate-rate-policy-grid .form-span { grid-column: auto; }
+.estimate-rate-editor label, .estimate-rate-fieldset label { display: grid; gap: 5px; min-width: 0; color: #40564e; font-size: 10px; font-weight: 750; }
+.estimate-rate-editor input, .estimate-rate-editor select, .estimate-rate-editor textarea { width: 100%; min-width: 0; }
+.estimate-rate-fieldset { display: grid; gap: 11px; min-width: 0; margin: 0; padding: 13px; border: 1px solid #dce6e1; }
+.estimate-rate-fieldset legend { padding: 0 6px; color: #315f52; font-size: 10px; font-weight: 800; }
+.estimate-rate-labour-list { display: grid; gap: 8px; min-width: 0; }
+.estimate-rate-labour-row { display: grid; grid-template-columns: minmax(110px, .55fr) minmax(170px, 1.2fr) minmax(130px, .65fr) 32px; align-items: end; gap: 9px; min-width: 0; }
+.estimate-rate-labour-row .icon-button { width: 32px; height: 32px; margin-bottom: 1px; }
+.estimate-rate-assumption-grid { grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 10px; }
+.estimate-rate-reason { display: grid; gap: 5px; min-width: 0; color: #40564e; font-size: 10px; font-weight: 750; }
+.estimate-rate-reason textarea { min-height: 74px; resize: vertical; }
+.unit-rate-editor { width: min(760px, 100%); }
+.unit-rate-input-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+.unit-rate-input-grid label:first-child { grid-column: 1 / -1; }
+.unit-rate-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid #d8e5df; border-left: 3px solid #31876e; }
+.unit-rate-preview > div { display: grid; gap: 4px; min-width: 0; padding: 11px 12px; border-right: 1px solid #e0e9e5; border-bottom: 1px solid #e0e9e5; }
+.unit-rate-preview > div:nth-child(3n) { border-right: 0; }
+.unit-rate-preview > div:nth-last-child(-n + 3) { border-bottom: 0; }
+.unit-rate-preview span, .unit-rate-preview strong { min-width: 0; overflow-wrap: anywhere; }
+.unit-rate-preview span { color: #6b7a74; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.unit-rate-preview strong { color: #26473c; font-size: 13px; }
 .status-converted { color: #315f76; background: #e3eef3; }
 .takeoff-modal { width: min(640px, 100%); }
 .takeoff-item-modal { width: min(920px, 100%); }
@@ -982,6 +1022,7 @@
   .takeoff-wbs-heading, .takeoff-wbs-row { grid-template-columns: minmax(150px, 1.35fr) minmax(70px, .45fr) repeat(3, minmax(90px, .6fr)); gap: 8px; }
   .takeoff-item { grid-template-columns: minmax(0, 1fr) minmax(90px, .45fr) minmax(110px, .55fr) auto; }
   .takeoff-item-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .estimate-rate-assumption-grid { grid-template-columns: repeat(3, minmax(110px, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -1003,6 +1044,21 @@
   .takeoff-item-copy { grid-column: 1 / -1; }
   .takeoff-item-quantity, .takeoff-item-money { grid-column: 1; }
   .takeoff-item-actions { grid-column: 2; grid-row: 2 / span 2; align-self: center; }
+  .estimate-rate-policy-strip { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .estimate-rate-policy-strip > .tag { grid-column: 2; justify-self: start; }
+  .estimate-rate-policy-strip > .secondary-button { grid-column: 3; grid-row: 1 / span 2; }
+  .estimate-rate-editor-wrap { align-items: end; padding: 12px; }
+  .estimate-rate-editor { max-height: calc(100vh - 24px); padding: 16px; }
+  .estimate-rate-editor .panel-heading { top: -16px; margin: -16px -16px 0; padding: 14px 16px; }
+  .estimate-rate-policy-grid, .estimate-rate-assumption-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .estimate-rate-policy-grid .form-span { grid-column: 1 / -1; }
+  .estimate-rate-labour-row { grid-template-columns: minmax(92px, .55fr) minmax(0, 1fr) 32px; }
+  .estimate-rate-labour-row label:nth-child(3) { grid-column: 1 / 3; }
+  .estimate-rate-labour-row .icon-button { grid-column: 3; grid-row: 1; }
+  .unit-rate-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .unit-rate-preview > div, .unit-rate-preview > div:nth-child(3n) { border-right: 1px solid #e0e9e5; border-bottom: 1px solid #e0e9e5; }
+  .unit-rate-preview > div:nth-child(2n) { border-right: 0; }
+  .unit-rate-preview > div:nth-last-child(-n + 2) { border-bottom: 0; }
   .takeoff-modal-body { padding: 16px; }
   .takeoff-item-form { grid-template-columns: minmax(0, 1fr); }
   .takeoff-item-form .form-span { grid-column: auto; }
@@ -1011,6 +1067,21 @@
   .takeoff-preview > div:last-child { border-bottom: 0; }
   .takeoff-modal .modal-actions, .takeoff-item-modal .modal-actions, .takeoff-confirm-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }
   .takeoff-modal .modal-actions button, .takeoff-item-modal .modal-actions button, .takeoff-confirm-modal .modal-actions button { width: 100%; }
+}
+
+@media (max-width: 520px) {
+  .estimate-rate-policy-strip { grid-template-columns: auto minmax(0, 1fr); }
+  .estimate-rate-policy-strip > .tag { grid-column: 2; }
+  .estimate-rate-policy-strip > .secondary-button { grid-column: 1 / -1; grid-row: auto; width: 100%; }
+  .estimate-rate-policy-grid, .estimate-rate-assumption-grid, .unit-rate-input-grid, .unit-rate-preview { grid-template-columns: minmax(0, 1fr); }
+  .estimate-rate-policy-grid .form-span, .unit-rate-input-grid label:first-child { grid-column: auto; }
+  .estimate-rate-labour-row { grid-template-columns: minmax(0, 1fr) 32px; }
+  .estimate-rate-labour-row label, .estimate-rate-labour-row label:nth-child(3) { grid-column: 1; }
+  .estimate-rate-labour-row .icon-button { grid-column: 2; grid-row: 1; }
+  .unit-rate-preview > div, .unit-rate-preview > div:nth-child(2n), .unit-rate-preview > div:nth-child(3n) { border-right: 0; border-bottom: 1px solid #e0e9e5; }
+  .unit-rate-preview > div:last-child { border-bottom: 0; }
+  .estimate-rate-editor .modal-actions { align-items: stretch; flex-direction: column-reverse; }
+  .estimate-rate-editor .modal-actions button { width: 100%; }
 }
 
 .finance-summary { grid-template-columns: repeat(6, minmax(0, 1fr)); }

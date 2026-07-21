@@ -21,6 +21,45 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(takeoffControl.getByRole('heading', { name: 'WBS & quantity takeoff' })).toBeVisible();
   await expect(takeoffControl.getByText('No WBS or quantity takeoffs')).toBeVisible();
 
+  const ratePolicyControl = takeoffControl.getByTestId('estimate-rate-policy-control');
+  await expect(ratePolicyControl).toContainText('Estimating rate policy required');
+  await ratePolicyControl.getByRole('button', { name: 'Configure rates' }).click();
+  let ratePolicyDialog = page.getByRole('dialog', { name: 'Estimating rate policy revision' });
+  await ratePolicyDialog.getByLabel('Policy name').fill('Browser governed rates');
+  await ratePolicyDialog.getByLabel('Target margin (%)').fill('20');
+  await ratePolicyDialog.getByLabel('Class code').fill('CRAFT');
+  await ratePolicyDialog.getByLabel('Class name').fill('Qualified craft labour');
+  await ratePolicyDialog.getByLabel('Base hourly rate').fill('40');
+  await ratePolicyDialog.getByLabel('Paid leave (%)').fill('10');
+  await ratePolicyDialog.getByLabel('Employer costs (%)').fill('20');
+  await ratePolicyDialog.getByLabel('Pension and benefits (%)').fill('5');
+  await ratePolicyDialog.getByLabel('Insurance and other (%)').fill('5');
+  await ratePolicyDialog.getByLabel('Productive utilization (%)').fill('70');
+  await ratePolicyDialog.getByLabel('Annual overhead').fill('60000');
+  await ratePolicyDialog.getByLabel('Annual productive labour hours').fill('2000');
+  await ratePolicyDialog.getByLabel('Revision reason').fill('Establish verified labour burden, overhead, and margin assumptions.');
+  await ratePolicyDialog.getByRole('button', { name: 'Request approval' }).click();
+  await expect(page.getByText('Estimating rate policy revision retained for approval.')).toBeVisible();
+
+  const pendingResponse = await request.get('/api/ledger/estimate-rates');
+  expect(pendingResponse.ok()).toBeTruthy();
+  const pendingRegister = (await pendingResponse.json()).estimateRates;
+  const pendingPolicy = pendingRegister.pendingPolicies.find(policy => policy.policyName === 'Browser governed rates');
+  expect(pendingPolicy?.approvalId).toBeTruthy();
+  const approvalResponse = await request.post(`/api/ledger/approvals/${pendingPolicy.approvalId}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser commercial approver',
+      reason: 'Labour burden, overhead recovery, and target margin assumptions verified.'
+    }
+  });
+  expect(approvalResponse.ok()).toBeTruthy();
+
+  await workspace.getByRole('button', { name: 'Close job workspace' }).click();
+  await page.getByRole('button', { name: `Open ${title}` }).first().click();
+  await expect(ratePolicyControl).toContainText('Browser governed rates / v1');
+  await expect(ratePolicyControl.getByRole('button', { name: 'Revise rates' })).toBeVisible();
+
   await takeoffControl.getByRole('button', { name: 'New takeoff' }).click();
   const createModal = page.getByTestId('takeoff-create-modal');
   await createModal.getByLabel('Takeoff title').fill('Ground floor measured scope');
@@ -66,6 +105,23 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(page.getByText('Takeoff measurement recalculated and retained.')).toBeVisible();
   await expect(sheet.getByText('27.5 m2')).toBeVisible();
 
+  await sheet.getByRole('button', { name: 'Build rate Ceramic floor tiles' }).click();
+  const unitRateDialog = page.getByRole('dialog', { name: 'Unit-rate build-up' });
+  await unitRateDialog.getByLabel('Labour hours / unit').fill('0.5');
+  await unitRateDialog.getByLabel('Material / unit').fill('20');
+  await unitRateDialog.getByLabel('Equipment / unit').fill('5');
+  await unitRateDialog.getByLabel('Subcontract / unit').fill('0');
+  await unitRateDialog.getByLabel('Other direct / unit').fill('2');
+  const ratePreview = unitRateDialog.getByLabel('Unit-rate calculation preview');
+  await expect(ratePreview).toContainText('82,00');
+  await expect(ratePreview).toContainText('102,50');
+  await expect(ratePreview).toContainText('25%');
+  await unitRateDialog.getByRole('button', { name: 'Apply build-up' }).click();
+  await expect(page.getByText('Unit-rate build-up calculated and retained on the draft measurement.')).toBeVisible();
+  await expect(sheet.getByText('Rate v1')).toBeVisible();
+  await expect(sheet.getByText(/Labour.*40,00.*overhead.*15,00.*cost.*82,00.*margin 20%/)).toBeVisible();
+  await expect(workBreakdown).toContainText('2.818,75');
+
   await sheet.getByRole('button', { name: 'Prepare estimate' }).click();
   const convertModal = page.getByTestId('takeoff-convert-modal');
   await expect(convertModal.getByText(/SHA-256 snapshot/i)).toBeVisible();
@@ -75,7 +131,7 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(sheet.getByText('converted', { exact: true })).toBeVisible();
   await expect(sheet.getByText('Snapshot verified')).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Measurement' })).toHaveCount(0);
-  await expect(workspace.getByTestId('commercial-control')).toContainText('€ 962,50');
+  await expect(workspace.getByTestId('commercial-control')).toContainText('2.818,75');
 
   const detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();
@@ -83,13 +139,32 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   const retained = detail.job.takeoffs.find(item => item.title === 'Ground floor measured scope');
   expect(retained).toMatchObject({
     status: 'converted',
-    subtotal: 962.5,
-    totalCost: 550,
+    subtotal: 2818.75,
+    totalCost: 2255,
     integrityValid: true,
     data: { externalCommitments: 0 }
   });
-  expect(retained.workBreakdown).toMatchObject({ format: 'contractor-ai-wbs/v1', packageCount: 1, valid: true, totalPrice: 962.5 });
-  expect(retained.items[0]).toMatchObject({ quantity: 27.5, unit: 'm2', totalPrice: 962.5, wbsCode: '03.20', workPackage: 'Floor finishes' });
+  expect(retained.workBreakdown).toMatchObject({ format: 'contractor-ai-wbs/v1', packageCount: 1, valid: true, totalPrice: 2818.75 });
+  expect(retained.items[0]).toMatchObject({
+    quantity: 27.5,
+    unit: 'm2',
+    unitCost: 82,
+    unitPrice: 102.5,
+    totalPrice: 2818.75,
+    wbsCode: '03.20',
+    workPackage: 'Floor finishes',
+    ratePolicyId: pendingPolicy.id,
+    rateIntegrityValid: true
+  });
+  expect(retained.items[0].rateBuildUp.calculation).toMatchObject({
+    fullyBurdenedHourlyRate: 80,
+    labourCostPerUnit: 40,
+    directCostPerUnit: 67,
+    overheadRecoveryPerUnit: 15,
+    unitCost: 82,
+    unitSellRate: 102.5,
+    markupPercent: 25
+  });
   const quote = detail.job.quotes.find(item => item.id === retained.quoteId);
   expect(quote.status).toBe('draft');
   expect(quote.approvalId).toBeTruthy();
@@ -104,6 +179,19 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   expect(detail.job.contractValue).toBe(0);
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await ratePolicyControl.getByRole('button', { name: 'Revise rates' }).click();
+  ratePolicyDialog = page.getByRole('dialog', { name: 'Estimating rate policy revision' });
+  const rateDialogGeometry = await ratePolicyDialog.evaluate(element => ({
+    left: element.getBoundingClientRect().left,
+    right: element.getBoundingClientRect().right,
+    viewportWidth: window.innerWidth,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth
+  }));
+  expect(rateDialogGeometry.left).toBeGreaterThanOrEqual(0);
+  expect(rateDialogGeometry.right).toBeLessThanOrEqual(rateDialogGeometry.viewportWidth);
+  expect(rateDialogGeometry.scrollWidth).toBeLessThanOrEqual(rateDialogGeometry.clientWidth);
+  await ratePolicyDialog.getByRole('button', { name: 'Close estimating rate policy editor' }).click();
   const geometry = await takeoffControl.evaluate(element => ({
     pageWidth: document.body.scrollWidth,
     viewportWidth: window.innerWidth,

@@ -1474,7 +1474,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(migrations.currentVersion, '054_estimate_rate_buildups');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1555,12 +1555,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('053_work_breakdown_takeoffs'));
+  assert.deepEqual(versions, Array(4).fill('054_estimate_rate_buildups'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 53);
+    assert.equal(Number(migrationCount.count), 54);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1602,11 +1602,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
         'opportunity_fit_assessments',
         'bid_decision_policies',
         'opportunity_bid_decisions',
+        'estimate_rate_policies',
         'opportunity_evidence',
         'opportunity_site_surveys'
       )
     `).rows[0];
-    assert.equal(Number(opportunityTableCount.count), 8);
+    assert.equal(Number(opportunityTableCount.count), 9);
     const marketFitIndexCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM pg_indexes
@@ -1628,6 +1629,17 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
         )
     `).rows[0];
     assert.equal(Number(bidDecisionIndexCount.count), 6);
+    const estimateRateIndexCount = verification.query(`
+      SELECT COUNT(*) AS count
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN (
+          'idx_estimate_rate_policy_one_approved',
+          'idx_estimate_rate_policy_status',
+          'idx_takeoff_items_rate_policy'
+        )
+    `).rows[0];
+    assert.equal(Number(estimateRateIndexCount.count), 3);
     const siteSurveyIndexCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM pg_indexes
@@ -2136,7 +2148,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2327,6 +2339,32 @@ test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceab
       title: `Hosted quantity takeoff ${marker}`,
       assignAutomatically: false
     }, { actor: 'postgres_takeoff_test' });
+    const ratePolicyRequest = ledger.requestEstimateRatePolicy({
+      entryKey: `postgres-rate-policy-${marker}`,
+      reason: 'Verify hosted labour burden, overhead recovery, and unit-rate traceability.',
+      policyName: `Hosted estimating rates ${marker}`,
+      currency: 'EUR',
+      labourClasses: [{ code: 'CRAFT', name: 'Hosted craft labour', baseHourlyRate: 40 }],
+      labourBurden: {
+        paidLeavePercent: 10,
+        statutoryEmployerCostsPercent: 20,
+        pensionBenefitsPercent: 5,
+        insuranceOtherPercent: 5,
+        productiveUtilizationPercent: 70
+      },
+      overheadRecovery: {
+        method: 'labor_hour',
+        annualOverhead: 60000,
+        annualProductiveLabourHours: 2000,
+        directCostPercent: 0
+      },
+      targetMarginPercent: 20
+    }, { actor: 'postgres_takeoff_test' });
+    ledger.resolveApproval(ratePolicyRequest.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_takeoff_approver',
+      reason: 'Hosted rate assumptions and recovery basis verified.'
+    });
     const takeoff = ledger.createTakeoff(job.id, {
       title: 'Hosted measured scope',
       taxRate: 21,
@@ -2359,6 +2397,20 @@ test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceab
     assert.deepEqual(takeoff.items.map(item => item.quantity), [32.13, 4]);
     assert.equal(takeoff.workBreakdown.packageCount, 2);
     assert.equal(takeoff.workBreakdown.valid, true);
+    const rated = ledger.applyTakeoffUnitRate(job.id, takeoff.id, takeoff.items[0].id, {
+      entryKey: `postgres-unit-rate-${marker}`,
+      policyId: ratePolicyRequest.policy.id,
+      labourClassCode: 'CRAFT',
+      labourHoursPerUnit: 0.5,
+      materialCostPerUnit: 20,
+      equipmentCostPerUnit: 5,
+      subcontractCostPerUnit: 0,
+      otherDirectCostPerUnit: 2,
+      targetMarginPercent: 20
+    }, { actor: 'postgres_takeoff_test' });
+    assert.equal(rated.item.rateIntegrityValid, true);
+    assert.equal(rated.item.rateBuildUp.calculation.unitCost, 82);
+    assert.equal(rated.item.rateBuildUp.calculation.unitSellRate, 102.5);
     const converted = ledger.convertTakeoffToQuote(job.id, takeoff.id, {
       validUntil: '2026-12-31'
     }, { actor: 'postgres_takeoff_test' });
@@ -2367,6 +2419,8 @@ test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceab
     assert.equal(converted.quote.data.source.snapshotHash, converted.takeoff.snapshotHash);
     assert.equal(converted.quote.data.source.workBreakdownHash, converted.takeoff.workBreakdown.hash);
     assert.deepEqual(converted.quote.lineItems.map(item => item.wbsCode), ['03.20', '02.10']);
+    assert.equal(converted.takeoff.items[0].ratePolicyId, ratePolicyRequest.policy.id);
+    assert.equal(converted.takeoff.items[0].rateIntegrityValid, true);
     assert.equal(ledger.convertTakeoffToQuote(job.id, takeoff.id).replayed, true);
     assert.equal(ledger.diagnose().valid, true);
   } finally {
@@ -2497,7 +2551,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2605,7 +2659,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2704,7 +2758,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2791,7 +2845,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
   } finally {
     ledger?.close();
   }
@@ -2896,7 +2950,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -2962,7 +3016,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
   } finally {
     ledger.close();
   }
@@ -3017,7 +3071,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
+    assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
   } finally {
     ledger.close();
   }

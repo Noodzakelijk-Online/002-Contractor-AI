@@ -2679,6 +2679,7 @@ function App() {
   const [selectedJobId, setSelectedJobId] = useState(null)
   const [selectedJob, setSelectedJob] = useState(null)
   const [selectedJobLoading, setSelectedJobLoading] = useState(false)
+  const [estimateRates, setEstimateRates] = useState(null)
   const [taskDraft, setTaskDraft] = useState(emptyTaskDraft)
   const [taskAction, setTaskAction] = useState(null)
   const [taskActionNote, setTaskActionNote] = useState('')
@@ -5717,6 +5718,9 @@ function App() {
     setTaskActionNote('')
     await Promise.all([
       loadSelectedJob(job.id),
+      capabilities.estimateRates === true
+        ? api('/api/ledger/estimate-rates').then((result) => setEstimateRates(result.estimateRates || null))
+        : Promise.resolve(),
       canCoordinate ? loadResourceOptions() : Promise.resolve(),
       canCoordinate
         ? api('/api/ledger/inspection-templates').then((result) => {
@@ -5753,6 +5757,45 @@ function App() {
       notify(
         `${created} internal setup draft${created === 1 ? '' : 's'} retained.${blocked ? ` ${blocked} manual gap${blocked === 1 ? '' : 's'} remained operator-controlled.` : ''}`,
       )
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestEstimateRatePolicy(payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/estimate-rates/policies', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setEstimateRates(result.estimateRates || estimateRates)
+      notify('Estimating rate policy revision retained for approval.')
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function applyTakeoffUnitRate(takeoff, item, payload) {
+    if (!selectedJobId || !takeoff?.id || !item?.id) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/takeoffs/${encodeURIComponent(takeoff.id)}/items/${encodeURIComponent(item.id)}/rate-build-up`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      )
+      setSelectedJob(result.job)
+      notify(result.replayed ? 'The matching unit-rate build-up was already retained.' : 'Unit-rate build-up calculated and retained on the draft measurement.')
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -13794,8 +13837,12 @@ function App() {
                   {!fieldScoped ? (
                     <TakeoffControl
                       job={selectedJob}
+                      estimateRates={estimateRates}
                       canCoordinate={canCoordinate}
+                      canManagePolicy={canManageMarketFitPolicy}
                       submitting={submitting}
+                      onRequestRatePolicy={requestEstimateRatePolicy}
+                      onApplyUnitRate={applyTakeoffUnitRate}
                       onNewTakeoff={openTakeoffCreate}
                       onAddItem={(takeoff) => openTakeoffItem(takeoff)}
                       onEditItem={openTakeoffItem}

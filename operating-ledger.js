@@ -113,6 +113,14 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'intake', label: 'Client intake', table: 'job_requests', detailKey: 'request' },
     { key: 'bid_package', label: 'Bid / tender package', table: 'bid_packages', detailKey: 'bidPackages' },
     { key: 'takeoff', label: 'Quantity takeoff', table: 'takeoff_sheets', detailKey: 'takeoffs' },
+    {
+      key: 'estimate_rate_policy',
+      label: 'Approved estimating rate policy',
+      table: 'estimate_rate_policies',
+      coverageStatuses: ['pending_approval', 'approved'],
+      readyStatuses: ['approved'],
+      ledgerOnly: true
+    },
     { key: 'quote', label: 'Quote or estimate', table: 'quotes', detailKey: 'quotes' },
     { key: 'site_visit', label: 'Site visit / survey', table: 'site_visits', detailKey: 'siteVisits' },
     { key: 'materials', label: 'Material scope', table: 'material_requirements', detailKey: 'materials' },
@@ -1098,6 +1106,8 @@ const CASH_FLOW_FORECAST_WEEKS = 13;
 const PERFORMANCE_SCORECARD_FORMAT = 'contractor-ai-performance-scorecard/v1';
 const MARKET_FIT_PROFILE_FORMAT = 'contractor-ai-market-fit-profile/v1';
 const MARKET_FIT_ASSESSMENT_FORMAT = 'contractor-ai-market-fit-assessment/v1';
+const ESTIMATE_RATE_POLICY_FORMAT = 'contractor-ai-estimate-rate-policy/v1';
+const UNIT_RATE_BUILD_UP_FORMAT = 'contractor-ai-unit-rate-build-up/v1';
 const MARKET_FIT_CRITERIA = Object.freeze([
   { key: 'service', label: 'Service fit', weight: 30 },
   { key: 'service_area', label: 'Service-area fit', weight: 30 },
@@ -1643,6 +1653,209 @@ function normalizeCommercialCurrency(value = 'EUR') {
     throw ledgerInputError('commercial_currency_invalid', 'Currency must be a three-letter ISO currency code.');
   }
   return currency;
+}
+
+function estimateRateNumber(value, label, options = {}) {
+  const number = Number(value ?? options.fallback ?? 0);
+  const minimum = options.minimum ?? 0;
+  const maximum = options.maximum ?? 1_000_000_000;
+  if (!Number.isFinite(number) || number < minimum || number > maximum) {
+    throw ledgerInputError('estimate_rate_value_invalid', `${label} must be between ${minimum} and ${maximum}.`, { label, minimum, maximum });
+  }
+  return roundMeasurement(number, options.precision ?? 4);
+}
+
+function normalizeEstimateRatePolicy(payload = {}, versionNumber = 1, actor = 'Contractor.AI') {
+  const policyName = normalizeText(payload.policyName || payload.policy_name || payload.name, 'Standard estimating rates');
+  if (policyName.length < 2 || policyName.length > 120) {
+    throw ledgerInputError('estimate_rate_policy_name_invalid', 'The estimating rate policy name must contain 2 to 120 characters.');
+  }
+  const currency = normalizeCommercialCurrency(payload.currency || 'EUR');
+  const rawClasses = payload.labourClasses || payload.laborClasses || payload.labour_classes || payload.labor_classes;
+  const classRows = Array.isArray(rawClasses) && rawClasses.length
+    ? rawClasses
+    : [{ code: payload.labourClassCode || payload.laborClassCode || 'STANDARD', name: 'Standard craft labour', baseHourlyRate: payload.baseHourlyRate ?? payload.base_hourly_rate ?? 0 }];
+  if (classRows.length > 20) {
+    throw ledgerInputError('estimate_rate_labour_class_limit', 'An estimating rate policy can retain at most 20 labour classes.');
+  }
+  const classCodes = new Set();
+  const labourClasses = classRows.map((row, index) => {
+    const code = normalizeText(row?.code || row?.key, `CLASS${index + 1}`).toUpperCase();
+    const name = normalizeText(row?.name || row?.label, '');
+    if (!/^[A-Z0-9][A-Z0-9_-]{0,23}$/.test(code) || classCodes.has(code)) {
+      throw ledgerInputError('estimate_rate_labour_class_code_invalid', 'Every labour class requires a unique alphanumeric code of 1 to 24 characters.', { code });
+    }
+    if (name.length < 2 || name.length > 80) {
+      throw ledgerInputError('estimate_rate_labour_class_name_invalid', 'Every labour class name must contain 2 to 80 characters.', { code });
+    }
+    classCodes.add(code);
+    return {
+      code,
+      name,
+      baseHourlyRate: estimateRateNumber(row?.baseHourlyRate ?? row?.base_hourly_rate, `${name} base hourly rate`, { minimum: 0.01, maximum: 10_000 })
+    };
+  });
+  const burden = payload.labourBurden || payload.laborBurden || payload.labour_burden || payload.labor_burden || payload;
+  const labourBurden = {
+    paidLeavePercent: estimateRateNumber(burden.paidLeavePercent ?? burden.paid_leave_percent, 'Paid leave burden', { maximum: 100 }),
+    statutoryEmployerCostsPercent: estimateRateNumber(
+      burden.statutoryEmployerCostsPercent ?? burden.statutory_employer_costs_percent,
+      'Statutory employer costs',
+      { maximum: 100 }
+    ),
+    pensionBenefitsPercent: estimateRateNumber(burden.pensionBenefitsPercent ?? burden.pension_benefits_percent, 'Pension and benefits burden', { maximum: 100 }),
+    insuranceOtherPercent: estimateRateNumber(burden.insuranceOtherPercent ?? burden.insurance_other_percent, 'Insurance and other burden', { maximum: 100 }),
+    productiveUtilizationPercent: estimateRateNumber(
+      burden.productiveUtilizationPercent ?? burden.productive_utilization_percent ?? burden.productiveTimePercent ?? burden.productive_time_percent ?? 100,
+      'Productive utilization',
+      { minimum: 1, maximum: 100 }
+    )
+  };
+  const overhead = payload.overheadRecovery || payload.overhead_recovery || payload;
+  const method = normalizeStatus(overhead.method || overhead.overheadMethod || overhead.overhead_method, 'labor_hour');
+  if (!['labor_hour', 'direct_cost_percent'].includes(method)) {
+    throw ledgerInputError('estimate_rate_overhead_method_invalid', 'Overhead recovery method must be labor_hour or direct_cost_percent.');
+  }
+  const annualOverhead = estimateRateNumber(overhead.annualOverhead ?? overhead.annual_overhead, 'Annual overhead', { maximum: 1_000_000_000, precision: 2 });
+  const annualProductiveLabourHours = estimateRateNumber(
+    overhead.annualProductiveLabourHours ?? overhead.annualProductiveLaborHours ?? overhead.annual_productive_labour_hours ?? overhead.annual_productive_labor_hours,
+    'Annual productive labour hours',
+    { minimum: method === 'labor_hour' ? 1 : 0, maximum: 10_000_000, precision: 2 }
+  );
+  const directCostPercent = estimateRateNumber(overhead.directCostPercent ?? overhead.direct_cost_percent, 'Direct-cost overhead percentage', { maximum: 500 });
+  const targetMarginPercent = estimateRateNumber(payload.targetMarginPercent ?? payload.target_margin_percent ?? 0, 'Target margin', { maximum: 90 });
+  return {
+    format: ESTIMATE_RATE_POLICY_FORMAT,
+    versionNumber,
+    policyName,
+    currency,
+    labourClasses,
+    labourBurden,
+    overheadRecovery: {
+      method,
+      annualOverhead,
+      annualProductiveLabourHours,
+      directCostPercent
+    },
+    targetMarginPercent,
+    calculation: {
+      burdenBasis: 'base_rate_times_one_plus_burden_divided_by_productive_utilization',
+      laborHourOverheadBasis: 'annual_overhead_divided_by_annual_productive_labour_hours',
+      marginBasis: 'sell_rate_equals_cost_divided_by_one_minus_margin'
+    },
+    governance: {
+      requestedBy: actor,
+      approvalRequired: true,
+      workerDirectoryRatesUnaffected: true,
+      externalCommitments: 0
+    }
+  };
+}
+
+function deriveEstimateRatePolicy(snapshot) {
+  if (!snapshot || snapshot.format !== ESTIMATE_RATE_POLICY_FORMAT) return null;
+  const burden = snapshot.labourBurden || {};
+  const totalBurdenPercent = roundMeasurement(
+    normalizeNumber(burden.paidLeavePercent, 0)
+      + normalizeNumber(burden.statutoryEmployerCostsPercent, 0)
+      + normalizeNumber(burden.pensionBenefitsPercent, 0)
+      + normalizeNumber(burden.insuranceOtherPercent, 0),
+    4
+  );
+  const utilization = normalizeNumber(burden.productiveUtilizationPercent, 0) / 100;
+  if (!(utilization > 0)) return null;
+  const labourClasses = (snapshot.labourClasses || []).map(item => ({
+    ...item,
+    cashBurdenedHourlyRate: roundMeasurement(normalizeNumber(item.baseHourlyRate, 0) * (1 + totalBurdenPercent / 100), 4),
+    fullyBurdenedHourlyRate: roundMeasurement(normalizeNumber(item.baseHourlyRate, 0) * (1 + totalBurdenPercent / 100) / utilization, 4)
+  }));
+  const overhead = snapshot.overheadRecovery || {};
+  const overheadPerLabourHour = overhead.method === 'labor_hour' && normalizeNumber(overhead.annualProductiveLabourHours, 0) > 0
+    ? roundMeasurement(normalizeNumber(overhead.annualOverhead, 0) / normalizeNumber(overhead.annualProductiveLabourHours, 0), 4)
+    : 0;
+  return {
+    totalBurdenPercent,
+    productiveUtilizationPercent: normalizeNumber(burden.productiveUtilizationPercent, 0),
+    labourClasses,
+    overheadMethod: overhead.method,
+    overheadPerLabourHour,
+    directCostPercent: normalizeNumber(overhead.directCostPercent, 0),
+    targetMarginPercent: normalizeNumber(snapshot.targetMarginPercent, 0)
+  };
+}
+
+function calculateUnitRateBuildUp(policy, payload = {}) {
+  const policySnapshot = policy?.snapshot || policy;
+  const derivedPolicy = deriveEstimateRatePolicy(policySnapshot);
+  if (!derivedPolicy) {
+    throw ledgerInputError('estimate_rate_policy_integrity_failed', 'The estimating rate policy cannot be used because its retained calculation basis is invalid.', null, 409);
+  }
+  const labourClassCode = normalizeText(
+    payload.labourClassCode || payload.laborClassCode || payload.labour_class_code || payload.labor_class_code || derivedPolicy.labourClasses[0]?.code,
+    ''
+  ).toUpperCase();
+  const labourClass = derivedPolicy.labourClasses.find(item => item.code === labourClassCode);
+  if (!labourClass) {
+    throw ledgerInputError('unit_rate_labour_class_invalid', 'Select a labour class retained in the active estimating policy.', { labourClassCode });
+  }
+  const labourHoursPerUnit = estimateRateNumber(
+    payload.labourHoursPerUnit ?? payload.laborHoursPerUnit ?? payload.labour_hours_per_unit ?? payload.labor_hours_per_unit,
+    'Labour hours per output unit',
+    { maximum: 1_000_000 }
+  );
+  const materialCostPerUnit = estimateRateNumber(payload.materialCostPerUnit ?? payload.material_cost_per_unit, 'Material cost per unit');
+  const equipmentCostPerUnit = estimateRateNumber(payload.equipmentCostPerUnit ?? payload.equipment_cost_per_unit, 'Equipment cost per unit');
+  const subcontractCostPerUnit = estimateRateNumber(payload.subcontractCostPerUnit ?? payload.subcontract_cost_per_unit, 'Subcontract cost per unit');
+  const otherDirectCostPerUnit = estimateRateNumber(payload.otherDirectCostPerUnit ?? payload.other_direct_cost_per_unit, 'Other direct cost per unit');
+  const policyMargin = normalizeNumber(policySnapshot.targetMarginPercent, 0);
+  const targetMarginPercent = estimateRateNumber(payload.targetMarginPercent ?? payload.target_margin_percent ?? policyMargin, 'Target margin', { maximum: 90 });
+  const marginOverrideReason = normalizeText(payload.marginOverrideReason || payload.margin_override_reason, '');
+  const marginOverride = Math.abs(targetMarginPercent - policyMargin) > 0.0001;
+  if (marginOverride && (marginOverrideReason.length < 8 || marginOverrideReason.length > 500)) {
+    throw ledgerInputError('unit_rate_margin_override_reason_required', 'A target-margin override requires a reason between 8 and 500 characters.');
+  }
+  const labourCostPerUnit = roundMoney(labourHoursPerUnit * labourClass.fullyBurdenedHourlyRate);
+  const directCostPerUnit = roundMoney(
+    labourCostPerUnit + materialCostPerUnit + equipmentCostPerUnit + subcontractCostPerUnit + otherDirectCostPerUnit
+  );
+  const overheadRecoveryPerUnit = derivedPolicy.overheadMethod === 'labor_hour'
+    ? roundMoney(labourHoursPerUnit * derivedPolicy.overheadPerLabourHour)
+    : roundMoney(directCostPerUnit * (derivedPolicy.directCostPercent / 100));
+  const unitCost = roundMoney(directCostPerUnit + overheadRecoveryPerUnit);
+  if (!(unitCost > 0)) {
+    throw ledgerInputError('unit_rate_cost_required', 'A unit-rate build-up requires labour, material, equipment, subcontract, other direct cost, or overhead greater than zero.');
+  }
+  const unitSellRate = roundMoney(unitCost / (1 - targetMarginPercent / 100));
+  const marginAmountPerUnit = roundMoney(unitSellRate - unitCost);
+  const markupPercent = roundMeasurement((marginAmountPerUnit / unitCost) * 100, 4);
+  return {
+    input: {
+      labourClassCode,
+      labourHoursPerUnit,
+      materialCostPerUnit,
+      equipmentCostPerUnit,
+      subcontractCostPerUnit,
+      otherDirectCostPerUnit,
+      targetMarginPercent,
+      marginOverride,
+      marginOverrideReason: marginOverride ? marginOverrideReason : null
+    },
+    calculation: {
+      baseHourlyRate: labourClass.baseHourlyRate,
+      cashBurdenedHourlyRate: labourClass.cashBurdenedHourlyRate,
+      fullyBurdenedHourlyRate: labourClass.fullyBurdenedHourlyRate,
+      labourCostPerUnit,
+      directCostPerUnit,
+      overheadMethod: derivedPolicy.overheadMethod,
+      overheadRate: derivedPolicy.overheadMethod === 'labor_hour' ? derivedPolicy.overheadPerLabourHour : derivedPolicy.directCostPercent,
+      overheadRecoveryPerUnit,
+      unitCost,
+      targetMarginPercent,
+      unitSellRate,
+      marginAmountPerUnit,
+      markupPercent
+    }
+  };
 }
 
 function normalizeAcceptanceEvidence(payload = {}) {
@@ -4308,6 +4521,40 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         update.run(toJson({ ...fromJson(row.data_json, {}), workBreakdownFormat: TAKEOFF_WBS_FORMAT }), row.id);
       }
     }
+  },
+  {
+    version: '054_estimate_rate_buildups',
+    description: 'Retain approval-gated estimating rate policies and source-bound unit-rate build-ups for draft takeoff rows.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS estimate_rate_policies (
+          id TEXT PRIMARY KEY,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          policy_name TEXT NOT NULL,
+          currency TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_estimate_rate_policy_one_approved
+          ON estimate_rate_policies(status)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_estimate_rate_policy_status
+          ON estimate_rate_policies(status, version_number DESC);
+
+        ALTER TABLE takeoff_items ADD COLUMN rate_policy_id TEXT REFERENCES estimate_rate_policies(id);
+        ALTER TABLE takeoff_items ADD COLUMN rate_build_up_hash TEXT;
+        CREATE INDEX IF NOT EXISTS idx_takeoff_items_rate_policy
+          ON takeoff_items(rate_policy_id, takeoff_id, sequence_number)
+          WHERE rate_policy_id IS NOT NULL;
+      `);
+    }
   }
 ];
 
@@ -5960,7 +6207,7 @@ class ContractorOperatingLedger {
   }
 
   activeRecordScope(table) {
-    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots', 'market_fit_profiles', 'opportunity_site_surveys'].includes(table)) {
+    if (['weekly_timesheets', 'timesheet_exports', 'worker_availability_periods', 'cash_flow_forecast_snapshots', 'performance_scorecard_targets', 'performance_scorecard_snapshots', 'market_fit_profiles', 'estimate_rate_policies', 'opportunity_site_surveys'].includes(table)) {
       return { from: `${table} AS records`, condition: '1 = 1' };
     }
     if (table === 'jobs') {
@@ -12690,6 +12937,163 @@ class ContractorOperatingLedger {
     });
   }
 
+  listEstimateRatePolicies(options = {}) {
+    const includeHistory = normalizeBoolean(options.includeHistory ?? options.include_history, false);
+    return this.db.prepare(`
+      SELECT * FROM estimate_rate_policies
+      ${includeHistory ? '' : "WHERE status IN ('pending_approval', 'approved')"}
+      ORDER BY version_number DESC
+    `).all().map(row => this.mapEstimateRatePolicy(row));
+  }
+
+  getEstimateRatePolicy(policyId) {
+    const row = this.db.prepare('SELECT * FROM estimate_rate_policies WHERE id = ?').get(policyId);
+    if (!row) throw ledgerInputError('estimate_rate_policy_not_found', 'Estimating rate policy not found.', { policyId }, 404);
+    const policy = this.mapEstimateRatePolicy(row);
+    if (!policy.integrityValid) {
+      throw ledgerInputError('estimate_rate_policy_integrity_failed', 'The retained estimating rate policy failed checksum or formula verification.', { policyId }, 409);
+    }
+    return policy;
+  }
+
+  activeEstimateRatePolicy() {
+    const row = this.db.prepare("SELECT * FROM estimate_rate_policies WHERE status = 'approved' ORDER BY version_number DESC LIMIT 1").get();
+    return row ? this.getEstimateRatePolicy(row.id) : null;
+  }
+
+  requestEstimateRatePolicy(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('estimate_rate_policy_entry_key_invalid', 'An estimating rate policy revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason || payload.notes, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('estimate_rate_policy_reason_invalid', 'An estimating rate policy revision requires a reason between 8 and 500 characters.');
+      }
+      const replay = this.db.prepare('SELECT * FROM estimate_rate_policies WHERE entry_key = ?').get(entryKey);
+      const versionNumber = replay
+        ? Math.round(normalizeNumber(replay.version_number, 1))
+        : Number(this.db.prepare('SELECT COALESCE(MAX(version_number), 0) AS value FROM estimate_rate_policies').get()?.value || 0) + 1;
+      const snapshot = normalizeEstimateRatePolicy(payload, versionNumber, actor);
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      const fingerprint = sha256Json({ snapshot, reason });
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('estimate_rate_policy_replay_conflict', 'This estimating rate policy entryKey was already used with different assumptions.', { entryKey, policyId: replay.id }, 409);
+        }
+        const policy = this.getEstimateRatePolicy(replay.id);
+        return {
+          policy,
+          approval: policy.approvalId ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(policy.approvalId)) : null,
+          replayed: true
+        };
+      }
+      const pending = this.db.prepare("SELECT id, approval_id FROM estimate_rate_policies WHERE status = 'pending_approval' ORDER BY version_number DESC LIMIT 1").get();
+      if (pending) {
+        throw ledgerInputError('estimate_rate_policy_pending', 'Resolve the pending estimating rate policy revision first.', { policyId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const timestamp = nowIso();
+      const id = makeId('ratepolicy');
+      this.db.prepare(`
+        INSERT INTO estimate_rate_policies (
+          id, version_number, status, policy_name, currency, entry_key, entry_fingerprint,
+          snapshot_hash, snapshot_json, approval_id, data_json, created_at, updated_at
+        ) VALUES (?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id, versionNumber, snapshot.policyName, snapshot.currency, entryKey, fingerprint, snapshotHash, snapshotJson,
+        toJson({ reason, requestedBy: actor, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const derived = deriveEstimateRatePolicy(snapshot);
+      const approval = this.createApproval({
+        targetType: 'estimate_rate_policy',
+        targetId: id,
+        approvalType: 'estimate_rate_policy_revision',
+        summary: `Approve estimating rate policy ${snapshot.policyName} v${versionNumber}`,
+        reason,
+        data: {
+          policyName: snapshot.policyName,
+          versionNumber,
+          currency: snapshot.currency,
+          labourClasses: derived.labourClasses,
+          totalBurdenPercent: derived.totalBurdenPercent,
+          productiveUtilizationPercent: derived.productiveUtilizationPercent,
+          overheadMethod: derived.overheadMethod,
+          overheadPerLabourHour: derived.overheadPerLabourHour,
+          directCostPercent: derived.directCostPercent,
+          targetMarginPercent: derived.targetMarginPercent,
+          snapshotHash,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE estimate_rate_policies SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const retained = this.getEstimateRatePolicy(id);
+      this.audit({
+        entityType: 'estimate_rate_policy', entityId: id, action: 'request_estimate_rate_policy_approval', actor, after: retained,
+        metadata: { approvalId: approval.id, versionNumber, snapshotHash, externalCommitments: 0 }
+      });
+      return { policy: retained, approval, replayed: false };
+    });
+  }
+
+  applyEstimateRatePolicyApproval(policyId) {
+    const row = this.db.prepare('SELECT * FROM estimate_rate_policies WHERE id = ?').get(policyId);
+    if (!row) throw ledgerInputError('estimate_rate_policy_not_found', 'Estimating rate policy not found.', { policyId }, 404);
+    if (row.status === 'approved') return this.getEstimateRatePolicy(policyId);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('estimate_rate_policy_state_conflict', `Estimating rate policy cannot be approved from ${row.status}.`, { policyId, status: row.status }, 409);
+    }
+    const policy = this.getEstimateRatePolicy(policyId);
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    if (!approval || approval.status !== 'approved' || approval.target_type !== 'estimate_rate_policy' || approval.target_id !== policyId) {
+      throw ledgerInputError('estimate_rate_policy_approval_invalid', 'The estimating rate policy lacks a matching approved decision.', { policyId }, 409);
+    }
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE estimate_rate_policies SET status = 'superseded', updated_at = ? WHERE status = 'approved' AND id <> ?").run(timestamp, policyId);
+    this.db.prepare(`
+      UPDATE estimate_rate_policies SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id, approvedAt: timestamp, approvedBy: actor }
+    }), timestamp, policyId);
+    const after = this.getEstimateRatePolicy(policyId);
+    this.audit({
+      entityType: 'estimate_rate_policy', entityId: policyId, action: 'approve_estimate_rate_policy', actor,
+      before: policy, after,
+      metadata: { approvalId: row.approval_id, versionNumber: row.version_number, snapshotHash: row.snapshot_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  estimateRateRegister(options = {}) {
+    const policies = this.listEstimateRatePolicies({ includeHistory: true });
+    const activePolicy = policies.find(policy => policy.status === 'approved') || null;
+    const pendingPolicies = policies.filter(policy => policy.status === 'pending_approval');
+    return {
+      format: ESTIMATE_RATE_POLICY_FORMAT,
+      activePolicy,
+      pendingPolicies,
+      history: normalizeBoolean(options.includeHistory ?? options.include_history, false) ? policies : [],
+      summary: {
+        configured: Boolean(activePolicy),
+        pendingApproval: pendingPolicies.length,
+        revisions: policies.length,
+        labourClasses: activePolicy?.derived?.labourClasses?.length || 0
+      },
+      formulas: {
+        fullyBurdenedRate: 'base rate x (1 + burden %) / productive utilization %',
+        laborHourOverhead: 'annual overhead / annual productive labour hours',
+        targetMarginSellRate: 'unit cost / (1 - target margin %)'
+      },
+      workerDirectoryRatesUnaffected: true,
+      externalCommitments: 0
+    };
+  }
+
   requireTakeoff(jobId, takeoffId) {
     const row = this.db.prepare('SELECT * FROM takeoff_sheets WHERE id = ? AND job_id = ?').get(takeoffId, jobId);
     if (!row) throw ledgerInputError('takeoff_not_found', 'Quantity takeoff was not found for this job.', null, 404);
@@ -12871,26 +13275,147 @@ class ContractorOperatingLedger {
       const before = this.mapTakeoffItem(row);
       const normalized = normalizeTakeoffItem({ ...before, ...payload });
       this.assertTakeoffWbsPackage(takeoffId, normalized, itemId);
+      const rateBasisChanged = Boolean(before.rateBuildUpHash) && (
+        normalized.category !== before.category
+        || normalized.unit !== before.unit
+        || Math.abs(normalized.unitCost - before.unitCost) > 0.0001
+        || Math.abs(normalized.unitPrice - before.unitPrice) > 0.0001
+      );
+      const nextData = { ...before.data, calculation: 'server_derived', workBreakdownFormat: TAKEOFF_WBS_FORMAT };
+      if (rateBasisChanged) {
+        for (const key of ['rateBuildUpFormat', 'rateBuildUp', 'rateBuildUpEntryKey', 'rateBuildUpFingerprint', 'rateBuildUpAppliedAt', 'rateBuildUpAppliedBy']) {
+          delete nextData[key];
+        }
+        nextData.rateBuildUpInvalidated = {
+          at: nowIso(),
+          by: options.actor || 'Contractor.AI',
+          reason: 'manual_rate_or_unit_change'
+        };
+      }
       this.db.prepare(`
         UPDATE takeoff_items SET
           category = ?, description = ?, measurement_type = ?, unit = ?, count_value = ?,
           length_value = ?, width_value = ?, height_value = ?, waste_percent = ?, quantity = ?,
           unit_cost = ?, unit_price = ?, total_cost = ?, total_price = ?, cost_code = ?,
-          wbs_code = ?, work_package = ?, source_reference = ?, data_json = ?, updated_at = ?
+          wbs_code = ?, work_package = ?, source_reference = ?, rate_policy_id = ?,
+          rate_build_up_hash = ?, data_json = ?, updated_at = ?
         WHERE id = ? AND takeoff_id = ?
       `).run(
         normalized.category, normalized.description, normalized.measurementType, normalized.unit, normalized.count,
         normalized.length, normalized.width, normalized.height, normalized.wastePercent, normalized.quantity,
         normalized.unitCost, normalized.unitPrice, normalized.totalCost, normalized.totalPrice, normalized.costCode,
         normalized.wbsCode, normalized.workPackage, normalized.sourceReference,
-        toJson({ ...before.data, calculation: 'server_derived', workBreakdownFormat: TAKEOFF_WBS_FORMAT }),
+        rateBasisChanged ? null : before.ratePolicyId,
+        rateBasisChanged ? null : before.rateBuildUpHash,
+        toJson(nextData),
         nowIso(), itemId, takeoffId
       );
       this.refreshTakeoffTotals(takeoffId);
       const item = this.mapTakeoffItem(this.db.prepare('SELECT * FROM takeoff_items WHERE id = ?').get(itemId));
       const takeoff = this.getTakeoff(jobId, takeoffId);
-      this.audit({ entityType: 'takeoff_item', entityId: itemId, jobId, action: 'update_takeoff_measurement', actor: options.actor || 'Contractor.AI', before, after: item, metadata: { takeoffId } });
+      this.audit({
+        entityType: 'takeoff_item', entityId: itemId, jobId, action: 'update_takeoff_measurement', actor: options.actor || 'Contractor.AI', before, after: item,
+        metadata: { takeoffId, rateBuildUpInvalidated: rateBasisChanged }
+      });
       return { item, takeoff };
+    });
+  }
+
+  applyTakeoffUnitRate(jobId, takeoffId, itemId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const takeoffRow = this.requireTakeoff(jobId, takeoffId);
+      this.assertTakeoffEditable(takeoffRow);
+      const row = this.db.prepare('SELECT * FROM takeoff_items WHERE id = ? AND takeoff_id = ?').get(itemId, takeoffId);
+      if (!row) throw ledgerInputError('takeoff_item_not_found', 'Takeoff measurement was not found.', null, 404);
+      const before = this.mapTakeoffItem(row);
+      const policy = this.activeEstimateRatePolicy();
+      if (!policy) {
+        throw ledgerInputError('estimate_rate_policy_required', 'Approve an estimating rate policy before applying a unit-rate build-up.', null, 409);
+      }
+      const requestedPolicyId = normalizeText(payload.policyId || payload.policy_id, policy.id);
+      if (requestedPolicyId !== policy.id) {
+        throw ledgerInputError('estimate_rate_policy_stale', 'The selected estimating rate policy is no longer active.', { requestedPolicyId, activePolicyId: policy.id }, 409);
+      }
+      if (policy.currency !== takeoffRow.currency) {
+        throw ledgerInputError(
+          'estimate_rate_currency_mismatch',
+          `The active ${policy.currency} estimating rate policy cannot be applied to a ${takeoffRow.currency} takeoff.`,
+          { policyCurrency: policy.currency, takeoffCurrency: takeoffRow.currency },
+          409
+        );
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('unit_rate_entry_key_invalid', 'A unit-rate build-up requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const result = calculateUnitRateBuildUp(policy, payload);
+      const itemBasis = { itemId, category: before.category, unit: before.unit };
+      const fingerprint = sha256Json({ policyId: policy.id, policySnapshotHash: policy.snapshotHash, itemBasis, input: result.input });
+      if (before.data?.rateBuildUpEntryKey === entryKey) {
+        if (before.data?.rateBuildUpFingerprint !== fingerprint) {
+          throw ledgerInputError('unit_rate_replay_conflict', 'This unit-rate entryKey was already used with different assumptions.', { entryKey, itemId }, 409);
+        }
+        if (before.rateIntegrityValid !== true) {
+          throw ledgerInputError('unit_rate_integrity_failed', 'The retained unit-rate build-up failed integrity verification.', { itemId }, 409);
+        }
+        return { item: before, takeoff: this.getTakeoff(jobId, takeoffId), policy, replayed: true, externalCommitments: 0 };
+      }
+      const snapshot = {
+        format: UNIT_RATE_BUILD_UP_FORMAT,
+        policy: { id: policy.id, versionNumber: policy.versionNumber, snapshotHash: policy.snapshotHash },
+        policySnapshot: policy.snapshot,
+        itemBasis,
+        input: result.input,
+        calculation: result.calculation,
+        governance: {
+          internalDraftOnly: true,
+          quoteConversionApprovalRequired: true,
+          workerDirectoryRatesUnaffected: true,
+          externalCommitments: 0
+        }
+      };
+      const buildUpHash = sha256Json(snapshot);
+      const normalized = normalizeTakeoffItem({ ...before, unitCost: result.calculation.unitCost, unitPrice: result.calculation.unitSellRate });
+      const timestamp = nowIso();
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const data = {
+        ...before.data,
+        calculation: 'server_derived',
+        workBreakdownFormat: TAKEOFF_WBS_FORMAT,
+        rateBuildUpFormat: UNIT_RATE_BUILD_UP_FORMAT,
+        rateBuildUp: snapshot,
+        rateBuildUpEntryKey: entryKey,
+        rateBuildUpFingerprint: fingerprint,
+        rateBuildUpAppliedAt: timestamp,
+        rateBuildUpAppliedBy: actor
+      };
+      delete data.rateBuildUpInvalidated;
+      this.db.prepare(`
+        UPDATE takeoff_items
+        SET unit_cost = ?, unit_price = ?, total_cost = ?, total_price = ?,
+            rate_policy_id = ?, rate_build_up_hash = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND takeoff_id = ?
+      `).run(
+        normalized.unitCost, normalized.unitPrice, normalized.totalCost, normalized.totalPrice,
+        policy.id, buildUpHash, toJson(data), timestamp, itemId, takeoffId
+      );
+      this.refreshTakeoffTotals(takeoffId);
+      const item = this.mapTakeoffItem(this.db.prepare('SELECT * FROM takeoff_items WHERE id = ?').get(itemId));
+      const takeoff = this.getTakeoff(jobId, takeoffId);
+      this.audit({
+        entityType: 'takeoff_item', entityId: itemId, jobId, action: 'apply_unit_rate_build_up', actor, before, after: item,
+        metadata: {
+          takeoffId,
+          policyId: policy.id,
+          policyVersion: policy.versionNumber,
+          policySnapshotHash: policy.snapshotHash,
+          buildUpHash,
+          marginOverride: result.input.marginOverride,
+          externalCommitments: 0
+        }
+      });
+      return { item, takeoff, policy, replayed: false, externalCommitments: 0 };
     });
   }
 
@@ -12941,7 +13466,12 @@ class ContractorOperatingLedger {
         totalPrice: item.totalPrice,
         costCode: item.costCode,
         ...(includeWorkBreakdown ? { wbsCode: item.wbsCode, workPackage: item.workPackage } : {}),
-        sourceReference: item.sourceReference
+        sourceReference: item.sourceReference,
+        ...(item.rateBuildUpHash ? {
+          ratePolicyId: item.ratePolicyId,
+          rateBuildUpHash: item.rateBuildUpHash,
+          rateBuildUp: item.rateBuildUp
+        } : {})
       }))
     };
   }
@@ -13001,6 +13531,17 @@ class ContractorOperatingLedger {
       if (!current.items.length) throw ledgerInputError('takeoff_items_required', 'Add at least one measurement before preparing an estimate.');
       if (!current.workBreakdown.valid) {
         throw ledgerInputError('takeoff_wbs_invalid', 'Resolve invalid or conflicting WBS work packages before preparing an estimate.', null, 409);
+      }
+      const invalidRateItem = current.items.find(item => (
+        item.ratePolicyId || item.rateBuildUpHash || item.rateBuildUp
+      ) && item.rateIntegrityValid !== true);
+      if (invalidRateItem) {
+        throw ledgerInputError(
+          'takeoff_rate_integrity_failed',
+          'Resolve the invalid retained unit-rate build-up before preparing an estimate.',
+          { itemId: invalidRateItem.id },
+          409
+        );
       }
       if (current.subtotal <= 0) throw ledgerInputError('takeoff_price_required', 'A positive sell price is required before preparing an estimate.');
       const snapshotHash = sha256Json(this.takeoffSnapshot(current));
@@ -37348,6 +37889,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'estimate_rate_policy') {
+        this.db.prepare(`
+          UPDATE estimate_rate_policies
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM estimate_rate_policies WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'opportunity_bid_decision') {
         this.db.prepare(`
           UPDATE opportunity_bid_decisions
@@ -37782,6 +38343,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyMarketFitProfileApproval(targetId);
     } else if (targetType === 'bid_decision_policy') {
       this.applyBidDecisionPolicyApproval(targetId);
+    } else if (targetType === 'estimate_rate_policy') {
+      this.applyEstimateRatePolicyApproval(targetId);
     } else if (targetType === 'opportunity_bid_decision') {
       this.applyOpportunityBidDecisionApproval(targetId);
     } else if (targetType === 'opportunity_site_survey') {
@@ -42301,6 +42864,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   countCapabilityRequirement(requirement = {}) {
     if (!requirement.table) return 0;
+    if (Array.isArray(requirement.coverageStatuses) && requirement.coverageStatuses.length) {
+      const scope = this.activeRecordScope(requirement.table);
+      const placeholders = requirement.coverageStatuses.map(() => '?').join(',');
+      return Number(this.db.prepare(`
+        SELECT COUNT(DISTINCT records.id) AS count
+        FROM ${scope.from}
+        WHERE ${scope.condition}
+          AND records.status IN (${placeholders})
+      `).get(...requirement.coverageStatuses).count || 0);
+    }
     if (requirement.recordType) {
       const scope = this.activeRecordScope(requirement.table);
       return Number(this.db.prepare(`
@@ -42358,6 +42931,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       opportunity_fit_assessments: 'status',
       bid_decision_policies: 'status',
       opportunity_bid_decisions: 'status',
+      estimate_rate_policies: 'status',
       opportunity_site_surveys: 'status',
       performance_scorecard_targets: 'status',
       performance_scorecard_snapshots: 'status',
@@ -47702,6 +48276,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Opportunity bid/no-bid decision ${decision.id} cannot be verified: ${error.code || error.message}.` });
       }
     }
+    const approvedEstimateRatePoliciesWithoutApproval = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM estimate_rate_policies policies
+      LEFT JOIN approvals ON approvals.id = policies.approval_id
+      WHERE policies.status = 'approved'
+        AND (
+          approvals.id IS NULL OR approvals.status <> 'approved'
+          OR approvals.target_type <> 'estimate_rate_policy' OR approvals.target_id <> policies.id
+        )
+    `).get().count || 0);
+    if (approvedEstimateRatePoliciesWithoutApproval) {
+      issues.push({ severity: 'error', message: `${approvedEstimateRatePoliciesWithoutApproval} approved estimating rate policy revision(s) lack a matching approval decision.` });
+    }
+    const estimateRatePolicyRows = this.db.prepare('SELECT * FROM estimate_rate_policies ORDER BY version_number').all();
+    for (const policyRow of estimateRatePolicyRows) {
+      const policy = this.mapEstimateRatePolicy(policyRow);
+      if (!policy.integrityValid) {
+        issues.push({ severity: 'error', message: `Estimating rate policy v${policy.versionNumber} failed retained snapshot or formula verification.` });
+      }
+    }
     const opportunityEvidenceRows = this.db.prepare('SELECT * FROM opportunity_evidence ORDER BY created_at').all();
     for (const evidenceRow of opportunityEvidenceRows) {
       const evidence = this.mapOpportunityEvidence(evidenceRow);
@@ -48757,6 +49351,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         } catch {
           issues.push({ severity: 'error', message: `Quantity takeoff item ${item.id} contains an invalid retained measurement.` });
         }
+        const hasAnyRateBuildUp = Boolean(item.ratePolicyId || item.rateBuildUpHash || item.rateBuildUp);
+        if (hasAnyRateBuildUp && item.rateIntegrityValid !== true) {
+          issues.push({ severity: 'error', message: `Quantity takeoff item ${item.id} failed retained unit-rate build-up verification.` });
+        }
+        if (item.ratePolicyId) {
+          const policyRow = this.db.prepare('SELECT id FROM estimate_rate_policies WHERE id = ?').get(item.ratePolicyId);
+          if (!policyRow) {
+            issues.push({ severity: 'error', message: `Quantity takeoff item ${item.id} references a missing estimating rate policy.` });
+          }
+        }
       }
       if (takeoff.status === 'converted') {
         const quoteRow = takeoff.quoteId ? this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(takeoff.quoteId, takeoff.jobId) : null;
@@ -48955,6 +49559,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         opportunityFitAssessments: this.count('opportunity_fit_assessments'),
         bidDecisionPolicies: this.count('bid_decision_policies'),
         opportunityBidDecisions: this.count('opportunity_bid_decisions'),
+        estimateRatePolicies: this.count('estimate_rate_policies'),
+        unitRateBuildUps: Number(this.db.prepare('SELECT COUNT(*) AS count FROM takeoff_items WHERE rate_build_up_hash IS NOT NULL').get().count || 0),
         opportunityEvidence: this.count('opportunity_evidence'),
         opportunitySiteSurveys: this.count('opportunity_site_surveys'),
         approvedOpportunitySiteSurveys: Number(this.db.prepare("SELECT COUNT(*) AS count FROM opportunity_site_surveys WHERE status = 'approved'").get().count || 0),
@@ -49113,6 +49719,40 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         && snapshot.policyName === row.policy_name
         && Array.isArray(snapshot.criteria)
         && roundMeasurement(snapshot.criteria.reduce((sum, criterion) => sum + normalizeNumber(criterion.weight, 0), 0), 1) === 100
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapEstimateRatePolicy(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const derived = deriveEstimateRatePolicy(snapshot);
+    return {
+      id: row.id,
+      versionNumber: Math.round(normalizeNumber(row.version_number, 0)),
+      status: row.status,
+      policyName: row.policy_name,
+      currency: row.currency,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      derived,
+      integrityValid: Boolean(
+        snapshot
+        && derived
+        && snapshot.format === ESTIMATE_RATE_POLICY_FORMAT
+        && snapshot.versionNumber === Math.round(normalizeNumber(row.version_number, 0))
+        && snapshot.policyName === row.policy_name
+        && snapshot.currency === row.currency
+        && Array.isArray(snapshot.labourClasses)
+        && snapshot.labourClasses.length > 0
         && sha256Text(snapshotJson) === row.snapshot_hash
       ),
       approvalId: row.approval_id || null,
@@ -49661,6 +50301,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   mapTakeoffItem(row) {
     if (!row) return null;
+    const data = fromJson(row.data_json);
+    const rateBuildUp = data?.rateBuildUp || null;
+    let rateIntegrityValid = null;
+    if (row.rate_policy_id || row.rate_build_up_hash || rateBuildUp) {
+      try {
+        const policyRow = row.rate_policy_id
+          ? this.db.prepare('SELECT snapshot_hash FROM estimate_rate_policies WHERE id = ?').get(row.rate_policy_id)
+          : null;
+        const recalculated = calculateUnitRateBuildUp(rateBuildUp?.policySnapshot, rateBuildUp?.input || {});
+        rateIntegrityValid = Boolean(
+          row.rate_policy_id
+          && row.rate_build_up_hash
+          && policyRow
+          && rateBuildUp?.format === UNIT_RATE_BUILD_UP_FORMAT
+          && rateBuildUp?.policy?.id === row.rate_policy_id
+          && rateBuildUp.policy.snapshotHash === policyRow.snapshot_hash
+          && sha256Text(toJson(rateBuildUp.policySnapshot)) === policyRow.snapshot_hash
+          && sha256Json(rateBuildUp) === row.rate_build_up_hash
+          && rateBuildUp.itemBasis?.itemId === row.id
+          && rateBuildUp.itemBasis?.category === row.category
+          && rateBuildUp.itemBasis?.unit === row.unit
+          && sha256Json(recalculated.input) === sha256Json(rateBuildUp.input)
+          && sha256Json(recalculated.calculation) === sha256Json(rateBuildUp.calculation)
+          && Math.abs(normalizeNumber(row.unit_cost, 0) - recalculated.calculation.unitCost) <= 0.0001
+          && Math.abs(normalizeNumber(row.unit_price, 0) - recalculated.calculation.unitSellRate) <= 0.0001
+        );
+      } catch {
+        rateIntegrityValid = false;
+      }
+    }
     return {
       id: row.id,
       takeoffId: row.takeoff_id,
@@ -49683,7 +50353,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       wbsCode: row.wbs_code || '01',
       workPackage: row.work_package || 'General scope',
       sourceReference: row.source_reference || null,
-      data: fromJson(row.data_json),
+      ratePolicyId: row.rate_policy_id || null,
+      rateBuildUpHash: row.rate_build_up_hash || null,
+      rateBuildUp,
+      rateIntegrityValid,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -52590,6 +53264,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.noBidThreshold = data.noBidThreshold ?? mapped?.snapshot?.policy?.noBidThreshold ?? null;
       preview.criteria = mapped?.snapshot?.criteria || data.criteria || [];
       preview.gates = mapped?.snapshot?.gates || data.gates || [];
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+    } else if (targetType === 'estimate_rate_policy') {
+      const row = this.db.prepare('SELECT * FROM estimate_rate_policies WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapEstimateRatePolicy(row) : null;
+      primaryEffect = `Approve estimating rate policy ${mapped?.policyName || data.policyName || ''}.`;
+      addEffect(`Activate version ${mapped?.versionNumber || data.versionNumber || ''} in ${mapped?.currency || data.currency || 'EUR'} with ${mapped?.derived?.labourClasses?.length || data.labourClasses?.length || 0} retained labour class(es).`);
+      addEffect(`Apply target margin ${normalizeNumber(mapped?.snapshot?.targetMarginPercent ?? data.targetMarginPercent, 0).toFixed(2)}% and ${mapped?.derived?.overheadMethod || data.overheadMethod || 'labor_hour'} overhead recovery to future draft unit-rate build-ups.`);
+      addSafeguard('Supersedes only the previous estimating policy. Historical policies and retained takeoff build-ups remain immutable and checksum-verifiable.');
+      addSafeguard('Does not alter worker directory rates, edit existing takeoff rows, issue a quote, contact a client, commit spend, or create an external action.');
+      riskLevel = 'high';
+      preview.policyName = mapped?.policyName || data.policyName || null;
+      preview.versionNumber = mapped?.versionNumber || data.versionNumber || null;
+      preview.currency = mapped?.currency || data.currency || null;
+      preview.labourClasses = mapped?.derived?.labourClasses || data.labourClasses || [];
+      preview.totalBurdenPercent = mapped?.derived?.totalBurdenPercent ?? data.totalBurdenPercent ?? null;
+      preview.productiveUtilizationPercent = mapped?.derived?.productiveUtilizationPercent ?? data.productiveUtilizationPercent ?? null;
+      preview.overheadMethod = mapped?.derived?.overheadMethod || data.overheadMethod || null;
+      preview.overheadPerLabourHour = mapped?.derived?.overheadPerLabourHour ?? data.overheadPerLabourHour ?? null;
+      preview.directCostPercent = mapped?.derived?.directCostPercent ?? data.directCostPercent ?? null;
+      preview.targetMarginPercent = mapped?.snapshot?.targetMarginPercent ?? data.targetMarginPercent ?? null;
       preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
     } else if (targetType === 'opportunity_bid_decision') {
       const row = this.db.prepare('SELECT * FROM opportunity_bid_decisions WHERE id = ?').get(approval.targetId || approval.target_id);

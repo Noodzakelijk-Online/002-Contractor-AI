@@ -1929,6 +1929,7 @@ app.get('/api/session', (req, res) => {
         pipeline: !fieldWorker,
         tenders: !fieldWorker,
         takeoffs: !fieldWorker,
+        estimateRates: !fieldWorker,
         schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
@@ -2506,6 +2507,26 @@ app.post('/api/ledger/bid-decisions/policies', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/estimate-rates', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    estimateRates: operatingLedger.estimateRateRegister(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/estimate-rates/policies', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can request an estimating rate policy revision.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestEstimateRatePolicy(req.body || {}, {
+      actor: actorFromRequest(req, 'estimate_rate_policy')
+    }),
+    estimateRates: operatingLedger.estimateRateRegister()
+  }), 201);
+});
+
 app.get('/api/ledger/opportunities/:id/bid-decision', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -2899,6 +2920,16 @@ app.put('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId', (req, res) => 
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.updateTakeoffItem(req.params.id, req.params.takeoffId, req.params.itemId, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/rate-build-up', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.applyTakeoffUnitRate(req.params.id, req.params.takeoffId, req.params.itemId, req.body || {}, {
       actor: actorFromRequest(req, 'commercial')
     }),
     job: operatingLedger.getJobDetail(req.params.id)
@@ -6058,6 +6089,7 @@ function operationalExport() {
     opportunityFitAssessments: operatingLedger.listOpportunityFitAssessments({ limit: 5_000 }),
     bidDecisionPolicies: operatingLedger.listBidDecisionPolicies({ includeHistory: true }),
     opportunityBidDecisions: operatingLedger.listOpportunityBidDecisions({ limit: 5_000 }),
+    estimateRatePolicies: operatingLedger.listEstimateRatePolicies({ includeHistory: true }),
     opportunityEvidence: operatingLedger.listOpportunityEvidence({ limit: 5_000 }),
     opportunitySiteSurveys: operatingLedger.listOpportunitySiteSurveys({ limit: 5_000 }),
     bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
@@ -6150,6 +6182,7 @@ function validateOperationalExport(snapshot) {
     'opportunityFitAssessments',
     'bidDecisionPolicies',
     'opportunityBidDecisions',
+    'estimateRatePolicies',
     'opportunityEvidence',
     'opportunitySiteSurveys',
     'attendanceSessions',
@@ -6225,6 +6258,7 @@ function validateOperationalExport(snapshot) {
       opportunityFitAssessments: Array.isArray(snapshot.opportunityFitAssessments) ? snapshot.opportunityFitAssessments.length : 0,
       bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
       opportunityBidDecisions: Array.isArray(snapshot.opportunityBidDecisions) ? snapshot.opportunityBidDecisions.length : 0,
+      estimateRatePolicies: Array.isArray(snapshot.estimateRatePolicies) ? snapshot.estimateRatePolicies.length : 0,
       opportunityEvidence: Array.isArray(snapshot.opportunityEvidence) ? snapshot.opportunityEvidence.length : 0,
       opportunitySiteSurveys: Array.isArray(snapshot.opportunitySiteSurveys) ? snapshot.opportunitySiteSurveys.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
@@ -6877,6 +6911,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         siteSurveyAutonomy: 'internal_review_task_only',
         takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups',
         takeoffEstimateTrace: 'snapshot_and_work_breakdown_hash',
+        estimateRatePolicyRevision: 'owner_requested_approval_gated_versioned',
+        unitRateBuildUp: 'active_policy_source_bound_exact_replay',
+        labourBurdenBasis: 'explicit_assumptions_and_productive_utilization',
+        overheadRecoveryBasis: 'labor_hour_or_direct_cost_percent',
+        unitRateCommercialEffect: 'draft_takeoff_only',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
@@ -7069,6 +7108,20 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         messagesSent: false,
         jobsCreated: false,
         bidPackagesCreated: false,
+        externalCommitments: 0
+      },
+      estimateRates: {
+        framework: 'unit_rate_labour_burden_overhead_recovery',
+        policyRevisions: 'owner_requested_approval_gated_versioned',
+        labourClasses: 'policy_retained_not_worker_directory',
+        burdenFormula: 'base_rate_times_one_plus_burden_divided_by_productive_utilization',
+        overheadMethods: ['labor_hour', 'direct_cost_percent'],
+        marginFormula: 'sell_rate_equals_cost_divided_by_one_minus_margin',
+        buildUpIntegrity: 'retained_policy_hash_and_sha256',
+        marginOverride: 'explicit_reason_retained',
+        draftTakeoffMutationOnly: true,
+        workerDirectoryRatesAffected: false,
+        quotesIssued: false,
         externalCommitments: 0
       },
       productionControl: {

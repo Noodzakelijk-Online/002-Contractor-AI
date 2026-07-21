@@ -367,6 +367,33 @@ function createBackupFixture(t, suffix = 'success') {
   });
   source.recordAuthenticationFailure(crypto.createHash('sha256').update(`migration-rate-limit-${suffix}`).digest('hex'));
   source.recordApiRateLimitRequest(crypto.createHash('sha256').update(`migration-api-rate-limit-${suffix}`).digest('hex'));
+  const estimateRatePolicyRequest = source.requestEstimateRatePolicy({
+    entryKey: `migration-rate-policy-${suffix}`,
+    reason: 'Retain governed estimating assumptions through the hosted migration.',
+    policyName: 'Migration estimating rates',
+    currency: 'EUR',
+    labourClasses: [{ code: 'CRAFT', name: 'Migration craft labour', baseHourlyRate: 40 }],
+    labourBurden: {
+      paidLeavePercent: 10,
+      statutoryEmployerCostsPercent: 20,
+      pensionBenefitsPercent: 5,
+      insuranceOtherPercent: 5,
+      productiveUtilizationPercent: 70
+    },
+    overheadRecovery: {
+      method: 'labor_hour',
+      annualOverhead: 60000,
+      annualProductiveLabourHours: 2000,
+      directCostPercent: 0
+    },
+    targetMarginPercent: 20
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(estimateRatePolicyRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration rate assumptions and recovery basis verified.'
+  });
+  const estimateRatePolicy = source.getEstimateRatePolicy(estimateRatePolicyRequest.policy.id);
   const takeoff = source.createTakeoff(job.id, {
     title: 'Migration measured scope',
     items: [{
@@ -379,6 +406,17 @@ function createBackupFixture(t, suffix = 'success') {
       unitPrice: 31.75,
       costCode: 'MIG-FIN-100'
     }]
+  }, { actor: 'migration_fixture' });
+  source.applyTakeoffUnitRate(job.id, takeoff.id, takeoff.items[0].id, {
+    entryKey: `migration-unit-rate-${suffix}`,
+    policyId: estimateRatePolicy.id,
+    labourClassCode: 'CRAFT',
+    labourHoursPerUnit: 0.5,
+    materialCostPerUnit: 20,
+    equipmentCostPerUnit: 5,
+    subcontractCostPerUnit: 0,
+    otherDirectCostPerUnit: 2,
+    targetMarginPercent: 20
   }, { actor: 'migration_fixture' });
   const convertedTakeoff = source.convertTakeoffToQuote(job.id, takeoff.id, {
     validUntil: '2026-12-31'
@@ -854,7 +892,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -982,7 +1020,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '053_work_breakdown_takeoffs');
+  assert.equal(migration.migrationVersion, '054_estimate_rate_buildups');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1020,6 +1058,11 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedTakeoff.integrityValid, true);
     assert.equal(migratedTakeoff.quoteId, fixture.convertedTakeoff.quote.id);
     assert.equal(migratedTakeoff.items[0].quantity, 37.625);
+    assert.equal(migratedTakeoff.items[0].ratePolicyId, fixture.estimateRatePolicy.id);
+    assert.equal(migratedTakeoff.items[0].rateBuildUp.policy.versionNumber, 1);
+    assert.equal(migratedTakeoff.items[0].rateBuildUp.calculation.unitCost, 82);
+    assert.equal(migratedTakeoff.items[0].rateIntegrityValid, true);
+    assert.equal(hosted.activeEstimateRatePolicy().id, fixture.estimateRatePolicy.id);
     assert.equal(detail.quotes.find(item => item.id === migratedTakeoff.quoteId).data.source.snapshotHash, migratedTakeoff.snapshotHash);
     const migratedBillingMilestone = detail.billingMilestones.find(item => item.id === fixture.billingMilestone.id);
     assert.equal(migratedBillingMilestone.status, 'approved');

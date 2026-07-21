@@ -116,6 +116,20 @@ test('backup verification rejects a migration 053 ledger with missing WBS takeof
   );
 });
 
+test('backup verification rejects a migration 054 ledger with missing estimating rate constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-estimate-rate-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Estimate rate schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_takeoff_items_rate_policy');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /estimating rate constraints are incomplete: idx_takeoff_items_rate_policy/i
+  );
+});
+
 test('backup verification rejects a migration 028 ledger with missing bid-commitment constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-commitment-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

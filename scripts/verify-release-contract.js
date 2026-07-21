@@ -138,11 +138,14 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.get('/api/ledger/bid-decisions'",
     "app.post('/api/ledger/bid-decisions/policies'",
     "app.post('/api/ledger/opportunities/:id/bid-decisions'",
+    "app.get('/api/ledger/estimate-rates'",
+    "app.post('/api/ledger/estimate-rates/policies'",
     "app.get('/api/ledger/bid-packages'",
     "app.post('/api/ledger/bid-packages/:id/commitment'",
     "app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package'",
     "app.post('/api/ledger/communications/:id/delivery-receipt'",
     "app.post('/api/ledger/jobs/:id/takeoffs'",
+    "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/rate-build-up'",
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert'",
     "app.post('/api/ledger/upload'",
     "app.post('/api/ledger/opportunities/:id/site-surveys'",
@@ -178,11 +181,23 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '053_work_breakdown_takeoffs'")) {
     failures.push('Canonical WBS takeoff migration is missing.');
   }
+  if (!ledgerSource.includes("version: '054_estimate_rate_buildups'")) {
+    failures.push('Canonical estimating rate build-up migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }
   if (!serverSource.includes("takeoffEstimateTrace: 'snapshot_and_work_breakdown_hash'")) {
     failures.push('Quantity takeoff capability does not bind estimates to the WBS hash.');
+  }
+  if (!serverSource.includes("unitRateBuildUp: 'active_policy_source_bound_exact_replay'")) {
+    failures.push('Unit-rate capability does not declare active-policy source binding and exact replay.');
+  }
+  if (!serverSource.includes("unitRateCommercialEffect: 'draft_takeoff_only'")) {
+    failures.push('Unit-rate capability does not constrain commercial mutation to draft takeoffs.');
+  }
+  if (!serverSource.includes("buildUpIntegrity: 'retained_policy_hash_and_sha256'")) {
+    failures.push('Unit-rate capability does not bind build-ups to the retained policy hash.');
   }
   if (!serverSource.includes("siteSurveyApproval: 'source_current_approval_gated'")) {
     failures.push('Site-survey capability does not declare source-current approval semantics.');
