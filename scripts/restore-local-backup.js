@@ -1050,6 +1050,19 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup risk-register constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('058_formal_variation_control')) {
+        if (!retainedTables.has('variation_number_sequences')) {
+          throw new Error('Backup formal-variation schema is incomplete: variation_number_sequences.');
+        }
+        const changeOrderColumns = new Set(database.prepare('PRAGMA table_info(change_orders)').all().map(row => row.name));
+        for (const column of ['variation_number', 'revision_number', 'supersedes_change_order_id', 'entry_key', 'entry_fingerprint', 'source_hash', 'snapshot_hash', 'snapshot_json']) {
+          if (!changeOrderColumns.has(column)) throw new Error(`Backup formal-variation schema is incomplete: change_orders.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_change_orders_variation_revision', 'idx_change_orders_entry_key', 'idx_change_orders_revision_chain', 'idx_change_orders_formal_status']) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup formal-variation constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

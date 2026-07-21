@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CalendarDays, CircleAlert, CircleCheckBig, FileText, HardHat, ListChecks, LoaderCircle, MessageSquareText, Send, ShieldCheck } from 'lucide-react'
+import { CalendarDays, CircleAlert, CircleCheckBig, Download, FileSignature, FileText, HardHat, ListChecks, LoaderCircle, MessageSquareText, Send, ShieldCheck } from 'lucide-react'
 import './ClientPortal.css'
 
 function formatPortalDate(value) {
@@ -21,10 +21,28 @@ function createResponseId() {
   return `response-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+function formatPortalMoney(value, currency = 'EUR') {
+  try {
+    return new Intl.NumberFormat('nl-NL', { style: 'currency', currency }).format(Number(value || 0))
+  } catch {
+    return `${Number(value || 0).toFixed(2)} ${currency}`
+  }
+}
+
 function emptySelectionDraft(selection) {
   return {
     decision: '',
     selectedOption: selection.options?.[0] || '',
+    note: '',
+    responseId: createResponseId()
+  }
+}
+
+function emptyVariationDraft() {
+  return {
+    decision: '',
+    signerName: '',
+    authorityConfirmed: false,
     note: '',
     responseId: createResponseId()
   }
@@ -73,6 +91,61 @@ function ClientSelection({ selection, draft, result, submitting, onDraftChange, 
   </article>
 }
 
+function VariationResponseState({ response }) {
+  if (!response) return null
+  const recorded = response.status === 'recorded'
+  const pending = response.status === 'pending_review'
+  const label = response.decision === 'accepted'
+    ? 'Akkoord geregistreerd'
+    : response.decision === 'changes_requested'
+      ? 'Aanpassing gevraagd'
+      : 'Voorstel afgewezen'
+  return <div className={`client-selection-response client-selection-response-${response.status}`} role="status">
+    {recorded ? <CircleCheckBig size={18} /> : <CircleAlert size={18} />}
+    <div>
+      <strong>{pending ? 'Wacht op interne verificatie' : recorded ? label : 'Reactie kan opnieuw worden ingediend'}</strong>
+      <span>{response.note || (response.signerName ? `Ondertekend door ${response.signerName}` : 'Uw reactie is vastgelegd.')}</span>
+    </div>
+  </div>
+}
+
+function ClientVariation({ variation, token, draft, result, submitting, onDraftChange, onSubmit }) {
+  const identity = `${variation.variationNumber || 'Variatie'} / R${variation.revisionNumber || 1}`
+  const responseDueAt = variation.formalControl?.responseDueAt
+  return <article className="client-portal-selection client-portal-variation">
+    <div className="client-selection-heading">
+      <div><h3>{identity} - {variation.title}</h3><p>{responseDueAt ? `Reageer uiterlijk ${formatPortalDate(responseDueAt)}` : 'Geen reactiedatum ingesteld'}</p></div>
+      <span className={`client-selection-status client-selection-status-${variation.status}`}>{formatPortalStatus(variation.status, 'uitgegeven')}</span>
+    </div>
+    <p className="client-variation-scope">{variation.scopeDelta}</p>
+    <div className="client-variation-facts">
+      <span><small>Bedrag incl. btw</small><strong>{formatPortalMoney(variation.total, variation.currency)}</strong></span>
+      <span><small>Planning</small><strong>{Number(variation.scheduleDeltaDays || 0) === 0 ? 'Geen wijziging' : `${variation.scheduleDeltaDays} kalenderdag(en)`}</strong></span>
+      <span><small>Type</small><strong>{formatPortalStatus(variation.formalControl?.variationType, 'scopewijziging')}</strong></span>
+    </div>
+    <a className="client-variation-download" href={`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/package`}><Download size={16} />Download genummerd voorstel</a>
+    <VariationResponseState response={variation.response} />
+    {result ? <p className="client-variation-result" role="status" aria-live="polite">{result}</p> : null}
+    {variation.responseAllowed && draft ? <form className="client-selection-form" onSubmit={event => onSubmit(event, variation)}>
+      <fieldset>
+        <legend>Uw besluit</legend>
+        <label><input type="radio" name={`variation-decision-${variation.id}`} value="accepted" checked={draft.decision === 'accepted'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />Ik ga akkoord</label>
+        <label><input type="radio" name={`variation-decision-${variation.id}`} value="changes_requested" checked={draft.decision === 'changes_requested'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />Ik vraag een aanpassing</label>
+        <label><input type="radio" name={`variation-decision-${variation.id}`} value="rejected" checked={draft.decision === 'rejected'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />Ik wijs dit voorstel af</label>
+      </fieldset>
+      <div className="client-variation-response-fields">
+        {draft.decision === 'accepted' ? <>
+          <label>Naam bevoegde ondertekenaar<input required maxLength="160" value={draft.signerName} onChange={event => onDraftChange(variation.id, { signerName: event.target.value })} /></label>
+          <label className="client-variation-authority"><input type="checkbox" checked={draft.authorityConfirmed} onChange={event => onDraftChange(variation.id, { authorityConfirmed: event.target.checked })} />Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren.</label>
+        </> : null}
+        <label>{draft.decision === 'accepted' ? 'Toelichting (optioneel)' : 'Reden en gewenste wijziging'}<textarea required={draft.decision !== 'accepted'} maxLength="2000" value={draft.note} onChange={event => onDraftChange(variation.id, { note: event.target.value })} /></label>
+      </div>
+      <p className="client-portal-note">Uw besluit wordt eerst intern geverifieerd tegen het genummerde voorstel. Tot die verificatie wijzigt geen contractsom en is het extra werk niet geautoriseerd.</p>
+      <div className="client-portal-submit"><button type="submit" disabled={submitting || !draft.decision || (draft.decision === 'accepted' && (!draft.signerName.trim() || !draft.authorityConfirmed)) || (draft.decision !== 'accepted' && draft.note.trim().length < 5)}><ShieldCheck size={16} />{submitting ? 'Indienen...' : 'Besluit indienen'}</button></div>
+    </form> : null}
+  </article>
+}
+
 export default function ClientPortal() {
   const [token] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('token') || '')
   const [job, setJob] = useState(null)
@@ -85,6 +158,9 @@ export default function ClientPortal() {
   const [selectionDrafts, setSelectionDrafts] = useState({})
   const [selectionResults, setSelectionResults] = useState({})
   const [selectionSubmitting, setSelectionSubmitting] = useState('')
+  const [variationDrafts, setVariationDrafts] = useState({})
+  const [variationResults, setVariationResults] = useState({})
+  const [variationSubmitting, setVariationSubmitting] = useState('')
 
   useEffect(() => {
     const previousTitle = document.title
@@ -122,6 +198,9 @@ export default function ClientPortal() {
         setSelectionDrafts(Object.fromEntries((payload.job?.selections || [])
           .filter(selection => selection.responseAllowed)
           .map(selection => [selection.id, emptySelectionDraft(selection)])))
+        setVariationDrafts(Object.fromEntries((payload.job?.variations || [])
+          .filter(variation => variation.responseAllowed)
+          .map(variation => [variation.id, emptyVariationDraft()])))
       } catch (requestError) {
         if (requestError.name !== 'AbortError') setError(requestError.message || 'Deze projectlink is niet beschikbaar.')
       } finally {
@@ -165,6 +244,42 @@ export default function ClientPortal() {
       setSelectionResults(current => ({ ...current, [selection.id]: requestError.message || 'Uw reactie kon niet worden opgeslagen.' }))
     } finally {
       setSelectionSubmitting('')
+    }
+  }
+
+  function updateVariationDraft(changeOrderId, patch) {
+    setVariationDrafts(current => ({
+      ...current,
+      [changeOrderId]: { ...current[changeOrderId], ...patch }
+    }))
+    setVariationResults(current => ({ ...current, [changeOrderId]: '' }))
+  }
+
+  async function submitVariationResponse(event, variation) {
+    event.preventDefault()
+    const draft = variationDrafts[variation.id]
+    if (!draft?.decision || variationSubmitting) return
+    setVariationSubmitting(variation.id)
+    setVariationResults(current => ({ ...current, [variation.id]: 'Uw besluit wordt veilig opgeslagen...' }))
+    try {
+      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/responses`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draft)
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload?.error?.message || 'Uw besluit kon niet worden opgeslagen.')
+      setJob(current => ({
+        ...current,
+        variations: current.variations.map(item => item.id === variation.id
+          ? { ...item, responseAllowed: false, response: { ...payload.response, status: 'pending_review' } }
+          : item)
+      }))
+      setVariationResults(current => ({ ...current, [variation.id]: 'Uw besluit wacht op interne verificatie.' }))
+    } catch (requestError) {
+      setVariationResults(current => ({ ...current, [variation.id]: requestError.message || 'Uw besluit kon niet worden opgeslagen.' }))
+    } finally {
+      setVariationSubmitting('')
     }
   }
 
@@ -235,6 +350,20 @@ export default function ClientPortal() {
               onDraftChange={updateSelectionDraft}
               onSubmit={submitSelectionResponse}
             />) : <p className="client-portal-empty">Er staan geen keuzes open.</p>}
+          </section>
+          <section className="client-portal-panel client-portal-wide client-portal-selections">
+            <div className="client-portal-panel-title"><FileSignature size={18} /><h2>Meer- en minderwerk</h2></div>
+            <p className="client-portal-note">Bekijk steeds het genummerde voorstel voordat u akkoord geeft, een wijziging vraagt of het voorstel afwijst.</p>
+            {job.variations?.length ? job.variations.map(variation => <ClientVariation
+              key={variation.id}
+              variation={variation}
+              token={token}
+              draft={variationDrafts[variation.id]}
+              result={variationResults[variation.id] || ''}
+              submitting={variationSubmitting === variation.id}
+              onDraftChange={updateVariationDraft}
+              onSubmit={submitVariationResponse}
+            />) : <p className="client-portal-empty client-portal-section-empty">Er zijn geen uitgegeven voorstellen voor meer- of minderwerk.</p>}
           </section>
           <section className="client-portal-panel client-portal-wide">
             <div className="client-portal-panel-title"><MessageSquareText size={18} /><h2>Projectupdates</h2></div>

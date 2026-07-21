@@ -847,7 +847,7 @@ function logSafeRequestPath(req) {
 }
 
 function isClientPortalApiPath(pathname) {
-  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/selections\/[^/]+\/responses)?$/.test(String(pathname || ''));
+  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/.test(String(pathname || ''));
 }
 
 function sendError(req, res, statusCode, code, message, details) {
@@ -4483,6 +4483,48 @@ app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, re
   }, 201);
 });
 
+app.get('/api/client-portal/:token/change-orders/:changeOrderId/package', (req, res) => {
+  try {
+    const issuePackage = operatingLedger.getClientPortalChangeOrderIssuePackage(
+      req.params.token,
+      req.params.changeOrderId,
+      { actor: 'client_portal' }
+    );
+    res.setHeader('Content-Type', issuePackage.mimeType || 'text/html; charset=utf-8');
+    res.setHeader('Content-Length', String(Buffer.byteLength(issuePackage.content, 'utf8')));
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(issuePackage.filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.end(issuePackage.content);
+  } catch (error) {
+    return sendError(
+      req,
+      res,
+      error.statusCode || 500,
+      error.code || 'client_variation_package_download_failed',
+      error.statusCode ? error.message : 'Unable to retrieve the issued variation package.',
+      serializeError(error)
+    );
+  }
+});
+
+app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.submitClientPortalChangeOrderResponse(
+      req.params.token,
+      req.params.changeOrderId,
+      req.body || {},
+      { actor: 'client_portal' }
+    );
+    return {
+      success: true,
+      approvalRequired: true,
+      externalCommitments: 0,
+      ...result
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/documents', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -6160,6 +6202,7 @@ function operationalExport() {
     takeoffSheets: operatingLedger.listAllTakeoffs({ limit: 5_000 }),
     takeoffItems: operatingLedger.listAllTakeoffItems({ limit: 10_000 }),
     jobs: operatingLedger.listJobs({ includeArchived: true, limit: 500 }),
+    formalVariations: operatingLedger.listChangeOrders({ formalOnly: true, limit: 10_000 }),
     tradePartners: operatingLedger.listTradePartners({ includeRetired: true, limit: 500 }),
     purchaseOrders: operatingLedger.listPurchaseOrders({ limit: 5_000 }),
     supplierInvoices: operatingLedger.listSupplierInvoices({ limit: 500 }),
@@ -6304,6 +6347,7 @@ function validateOperationalExport(snapshot) {
     integrity: { verified: true, algorithm: 'sha256', digest: expectedDigest },
     counts: {
       jobs: snapshot.jobs.length,
+      formalVariations: Array.isArray(snapshot.formalVariations) ? snapshot.formalVariations.length : 0,
       opportunities: Array.isArray(snapshot.opportunities) ? snapshot.opportunities.length : 0,
       opportunityActivities: Array.isArray(snapshot.opportunityActivities) ? snapshot.opportunityActivities.length : 0,
       bidPackages: Array.isArray(snapshot.bidPackages) ? snapshot.bidPackages.length : 0,
@@ -6940,6 +6984,17 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         clientAcceptanceRequired: true,
         externalCommitments: 0
       },
+      formalVariationControl: {
+        available: true,
+        framework: 'source_bound_numbered_revision_control',
+        contractSource: 'accepted_quote_or_retained_legacy_baseline',
+        entryReplay: 'durable_exact_fingerprint',
+        clientDecisions: ['accepted', 'changes_requested', 'rejected'],
+        clientChannel: 'token_scoped_portal_and_numbered_package',
+        internalVerificationRequired: true,
+        workAuthorization: 'verified_client_acceptance_only',
+        externalCommitments: 0
+      },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
@@ -6993,6 +7048,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         riskRegisterPremortem: 'linked_failure_modes_required',
         riskRegisterScoring: 'server_derived_probability_impact_and_exposure',
         quoteRiskRegisterApproval: 'source_current_required',
+        formalVariationEntryKey: 'durable_exact_replay',
+        formalVariationSnapshot: 'accepted_contract_source_sha256',
+        formalVariationRevision: 'explicit_approved_supersession',
+        formalVariationClientResponse: 'package_and_delivery_bound_internal_verification',
+        formalVariationWorkAuthorization: 'accepted_status_only',
         pricingBasisDecision: 'versioned_source_bound_exact_replay',
         pricingBasisOverride: 'explicit_reason_retained',
         quotePricingBasisApproval: 'source_current_required',

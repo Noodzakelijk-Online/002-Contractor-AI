@@ -149,6 +149,10 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert'",
     "app.get('/api/ledger/jobs/:id/risk-register'",
     "app.post('/api/ledger/jobs/:id/risk-register/revisions'",
+    "app.post('/api/ledger/jobs/:id/change-orders'",
+    "app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/issue-package'",
+    "app.get('/api/client-portal/:token/change-orders/:changeOrderId/package'",
+    "app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses'",
     "app.get('/api/ledger/jobs/:id/pricing-basis'",
     "app.post('/api/ledger/jobs/:id/pricing-decisions'",
     "app.post('/api/ledger/upload'",
@@ -197,6 +201,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '057_governed_risk_register'")) {
     failures.push('Canonical governed risk-register migration is missing.');
   }
+  if (!ledgerSource.includes("version: '058_formal_variation_control'")) {
+    failures.push('Canonical formal-variation control migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }
@@ -229,6 +236,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes("quoteRiskRegisterApproval: 'source_current_required'")) {
     failures.push('Quote approval does not declare current project risk-register enforcement.');
+  }
+  if (!serverSource.includes("framework: 'source_bound_numbered_revision_control'")) {
+    failures.push('Formal variation capability does not declare source-bound numbered revision control.');
+  }
+  if (!serverSource.includes("formalVariationClientResponse: 'package_and_delivery_bound_internal_verification'")) {
+    failures.push('Formal variation client decisions are not declared as package-bound and internally verified.');
   }
   if (!serverSource.includes('autonomousAuthoring: false')) {
     failures.push('Risk-management capability does not explicitly prohibit autonomous risk authoring.');

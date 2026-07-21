@@ -444,16 +444,41 @@ function emptyQuoteDraft(job = null) {
   }
 }
 
-function emptyChangeOrderDraft(job = null) {
-  const referenceQuote = (job?.quotes || []).find((quote) => ['accepted', 'approved'].includes(quote.status))
+function emptyChangeOrderDraft(job = null, supersedes = null) {
+  const referenceQuote = (job?.quotes || []).find((quote) => quote.status === 'accepted')
+  const formalControl = supersedes?.formalControl || {}
   return {
+    entryKey: createFieldEvidenceDraftId(),
     quoteId: referenceQuote?.id || '',
-    title: '',
-    scopeDelta: '',
-    scheduleDeltaDays: '0',
+    supersedesChangeOrderId: supersedes?.id || '',
+    title: supersedes?.title ? `${supersedes.title} - revision` : '',
+    scopeDelta: supersedes?.scopeDelta || '',
+    variationType: formalControl.variationType || 'client_request',
+    initiatedBy: formalControl.initiatedBy || 'client',
+    cause: formalControl.cause || '',
+    justification: formalControl.justification || '',
+    contractReference: formalControl.contractReference || referenceQuote?.id || 'Current retained contract baseline',
+    noticeReference: formalControl.noticeReference || '',
+    noticeNotApplicableReason: formalControl.noticeNotApplicableReason || '',
+    requestedAt: new Date().toISOString().slice(0, 10),
+    responseDueAt: futureDateInput(7),
+    scheduleDeltaDays: supersedes?.scheduleDeltaDays == null ? '0' : String(supersedes.scheduleDeltaDays),
+    scheduleImpactNarrative: formalControl.scheduleImpactNarrative || '',
+    riskImpact: formalControl.riskImpact || 'medium',
+    riskImpactStatement: formalControl.riskImpactStatement || '',
+    assumptions: (formalControl.assumptions || []).join('\n'),
+    exclusions: (formalControl.exclusions || []).join('\n'),
+    evidenceReferences: (formalControl.evidenceReferences || []).join('\n'),
     taxRate: referenceQuote?.taxRate == null ? '21' : String(referenceQuote.taxRate),
-    notes: '',
-    lineItems: [{ description: '', quantity: '1', unitPrice: '', costCode: 'change_order' }],
+    notes: supersedes?.data?.notes || '',
+    lineItems: supersedes?.lineItems?.length
+      ? supersedes.lineItems.map((item) => ({
+          description: item.description || '',
+          quantity: String(item.quantity ?? 1),
+          unitPrice: String(item.unitPrice ?? ''),
+          costCode: item.costCode || 'change_order',
+        }))
+      : [{ description: '', quantity: '1', unitPrice: '', costCode: 'change_order' }],
   }
 }
 
@@ -3084,7 +3109,16 @@ function App() {
       && selectedJob?.pricingBasis?.stale !== true
     )) &&
     (commercialDraftMode !== 'change_order' ||
-      (changeOrderDraft.title.trim().length >= 2 && changeOrderDraft.scopeDelta.trim().length >= 3))
+      (changeOrderDraft.title.trim().length >= 2 &&
+        changeOrderDraft.scopeDelta.trim().length >= 3 &&
+        changeOrderDraft.cause.trim().length >= 8 &&
+        changeOrderDraft.justification.trim().length >= 8 &&
+        changeOrderDraft.contractReference.trim().length >= 3 &&
+        (changeOrderDraft.noticeReference.trim().length >= 3 || changeOrderDraft.noticeNotApplicableReason.trim().length >= 8) &&
+        changeOrderDraft.scheduleImpactNarrative.trim().length >= 8 &&
+        changeOrderDraft.riskImpactStatement.trim().length >= 8 &&
+        changeOrderDraft.assumptions.trim().length >= 3 &&
+        changeOrderDraft.exclusions.trim().length >= 3))
   const takeoffPreviewQuantity = takeoffDraftQuantity(takeoffItemDraft)
   const takeoffPreviewCost = roundMoney(takeoffPreviewQuantity * (Number(takeoffItemDraft.unitCost) || 0))
   const takeoffPreviewSell = roundMoney(takeoffPreviewQuantity * (Number(takeoffItemDraft.unitPrice) || 0))
@@ -5988,7 +6022,7 @@ function App() {
     }
   }
 
-  function openCommercialDraft(mode) {
+  function openCommercialDraft(mode, supersedes = null) {
     if (!selectedJob) return
     if (mode === 'quote' && selectedJob.commercialScope?.ready !== true) {
       setError('Approve a current scope, assumptions, exclusions, and allowances revision before creating an estimate.')
@@ -6006,7 +6040,7 @@ function App() {
     commercialDialogOpenerRef.current = document.activeElement
     setCommercialDraftMode(mode)
     if (mode === 'quote') setQuoteDraft(emptyQuoteDraft(selectedJob))
-    else setChangeOrderDraft(emptyChangeOrderDraft(selectedJob))
+    else setChangeOrderDraft(emptyChangeOrderDraft(selectedJob, supersedes))
   }
 
   function restoreCommercialDialogFocus() {
@@ -6078,10 +6112,27 @@ function App() {
               lineItems,
             }
           : {
+              entryKey: draft.entryKey,
               quoteId: draft.quoteId || null,
+              supersedesChangeOrderId: draft.supersedesChangeOrderId || null,
               title: draft.title.trim(),
               scopeDelta: draft.scopeDelta.trim(),
+              variationType: draft.variationType,
+              initiatedBy: draft.initiatedBy,
+              cause: draft.cause.trim(),
+              justification: draft.justification.trim(),
+              contractReference: draft.contractReference.trim(),
+              noticeReference: draft.noticeReference.trim() || null,
+              noticeNotApplicableReason: draft.noticeReference.trim() ? null : draft.noticeNotApplicableReason.trim(),
+              requestedAt: draft.requestedAt || null,
+              responseDueAt: draft.responseDueAt || null,
               scheduleDeltaDays: Number(draft.scheduleDeltaDays),
+              scheduleImpactNarrative: draft.scheduleImpactNarrative.trim(),
+              riskImpact: draft.riskImpact,
+              riskImpactStatement: draft.riskImpactStatement.trim(),
+              assumptions: draft.assumptions.split('\n').map((item) => item.trim()).filter(Boolean),
+              exclusions: draft.exclusions.split('\n').map((item) => item.trim()).filter(Boolean),
+              evidenceReferences: draft.evidenceReferences.split('\n').map((item) => item.trim()).filter(Boolean),
               currency: 'EUR',
               taxRate: Number(draft.taxRate),
               notes: draft.notes.trim() || null,
@@ -13986,7 +14037,7 @@ function App() {
                       canApprove={capabilities.approvals === true}
                       submitting={submitting}
                       onNewQuote={() => openCommercialDraft('quote')}
-                      onNewChangeOrder={() => openCommercialDraft('change_order')}
+                      onNewChangeOrder={(supersedes) => openCommercialDraft('change_order', supersedes)}
                       onRequestAcceptance={openCommercialAcceptance}
                       onRecordChangeDelivery={openChangeOrderDelivery}
                       onOpenApprovals={openApprovals}
@@ -14826,6 +14877,44 @@ function App() {
                         placeholder="Record added, omitted, or revised scope."
                       />
                     </label>
+                    {changeOrderDraft.supersedesChangeOrderId ? (
+                      <div className="form-span commercial-source-notice" role="status">
+                        <ShieldCheck size={16} />Preparing the next formal revision of the client-returned variation. The prior revision is superseded only after this revision is approved.
+                      </div>
+                    ) : null}
+                    <label>
+                      Variation type
+                      <select value={changeOrderDraft.variationType} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, variationType: event.target.value })}>
+                        <option value="client_request">Client request</option>
+                        <option value="design_change">Design change</option>
+                        <option value="unforeseen_condition">Unforeseen condition</option>
+                        <option value="regulatory_change">Regulatory change</option>
+                        <option value="allowance_reconciliation">Allowance reconciliation</option>
+                        <option value="contractor_proposal">Contractor proposal</option>
+                        <option value="error_correction">Error correction</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                    <label>
+                      Initiated by
+                      <select value={changeOrderDraft.initiatedBy} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, initiatedBy: event.target.value })}>
+                        <option value="client">Client</option>
+                        <option value="contractor">Contractor</option>
+                        <option value="designer">Designer</option>
+                        <option value="authority">Authority</option>
+                        <option value="supplier">Supplier</option>
+                        <option value="site_condition">Site condition</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                    <label className="form-span">
+                      Cause
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.cause} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, cause: event.target.value })} placeholder="What event or instruction created this variation?" />
+                    </label>
+                    <label className="form-span">
+                      Contractual justification
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.justification} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, justification: event.target.value })} placeholder="Why is this outside or different from the retained contract scope?" />
+                    </label>
                     <label>
                       Reference quote
                       <select
@@ -14834,13 +14923,33 @@ function App() {
                       >
                         <option value="">Current retained contract</option>
                         {(selectedJob?.quotes || [])
-                          .filter((quote) => ['approved', 'accepted'].includes(quote.status))
+                          .filter((quote) => quote.status === 'accepted')
                           .map((quote) => (
                             <option key={quote.id} value={quote.id}>
                               {formatStatus(quote.status)} / {currency.format(quote.subtotal || 0)} net
                             </option>
                           ))}
                       </select>
+                    </label>
+                    <label>
+                      Contract / clause reference
+                      <input required minLength="3" maxLength="240" value={changeOrderDraft.contractReference} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, contractReference: event.target.value })} />
+                    </label>
+                    <label>
+                      Notice reference
+                      <input maxLength="240" value={changeOrderDraft.noticeReference} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, noticeReference: event.target.value })} placeholder="Instruction, RFI, email, or notice ID" />
+                    </label>
+                    <label>
+                      If no notice, explain why
+                      <input required={!changeOrderDraft.noticeReference.trim()} minLength="8" maxLength="500" value={changeOrderDraft.noticeNotApplicableReason} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, noticeNotApplicableReason: event.target.value })} />
+                    </label>
+                    <label>
+                      Requested on
+                      <input required type="date" value={changeOrderDraft.requestedAt} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, requestedAt: event.target.value })} />
+                    </label>
+                    <label>
+                      Response due
+                      <input type="date" min={changeOrderDraft.requestedAt} value={changeOrderDraft.responseDueAt} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, responseDueAt: event.target.value })} />
                     </label>
                     <label>
                       Schedule impact (days)
@@ -14854,6 +14963,20 @@ function App() {
                         onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, scheduleDeltaDays: event.target.value })}
                       />
                     </label>
+                    <label className="form-span">
+                      Schedule impact basis
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.scheduleImpactNarrative} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, scheduleImpactNarrative: event.target.value })} placeholder="Explain the proposed effect or why no date change is needed." />
+                    </label>
+                    <label>
+                      Risk impact
+                      <select aria-label="Risk impact" value={changeOrderDraft.riskImpact} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, riskImpact: event.target.value })}>
+                        <option value="none">None</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                      </select>
+                    </label>
                     <label>
                       VAT rate (%)
                       <input
@@ -14865,6 +14988,22 @@ function App() {
                         value={changeOrderDraft.taxRate}
                         onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, taxRate: event.target.value })}
                       />
+                    </label>
+                    <label className="form-span">
+                      Risk impact statement
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.riskImpactStatement} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, riskImpactStatement: event.target.value })} />
+                    </label>
+                    <label>
+                      Assumptions (one per line)
+                      <textarea required value={changeOrderDraft.assumptions} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, assumptions: event.target.value })} />
+                    </label>
+                    <label>
+                      Exclusions (one per line)
+                      <textarea required value={changeOrderDraft.exclusions} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, exclusions: event.target.value })} />
+                    </label>
+                    <label className="form-span">
+                      Evidence references (one per line)
+                      <textarea value={changeOrderDraft.evidenceReferences} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, evidenceReferences: event.target.value })} placeholder="Drawing revision, instruction, site photo, RFI, or retained document reference" />
                     </label>
                   </div>
                 )}

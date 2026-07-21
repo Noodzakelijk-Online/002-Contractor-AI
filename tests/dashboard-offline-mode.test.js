@@ -397,8 +397,13 @@ test('client portal is a scoped React workflow without imperative HTML rendering
   assert.match(clientPortalSource, /\/api\/client-portal\/\$\{encodeURIComponent\(token\)\}/);
   assert.match(clientPortalSource, /\/messages`/);
   assert.match(clientPortalSource, /\/selections\/\$\{encodeURIComponent\(selection\.id\)\}\/responses/);
+  assert.match(clientPortalSource, /\/change-orders\/\$\{encodeURIComponent\(variation\.id\)\}\/responses/);
+  assert.match(clientPortalSource, /\/change-orders\/\$\{encodeURIComponent\(variation\.id\)\}\/package/);
   assert.match(clientPortalSource, /responseId: createResponseId\(\)/);
   assert.match(clientPortalSource, /Ter beoordeling indienen/);
+  assert.match(clientPortalSource, /Meer- en minderwerk/);
+  assert.match(clientPortalSource, /Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren/);
+  assert.match(clientPortalSource, /Tot die verificatie wijzigt geen contractsom en is het extra werk niet geautoriseerd/);
   assert.match(clientPortalSource, /Hiermee wijzigt u geen prijs, planning, opdracht of bestelling/);
   assert.match(clientPortalSource, /new URLSearchParams\(window\.location\.hash\.slice\(1\)\)/);
   assert.match(clientPortalSource, /noindex, nofollow/);

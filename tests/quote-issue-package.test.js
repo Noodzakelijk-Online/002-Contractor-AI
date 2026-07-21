@@ -99,7 +99,7 @@ test('business identity is durable, validated, and reports commercial issue read
   assert.equal(retained.data.quoteTerms, organizationPayload().quoteTerms);
 
   assert.equal(ledger.getOrganizationProfile().legalName, retained.legalName);
-  assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+  assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
 });
 

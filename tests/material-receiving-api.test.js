@@ -150,5 +150,5 @@ test('material receiving API retains exact field evidence and approval-backed re
   assert.equal(finalJob.body.job.materials[0].status, 'needed');
   const diagnostics = await request(baseUrl, '/api/ledger/debug');
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '057_governed_risk_register');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '058_formal_variation_control');
 });

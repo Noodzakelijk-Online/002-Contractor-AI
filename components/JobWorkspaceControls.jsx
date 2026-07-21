@@ -2229,6 +2229,9 @@ function CommercialControl({
               {changeOrders.map((changeOrder) => {
                 const approval = pendingFor('change_order', changeOrder.id)
                 const acceptanceApproval = pendingFor('change_order_acceptance', changeOrder.id)
+                const clientResponseApproval = pendingApprovals.find(
+                  (item) => item.targetType === 'change_order_client_response' && item.data?.changeOrderId === changeOrder.id,
+                )
                 const issuePackage = job.documents?.find(
                   (document) =>
                     document.type === 'change_order_issue_package' && document.data?.sourceRecordId === changeOrder.id,
@@ -2241,14 +2244,15 @@ function CommercialControl({
                     )
                   : null
                 const deliveryApproval = deliveryDraft ? pendingFor('communication', deliveryDraft.id) : null
-                const canPrepare = changeOrder.status === 'approved' && canCoordinate && !issuePackage
+                const canPrepare = changeOrder.status === 'approved' && canCoordinate && !issuePackage && changeOrder.integrityValid && changeOrder.sourceCurrent
                 const canRecordDelivery =
                   changeOrder.status === 'approved' && deliveryDraft?.status === 'approved' && canCoordinate
+                const canRevise = ['changes_requested', 'rejected_by_client', 'rejected', 'cancelled'].includes(changeOrder.status) && canCoordinate
                 return (
                   <div className="activity-row commercial-row" key={changeOrder.id} data-testid={`commercial-change-${changeOrder.id}`}>
                     <div className="commercial-record">
                       <div>
-                        <strong>{changeOrder.title}</strong>
+                        <strong>{changeOrder.variationNumber ? `${changeOrder.variationNumber} / R${changeOrder.revisionNumber} - ` : ''}{changeOrder.title}</strong>
                         <span className={`status status-${changeOrder.status}`}>{formatStatus(changeOrder.status)}</span>
                       </div>
                       <small>
@@ -2264,6 +2268,9 @@ function CommercialControl({
                         {changeOrder.data?.acceptance?.evidenceReference
                           ? ` · evidence ${changeOrder.data.acceptance.evidenceReference}`
                           : ''}
+                      </small>
+                      <small>
+                        {formatStatus(changeOrder.formalControl?.variationType || 'legacy record')} · initiated by {formatStatus(changeOrder.formalControl?.initiatedBy || 'not retained')} · risk {formatStatus(changeOrder.formalControl?.riskImpact || 'not retained')} · {changeOrder.integrityValid ? 'snapshot verified' : 'snapshot invalid'} · {changeOrder.sourceCurrent ? 'contract source current' : 'contract source stale'} · {changeOrder.workAuthorized ? 'work authorized' : 'work not authorized'}
                       </small>
                     </div>
                     <div className="commercial-row-actions">
@@ -2335,7 +2342,18 @@ function CommercialControl({
                           Verify acceptance
                         </button>
                       ) : null}
-                      {changeOrder.status === 'issued' && canCoordinate && !acceptanceApproval ? (
+                      {clientResponseApproval && canApprove ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={submitting}
+                          onClick={() => onOpenApprovals({ approvalId: clientResponseApproval.id })}
+                        >
+                          <ShieldCheck size={15} />
+                          Review client response
+                        </button>
+                      ) : null}
+                      {changeOrder.status === 'issued' && canCoordinate && !acceptanceApproval && !clientResponseApproval ? (
                         <button
                           type="button"
                           className="primary-button"
@@ -2344,6 +2362,17 @@ function CommercialControl({
                         >
                           <Check size={15} />
                           Record acceptance
+                        </button>
+                      ) : null}
+                      {canRevise ? (
+                        <button
+                          type="button"
+                          className="primary-button"
+                          disabled={submitting}
+                          onClick={() => onNewChangeOrder(changeOrder)}
+                        >
+                          <FileDown size={15} />
+                          Prepare revision
                         </button>
                       ) : null}
                     </div>

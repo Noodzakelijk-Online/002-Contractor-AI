@@ -187,7 +187,7 @@ test('pre-task plan API enforces role, identity, approval, acknowledgement, stop
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '057_governed_risk_register');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '058_formal_variation_control');
   assert.equal(diagnostics.body.diagnostics.counts.preTaskPlans, 1);
   assert.equal(diagnostics.body.diagnostics.counts.preTaskPlanAttendees, 2);
 

@@ -387,6 +387,17 @@ test('commercial control retains server totals and changes contract value only a
   const changeModal = page.getByTestId('commercial-draft-modal');
   await changeModal.getByLabel('Change title').fill('Additional acoustic lining');
   await changeModal.getByLabel('Scope change').fill('Add acoustic lining to the retained partition scope.');
+  await changeModal.getByLabel('Cause').fill('The client instructed an acoustic upgrade after accepting the original partition scope.');
+  await changeModal.getByLabel('Contractual justification').fill('The accepted quote covers standard lining and excludes this acoustic upgrade.');
+  await changeModal.getByLabel('Contract / clause reference').fill('Accepted quote partition scope');
+  await changeModal.getByLabel('Notice reference').fill('CLIENT-INSTRUCTION-BROWSER-001');
+  await changeModal.getByLabel('Schedule impact (days)').fill('1');
+  await changeModal.getByLabel('Schedule impact basis').fill('The additional lining requires one retained installation day before closeout.');
+  await changeModal.getByLabel('Risk impact', { exact: true }).selectOption('medium');
+  await changeModal.getByLabel('Risk impact statement').fill('The upgrade changes material handling and interface sequencing.');
+  await changeModal.getByLabel('Assumptions (one per line)').fill('The accepted partition layout remains unchanged.');
+  await changeModal.getByLabel('Exclusions (one per line)').fill('Acoustic testing by an independent consultant is excluded.');
+  await changeModal.getByLabel('Evidence references (one per line)').fill('CLIENT-INSTRUCTION-BROWSER-001');
   const changeLine = changeModal.locator('.commercial-line-item').first();
   await changeLine.getByLabel('Description').fill('Acoustic lining');
   await changeLine.getByLabel('Quantity').fill('2');
@@ -399,6 +410,14 @@ test('commercial control retains server totals and changes contract value only a
   detail = await detailResponse.json();
   const changeOrder = detail.job.changeOrders.find(item => item.title === 'Additional acoustic lining');
   expect(changeOrder).toMatchObject({ amount: 250, taxAmount: 52.5, total: 302.5, status: 'pending_approval' });
+  expect(changeOrder.variationNumber).toMatch(/^VAR-\d{4}-\d{6}$/);
+  expect(changeOrder).toMatchObject({ revisionNumber: 1, integrityValid: true, sourceCurrent: true, workAuthorized: false });
+  expect(changeOrder.formalControl).toMatchObject({
+    variationType: 'client_request',
+    initiatedBy: 'client',
+    noticeReference: 'CLIENT-INSTRUCTION-BROWSER-001',
+    workAuthorization: 'not_authorized_until_verified_client_acceptance'
+  });
   expect(detail.job.contractValue).toBe(1500);
 
   let changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
@@ -476,6 +495,7 @@ test('commercial control retains server totals and changes contract value only a
   changeRow = commercial.getByTestId(`commercial-change-${changeOrder.id}`);
   await expect(changeRow.getByText('accepted', { exact: true })).toBeVisible();
   await expect(changeRow).toContainText('signed-change-browser-001');
+  await expect(changeRow).toContainText('work authorized');
   await expect(commercial.getByLabel('Accepted commercial value')).toContainText(/1[.,]750/);
 
   detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
@@ -3018,6 +3038,154 @@ test('client portal records an inbound message and approval-gated selection resp
   await expect(page.getByText('Reactie verwerkt')).toBeVisible();
   await expect(page.getByText('Vastgelegde keuze:')).toBeVisible();
   await expect(page.getByText('Lichtgrijs', { exact: true })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const geometry = await page.locator('.client-portal-shell').evaluate(element => ({
+    pageWidth: document.body.scrollWidth,
+    viewportWidth: window.innerWidth,
+    shellWidth: element.scrollWidth
+  }));
+  expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+  expect(geometry.shellWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+});
+
+test('client portal accepts a numbered formal variation only after internal verification', async ({ page, request }) => {
+  await ensureBrowserOrganization(request);
+  const marker = Date.now();
+  const intake = await createBrowserJob(request, `Browser formal variation ${marker}`, {
+    service: 'Occupied office refurbishment',
+    contractValue: 1000,
+    assignAutomatically: false,
+    client: { name: 'Browser Variation Client', email: `variation-${marker}@example.test` }
+  });
+  const variationResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/change-orders`, {
+    data: {
+      entryKey: `browser-formal-variation-${marker}`,
+      title: 'Revised occupied access protection',
+      scopeDelta: 'Add retained floor protection for the revised occupied-building access route.',
+      variationType: 'client_request',
+      initiatedBy: 'client',
+      cause: 'The client instructed use of a different occupied-building access route.',
+      justification: 'The retained contract baseline does not include protection for the revised route.',
+      contractReference: 'Retained contract scope section 3.2',
+      noticeReference: `CLIENT-INSTRUCTION-${marker}`,
+      requestedAt: '2026-07-21',
+      responseDueAt: '2026-07-28',
+      scheduleDeltaDays: 1,
+      scheduleImpactNarrative: 'One additional calendar day is required to install and remove the protection.',
+      riskImpact: 'medium',
+      riskImpactStatement: 'Occupied access increases interface and damage exposure until protection is installed.',
+      assumptions: ['The revised route remains available during the agreed working hours.'],
+      exclusions: ['Out-of-hours access marshals are excluded.'],
+      evidenceReferences: [`CLIENT-INSTRUCTION-${marker}`],
+      taxRate: 21,
+      status: 'submitted',
+      lineItems: [{ description: 'Floor protection', quantity: 2, unitPrice: 50, costCode: 'CO-ACCESS' }]
+    }
+  });
+  expect(variationResponse.ok()).toBeTruthy();
+  const variationPayload = await variationResponse.json();
+  const variation = variationPayload.changeOrder;
+  expect(variation.variationNumber).toMatch(/^VAR-\d{4}-\d{6}$/);
+  expect(variation).toMatchObject({ revisionNumber: 1, integrityValid: true, sourceCurrent: true, workAuthorized: false });
+
+  const variationApproval = await request.post(`/api/ledger/approvals/${variation.approvalId}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser variation approver',
+      reason: 'Contract source, cause, scope, price, schedule, risk, assumptions, and exclusions verified.'
+    }
+  });
+  expect(variationApproval.ok()).toBeTruthy();
+  const issueResponse = await request.post(
+    `/api/ledger/jobs/${intake.job.id}/change-orders/${variation.id}/issue-package`,
+    { data: {} }
+  );
+  expect(issueResponse.ok()).toBeTruthy();
+  const issue = await issueResponse.json();
+  expect(issue.issueReference).toMatch(/^CO-\d{4}-\d{6}$/);
+  const deliveryApproval = await request.post(`/api/ledger/approvals/${issue.approval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser variation delivery approver',
+      reason: 'Client recipient and exact numbered variation package verified.'
+    }
+  });
+  expect(deliveryApproval.ok()).toBeTruthy();
+  const delivery = await request.post(`/api/ledger/communications/${issue.communication.id}/delivery-receipt`, {
+    data: {
+      integration: 'playwright_test_provider',
+      providerMessageId: `browser-variation-message-${marker}`,
+      receipt: { status: 'accepted-by-provider' }
+    }
+  });
+  expect(delivery.ok()).toBeTruthy();
+
+  const accessResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/client-portal-access`, {
+    data: { label: 'Formal variation portal', expiresAt: '2027-01-01T23:59:59.000Z' }
+  });
+  expect(accessResponse.ok()).toBeTruthy();
+  const access = await accessResponse.json();
+  const portalApproval = await request.post(`/api/ledger/approvals/${access.access.approval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser portal approver', reason: 'Token scope and expiry verified.' }
+  });
+  expect(portalApproval.ok()).toBeTruthy();
+
+  const packageResponse = await request.get(
+    `/api/client-portal/${access.access.portalToken}/change-orders/${variation.id}/package`
+  );
+  expect(packageResponse.ok()).toBeTruthy();
+  expect(packageResponse.headers()['content-type']).toMatch(/^text\/html/);
+  expect(await packageResponse.text()).toContain(variation.variationNumber);
+
+  const portalResponse = await page.goto(`/client-portal.html#token=${access.access.portalToken}`);
+  expect(portalResponse.ok()).toBeTruthy();
+  await expect(page.getByRole('heading', { name: 'Meer- en minderwerk' })).toBeVisible();
+  const variationCard = page.locator('.client-portal-variation').filter({ hasText: variation.variationNumber });
+  await expect(variationCard).toHaveCount(1);
+  await expect(variationCard.getByRole('heading', { name: `${variation.variationNumber} / R1 - Revised occupied access protection` })).toBeVisible();
+  await expect(variationCard.getByRole('link', { name: 'Download genummerd voorstel' })).toHaveAttribute(
+    'href',
+    `/api/client-portal/${access.access.portalToken}/change-orders/${variation.id}/package`
+  );
+  await variationCard.getByLabel('Ik ga akkoord').check();
+  await variationCard.getByLabel('Naam bevoegde ondertekenaar').fill('Authorized Browser Client');
+  await variationCard.getByLabel('Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren.').check();
+  await variationCard.getByLabel('Toelichting (optioneel)').fill('Accepted against the downloaded numbered proposal.');
+  await variationCard.getByRole('button', { name: 'Besluit indienen' }).click();
+  await expect(variationCard.getByText('Uw besluit wacht op interne verificatie.')).toBeVisible();
+  await expect(variationCard.getByText('Wacht op interne verificatie', { exact: true })).toBeVisible();
+
+  let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  let detail = await detailResponse.json();
+  expect(detail.job.contractValue).toBe(1000);
+  expect(detail.job.changeOrders.find(item => item.id === variation.id).workAuthorized).toBe(false);
+  const responseApproval = detail.job.approvals.find(
+    item => item.targetType === 'change_order_client_response' && item.data?.changeOrderId === variation.id && item.status === 'pending'
+  );
+  expect(responseApproval).toBeTruthy();
+  const accepted = await request.post(`/api/ledger/approvals/${responseApproval.id}/resolve`, {
+    data: {
+      status: 'approved',
+      resolvedBy: 'Browser contract approver',
+      reason: 'Portal token, signer authority, package hash, and verified delivery chain confirmed.'
+    }
+  });
+  expect(accepted.ok()).toBeTruthy();
+
+  detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
+  detail = await detailResponse.json();
+  expect(detail.job.contractValue).toBe(1100);
+  expect(detail.job.changeOrders.find(item => item.id === variation.id)).toMatchObject({
+    status: 'accepted',
+    workAuthorized: true,
+    data: { acceptance: { channel: 'client_portal', packageHash: issue.packageHash } }
+  });
+
+  await page.reload();
+  const recordedVariation = page.locator('.client-portal-variation').filter({ hasText: variation.variationNumber });
+  await expect(recordedVariation.getByText('Akkoord geregistreerd')).toBeVisible();
+  await expect(recordedVariation.getByRole('button', { name: 'Besluit indienen' })).toHaveCount(0);
 
   await page.setViewportSize({ width: 390, height: 844 });
   const geometry = await page.locator('.client-portal-shell').evaluate(element => ({

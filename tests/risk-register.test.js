@@ -218,11 +218,11 @@ test('migration 057 survives restart and diagnostics verify retained project ris
   const job = createJob(ledger);
   const scope = approveScope(ledger, job.id, 'risk-register-scope-restart-0001');
   const risk = approveRisk(ledger, job.id, scope, 'risk-register-restart-0001');
-  assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+  assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
   ledger.close();
 
   restarted = new ContractorOperatingLedger({ dbFile });
-  assert.equal(restarted.migrationStatus().currentVersion, '057_governed_risk_register');
+  assert.equal(restarted.migrationStatus().currentVersion, '058_formal_variation_control');
   assert.equal(restarted.getRiskRegisterRevision(risk.id).integrityValid, true);
   assert.equal(restarted.riskRegisterForJob(job.id).ready, true);
   assert.equal(restarted.diagnose().counts.riskRegisterRevisions, 1);

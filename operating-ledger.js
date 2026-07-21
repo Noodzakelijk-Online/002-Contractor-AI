@@ -1122,6 +1122,20 @@ const RISK_REGISTER_CATEGORIES = new Set(['commercial', 'contract', 'design', 's
 const RISK_RESPONSE_STRATEGIES = new Set(['avoid', 'mitigate', 'transfer', 'accept']);
 const RISK_RECORD_STATUSES = new Set(['open', 'monitoring', 'treatment_due', 'accepted', 'closed']);
 const RISK_PROBABILITY_PERCENT = Object.freeze({ 1: 10, 2: 30, 3: 50, 4: 70, 5: 90 });
+const FORMAL_VARIATION_FORMAT = 'contractor-ai-formal-variation/v1';
+const FORMAL_VARIATION_TYPES = new Set([
+  'client_request',
+  'design_change',
+  'unforeseen_condition',
+  'regulatory_change',
+  'allowance_reconciliation',
+  'contractor_proposal',
+  'error_correction',
+  'other'
+]);
+const FORMAL_VARIATION_INITIATORS = new Set(['client', 'contractor', 'designer', 'authority', 'supplier', 'site_condition', 'other']);
+const FORMAL_VARIATION_RISK_IMPACTS = new Set(['none', 'low', 'medium', 'high', 'critical']);
+const FORMAL_VARIATION_CLIENT_DECISIONS = new Set(['accepted', 'changes_requested', 'rejected']);
 const PRICING_BASIS_DECISION_FORMAT = 'contractor-ai-pricing-basis-decision/v1';
 const PRICING_BASIS_FACTORS = Object.freeze([
   { key: 'scope_defined', label: 'Scope is fully defined', weight: 15, critical: true },
@@ -5004,6 +5018,40 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_risk_register_approval
           ON risk_register_revisions(approval_id, status)
           WHERE approval_id IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '058_formal_variation_control',
+    description: 'Retain source-bound formal variation revisions and approval-gated client portal decisions.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS variation_number_sequences (
+          period_year INTEGER PRIMARY KEY,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
+        ALTER TABLE change_orders ADD COLUMN variation_number TEXT;
+        ALTER TABLE change_orders ADD COLUMN revision_number INTEGER;
+        ALTER TABLE change_orders ADD COLUMN supersedes_change_order_id TEXT REFERENCES change_orders(id);
+        ALTER TABLE change_orders ADD COLUMN entry_key TEXT;
+        ALTER TABLE change_orders ADD COLUMN entry_fingerprint TEXT;
+        ALTER TABLE change_orders ADD COLUMN source_hash TEXT;
+        ALTER TABLE change_orders ADD COLUMN snapshot_hash TEXT;
+        ALTER TABLE change_orders ADD COLUMN snapshot_json TEXT;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_change_orders_variation_revision
+          ON change_orders(job_id, variation_number, revision_number)
+          WHERE variation_number IS NOT NULL AND revision_number IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_change_orders_entry_key
+          ON change_orders(entry_key)
+          WHERE entry_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_change_orders_revision_chain
+          ON change_orders(supersedes_change_order_id, revision_number DESC)
+          WHERE supersedes_change_order_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_change_orders_formal_status
+          ON change_orders(job_id, status, revision_number DESC, updated_at DESC);
       `);
     }
   }
@@ -15514,6 +15562,234 @@ class ContractorOperatingLedger {
 </html>`;
   }
 
+  allocateVariationNumber(createdAt = nowIso()) {
+    const periodYear = new Date(createdAt).getUTCFullYear();
+    if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
+      throw ledgerInputError('variation_date_invalid', 'Variation creation date could not be used for numbering.');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO variation_number_sequences (period_year, last_value, updated_at)
+      VALUES (?, 0, ?)
+    `).run(periodYear, timestamp);
+    const row = this.db.prepare(`
+      UPDATE variation_number_sequences
+      SET last_value = last_value + 1, updated_at = ?
+      WHERE period_year = ?
+      RETURNING last_value
+    `).get(timestamp, periodYear);
+    const sequence = Number(row?.last_value || 0);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      const error = new Error('A durable variation number could not be allocated.');
+      error.statusCode = 500;
+      error.code = 'variation_number_allocation_failed';
+      throw error;
+    }
+    return `VAR-${periodYear}-${String(sequence).padStart(6, '0')}`;
+  }
+
+  changeOrderContractSource(jobId, requestedQuoteId = null, options = {}) {
+    const jobRow = this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+    if (!jobRow) throw ledgerInputError('job_not_found', 'Ledger job not found.', { jobId }, 404);
+    const forceLegacy = options.forceLegacy === true;
+    let quoteRow = null;
+    if (!forceLegacy && requestedQuoteId) {
+      quoteRow = this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(requestedQuoteId, jobId);
+      if (!quoteRow) {
+        throw ledgerInputError('change_order_quote_job_mismatch', 'The selected contract quote does not belong to this job.', { jobId, quoteId: requestedQuoteId });
+      }
+      if (quoteRow.status !== 'accepted') {
+        throw ledgerInputError(
+          'change_order_accepted_contract_required',
+          'A formal variation can reference only the currently accepted quote, not an internal or superseded estimate.',
+          { jobId, quoteId: requestedQuoteId, status: quoteRow.status },
+          409
+        );
+      }
+    } else if (!forceLegacy) {
+      quoteRow = this.db.prepare(`
+        SELECT * FROM quotes
+        WHERE job_id = ? AND status = 'accepted'
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 1
+      `).get(jobId);
+    }
+
+    if (quoteRow) {
+      const quote = this.mapQuote(quoteRow);
+      if (quote.commercialScopeIntegrityValid === false || quote.riskRegisterIntegrityValid === false || quote.pricingBasisIntegrityValid === false) {
+        throw ledgerInputError(
+          'change_order_contract_source_integrity_failed',
+          'The accepted contract quote failed its retained scope, risk, or pricing-basis integrity check.',
+          { jobId, quoteId: quote.id },
+          409
+        );
+      }
+      return {
+        type: 'accepted_quote',
+        jobId,
+        quoteId: quote.id,
+        quoteStatus: quote.status,
+        currency: quote.currency,
+        pricingModel: quote.pricingModel || null,
+        netContractBaseline: roundMoney(quote.subtotal),
+        grossContractBaseline: roundMoney(quote.total),
+        lineItemsHash: sha256Json(quote.lineItems || []),
+        commercialScope: quote.data?.commercialScope || null,
+        riskRegister: quote.data?.riskRegister || null,
+        pricingBasis: quote.data?.pricingBasis || null,
+        acceptance: quote.data?.acceptance || null
+      };
+    }
+
+    const jobData = fromJson(jobRow.data_json, {});
+    const baseline = roundMoney(jobData.commercialBaselineNet ?? jobRow.contract_value);
+    if (!(baseline > 0) && options.allowZeroBaseline !== true) {
+      throw ledgerInputError(
+        'change_order_contract_source_required',
+        'Accept a quote or retain a positive legacy contract baseline before creating a formal variation.',
+        { jobId, contractValue: roundMoney(jobRow.contract_value) },
+        409
+      );
+    }
+    return {
+      type: 'legacy_contract',
+      jobId,
+      quoteId: null,
+      currency: 'EUR',
+      pricingModel: jobData.commercialPricingModel || null,
+      netContractBaseline: baseline,
+      retainedContractReference: normalizeText(jobData.contractReference || jobData.contractNumber, '') || null,
+      retainedBaselineAt: jobData.commercialBaselineRetainedAt || jobRow.created_at
+    };
+  }
+
+  normalizeFormalVariationControl(payload, context = {}) {
+    const variationType = normalizeStatus(payload.variationType || payload.variation_type, 'other');
+    if (!FORMAL_VARIATION_TYPES.has(variationType)) {
+      throw ledgerInputError('variation_type_invalid', `Variation type must be one of: ${[...FORMAL_VARIATION_TYPES].join(', ')}.`);
+    }
+    const initiatedBy = normalizeStatus(payload.initiatedBy || payload.initiated_by, 'contractor');
+    if (!FORMAL_VARIATION_INITIATORS.has(initiatedBy)) {
+      throw ledgerInputError('variation_initiator_invalid', `Variation initiator must be one of: ${[...FORMAL_VARIATION_INITIATORS].join(', ')}.`);
+    }
+    const cause = normalizeText(payload.cause, context.scopeDelta || '');
+    const justification = normalizeText(payload.justification || payload.reason, context.notes || context.scopeDelta || '');
+    const contractReference = normalizeText(
+      payload.contractReference || payload.contract_reference || payload.contractClause || payload.contract_clause,
+      context.source?.quoteId || context.source?.retainedContractReference || 'Retained contract baseline'
+    );
+    const noticeReference = normalizeText(payload.noticeReference || payload.notice_reference, '');
+    const noticeNotApplicableReason = normalizeText(
+      payload.noticeNotApplicableReason || payload.notice_not_applicable_reason,
+      noticeReference ? '' : 'No separate contractual notice reference was supplied at creation.'
+    );
+    const scheduleImpactNarrative = normalizeText(
+      payload.scheduleImpactNarrative || payload.schedule_impact_narrative,
+      Number(context.scheduleDeltaDays || 0) === 0
+        ? 'No schedule change is proposed by this variation.'
+        : `The proposed schedule adjustment is ${context.scheduleDeltaDays} calendar day(s).`
+    );
+    const riskImpact = normalizeStatus(payload.riskImpact || payload.risk_impact, 'medium');
+    if (!FORMAL_VARIATION_RISK_IMPACTS.has(riskImpact)) {
+      throw ledgerInputError('variation_risk_impact_invalid', `Variation risk impact must be one of: ${[...FORMAL_VARIATION_RISK_IMPACTS].join(', ')}.`);
+    }
+    const riskImpactStatement = normalizeText(
+      payload.riskImpactStatement || payload.risk_impact_statement,
+      riskImpact === 'none' ? 'No additional project risk was identified.' : 'Review changed scope, sequencing, cost, and delivery exposure before authorization.'
+    );
+    const requestedAt = normalizeRetainedDate(payload.requestedAt || payload.requested_at || context.timestamp, {
+      required: true,
+      label: 'Variation request date',
+      code: 'variation_requested_at_invalid'
+    });
+    const responseDueAt = normalizeRetainedDate(payload.responseDueAt || payload.response_due_at, {
+      label: 'Variation response due date',
+      code: 'variation_response_due_at_invalid'
+    });
+    if (responseDueAt && Date.parse(responseDueAt) < Date.parse(requestedAt)) {
+      throw ledgerInputError('variation_response_window_invalid', 'Variation response due date cannot precede its request date.');
+    }
+    const validateNarrative = (value, label, minimum = 8, maximum = 2_000) => {
+      if (value.length < minimum || value.length > maximum) {
+        throw ledgerInputError('variation_narrative_invalid', `${label} must contain between ${minimum} and ${maximum} characters.`, { field: label });
+      }
+      return value;
+    };
+    const assumptions = normalizeCommercialScopeList(
+      Array.isArray(payload.assumptions) && payload.assumptions.length
+        ? payload.assumptions
+        : ['No additional assumptions beyond the retained contract and this variation.'],
+      'Variation assumptions',
+      { minimum: 1, maximum: 30, field: 'assumptions' }
+    );
+    const exclusions = normalizeCommercialScopeList(
+      Array.isArray(payload.exclusions) && payload.exclusions.length
+        ? payload.exclusions
+        : ['No additional exclusions beyond the retained contract and this variation.'],
+      'Variation exclusions',
+      { minimum: 1, maximum: 30, field: 'exclusions' }
+    );
+    const evidenceReferences = normalizeList(payload.evidenceReferences || payload.evidence_references).map((value, index) => {
+      const reference = normalizeText(value, '');
+      if (reference.length < 3 || reference.length > 240) {
+        throw ledgerInputError('variation_evidence_reference_invalid', `Variation evidence reference ${index + 1} must contain between 3 and 240 characters.`);
+      }
+      return reference;
+    });
+    if (evidenceReferences.length > 50) {
+      throw ledgerInputError('variation_evidence_reference_limit', 'A variation can retain at most 50 evidence references.');
+    }
+    return {
+      format: FORMAL_VARIATION_FORMAT,
+      variationType,
+      initiatedBy,
+      cause: validateNarrative(cause, 'Variation cause'),
+      justification: validateNarrative(justification, 'Variation justification'),
+      contractReference: validateNarrative(contractReference, 'Contract reference', 3, 240),
+      noticeReference: noticeReference || null,
+      noticeNotApplicableReason: noticeReference
+        ? null
+        : validateNarrative(noticeNotApplicableReason, 'Notice not-applicable reason', 8, 500),
+      requestedAt,
+      responseDueAt,
+      scheduleImpactNarrative: validateNarrative(scheduleImpactNarrative, 'Schedule impact narrative'),
+      riskImpact,
+      riskImpactStatement: validateNarrative(riskImpactStatement, 'Risk impact statement'),
+      riskRegisterRevisionId: context.riskRegister?.id || null,
+      riskRegisterSnapshotHash: context.riskRegister?.snapshotHash || null,
+      assumptions,
+      exclusions,
+      evidenceReferences,
+      workAuthorization: 'not_authorized_until_verified_client_acceptance',
+      externalCommitments: 0
+    };
+  }
+
+  assertFormalVariationCurrent(changeOrder) {
+    if (!changeOrder || changeOrder.formalControl?.format !== FORMAL_VARIATION_FORMAT) {
+      throw ledgerInputError('formal_variation_required', 'Prepare a source-bound formal variation record before approval or client issue.', { changeOrderId: changeOrder?.id }, 409);
+    }
+    if (!changeOrder.integrityValid) {
+      throw ledgerInputError('formal_variation_integrity_failed', 'The retained formal variation snapshot failed checksum verification.', { changeOrderId: changeOrder.id }, 409);
+    }
+    const forceLegacy = changeOrder.snapshot?.source?.type === 'legacy_contract';
+    const currentSource = this.changeOrderContractSource(changeOrder.jobId, changeOrder.quoteId, {
+      forceLegacy,
+      allowZeroBaseline: forceLegacy && normalizeNumber(changeOrder.snapshot?.source?.netContractBaseline, 0) === 0
+    });
+    const currentSourceHash = sha256Json(currentSource);
+    if (!changeOrder.sourceHash || changeOrder.sourceHash !== currentSourceHash) {
+      throw ledgerInputError(
+        'formal_variation_source_stale',
+        'The accepted contract source changed after this variation was retained. Prepare a current revision.',
+        { changeOrderId: changeOrder.id, retainedSourceHash: changeOrder.sourceHash || null, currentSourceHash },
+        409
+      );
+    }
+    return changeOrder;
+  }
+
   allocateChangeOrderReference(preparedAt = nowIso()) {
     const periodYear = new Date(preparedAt).getUTCFullYear();
     if (!Number.isInteger(periodYear) || periodYear < 2000 || periodYear > 9999) {
@@ -15545,6 +15821,11 @@ class ContractorOperatingLedger {
       id: changeOrder.id,
       jobId: changeOrder.jobId,
       quoteId: changeOrder.quoteId || null,
+      ...(changeOrder.variationNumber ? {
+        variationNumber: changeOrder.variationNumber,
+        revisionNumber: changeOrder.revisionNumber,
+        supersedesChangeOrderId: changeOrder.supersedesChangeOrderId || null
+      } : {}),
       title: changeOrder.title,
       scopeDelta: changeOrder.scopeDelta || null,
       currency: changeOrder.currency,
@@ -15559,7 +15840,12 @@ class ContractorOperatingLedger {
         unitPrice: roundMoney(item.unitPrice),
         costCode: item.costCode || null
       })),
-      notes: changeOrder.data?.notes || null
+      notes: changeOrder.data?.notes || null,
+      ...(changeOrder.variationNumber ? {
+        formalControl: changeOrder.formalControl,
+        contractSourceHash: changeOrder.sourceHash,
+        formalSnapshotHash: changeOrder.snapshotHash
+      } : {})
     };
   }
 
@@ -15583,6 +15869,7 @@ class ContractorOperatingLedger {
       const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(changeOrderId, jobId);
       if (!row) throw ledgerInputError('change_order_not_found', 'Change order not found for this job.', null, 404);
       const changeOrder = this.mapChangeOrder(row);
+      this.assertFormalVariationCurrent(changeOrder);
       const identityKey = sha256Text(`${jobId}\0${changeOrderId}`);
       const documentId = `doc_change_${identityKey.slice(0, 24)}`;
       const communicationId = `comm_change_${identityKey.slice(0, 24)}`;
@@ -15630,7 +15917,7 @@ class ContractorOperatingLedger {
         issueReference = this.allocateChangeOrderReference(preparedAt);
         const sourceBasisHash = sha256Json(this.changeOrderIssueBasis(changeOrder));
         snapshot = {
-          packageVersion: 1,
+          packageVersion: 2,
           issueReference,
           preparedAt,
           preparedBy: options.actor || 'Contractor.AI',
@@ -15689,7 +15976,7 @@ class ContractorOperatingLedger {
         sizeBytes: Buffer.byteLength(html, 'utf8'),
         status: 'prepared',
         data: {
-          packageVersion: 1,
+          packageVersion: 2,
           sourceRecordType: 'change_order',
           sourceRecordId: changeOrderId,
           issueReference,
@@ -15823,6 +16110,85 @@ class ContractorOperatingLedger {
   }
 
   renderChangeOrderIssuePackageHtml(snapshot, packageHash) {
+    if (Number(snapshot?.packageVersion || 1) < 2) {
+      return this.renderLegacyChangeOrderIssuePackageHtml(snapshot, packageHash);
+    }
+    const organization = snapshot.organization || {};
+    const client = snapshot.client || {};
+    const job = snapshot.job || {};
+    const changeOrder = snapshot.changeOrder || {};
+    const money = value => {
+      try {
+        return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: changeOrder.currency || 'EUR' }).format(Number(value || 0));
+      } catch {
+        return `${Number(value || 0).toFixed(2)} ${changeOrder.currency || 'EUR'}`;
+      }
+    };
+    const date = value => {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? String(value || 'Not specified') : new Intl.DateTimeFormat('nl-NL', { dateStyle: 'long' }).format(parsed);
+    };
+    const lines = (changeOrder.lineItems || []).map(item => `<tr><td>${escapeHtml(item.description)}</td><td class="number">${escapeHtml(item.quantity)}</td><td class="number">${escapeHtml(money(item.unitPrice))}</td><td class="number">${escapeHtml(money(Number(item.quantity || 0) * Number(item.unitPrice || 0)))}</td></tr>`).join('');
+    const organizationName = organization.tradingName || organization.legalName || 'Contractor';
+    const organizationAddress = [organization.address, organization.postalCode, organization.city, organization.country].filter(Boolean).map(escapeHtml).join(', ');
+    const clientAddress = [client.address, client.city, client.country].filter(Boolean).map(escapeHtml).join(', ');
+    const siteAddress = [job.address, job.city, job.country].filter(Boolean).map(escapeHtml).join(', ');
+    const scheduleImpact = Number(changeOrder.scheduleDeltaDays || 0);
+    const formalControl = changeOrder.formalControl || {};
+    const scopeList = values => `<ul>${(Array.isArray(values) ? values : []).map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`;
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(snapshot.issueReference)} - ${escapeHtml(job.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; color: #1f2f29; background: #fff; }
+    * { box-sizing: border-box; }
+    body { max-width: 920px; margin: 0 auto; padding: 42px; font-size: 14px; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; gap: 32px; padding-bottom: 24px; border-bottom: 3px solid #176b57; }
+    h1 { margin: 0; font-size: 30px; color: #174d40; }
+    h2 { margin: 28px 0 10px; font-size: 18px; color: #23483d; }
+    p { margin: 4px 0; }
+    .muted { color: #64736e; }
+    .reference { text-align: right; }
+    .reference strong { display: block; font-size: 18px; }
+    .parties, .impact { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 26px; }
+    .party, .impact div { padding: 16px 0; border-bottom: 1px solid #dce5e1; }
+    .party span, .impact span { display: block; color: #6a7873; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    table { width: 100%; margin-top: 14px; border-collapse: collapse; }
+    th, td { padding: 11px 9px; border-bottom: 1px solid #dfe7e3; text-align: left; vertical-align: top; }
+    th { color: #53645e; background: #f2f6f4; font-size: 11px; text-transform: uppercase; }
+    .number { text-align: right; white-space: nowrap; }
+    .totals { width: min(390px, 100%); margin: 18px 0 0 auto; }
+    .totals div { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #e3e9e6; }
+    .totals .grand { padding-top: 12px; color: #174d40; font-size: 18px; font-weight: 700; border-bottom: 0; }
+    .notice { margin-top: 28px; padding: 17px; background: #f4f7f6; border-left: 4px solid #176b57; }
+    footer { margin-top: 38px; padding-top: 16px; color: #6c7975; border-top: 1px solid #dce5e1; font-size: 10px; overflow-wrap: anywhere; }
+    @media print { body { max-width: none; padding: 18mm; } }
+    @media (max-width: 650px) { body { padding: 22px; } header, .parties, .impact { display: grid; grid-template-columns: 1fr; } .reference { text-align: left; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>${escapeHtml(organizationName)}</h1><p>${organizationAddress}</p><p class="muted">Registration ${escapeHtml(organization.registrationNumber || 'not retained')} &middot; VAT ${escapeHtml(organization.vatExempt ? 'exempt' : organization.vatNumber || 'not retained')}</p><p class="muted">${escapeHtml(organization.email || '')}</p></div><div class="reference"><span class="muted">Formal variation</span><strong>${escapeHtml(changeOrder.variationNumber || snapshot.issueReference)} / R${escapeHtml(changeOrder.revisionNumber || 1)}</strong><p>Issue ${escapeHtml(snapshot.issueReference)}</p><p>Prepared ${escapeHtml(date(snapshot.preparedAt))}</p>${changeOrder.quoteId ? `<p>Accepted quote ${escapeHtml(changeOrder.quoteId)}</p>` : ''}</div></header>
+  <section class="parties"><div class="party"><span>Prepared for</span><strong>${escapeHtml(client.company || client.name)}</strong>${client.company && client.name ? `<p>${escapeHtml(client.name)}</p>` : ''}<p>${clientAddress || 'Address not retained'}</p><p>${escapeHtml(client.recipient || client.email || '')}</p></div><div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${siteAddress || 'Site address not retained'}</p><p class="muted">Job reference ${escapeHtml(job.id)}</p></div></section>
+  <h2>${escapeHtml(changeOrder.title)}</h2>
+  <p>${escapeHtml(changeOrder.scopeDelta)}</p>
+  <section class="impact"><div><span>Schedule impact</span><strong>${escapeHtml(scheduleImpact)} day${Math.abs(scheduleImpact) === 1 ? '' : 's'}</strong><p>${escapeHtml(formalControl.scheduleImpactNarrative || '')}</p></div><div><span>Contract source</span><strong>${escapeHtml(formalControl.contractReference || changeOrder.quoteId || 'Current retained contract')}</strong><p>${escapeHtml(formalControl.noticeReference ? `Notice ${formalControl.noticeReference}` : formalControl.noticeNotApplicableReason || '')}</p></div></section>
+  <h2>Variation basis</h2>
+  <section class="impact"><div><span>Cause and initiator</span><strong>${escapeHtml(String(formalControl.variationType || 'other').replace(/_/g, ' '))} / ${escapeHtml(String(formalControl.initiatedBy || 'contractor').replace(/_/g, ' '))}</strong><p>${escapeHtml(formalControl.cause || '')}</p></div><div><span>Justification</span><strong>${escapeHtml(formalControl.riskImpact || 'medium')} risk impact</strong><p>${escapeHtml(formalControl.justification || '')}</p><p>${escapeHtml(formalControl.riskImpactStatement || '')}</p></div></section>
+  <section class="parties"><div class="party"><span>Assumptions</span>${scopeList(formalControl.assumptions)}</div><div class="party"><span>Exclusions</span>${scopeList(formalControl.exclusions)}</div></section>
+  ${formalControl.evidenceReferences?.length ? `<h2>Evidence references</h2>${scopeList(formalControl.evidenceReferences)}` : ''}
+  <h2>Price change</h2>
+  <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit price</th><th class="number">Amount</th></tr></thead><tbody>${lines}</tbody></table>
+  <div class="totals"><div><span>Net change</span><strong>${escapeHtml(money(changeOrder.amount))}</strong></div><div><span>VAT (${escapeHtml(changeOrder.taxRate)}%)</span><strong>${escapeHtml(money(changeOrder.taxAmount))}</strong></div><div class="grand"><span>Gross change</span><strong>${escapeHtml(money(changeOrder.total))}</strong></div></div>
+  <section class="notice"><strong>Acceptance control</strong>${changeOrder.notes ? `<p>${escapeHtml(changeOrder.notes)}</p>` : ''}${organization.quoteTerms ? `<p>${escapeHtml(organization.quoteTerms)}</p>` : ''}<p>Receipt does not authorize work or alter contract value. Client acceptance is recorded and verified separately against this exact package.</p></section>
+  <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Issue basis ${escapeHtml(changeOrder.sourceBasisHash)} &middot; Contract source ${escapeHtml(changeOrder.contractSourceHash || '')} &middot; Formal snapshot ${escapeHtml(changeOrder.formalSnapshotHash || '')} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source variation ${escapeHtml(changeOrder.id)}</footer>
+</body>
+</html>`;
+  }
+
+  renderLegacyChangeOrderIssuePackageHtml(snapshot, packageHash) {
     const organization = snapshot.organization || {};
     const client = snapshot.client || {};
     const job = snapshot.job || {};
@@ -17996,6 +18362,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           409
         );
       }
+      this.assertFormalVariationCurrent(changeOrder);
       const issueData = changeOrder.data?.issuePackage || {};
       if (!issueData.documentId || !issueData.communicationId || !issueData.packageHash || !issueData.issueReference) {
         throw ledgerInputError('change_order_issue_package_incomplete', 'The issued change order is missing its retained package chain.', { changeOrderId }, 409);
@@ -18012,6 +18379,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         || mappedCommunication.data?.packageHash !== issueData.packageHash
         || !mappedCommunication.data?.deliveryReceipt) {
         throw ledgerInputError('change_order_issue_package_incomplete', 'The issued change-order package and verified delivery receipt no longer form a valid chain.', { changeOrderId }, 409);
+      }
+      const pendingPortalResponse = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE job_id = ? AND target_type = 'change_order_client_response' AND status = 'pending'
+        ORDER BY created_at DESC
+      `).all(jobId).map(approvalRow => this.mapApproval(approvalRow))
+        .find(approval => approval.data?.changeOrderId === changeOrderId);
+      if (pendingPortalResponse) {
+        throw ledgerInputError(
+          'change_order_acceptance_pending_conflict',
+          'A client portal response for this issued variation is already awaiting internal review.',
+          { changeOrderId, approvalId: pendingPortalResponse.id },
+          409
+        );
       }
       const evidence = normalizeAcceptanceEvidence(payload);
       const pending = this.db.prepare(`
@@ -18051,6 +18432,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           issueReference: issueData.issueReference,
           packageHash: issueData.packageHash,
           sourceBasisHash: issueData.sourceBasisHash,
+          formalSourceHash: changeOrder.sourceHash,
+          formalSnapshotHash: changeOrder.snapshotHash,
           documentId: issueData.documentId,
           deliveryCommunicationId: issueData.communicationId,
           deliveredAt: issueData.deliveredAt,
@@ -19047,6 +19430,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         throw ledgerInputError('change_order_schedule_delta_invalid', 'Schedule impact must be between -3,650 and 3,650 days.');
       }
       const changeOrderPayload = {
+        entryKey: `daywork-change:${before.id}:${String(before.snapshotHash || '').slice(0, 16)}`,
         title: normalizeText(payload.title, generatedTitle),
         scopeDelta: normalizeText(payload.scopeDelta || payload.scope_delta, generatedScope),
         lineItems,
@@ -19055,6 +19439,25 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         scheduleDeltaDays,
         status: 'submitted',
         notes: normalizeText(payload.notes, '') || `Converted from approved daywork ticket ${before.ticketNumber}.`,
+        variationType: 'unforeseen_condition',
+        initiatedBy: 'site_condition',
+        cause: normalizeText(payload.cause, '') || `Approved daywork ticket ${before.ticketNumber} records additional site work outside the retained contract scope.`,
+        justification: normalizeText(payload.justification, '') || `Convert verified daywork quantities and rates into a formal variation for client review.`,
+        contractReference: normalizeText(payload.contractReference || payload.contract_reference, '') || `Daywork ticket ${before.ticketNumber}`,
+        noticeReference: before.acknowledgementReference || null,
+        noticeNotApplicableReason: before.acknowledgementReference ? null : 'No separate notice reference was retained with the approved daywork ticket.',
+        scheduleImpactNarrative: normalizeText(payload.scheduleImpactNarrative || payload.schedule_impact_narrative, '') || (scheduleDeltaDays === 0
+          ? 'No schedule change is proposed from this daywork conversion.'
+          : `The approved daywork record supports a ${scheduleDeltaDays} calendar day schedule adjustment.`),
+        riskImpact: normalizeStatus(payload.riskImpact || payload.risk_impact, 'low'),
+        riskImpactStatement: normalizeText(payload.riskImpactStatement || payload.risk_impact_statement, '') || 'Review sequencing, access, and productivity effects before authorizing the changed work.',
+        assumptions: Array.isArray(payload.assumptions) && payload.assumptions.length
+          ? payload.assumptions
+          : ['The approved daywork record accurately reflects labour, material, and equipment quantities.'],
+        exclusions: Array.isArray(payload.exclusions) && payload.exclusions.length
+          ? payload.exclusions
+          : ['Work not recorded in the retained daywork ticket is excluded from this variation.'],
+        evidenceReferences: [before.ticketNumber, before.snapshotHash, before.acknowledgementReference].filter(Boolean),
         source: {
           type: 'daywork_ticket',
           id: before.id,
@@ -19119,19 +19522,6 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const actor = options.actor || 'Contractor.AI';
       const timestamp = nowIso();
       const id = makeId('change');
-      let quoteId = payload.quoteId || payload.quote_id || null;
-      if (quoteId) {
-        const quote = this.db.prepare('SELECT id FROM quotes WHERE id = ? AND job_id = ?').get(quoteId, jobId);
-        if (!quote) {
-          const error = new Error('Change order quote does not belong to this job');
-          error.statusCode = 400;
-          throw error;
-        }
-      } else {
-        const quote = this.db.prepare('SELECT id FROM quotes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1').get(jobId);
-        quoteId = quote?.id || null;
-      }
-
       const lineItems = normalizeCommercialLineItems(payload.lineItems, {
         fallbackDescription: normalizeText(payload.title || payload.scopeDelta || payload.scope_delta, 'Scope change'),
         fallbackAmount: payload.amount ?? payload.subtotal ?? 0,
@@ -19155,6 +19545,55 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         throw ledgerInputError('change_order_scope_required', 'Change order scope must be between 3 and 4,000 characters.');
       }
       const currency = normalizeCommercialCurrency(payload.currency);
+      const requestedQuoteId = normalizeText(payload.quoteId || payload.quote_id, '') || null;
+      const source = this.changeOrderContractSource(jobId, requestedQuoteId, {
+        allowZeroBaseline: payload.source?.type === 'daywork_ticket'
+      });
+      const quoteId = source.quoteId || null;
+      if (source.currency && source.currency !== currency) {
+        throw ledgerInputError(
+          'change_order_currency_mismatch',
+          `Variation currency ${currency} must match the retained contract currency ${source.currency}.`,
+          { jobId, quoteId, contractCurrency: source.currency, variationCurrency: currency },
+          409
+        );
+      }
+      const supersedesChangeOrderId = normalizeText(payload.supersedesChangeOrderId || payload.supersedes_change_order_id, '') || null;
+      let superseded = null;
+      if (supersedesChangeOrderId) {
+        const supersededRow = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(supersedesChangeOrderId, jobId);
+        if (!supersededRow) {
+          throw ledgerInputError('variation_superseded_record_missing', 'The variation revision source does not belong to this job.', { jobId, supersedesChangeOrderId }, 404);
+        }
+        superseded = this.mapChangeOrder(supersededRow);
+        if (!['changes_requested', 'rejected_by_client', 'rejected', 'cancelled'].includes(superseded.status)) {
+          throw ledgerInputError(
+            'variation_revision_state_invalid',
+            'A variation revision can supersede only a client change request or a rejected or cancelled variation.',
+            { supersedesChangeOrderId, status: superseded.status },
+            409
+          );
+        }
+        if (!superseded.variationNumber || !Number.isInteger(superseded.revisionNumber)) {
+          throw ledgerInputError('variation_revision_source_invalid', 'The superseded record is not a retained formal variation revision.', { supersedesChangeOrderId }, 409);
+        }
+      }
+      const riskRow = this.db.prepare(`
+        SELECT * FROM risk_register_revisions
+        WHERE job_id = ? AND status = 'approved'
+        ORDER BY version_number DESC
+        LIMIT 1
+      `).get(jobId);
+      const riskRegister = riskRow ? this.mapRiskRegisterRevision(riskRow) : null;
+      const formalControl = this.normalizeFormalVariationControl(payload, {
+        timestamp,
+        source,
+        scopeDelta,
+        notes: normalizeText(payload.notes, ''),
+        scheduleDeltaDays,
+        riskRegister
+      });
+      const sourceHash = sha256Json(source);
       const requestedStatus = normalizeStatus(payload.status, 'draft');
       const commitmentStatuses = ['sent', 'submitted', 'approved', 'accepted', 'committed', 'issued'];
       const hasImpact = Math.abs(total) > 0 || Math.abs(scheduleDeltaDays) > 0 || Boolean(scopeDelta);
@@ -19162,14 +19601,95 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         || commitmentStatuses.includes(requestedStatus)
         || normalizeBoolean(payload.requiresApproval, false);
       const status = requiresApproval && commitmentStatuses.includes(requestedStatus) ? 'pending_approval' : requestedStatus;
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '') || `variation:${id}`;
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('variation_entry_key_invalid', 'A formal variation entryKey must contain 8 to 160 safe characters.');
+      }
+      const entryFingerprint = sha256Json({
+        jobId,
+        quoteId,
+        supersedesChangeOrderId,
+        title,
+        scopeDelta,
+        currency,
+        amount,
+        taxRate,
+        taxAmount,
+        total,
+        scheduleDeltaDays,
+        lineItems,
+        notes: normalizeText(payload.notes, '') || null,
+        source,
+        formalControl,
+        requestedStatus,
+        requiresApproval
+      });
+      const replayRow = this.db.prepare('SELECT * FROM change_orders WHERE entry_key = ?').get(entryKey);
+      if (replayRow) {
+        if (replayRow.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError(
+            'variation_replay_conflict',
+            'This formal variation entryKey was already used with different scope, price, schedule, or governance evidence.',
+            { entryKey, changeOrderId: replayRow.id },
+            409
+          );
+        }
+        return { ...this.mapChangeOrder(replayRow), replayed: true };
+      }
+      const variationNumber = superseded?.variationNumber || this.allocateVariationNumber(timestamp);
+      const revisionNumber = superseded ? superseded.revisionNumber + 1 : 1;
+      const snapshot = {
+        format: FORMAL_VARIATION_FORMAT,
+        variationNumber,
+        revisionNumber,
+        supersedesChangeOrderId,
+        jobId,
+        quoteId,
+        title,
+        scopeDelta,
+        currency,
+        amount,
+        taxRate,
+        taxAmount,
+        total,
+        scheduleDeltaDays,
+        lineItems,
+        notes: normalizeText(payload.notes, '') || null,
+        source,
+        sourceHash,
+        formalControl,
+        entryKey,
+        entryFingerprint,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          workAuthorization: 'not_authorized_until_verified_client_acceptance',
+          contractValueChanged: false,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
 
       this.db.prepare(`
-        INSERT INTO change_orders (id, job_id, quote_id, title, status, scope_delta, currency, amount, tax_rate, tax_amount, total, schedule_delta_days, line_items_json, data_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO change_orders (
+          id, job_id, quote_id, variation_number, revision_number, supersedes_change_order_id,
+          entry_key, entry_fingerprint, source_hash, snapshot_hash, snapshot_json,
+          title, status, scope_delta, currency, amount, tax_rate, tax_amount, total,
+          schedule_delta_days, line_items_json, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         jobId,
         quoteId,
+        variationNumber,
+        revisionNumber,
+        supersedesChangeOrderId,
+        entryKey,
+        entryFingerprint,
+        sourceHash,
+        snapshotHash,
+        snapshotJson,
         title,
         status,
         scopeDelta,
@@ -19183,9 +19703,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         toJson({
           notes: payload.notes || null,
           source: payload.source || null,
+          formalControl,
+          contractSource: source,
+          formalSnapshotHash: snapshotHash,
           requestedStatus,
           requiresApproval,
-          calculation: 'server_derived'
+          calculation: 'server_derived',
+          workAuthorization: 'not_authorized_until_verified_client_acceptance',
+          externalCommitments: 0
         }),
         timestamp,
         timestamp
@@ -19198,17 +19723,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           targetId: id,
           jobId,
           approvalType: 'scope_change',
-          summary: `Approve change order ${id} for ${total.toFixed(2)} ${currency}`,
-          reason: 'Scope, price, or schedule changes require approval before client commitment.',
+          summary: `Approve ${variationNumber} revision ${revisionNumber} for ${total.toFixed(2)} ${currency}`,
+          reason: 'Verify the retained contract source, variation cause, scope, price, schedule, risk, assumptions, and exclusions before client issue.',
           data: {
             quoteId,
+            variationNumber,
+            revisionNumber,
+            supersedesChangeOrderId,
             amount,
             taxRate,
             taxAmount,
             total,
             scheduleDeltaDays,
             requestedStatus,
-            lineItems
+            lineItems,
+            formalControl,
+            sourceHash,
+            snapshotHash,
+            entryKey,
+            entryFingerprint,
+            workAuthorization: 'not_authorized_until_verified_client_acceptance',
+            externalCommitments: 0
           }
         }, { actor, audit: false });
         this.db.prepare('UPDATE change_orders SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
@@ -19223,7 +19758,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           action: 'create_change_order',
           actor,
           after: changeOrder,
-          metadata: { approvalId: approval?.id || null }
+          metadata: {
+            approvalId: approval?.id || null,
+            variationNumber,
+            revisionNumber,
+            supersedesChangeOrderId,
+            sourceHash,
+            snapshotHash,
+            externalCommitments: 0
+          }
         });
       }
       return changeOrder;
@@ -38976,6 +39519,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'change_order') {
+        const changeOrder = this.db.prepare('SELECT data_json FROM change_orders WHERE id = ?').get(before.target_id);
+        if (changeOrder) {
+          this.db.prepare(`
+            UPDATE change_orders
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status IN ('draft', 'pending_approval')
+          `).run(
+            status,
+            toJson({
+              ...fromJson(changeOrder.data_json, {}),
+              approvalResolution: {
+                approvalId,
+                status,
+                resolvedAt: timestamp,
+                resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+                reason: payload.reason || payload.notes || null
+              }
+            }),
+            timestamp,
+            before.target_id
+          );
+        }
       } else if (before.target_type === 'client_portal_access') {
         this.db.prepare(`
           UPDATE client_portal_access
@@ -39662,12 +40228,6 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
-      } else if (before.target_type === 'change_order') {
-        this.db.prepare(`
-          UPDATE change_orders
-          SET status = ?, updated_at = ?
-          WHERE id = ? AND status IN ('draft', 'pending_approval')
-        `).run(status, timestamp, before.target_id);
       } else if (before.target_type === 'credit_note') {
         this.db.prepare(`
           UPDATE credit_notes
@@ -40093,6 +40653,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.db.prepare("UPDATE jobs SET phase = CASE WHEN phase = 'intake' THEN 'survey' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM site_visits WHERE id = ?)")
         .run(timestamp, targetId);
     } else if (targetType === 'change_order') {
+      const beforeRow = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId);
+      if (!beforeRow) {
+        throw ledgerInputError('change_order_not_found', 'The formal variation for this approval no longer exists.', { changeOrderId: targetId }, 409);
+      }
+      const beforeChangeOrder = this.mapChangeOrder(beforeRow);
+      this.assertFormalVariationCurrent(beforeChangeOrder);
+      if (beforeChangeOrder.supersedesChangeOrderId) {
+        const prior = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?')
+          .get(beforeChangeOrder.supersedesChangeOrderId, beforeChangeOrder.jobId);
+        if (!prior
+          || !['changes_requested', 'rejected_by_client', 'rejected', 'cancelled'].includes(prior.status)
+          || prior.variation_number !== beforeChangeOrder.variationNumber
+          || Number(prior.revision_number) !== beforeChangeOrder.revisionNumber - 1) {
+          throw ledgerInputError(
+            'variation_supersession_state_changed',
+            'The prior variation revision changed after this approval was requested. Prepare a new revision from the current state.',
+            { changeOrderId: targetId, supersedesChangeOrderId: beforeChangeOrder.supersedesChangeOrderId },
+            409
+          );
+        }
+      }
       this.db.prepare(`
         UPDATE change_orders
         SET status = CASE
@@ -40103,10 +40684,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         updated_at = ?
         WHERE id = ?
       `).run(timestamp, targetId);
+      if (beforeChangeOrder.supersedesChangeOrderId) {
+        this.db.prepare(`
+          UPDATE change_orders
+          SET status = 'superseded', updated_at = ?
+          WHERE id = ? AND job_id = ? AND status IN ('changes_requested', 'rejected_by_client', 'rejected', 'cancelled')
+        `).run(timestamp, beforeChangeOrder.supersedesChangeOrderId, beforeChangeOrder.jobId);
+      }
       const changeOrder = this.db.prepare('SELECT job_id FROM change_orders WHERE id = ?').get(targetId);
       if (changeOrder) {
         this.db.prepare('UPDATE jobs SET approval_state = ?, updated_at = ? WHERE id = ?')
           .run('change_order_approved', timestamp, changeOrder.job_id);
+        this.audit({
+          entityType: 'change_order',
+          entityId: targetId,
+          jobId: changeOrder.job_id,
+          action: 'approve_formal_variation',
+          actor: 'approval',
+          before: beforeChangeOrder,
+          after: this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId)),
+          metadata: {
+            variationNumber: beforeChangeOrder.variationNumber,
+            revisionNumber: beforeChangeOrder.revisionNumber,
+            supersedesChangeOrderId: beforeChangeOrder.supersedesChangeOrderId,
+            sourceHash: beforeChangeOrder.sourceHash,
+            snapshotHash: beforeChangeOrder.snapshotHash,
+            externalCommitments: 0
+          }
+        });
       }
     } else if (targetType === 'daywork_ticket') {
       this.applyDayworkTicketApproval(targetId, timestamp);
@@ -40116,6 +40721,141 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyNonconformanceCorrectiveAction(targetId, timestamp);
     } else if (targetType === 'nonconformance_closure') {
       this.applyNonconformanceClosure(targetId, timestamp);
+    } else if (targetType === 'change_order_client_response') {
+      const approval = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE id = ? AND target_type = 'change_order_client_response' AND status = 'approved'
+      `).get(targetId);
+      if (!approval) {
+        throw ledgerInputError('variation_response_approval_missing', 'The approved client variation response could not be loaded.', { approvalId: targetId }, 409);
+      }
+      const response = fromJson(approval.data_json, {});
+      const changeOrderRow = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?')
+        .get(response.changeOrderId, approval.job_id);
+      if (!changeOrderRow) {
+        throw ledgerInputError('change_order_not_found', 'The formal variation for this client response no longer exists.', { changeOrderId: response.changeOrderId }, 409);
+      }
+      const beforeChangeOrder = this.mapChangeOrder(changeOrderRow);
+      if (beforeChangeOrder.status !== 'issued') {
+        throw ledgerInputError(
+          'variation_response_state_invalid',
+          'The formal variation is no longer in the issued state required by this client response.',
+          { changeOrderId: beforeChangeOrder.id, status: beforeChangeOrder.status },
+          409
+        );
+      }
+      this.assertFormalVariationCurrent(beforeChangeOrder);
+      const issueData = beforeChangeOrder.data?.issuePackage || {};
+      if (issueData.documentId !== response.documentId
+        || issueData.communicationId !== response.deliveryCommunicationId
+        || issueData.issueReference !== response.issueReference
+        || issueData.packageHash !== response.packageHash
+        || issueData.sourceBasisHash !== response.sourceBasisHash
+        || beforeChangeOrder.sourceHash !== response.formalSourceHash
+        || beforeChangeOrder.snapshotHash !== response.formalSnapshotHash) {
+        throw ledgerInputError(
+          'variation_response_package_mismatch',
+          'The client response no longer matches the retained formal variation and issued package.',
+          { changeOrderId: beforeChangeOrder.id, approvalId: approval.id },
+          409
+        );
+      }
+      const issuePackage = this.getChangeOrderIssuePackage(issueData.documentId, { audit: false });
+      const deliveryRow = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?')
+        .get(issueData.communicationId, beforeChangeOrder.jobId);
+      const delivery = deliveryRow ? this.mapCommunication(deliveryRow) : null;
+      if (issuePackage.packageHash !== response.packageHash
+        || delivery?.status !== 'sent'
+        || delivery.data?.packageHash !== response.packageHash
+        || delivery.data?.sourceRecordId !== beforeChangeOrder.id
+        || !delivery.data?.deliveryReceipt) {
+        throw ledgerInputError(
+          'variation_response_issue_chain_invalid',
+          'The approved client response is not backed by the exact verified delivery chain.',
+          { changeOrderId: beforeChangeOrder.id, approvalId: approval.id },
+          409
+        );
+      }
+      const decision = normalizeStatus(response.decision, '');
+      if (!FORMAL_VARIATION_CLIENT_DECISIONS.has(decision)) {
+        throw ledgerInputError('invalid_variation_response', 'The retained client variation decision is invalid.', { approvalId: approval.id }, 409);
+      }
+      const nextStatus = decision === 'accepted' ? 'accepted' : decision === 'changes_requested' ? 'changes_requested' : 'rejected_by_client';
+      const clientResponse = {
+        approvalId: approval.id,
+        responseId: response.responseId,
+        decision,
+        signerName: response.signerName || null,
+        authorityConfirmed: response.authorityConfirmed === true,
+        note: response.note || null,
+        submittedAt: response.submittedAt,
+        reviewedAt: approval.resolved_at,
+        reviewedBy: approval.resolved_by,
+        portalAccessId: response.portalAccessId,
+        issueReference: response.issueReference,
+        packageHash: response.packageHash,
+        formalSourceHash: response.formalSourceHash,
+        formalSnapshotHash: response.formalSnapshotHash
+      };
+      const nextData = {
+        ...(beforeChangeOrder.data || {}),
+        clientResponse,
+        ...(decision === 'accepted' ? {
+          acceptance: {
+            approvalId: approval.id,
+            evidenceReference: `client-portal:${response.portalAccessId}:${response.responseId}`,
+            acceptedAt: response.submittedAt,
+            notes: response.note || null,
+            acceptedBy: response.signerName,
+            authorityConfirmed: true,
+            verifiedBy: approval.resolved_by,
+            verifiedAt: approval.resolved_at,
+            issueReference: response.issueReference,
+            packageHash: response.packageHash,
+            sourceBasisHash: response.sourceBasisHash,
+            documentId: response.documentId,
+            deliveryCommunicationId: response.deliveryCommunicationId,
+            providerMessageId: response.providerMessageId,
+            channel: 'client_portal'
+          }
+        } : {})
+      };
+      this.db.prepare(`
+        UPDATE change_orders
+        SET status = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'issued'
+      `).run(nextStatus, toJson(nextData), timestamp, beforeChangeOrder.id);
+      let commercial = null;
+      if (decision === 'accepted') {
+        commercial = this.recalculateCommercialContractValue(beforeChangeOrder.jobId, { captureBaseline: true });
+      }
+      this.db.prepare('UPDATE jobs SET approval_state = ?, updated_at = ? WHERE id = ?').run(
+        decision === 'accepted' ? 'change_order_accepted' : decision === 'changes_requested' ? 'change_order_changes_requested' : 'change_order_rejected',
+        timestamp,
+        beforeChangeOrder.jobId
+      );
+      this.audit({
+        entityType: 'change_order',
+        entityId: beforeChangeOrder.id,
+        jobId: beforeChangeOrder.jobId,
+        action: decision === 'accepted'
+          ? 'accept_change_order_contract'
+          : decision === 'changes_requested'
+            ? 'request_change_order_revision'
+            : 'reject_change_order_contract',
+        actor: approval.resolved_by || 'approval',
+        before: beforeChangeOrder,
+        after: this.mapChangeOrder(this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(beforeChangeOrder.id)),
+        metadata: {
+          approvalId: approval.id,
+          responseId: response.responseId,
+          decision,
+          issueReference: response.issueReference,
+          packageHash: response.packageHash,
+          commercial,
+          externalCommitments: 0
+        }
+      });
     } else if (targetType === 'change_order_acceptance') {
       const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(targetId);
       const approval = this.db.prepare(`
@@ -40141,12 +40881,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       {
         const acceptance = fromJson(approval.data_json, {});
         const mappedBefore = this.mapChangeOrder(changeOrder);
+        this.assertFormalVariationCurrent(mappedBefore);
         const issueData = mappedBefore.data?.issuePackage || {};
         if (!issueData.documentId
           || issueData.issueReference !== acceptance.issueReference
           || issueData.packageHash !== acceptance.packageHash
           || issueData.sourceBasisHash !== acceptance.sourceBasisHash
-          || issueData.communicationId !== acceptance.deliveryCommunicationId) {
+          || issueData.communicationId !== acceptance.deliveryCommunicationId
+          || mappedBefore.sourceHash !== acceptance.formalSourceHash
+          || mappedBefore.snapshotHash !== acceptance.formalSnapshotHash) {
           throw ledgerInputError(
             'change_order_acceptance_package_mismatch',
             'The acceptance decision no longer matches the issued change-order package.',
@@ -40159,6 +40902,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           throw ledgerInputError(
             'change_order_acceptance_package_mismatch',
             'The acceptance decision package checksum no longer matches the retained issue package.',
+            { changeOrderId: targetId, approvalId: approval.id },
+            409
+          );
+        }
+        const deliveryRow = this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?')
+          .get(issueData.communicationId, mappedBefore.jobId);
+        const delivery = deliveryRow ? this.mapCommunication(deliveryRow) : null;
+        if (delivery?.status !== 'sent'
+          || delivery.data?.sourceRecordId !== mappedBefore.id
+          || delivery.data?.packageHash !== acceptance.packageHash
+          || !delivery.data?.deliveryReceipt) {
+          throw ledgerInputError(
+            'change_order_acceptance_issue_chain_invalid',
+            'The acceptance decision is no longer backed by the exact verified delivery chain.',
             { changeOrderId: targetId, approvalId: approval.id },
             409
           );
@@ -41343,6 +42100,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return rows.filter(invoice => !search || JSON.stringify(invoice).toLowerCase().includes(search)).slice(0, limit);
   }
 
+  listChangeOrders(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '');
+    const status = normalizeStatus(filters.status, '');
+    const formalOnly = normalizeBoolean(filters.formalOnly ?? filters.formal_only, false);
+    const limit = safeLimit(filters.limit, 500, 10_000);
+    return this.db.prepare(`
+      SELECT * FROM change_orders
+      WHERE (? = '' OR job_id = ?)
+        AND (? = '' OR status = ?)
+        AND (? = 0 OR variation_number IS NOT NULL)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, status, status, formalOnly ? 1 : 0, limit).map(row => this.mapChangeOrder(row));
+  }
+
   listSupplierInvoicePayments(filters = {}) {
     const status = normalizeStatus(filters.status, '');
     const jobId = normalizeText(filters.jobId || filters.job_id, '');
@@ -41668,6 +42440,59 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           response
         };
       });
+    const variationResponseApprovals = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE job_id = ? AND target_type = 'change_order_client_response'
+      ORDER BY created_at DESC
+    `).all(row.job_id);
+    const latestVariationResponse = new Map();
+    for (const approvalRow of variationResponseApprovals) {
+      const approval = this.mapApproval(approvalRow);
+      const changeOrderId = approval.data?.changeOrderId;
+      if (changeOrderId && !latestVariationResponse.has(changeOrderId)) latestVariationResponse.set(changeOrderId, approval);
+    }
+    const portalVariationStatuses = new Set(['issued', 'accepted', 'changes_requested', 'rejected_by_client']);
+    const clientVisibleVariations = detail.changeOrders
+      .filter(item => portalVariationStatuses.has(normalizeStatus(item.status, '')) && item.data?.issuePackage?.documentId)
+      .slice(0, 20)
+      .map(item => {
+        const responseApproval = latestVariationResponse.get(item.id) || null;
+        const response = responseApproval
+          ? {
+              status: responseApproval.status === 'pending'
+                ? 'pending_review'
+                : responseApproval.status === 'approved'
+                  ? 'recorded'
+                  : `review_${responseApproval.status}`,
+              decision: responseApproval.data?.decision || null,
+              signerName: responseApproval.data?.signerName || null,
+              note: responseApproval.data?.note || null,
+              submittedAt: responseApproval.data?.submittedAt || responseApproval.createdAt,
+              reviewedAt: responseApproval.resolvedAt || null
+            }
+          : item.data?.clientResponse || null;
+        return {
+          id: item.id,
+          variationNumber: item.variationNumber,
+          revisionNumber: item.revisionNumber,
+          title: item.title,
+          status: item.status,
+          scopeDelta: item.scopeDelta,
+          currency: item.currency,
+          amount: item.amount,
+          taxAmount: item.taxAmount,
+          total: item.total,
+          scheduleDeltaDays: item.scheduleDeltaDays,
+          lineItems: item.lineItems,
+          formalControl: item.formalControl,
+          issueReference: item.data.issuePackage.issueReference,
+          packageHash: item.data.issuePackage.packageHash,
+          packageAvailable: true,
+          responseAllowed: item.status === 'issued' && responseApproval?.status !== 'pending',
+          workAuthorized: item.workAuthorized,
+          response
+        };
+      });
 
     return {
       portal: {
@@ -41688,6 +42513,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         targetCompletion: detail.targetCompletion,
         siteVisits: detail.siteVisits.slice(0, 10).map(item => ({ visitType: item.visitType, status: item.status, scheduledAt: item.scheduledAt })),
         selections: clientVisibleSelections,
+        variations: clientVisibleVariations,
         updates: clientVisibleMessages,
         documents: clientVisibleDocuments
       }
@@ -41851,6 +42677,207 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
       return {
         selection,
+        approval,
+        response: { ...responseData, status: 'pending_review' },
+        portal: snapshot.portal,
+        replayed: false
+      };
+    });
+  }
+
+  getClientPortalChangeOrderIssuePackage(portalToken, changeOrderId, options = {}) {
+    const snapshot = this.getClientPortalSnapshot(portalToken);
+    const portalVariation = snapshot.job.variations.find(item => item.id === changeOrderId);
+    if (!portalVariation?.packageAvailable) throw this.portalAccessError();
+    const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(changeOrderId, snapshot.job.id);
+    const issueData = changeOrder ? fromJson(changeOrder.data_json, {}).issuePackage || {} : {};
+    if (!issueData.documentId || issueData.packageHash !== portalVariation.packageHash) throw this.portalAccessError();
+    const issuePackage = this.getChangeOrderIssuePackage(issueData.documentId, {
+      actor: options.actor || 'client_portal',
+      audit: false
+    });
+    if (issuePackage.packageHash !== issueData.packageHash || issuePackage.document.data?.sourceRecordId !== changeOrderId) {
+      throw this.portalAccessError();
+    }
+    this.audit({
+      entityType: 'change_order_issue_package',
+      entityId: issueData.documentId,
+      jobId: snapshot.job.id,
+      action: 'download_client_portal_change_order_package',
+      actor: options.actor || 'client_portal',
+      after: {
+        changeOrderId,
+        variationNumber: portalVariation.variationNumber,
+        revisionNumber: portalVariation.revisionNumber,
+        packageHash: issuePackage.packageHash
+      },
+      metadata: { portalAccessId: snapshot.portal.accessId, externalCommitments: 0 }
+    });
+    return issuePackage;
+  }
+
+  submitClientPortalChangeOrderResponse(portalToken, changeOrderId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const snapshot = this.getClientPortalSnapshot(portalToken);
+      const portalVariation = snapshot.job.variations.find(item => item.id === changeOrderId);
+      if (!portalVariation) throw this.portalAccessError();
+      const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ? AND job_id = ?').get(changeOrderId, snapshot.job.id);
+      if (!row) throw this.portalAccessError();
+      const changeOrder = this.mapChangeOrder(row);
+
+      const requestedDecision = normalizeStatus(payload.decision || payload.response, '');
+      const decision = ['accept', 'accepted', 'approve', 'approved', 'confirm', 'confirmed'].includes(requestedDecision)
+        ? 'accepted'
+        : ['request_change', 'request_changes', 'changes_requested', 'change', 'revise'].includes(requestedDecision)
+          ? 'changes_requested'
+          : ['reject', 'rejected', 'decline', 'declined'].includes(requestedDecision)
+            ? 'rejected'
+            : null;
+      if (!decision || !FORMAL_VARIATION_CLIENT_DECISIONS.has(decision)) {
+        throw ledgerInputError('invalid_variation_response', 'Variation response must accept, request changes, or reject the issued revision.');
+      }
+      const responseId = normalizeText(payload.responseId || payload.response_id, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(responseId)) {
+        throw ledgerInputError('invalid_variation_response_id', 'Variation responseId must contain 8 to 200 safe characters.');
+      }
+      const note = normalizeText(payload.note || payload.notes, '').slice(0, 2000);
+      if (decision !== 'accepted' && note.length < 5) {
+        throw ledgerInputError('variation_response_note_required', 'Describe the requested revision or rejection reason before submitting this response.');
+      }
+      const signerName = normalizeText(payload.signerName || payload.signer_name, '');
+      const authorityConfirmed = normalizeBoolean(payload.authorityConfirmed ?? payload.authority_confirmed, false);
+      if (decision === 'accepted' && (signerName.length < 2 || signerName.length > 160 || !authorityConfirmed)) {
+        throw ledgerInputError(
+          'variation_acceptance_authority_required',
+          'Acceptance requires the signer name and confirmation that the signer is authorized for this contract.'
+        );
+      }
+
+      const allResponses = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE job_id = ? AND target_type = 'change_order_client_response'
+        ORDER BY created_at DESC
+      `).all(snapshot.job.id).map(approvalRow => this.mapApproval(approvalRow))
+        .filter(approval => approval.data?.changeOrderId === changeOrderId);
+      const replay = allResponses.find(approval => approval.data?.responseId === responseId);
+      if (replay) {
+        const replayMatches = replay.data?.decision === decision
+          && (replay.data?.signerName || '') === (decision === 'accepted' ? signerName : '')
+          && Boolean(replay.data?.authorityConfirmed) === (decision === 'accepted' ? authorityConfirmed : false)
+          && (replay.data?.note || '') === note;
+        if (!replayMatches) {
+          throw ledgerInputError('variation_response_id_reused', 'This variation responseId was already used for a different decision.', { responseId, changeOrderId }, 409);
+        }
+        return {
+          changeOrder,
+          approval: replay,
+          response: { ...replay.data, status: replay.status === 'pending' ? 'pending_review' : replay.status },
+          portal: snapshot.portal,
+          replayed: true
+        };
+      }
+      if (allResponses.some(approval => approval.status === 'pending')) {
+        throw ledgerInputError('variation_response_pending_review', 'This issued variation already has a client response awaiting internal review.', { changeOrderId }, 409);
+      }
+      const pendingManualAcceptance = this.db.prepare(`
+        SELECT id FROM approvals
+        WHERE target_type = 'change_order_acceptance' AND target_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(changeOrderId);
+      if (pendingManualAcceptance) {
+        throw ledgerInputError(
+          'variation_response_pending_review',
+          'This issued variation already has acceptance evidence awaiting internal review.',
+          { changeOrderId, approvalId: pendingManualAcceptance.id },
+          409
+        );
+      }
+      this.assertFormalVariationCurrent(changeOrder);
+      if (changeOrder.status !== 'issued' || !portalVariation.responseAllowed) {
+        throw ledgerInputError('variation_response_closed', 'This formal variation revision is not open for a client response.', { changeOrderId, status: changeOrder.status }, 409);
+      }
+
+      const issueData = changeOrder.data?.issuePackage || {};
+      const issuePackage = issueData.documentId
+        ? this.getChangeOrderIssuePackage(issueData.documentId, { audit: false })
+        : null;
+      const deliveryRow = issueData.communicationId
+        ? this.db.prepare('SELECT * FROM communication_records WHERE id = ? AND job_id = ?').get(issueData.communicationId, snapshot.job.id)
+        : null;
+      const delivery = deliveryRow ? this.mapCommunication(deliveryRow) : null;
+      if (!issuePackage
+        || issuePackage.packageHash !== issueData.packageHash
+        || issuePackage.document.data?.sourceRecordId !== changeOrderId
+        || delivery?.status !== 'sent'
+        || delivery.data?.sourceRecordId !== changeOrderId
+        || delivery.data?.packageHash !== issueData.packageHash
+        || !delivery.data?.deliveryReceipt) {
+        throw ledgerInputError('variation_response_issue_chain_invalid', 'The client response no longer matches a verified issued package and delivery receipt.', { changeOrderId }, 409);
+      }
+
+      const submittedAt = nowIso();
+      const approvalId = makeId('approval');
+      const responseData = {
+        responseId,
+        changeOrderId,
+        variationNumber: changeOrder.variationNumber,
+        revisionNumber: changeOrder.revisionNumber,
+        decision,
+        requestedStatus: decision === 'accepted' ? 'accepted' : decision === 'changes_requested' ? 'changes_requested' : 'rejected_by_client',
+        signerName: decision === 'accepted' ? signerName : null,
+        authorityConfirmed: decision === 'accepted' ? authorityConfirmed : false,
+        note: note || null,
+        submittedAt,
+        portalAccessId: snapshot.portal.accessId,
+        issueReference: issueData.issueReference,
+        documentId: issueData.documentId,
+        deliveryCommunicationId: issueData.communicationId,
+        providerMessageId: issueData.providerMessageId,
+        packageHash: issueData.packageHash,
+        sourceBasisHash: issueData.sourceBasisHash,
+        formalSourceHash: changeOrder.sourceHash,
+        formalSnapshotHash: changeOrder.snapshotHash,
+        amount: changeOrder.amount,
+        taxAmount: changeOrder.taxAmount,
+        total: changeOrder.total,
+        currency: changeOrder.currency,
+        externalCommitments: 0
+      };
+      const approval = this.createApproval({
+        id: approvalId,
+        targetType: 'change_order_client_response',
+        targetId: approvalId,
+        jobId: snapshot.job.id,
+        approvalType: 'change_order_client_response_verification',
+        requestedBy: options.actor || 'client_portal',
+        summary: decision === 'accepted'
+          ? `Verify client acceptance of ${changeOrder.variationNumber} revision ${changeOrder.revisionNumber}`
+          : decision === 'changes_requested'
+            ? `Review client revision request for ${changeOrder.variationNumber} revision ${changeOrder.revisionNumber}`
+            : `Review client rejection of ${changeOrder.variationNumber} revision ${changeOrder.revisionNumber}`,
+        reason: 'Verify client authority, the exact issued package, and the retained decision before changing variation or contract status.',
+        data: responseData
+      }, { actor: options.actor || 'client_portal', audit: false });
+      this.audit({
+        entityType: 'change_order',
+        entityId: changeOrderId,
+        jobId: snapshot.job.id,
+        action: 'submit_client_variation_response',
+        actor: options.actor || 'client_portal',
+        before: changeOrder,
+        after: { ...changeOrder, clientResponseStatus: 'pending_review' },
+        metadata: {
+          approvalId: approval.id,
+          responseId,
+          decision,
+          portalAccessId: snapshot.portal.accessId,
+          packageHash: issueData.packageHash,
+          externalCommitments: 0
+        }
+      });
+      return {
+        changeOrder,
         approval,
         response: { ...responseData, status: 'pending_review' },
         portal: snapshot.portal,
@@ -48302,10 +49329,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const changeOrders = preview.filter(action => action.type === 'draft_change_order').slice(0, 3);
         for (const action of changeOrders) {
           const changeOrder = this.createChangeOrder(action.jobId, {
+            entryKey: action.idempotencyKey,
             status: 'draft',
             title: 'Cost and scope variance review',
             scopeDelta: action.message,
             amount: normalizeNumber(action.suggestedAmount, 0),
+            variationType: 'contractor_proposal',
+            initiatedBy: 'contractor',
+            cause: action.message,
+            justification: 'Retain the detected cost or scope variance as an internal formal variation draft for governed review.',
+            contractReference: 'Current accepted contract baseline',
+            noticeNotApplicableReason: 'This autonomous record is an internal draft and no client notice has been issued.',
+            scheduleImpactNarrative: 'No schedule commitment is proposed by this autonomous draft.',
+            riskImpact: 'medium',
+            riskImpactStatement: 'Review scope, cost, sequencing, and client impact before approving this draft for issue.',
+            assumptions: ['The detected variance requires operator validation against current site and contract evidence.'],
+            exclusions: ['This draft does not authorize work, client communication, procurement, price changes, or schedule commitments.'],
             notes: 'Autonomous draft change order. Robert must approve before client commitment.',
             source: 'autonomous_cycle'
           }, { actor, audit: false });
@@ -50556,6 +51595,41 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Purchase order ${purchaseOrder.id} failed issue-package verification: ${error.code || error.message}.` });
       }
     }
+    const formalVariationRows = this.db.prepare(`
+      SELECT * FROM change_orders
+      WHERE variation_number IS NOT NULL
+      ORDER BY job_id, variation_number, revision_number
+    `).all();
+    for (const row of formalVariationRows) {
+      const variation = this.mapChangeOrder(row);
+      if (!variation.integrityValid) {
+        issues.push({ severity: 'error', message: `Formal variation ${variation.variationNumber} revision ${variation.revisionNumber} failed retained snapshot verification.` });
+        continue;
+      }
+      const expectedApprovalStatus = ['draft', 'pending_approval'].includes(variation.status)
+        ? 'pending'
+        : ['approved', 'issued', 'accepted', 'changes_requested', 'rejected_by_client', 'superseded'].includes(variation.status)
+          ? 'approved'
+          : ['rejected', 'cancelled'].includes(variation.status) ? variation.status : null;
+      const approval = variation.approvalId
+        ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'change_order' AND target_id = ?").get(variation.approvalId, variation.id)
+        : null;
+      if (!approval || (expectedApprovalStatus && approval.status !== expectedApprovalStatus)) {
+        issues.push({ severity: 'error', message: `Formal variation ${variation.variationNumber} revision ${variation.revisionNumber} lacks its matching ${expectedApprovalStatus || 'retained'} approval.` });
+      }
+      if (variation.supersedesChangeOrderId) {
+        const prior = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(variation.supersedesChangeOrderId);
+        if (!prior
+          || prior.job_id !== variation.jobId
+          || prior.variation_number !== variation.variationNumber
+          || Number(prior.revision_number) !== variation.revisionNumber - 1) {
+          issues.push({ severity: 'error', message: `Formal variation ${variation.variationNumber} revision ${variation.revisionNumber} has an invalid supersession link.` });
+        }
+      }
+      if (variation.status === 'accepted' && !variation.workAuthorized) {
+        issues.push({ severity: 'error', message: `Accepted formal variation ${variation.variationNumber} revision ${variation.revisionNumber} is not backed by a current verified contract source.` });
+      }
+    }
     const changeOrdersWithPackages = this.db.prepare(`
       SELECT * FROM change_orders
       WHERE data_json LIKE '%"issuePackage"%'
@@ -50580,7 +51654,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const verifiedDelivery = communication.status === 'sent'
           && Boolean(communication.data?.deliveryReceipt?.integration)
           && Boolean(issuePackage.providerMessageId || issuePackage.deliveryReceipt);
-        if (delivered !== verifiedDelivery || (['issued', 'accepted'].includes(changeOrder.status) && !delivered)) {
+        if (delivered !== verifiedDelivery || (['issued', 'accepted', 'changes_requested', 'rejected_by_client'].includes(changeOrder.status) && !delivered)) {
           throw new Error('delivery state mismatch');
         }
         if (changeOrder.status === 'accepted') {
@@ -51225,7 +52299,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             sourceReference: line.sourceReference || ticket.evidenceReference
           }));
           const expectedPricingHash = sha256Json(conversionLineItems);
+          const formalControl = mappedChangeOrder.formalControl || {};
           const expectedRequestHash = sha256Json({
+            entryKey: mappedChangeOrder.entryKey,
             title: mappedChangeOrder.title,
             scopeDelta: mappedChangeOrder.scopeDelta,
             lineItems: conversionLineItems,
@@ -51234,6 +52310,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             scheduleDeltaDays: mappedChangeOrder.scheduleDeltaDays,
             status: 'submitted',
             notes: mappedChangeOrder.data?.notes,
+            variationType: formalControl.variationType,
+            initiatedBy: formalControl.initiatedBy,
+            cause: formalControl.cause,
+            justification: formalControl.justification,
+            contractReference: formalControl.contractReference,
+            noticeReference: formalControl.noticeReference,
+            noticeNotApplicableReason: formalControl.noticeNotApplicableReason,
+            scheduleImpactNarrative: formalControl.scheduleImpactNarrative,
+            riskImpact: formalControl.riskImpact,
+            riskImpactStatement: formalControl.riskImpactStatement,
+            assumptions: formalControl.assumptions,
+            exclusions: formalControl.exclusions,
+            evidenceReferences: formalControl.evidenceReferences,
             source: changeOrderSource
           });
           const conversion = ticket.data?.conversion;
@@ -51361,6 +52450,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvals: this.count('approvals'),
         siteVisits: this.count('site_visits'),
         changeOrders: this.count('change_orders'),
+        formalVariations: Number(this.db.prepare('SELECT COUNT(*) AS count FROM change_orders WHERE variation_number IS NOT NULL').get().count || 0),
+        formalVariationClientResponses: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE target_type = 'change_order_client_response'").get().count || 0),
         dayworkTickets: this.count('daywork_tickets'),
         fieldReports: this.count('field_reports'),
         rfiRecords: this.count('rfi_records'),
@@ -52326,10 +53417,50 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   mapChangeOrder(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const formalControl = snapshot?.formalControl || data.formalControl || null;
+    const sourceHashValid = Boolean(snapshot?.source && row.source_hash && sha256Json(snapshot.source) === row.source_hash);
+    const snapshotHashValid = Boolean(snapshotJson && row.snapshot_hash && sha256Text(snapshotJson) === row.snapshot_hash);
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === FORMAL_VARIATION_FORMAT
+      && snapshot.variationNumber === row.variation_number
+      && Number(snapshot.revisionNumber) === Number(row.revision_number)
+      && snapshot.entryFingerprint === row.entry_fingerprint
+      && sourceHashValid
+      && snapshotHashValid
+    );
+    let sourceCurrent = false;
+    if (integrityValid) {
+      try {
+        const currentSource = this.changeOrderContractSource(row.job_id, row.quote_id, {
+          forceLegacy: snapshot.source?.type === 'legacy_contract',
+          allowZeroBaseline: snapshot.source?.type === 'legacy_contract' && normalizeNumber(snapshot.source?.netContractBaseline, 0) === 0
+        });
+        sourceCurrent = sha256Json(currentSource) === row.source_hash;
+      } catch {
+        sourceCurrent = false;
+      }
+    }
     return {
       id: row.id,
       jobId: row.job_id,
       quoteId: row.quote_id,
+      variationNumber: row.variation_number || null,
+      revisionNumber: row.revision_number === null || row.revision_number === undefined ? null : Number(row.revision_number),
+      supersedesChangeOrderId: row.supersedes_change_order_id || null,
+      entryKey: row.entry_key || null,
+      entryFingerprint: row.entry_fingerprint || null,
+      sourceHash: row.source_hash || null,
+      snapshotHash: row.snapshot_hash || null,
+      snapshot,
+      formalControl,
+      integrityValid,
+      sourceCurrent,
+      workAuthorized: row.status === 'accepted' && integrityValid,
       title: row.title,
       status: row.status,
       scopeDelta: row.scope_delta,
@@ -52341,7 +53472,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       scheduleDeltaDays: normalizeNumber(row.schedule_delta_days, 0),
       approvalId: row.approval_id,
       lineItems: fromJson(row.line_items_json, []),
-      data: fromJson(row.data_json),
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -54619,6 +55750,59 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         && record.snapshotHash === data.snapshotHash
         && record.correctiveActionHash === data.correctiveActionHash
       );
+    } else if (targetType === 'change_order') {
+      const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapChangeOrder(row) : null;
+      primaryEffect = `Approve ${mapped?.variationNumber || 'formal variation'} revision ${mapped?.revisionNumber || 1}.`;
+      addEffect(`Authorize preparation of a client issue package for ${(mapped?.amount ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} net and ${mapped?.scheduleDeltaDays ?? data.scheduleDeltaDays ?? 0} schedule day(s).`);
+      if (mapped?.supersedesChangeOrderId) addEffect('Supersede the exact client-returned or rejected revision after this revision is approved.');
+      addSafeguard('Rechecks the immutable variation snapshot and current accepted contract source when approval resolves.');
+      addSafeguard('Does not issue the package, authorize changed work, alter contract value, contact the client, order materials, or commit dates.');
+      riskLevel = ['high', 'critical'].includes(mapped?.formalControl?.riskImpact) ? 'critical' : 'high';
+      preview.variationNumber = mapped?.variationNumber || data.variationNumber || null;
+      preview.revisionNumber = mapped?.revisionNumber || data.revisionNumber || null;
+      preview.title = mapped?.title || null;
+      preview.amount = mapped?.amount ?? data.amount ?? null;
+      preview.total = mapped?.total ?? data.total ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.scheduleDeltaDays = mapped?.scheduleDeltaDays ?? data.scheduleDeltaDays ?? null;
+      preview.formalControl = mapped?.formalControl || data.formalControl || null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+      preview.integrityValid = mapped?.integrityValid === true;
+      preview.sourceCurrent = mapped?.sourceCurrent === true;
+    } else if (targetType === 'change_order_client_response') {
+      const row = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(data.changeOrderId);
+      const mapped = row ? this.mapChangeOrder(row) : null;
+      const decision = normalizeStatus(data.decision, '');
+      primaryEffect = decision === 'accepted'
+        ? `Verify client acceptance of ${mapped?.variationNumber || data.variationNumber || 'the variation'} revision ${mapped?.revisionNumber || data.revisionNumber || 1}.`
+        : decision === 'changes_requested'
+          ? `Record the client revision request for ${mapped?.variationNumber || data.variationNumber || 'the variation'}.`
+          : `Record the client rejection of ${mapped?.variationNumber || data.variationNumber || 'the variation'}.`;
+      if (decision === 'accepted') {
+        addEffect(`Add ${(mapped?.amount ?? data.amount ?? 0).toFixed(2)} ${mapped?.currency || data.currency || 'EUR'} net to accepted contract value and authorize the exact accepted variation scope.`);
+      } else if (decision === 'changes_requested') {
+        addEffect('Mark this revision changes requested so a new source-bound revision can be prepared.');
+      } else {
+        addEffect('Mark this revision rejected by the client without changing contract value.');
+      }
+      addSafeguard('Rechecks the formal source, immutable snapshot, numbered package, and verified delivery receipt when approval resolves.');
+      addSafeguard('Does not send a message, order materials, commit dates, issue an invoice, collect payment, or move funds.');
+      riskLevel = 'critical';
+      preview.variationNumber = mapped?.variationNumber || data.variationNumber || null;
+      preview.revisionNumber = mapped?.revisionNumber || data.revisionNumber || null;
+      preview.title = mapped?.title || null;
+      preview.decision = decision;
+      preview.signerName = data.signerName || null;
+      preview.authorityConfirmed = data.authorityConfirmed === true;
+      preview.note = data.note || null;
+      preview.amount = mapped?.amount ?? data.amount ?? null;
+      preview.total = mapped?.total ?? data.total ?? null;
+      preview.currency = mapped?.currency || data.currency || 'EUR';
+      preview.issueReference = data.issueReference || null;
+      preview.packageHash = data.packageHash || null;
+      preview.sourceCurrent = Boolean(mapped?.integrityValid && mapped?.sourceCurrent && mapped?.sourceHash === data.formalSourceHash && mapped?.snapshotHash === data.formalSnapshotHash);
     } else if (targetType === 'change_order_acceptance') {
       const changeOrder = this.db.prepare('SELECT * FROM change_orders WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = changeOrder ? this.mapChangeOrder(changeOrder) : null;

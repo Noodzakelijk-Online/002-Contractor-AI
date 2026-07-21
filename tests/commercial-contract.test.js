@@ -127,6 +127,15 @@ test('client acceptance alone changes net contract value and preserves revisions
   ledger.resolveApproval(quote.approvalId, { status: 'approved', resolvedBy: 'internal-approver' });
   assert.equal(ledger.getJobDetail(job.id).contractValue, 500);
   assert.throws(
+    () => ledger.createChangeOrder(job.id, {
+      quoteId: quote.id,
+      title: 'Estimate-only variation must fail',
+      scopeDelta: 'This change must not bind to an estimate that the client has not accepted.',
+      lineItems: [{ description: 'Unaccepted estimate scope', quantity: 1, unitPrice: 25 }]
+    }),
+    error => error.code === 'change_order_accepted_contract_required' && error.statusCode === 409
+  );
+  assert.throws(
     () => ledger.requestQuoteAcceptance(job.id, quote.id, { evidenceReference: 'x' }),
     error => error.code === 'commercial_acceptance_evidence_required'
   );

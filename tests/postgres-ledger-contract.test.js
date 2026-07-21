@@ -1537,7 +1537,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '057_governed_risk_register');
+    assert.equal(migrations.currentVersion, '058_formal_variation_control');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1618,12 +1618,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('057_governed_risk_register'));
+  assert.deepEqual(versions, Array(4).fill('058_formal_variation_control'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 57);
+    assert.equal(Number(migrationCount.count), 58);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1961,6 +1961,11 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
       taxRate: 21,
       lineItems: [{ description: 'Additional package', quantity: 1, unitPrice: 125 }]
     }, { actor: 'postgres_commercial_test' });
+    assert.match(changeOrder.variationNumber, /^VAR-\d{4}-\d{6}$/);
+    assert.equal(changeOrder.revisionNumber, 1);
+    assert.equal(changeOrder.integrityValid, true);
+    assert.equal(changeOrder.sourceCurrent, true);
+    assert.equal(changeOrder.workAuthorized, false);
     ledger.resolveApproval(changeOrder.approvalId, { status: 'approved', resolvedBy: 'postgres_approver' });
     assert.equal(ledger.getJobDetail(job.id).contractValue, 1000);
     const changePackage = ledger.prepareChangeOrderIssuePackage(job.id, changeOrder.id, {}, { actor: 'postgres_commercial_test' });
@@ -1982,6 +1987,7 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
     assert.equal(detail.contractValue, 1125);
     assert.equal(detail.quotes.find(item => item.id === quote.id).status, 'accepted');
     assert.equal(detail.changeOrders.find(item => item.id === changeOrder.id).status, 'accepted');
+    assert.equal(detail.changeOrders.find(item => item.id === changeOrder.id).workAuthorized, true);
     assert.ok(detail.audit.some(event => event.action === 'accept_change_order_contract'));
 
     const invoice = ledger.createInvoice(job.id, {
@@ -2262,7 +2268,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2665,7 +2671,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2773,7 +2779,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2872,7 +2878,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2959,7 +2965,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
   } finally {
     ledger?.close();
   }
@@ -3064,7 +3070,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -3130,7 +3136,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
   } finally {
     ledger.close();
   }
@@ -3185,7 +3191,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+    assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
   } finally {
     ledger.close();
   }

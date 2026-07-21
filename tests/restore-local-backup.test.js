@@ -172,6 +172,20 @@ test('backup verification rejects a migration 057 ledger with missing risk-regis
   );
 });
 
+test('backup verification rejects a migration 058 ledger with missing formal-variation constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-formal-variation-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Formal variation schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_change_orders_variation_revision');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /formal-variation constraints are incomplete: idx_change_orders_variation_revision/i
+  );
+});
+
 test('backup verification rejects a migration 028 ledger with missing bid-commitment constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-commitment-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

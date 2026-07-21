@@ -285,12 +285,12 @@ test('migration 057 survives restart and diagnostics verify retained scope revis
   });
   const { job } = createJob(ledger);
   const revision = approveScope(ledger, job.id, 'commercial-scope-restart-0001');
-  assert.equal(ledger.migrationStatus().currentVersion, '057_governed_risk_register');
+  assert.equal(ledger.migrationStatus().currentVersion, '058_formal_variation_control');
   assert.equal(ledger.diagnose().valid, true);
   ledger.close();
 
   restarted = new ContractorOperatingLedger({ dbFile });
-  assert.equal(restarted.migrationStatus().currentVersion, '057_governed_risk_register');
+  assert.equal(restarted.migrationStatus().currentVersion, '058_formal_variation_control');
   assert.equal(restarted.getCommercialScopeRevision(revision.id).integrityValid, true);
   assert.equal(restarted.commercialScopeForJob(job.id).ready, true);
   assert.equal(restarted.diagnose().counts.commercialScopeRevisions, 1);
