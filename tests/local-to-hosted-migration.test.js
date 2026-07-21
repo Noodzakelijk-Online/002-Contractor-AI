@@ -1243,7 +1243,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPricingBasis.stale, false);
     const migratedQuote = detail.quotes.find(item => item.id === fixture.convertedTakeoff.quote.id);
     assert.equal(migratedQuote.pricingModel, 'fixed_price');
-    assert.equal(migratedQuote.commercialScope.id, fixture.commercialScope.id);
+    assert.equal(migratedQuote.commercialScope.revisionId, fixture.commercialScope.id);
     assert.equal(migratedQuote.commercialScopeIntegrityValid, true);
     assert.equal(migratedQuote.commercialScopeCurrent, true);
     assert.equal(migratedQuote.pricingBasisIntegrityValid, true);

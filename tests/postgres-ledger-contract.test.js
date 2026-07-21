@@ -1617,7 +1617,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 55);
+    assert.equal(Number(migrationCount.count), 56);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -1888,9 +1888,11 @@ test('PostgreSQL commercial acceptance preserves net contract accounting parity'
       lineItems: [{ description: 'Initial allowance', quantity: 1, unitPrice: 400 }],
       assignAutomatically: false
     }, { actor: 'postgres_commercial_test' });
+    const commercialScope = approveCommercialScope(ledger, job.id, marker, 'postgres_commercial_test');
     const quote = ledger.createQuote(job.id, {
       taxRate: 21,
       subtotal: 9999,
+      commercialScopeRevisionId: commercialScope.id,
       lineItems: [{ description: 'Accepted scope', quantity: 2, unitPrice: 500 }]
     }, { actor: 'postgres_commercial_test' });
     assert.equal(quote.subtotal, 1000);
