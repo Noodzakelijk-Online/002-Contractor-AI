@@ -1390,7 +1390,7 @@ function CommercialControl({
 }) {
   const quotes = job.quotes || EMPTY_LIST
   const changeOrders = job.changeOrders || EMPTY_LIST
-  const pricingBasis = job.pricingBasis || {}
+  const pricingBasis = useMemo(() => job.pricingBasis || {}, [job.pricingBasis])
   const currentPricingBasis = pricingBasis.currentDecision || null
   const pricingBasisReady = Boolean(currentPricingBasis && pricingBasis.stale !== true)
   const pendingApprovals = job.approvals?.filter((approval) => approval.status === 'pending') || EMPTY_LIST
@@ -1413,7 +1413,7 @@ function CommercialControl({
 
   useEffect(() => {
     if (!editingPricingBasis) setPricingDraft(pricingBasisDraft(pricingBasis))
-  }, [editingPricingBasis, job.id, currentPricingBasis?.id, pricingBasis.stale])
+  }, [editingPricingBasis, job.id, currentPricingBasis?.id, pricingBasis, pricingBasis.stale])
 
   function openPricingBasisEditor() {
     setPricingDraft(pricingBasisDraft(pricingBasis))
