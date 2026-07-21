@@ -789,7 +789,8 @@ function emptyTakeoffDraft(job = null) {
   }
 }
 
-function emptyTakeoffItemDraft(item = null) {
+function emptyTakeoffItemDraft(item = null, takeoff = null) {
+  const fallbackPackage = takeoff?.items?.[takeoff.items.length - 1] || null
   return {
     id: item?.id || '',
     description: item?.description || '',
@@ -805,6 +806,8 @@ function emptyTakeoffItemDraft(item = null) {
     unitCost: item ? String(item.unitCost ?? 0) : '',
     unitPrice: item ? String(item.unitPrice ?? 0) : '',
     costCode: item?.costCode || 'estimate',
+    wbsCode: item?.wbsCode || fallbackPackage?.wbsCode || '01',
+    workPackage: item?.workPackage || fallbackPackage?.workPackage || 'General scope',
     sourceReference: item?.sourceReference || '',
   }
 }
@@ -3081,6 +3084,8 @@ function App() {
   const takeoffPreviewSell = roundMoney(takeoffPreviewQuantity * (Number(takeoffItemDraft.unitPrice) || 0))
   const takeoffItemDraftReady =
     takeoffItemDraft.description.trim().length >= 2 &&
+    /^[A-Za-z0-9][A-Za-z0-9-]{0,11}(?:\.[A-Za-z0-9][A-Za-z0-9-]{0,11}){0,7}$/.test(takeoffItemDraft.wbsCode.trim()) &&
+    takeoffItemDraft.workPackage.trim().length >= 2 &&
     takeoffPreviewQuantity > 0 &&
     Number.isFinite(Number(takeoffItemDraft.unitCost)) &&
     Number(takeoffItemDraft.unitCost) >= 0 &&
@@ -5768,7 +5773,7 @@ function App() {
   function openTakeoffItem(takeoff, item = null) {
     commercialDialogReturnFocusRef.current = false
     commercialDialogOpenerRef.current = document.activeElement
-    setTakeoffItemDraft(emptyTakeoffItemDraft(item))
+    setTakeoffItemDraft(emptyTakeoffItemDraft(item, takeoff))
     setTakeoffDialog({ mode: item ? 'edit_item' : 'add_item', takeoff, item })
   }
 
@@ -5851,6 +5856,8 @@ function App() {
           unitCost: Number(takeoffItemDraft.unitCost) || 0,
           unitPrice: Number(takeoffItemDraft.unitPrice) || 0,
           costCode: takeoffItemDraft.costCode.trim() || 'estimate',
+          wbsCode: takeoffItemDraft.wbsCode.trim().toUpperCase(),
+          workPackage: takeoffItemDraft.workPackage.trim(),
           sourceReference: takeoffItemDraft.sourceReference.trim() || null,
         }),
       })
@@ -14432,6 +14439,27 @@ function App() {
                     <input maxLength="80" value={takeoffItemDraft.costCode} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, costCode: event.target.value })} />
                   </label>
                   <label>
+                    WBS code
+                    <input
+                      required
+                      maxLength="80"
+                      pattern="[A-Za-z0-9][A-Za-z0-9-]{0,11}(\.[A-Za-z0-9][A-Za-z0-9-]{0,11}){0,7}"
+                      title="Use one to eight dot-separated work-breakdown segments, for example 01.20."
+                      value={takeoffItemDraft.wbsCode}
+                      onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, wbsCode: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Work package
+                    <input
+                      required
+                      minLength="2"
+                      maxLength="120"
+                      value={takeoffItemDraft.workPackage}
+                      onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, workPackage: event.target.value })}
+                    />
+                  </label>
+                  <label>
                     Drawing / source reference
                     <input maxLength="240" value={takeoffItemDraft.sourceReference} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, sourceReference: event.target.value })} />
                   </label>
@@ -14511,7 +14539,8 @@ function App() {
             </div>
             <form onSubmit={convertTakeoff}>
               <div className="takeoff-modal-body">
-                <div className="takeoff-preview">
+                <div className="takeoff-preview takeoff-convert-preview">
+                  <div><span>Work packages</span><strong>{takeoffDialog.takeoff.workBreakdown?.packageCount || 0}</strong></div>
                   <div><span>Measurements</span><strong>{takeoffDialog.takeoff.itemCount}</strong></div>
                   <div><span>Cost</span><strong>{currency.format(takeoffDialog.takeoff.totalCost || 0)}</strong></div>
                   <div><span>Estimate net</span><strong>{currency.format(takeoffDialog.takeoff.subtotal || 0)}</strong></div>
@@ -14526,7 +14555,7 @@ function App() {
                     <textarea maxLength="4000" value={takeoffConversionDraft.notes} onChange={(event) => setTakeoffConversionDraft({ ...takeoffConversionDraft, notes: event.target.value })} placeholder="Add reviewer context, exclusions, or estimate assumptions." />
                   </label>
                 </div>
-                <p className="workflow-note">Conversion seals this sheet with a SHA-256 snapshot and makes its measurements read-only. It creates an internal quote approval only.</p>
+                <p className="workflow-note">Conversion seals the WBS, measurements, and package rollups with a SHA-256 snapshot and makes them read-only. It creates an internal quote approval only.</p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>

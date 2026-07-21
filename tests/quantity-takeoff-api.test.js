@@ -88,11 +88,16 @@ test('takeoff API enforces roles and converts retained measurements into one int
       unitCost: 22,
       unitPrice: 38,
       costCode: 'FIN-220',
+      wbsCode: '03.20',
+      workPackage: 'Floor finishes',
       sourceReference: 'Drawing A-101'
     })
   });
   assert.equal(added.response.status, 201, JSON.stringify(added.body));
   assert.equal(added.body.item.quantity, 26.4);
+  assert.equal(added.body.item.wbsCode, '03.20');
+  assert.equal(added.body.takeoff.workBreakdown.packageCount, 1);
+  assert.equal(added.body.takeoff.workBreakdown.nodes[0].name, 'Floor finishes');
   assert.equal(added.body.takeoff.subtotal, 1003.2);
 
   const converted = await request(baseUrl, `/api/ledger/jobs/${jobId}/takeoffs/${takeoffId}/convert`, tokens.office_operator, {
@@ -103,6 +108,11 @@ test('takeoff API enforces roles and converts retained measurements into one int
   assert.equal(converted.body.takeoff.status, 'converted');
   assert.equal(converted.body.takeoff.integrityValid, true);
   assert.equal(converted.body.quote.status, 'draft');
+  assert.equal(converted.body.quote.data.source.workBreakdownHash, converted.body.takeoff.workBreakdown.hash);
+  assert.deepEqual(
+    converted.body.quote.lineItems.map(item => ({ wbsCode: item.wbsCode, workPackage: item.workPackage })),
+    [{ wbsCode: '03.20', workPackage: 'Floor finishes' }]
+  );
   assert.ok(converted.body.quote.approvalId);
   assert.equal(converted.body.externalCommitments, 0);
   assert.equal(converted.body.job.contractValue, 0);
@@ -122,5 +132,5 @@ test('takeoff API enforces roles and converts retained measurements into one int
 
   const exported = await request(baseUrl, '/api/operations/export', tokens.owner);
   assert.ok(exported.body.takeoffSheets.some(item => item.id === takeoffId));
-  assert.ok(exported.body.takeoffItems.some(item => item.takeoffId === takeoffId));
+  assert.ok(exported.body.takeoffItems.some(item => item.takeoffId === takeoffId && item.wbsCode === '03.20' && item.workPackage === 'Floor finishes'));
 });

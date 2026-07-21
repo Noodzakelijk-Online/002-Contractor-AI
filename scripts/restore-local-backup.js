@@ -984,6 +984,16 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup governed site-survey constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('053_work_breakdown_takeoffs')) {
+        const takeoffItemColumns = new Set(database.prepare('PRAGMA table_info(takeoff_items)').all().map(row => row.name));
+        for (const column of ['wbs_code', 'work_package']) {
+          if (!takeoffItemColumns.has(column)) throw new Error(`Backup WBS takeoff schema is incomplete: takeoff_items.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        if (!retainedIndexes.has('idx_takeoff_items_wbs')) {
+          throw new Error('Backup WBS takeoff constraints are incomplete: idx_takeoff_items_wbs.');
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

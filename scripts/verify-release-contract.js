@@ -19,6 +19,7 @@ const REQUIRED_PATHS = [
   'server.js',
   'scripts/migrate-local-backup-to-hosted.js',
   'scripts/restore-local-backup.js',
+  'scripts/run-node-tests.js',
   'scripts/verify-container-runtime.js'
 ];
 
@@ -106,6 +107,16 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   for (const script of ['build', 'lint', 'migrate:hosted', 'restore:local', 'test', 'test:browser', 'test:container', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
+  for (const script of ['pretest', 'test']) {
+    if (!packageJson.scripts?.[script]?.startsWith('node scripts/run-node-tests.js ')) {
+      failures.push(`package.json ${script} must isolate and clean temporary Node test state.`);
+    }
+  }
+
+  const nodeTestRunner = fs.readFileSync(path.join(root, 'scripts', 'run-node-tests.js'), 'utf8');
+  for (const cleanupRequirement of ['fs.mkdtempSync', 'TEMP: runtimeDirectory', 'TMP: runtimeDirectory', 'TMPDIR: runtimeDirectory', 'cleanupRuntimeDirectory(runtimeDirectory)']) {
+    if (!nodeTestRunner.includes(cleanupRequirement)) failures.push(`Node test runner is missing temporary-state cleanup: ${cleanupRequirement}`);
+  }
 
   const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
   for (const liveFacade of ["app.get('/api/dashboard'", "app.post('/api/upload'"]) {
@@ -163,6 +174,15 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!ledgerSource.includes("version: '052_governed_site_surveys'")) {
     failures.push('Canonical governed site-survey migration is missing.');
+  }
+  if (!ledgerSource.includes("version: '053_work_breakdown_takeoffs'")) {
+    failures.push('Canonical WBS takeoff migration is missing.');
+  }
+  if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
+    failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
+  }
+  if (!serverSource.includes("takeoffEstimateTrace: 'snapshot_and_work_breakdown_hash'")) {
+    failures.push('Quantity takeoff capability does not bind estimates to the WBS hash.');
   }
   if (!serverSource.includes("siteSurveyApproval: 'source_current_approval_gated'")) {
     failures.push('Site-survey capability does not declare source-current approval semantics.');

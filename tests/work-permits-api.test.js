@@ -209,7 +209,7 @@ test('work permit API scopes field identity and keeps activation, suspension, an
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '052_governed_site_surveys');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '053_work_breakdown_takeoffs');
   assert.equal(diagnostics.body.diagnostics.counts.governedWorkPermits, 1);
   assert.equal(diagnostics.body.diagnostics.counts.workPermitAttendees, 2);
 

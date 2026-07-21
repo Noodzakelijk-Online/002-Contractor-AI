@@ -18,8 +18,8 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
   const takeoffControl = workspace.getByTestId('takeoff-control');
-  await expect(takeoffControl.getByRole('heading', { name: 'Quantity takeoff' })).toBeVisible();
-  await expect(takeoffControl.getByText('No quantity takeoffs')).toBeVisible();
+  await expect(takeoffControl.getByRole('heading', { name: 'WBS & quantity takeoff' })).toBeVisible();
+  await expect(takeoffControl.getByText('No WBS or quantity takeoffs')).toBeVisible();
 
   await takeoffControl.getByRole('button', { name: 'New takeoff' }).click();
   const createModal = page.getByTestId('takeoff-create-modal');
@@ -43,6 +43,8 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await itemModal.getByLabel('Unit cost').fill('20');
   await itemModal.getByLabel('Unit sell price').fill('35');
   await itemModal.getByLabel('Cost code').fill('FIN-220');
+  await itemModal.getByLabel('WBS code').fill('03.20');
+  await itemModal.getByLabel('Work package').fill('Floor finishes');
   await itemModal.getByLabel('Drawing / source reference').fill('A-101 P02');
   await expect(itemModal.getByLabel('Calculated measurement preview')).toContainText('22 m2');
   await expect(itemModal.getByLabel('Calculated measurement preview')).toContainText('€ 770,00');
@@ -50,6 +52,11 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(page.getByText('Takeoff measurement calculated and retained.')).toBeVisible();
   await expect(sheet.getByText('22 m2')).toBeVisible();
   await expect(sheet.getByText('A-101 P02', { exact: false })).toBeVisible();
+  const workBreakdown = sheet.getByRole('table', { name: 'Ground floor measured scope work breakdown' });
+  await expect(workBreakdown).toContainText('03.20');
+  await expect(workBreakdown).toContainText('Floor finishes');
+  await expect(workBreakdown).toContainText('770,00');
+  await expect(sheet.getByText('03.20 / Floor finishes')).toBeVisible();
 
   await sheet.getByRole('button', { name: 'Edit Ceramic floor tiles' }).click();
   itemModal = page.getByTestId('takeoff-item-modal');
@@ -81,11 +88,19 @@ test('operator measures scope and seals it into one approval-gated estimate', as
     integrityValid: true,
     data: { externalCommitments: 0 }
   });
-  expect(retained.items[0]).toMatchObject({ quantity: 27.5, unit: 'm2', totalPrice: 962.5 });
+  expect(retained.workBreakdown).toMatchObject({ format: 'contractor-ai-wbs/v1', packageCount: 1, valid: true, totalPrice: 962.5 });
+  expect(retained.items[0]).toMatchObject({ quantity: 27.5, unit: 'm2', totalPrice: 962.5, wbsCode: '03.20', workPackage: 'Floor finishes' });
   const quote = detail.job.quotes.find(item => item.id === retained.quoteId);
   expect(quote.status).toBe('draft');
   expect(quote.approvalId).toBeTruthy();
-  expect(quote.data.source).toMatchObject({ type: 'quantity_takeoff', id: retained.id, snapshotHash: retained.snapshotHash });
+  expect(quote.data.source).toMatchObject({
+    type: 'quantity_takeoff',
+    id: retained.id,
+    snapshotHash: retained.snapshotHash,
+    workBreakdownFormat: 'contractor-ai-wbs/v1',
+    workBreakdownHash: retained.workBreakdown.hash
+  });
+  expect(quote.lineItems[0]).toMatchObject({ wbsCode: '03.20', workPackage: 'Floor finishes' });
   expect(detail.job.contractValue).toBe(0);
 
   await page.setViewportSize({ width: 390, height: 844 });

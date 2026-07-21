@@ -428,6 +428,7 @@ const BID_PARTICIPANT_STATUSES = new Set([
 const TAKEOFF_STATUSES = new Set(['draft', 'converted', 'cancelled']);
 const TAKEOFF_MEASUREMENT_TYPES = new Set(['count', 'linear', 'area', 'volume', 'manual']);
 const TAKEOFF_CATEGORIES = new Set(['material', 'labor', 'equipment', 'subcontract', 'other']);
+const TAKEOFF_WBS_FORMAT = 'contractor-ai-wbs/v1';
 const DAYWORK_TICKET_FORMAT = 'contractor-ai-daywork-ticket/v1';
 const DAYWORK_LINE_TYPES = new Set(['labor', 'material', 'equipment', 'subcontract', 'other']);
 const NONCONFORMANCE_FORMAT = 'contractor-ai-nonconformance/v1';
@@ -494,6 +495,88 @@ function takeoffNumber(value, label, options = {}) {
   return number;
 }
 
+function normalizeTakeoffWbsCode(value) {
+  const code = normalizeText(value, '01').toUpperCase();
+  if (code.length > 80 || !/^[A-Z0-9][A-Z0-9-]{0,11}(?:\.[A-Z0-9][A-Z0-9-]{0,11}){0,7}$/.test(code)) {
+    throw ledgerInputError(
+      'takeoff_wbs_code_invalid',
+      'WBS code must contain one to eight dot-separated alphanumeric segments; hyphens are allowed within a segment.'
+    );
+  }
+  return code;
+}
+
+function normalizeTakeoffWorkPackage(value) {
+  const workPackage = normalizeText(value, 'General scope');
+  if (workPackage.length < 2 || workPackage.length > 120) {
+    throw ledgerInputError('takeoff_work_package_invalid', 'Work package must be between 2 and 120 characters.');
+  }
+  return workPackage;
+}
+
+function buildTakeoffWorkBreakdown(items = []) {
+  const packages = new Map();
+  const conflicts = [];
+  const invalidItemIds = [];
+  for (const item of items) {
+    let code;
+    let name;
+    try {
+      code = normalizeTakeoffWbsCode(item.wbsCode || item.wbs_code);
+      name = normalizeTakeoffWorkPackage(item.workPackage || item.work_package);
+    } catch {
+      invalidItemIds.push(item.id || null);
+      code = normalizeText(item.wbsCode || item.wbs_code, 'INVALID').toUpperCase();
+      name = normalizeText(item.workPackage || item.work_package, 'Invalid work package');
+    }
+    const current = packages.get(code) || {
+      code,
+      name,
+      parentCode: code.includes('.') ? code.slice(0, code.lastIndexOf('.')) : null,
+      depth: code.split('.').length,
+      itemIds: [],
+      itemCount: 0,
+      totalCost: 0,
+      totalPrice: 0
+    };
+    if (current.name !== name) {
+      conflicts.push({ code, retainedName: current.name, conflictingName: name, itemId: item.id || null });
+    }
+    current.itemIds.push(item.id);
+    current.itemCount += 1;
+    current.totalCost = roundMoney(current.totalCost + normalizeNumber(item.totalCost ?? item.total_cost, 0));
+    current.totalPrice = roundMoney(current.totalPrice + normalizeNumber(item.totalPrice ?? item.total_price, 0));
+    packages.set(code, current);
+  }
+  const nodes = [...packages.values()]
+    .sort((left, right) => left.code < right.code ? -1 : left.code > right.code ? 1 : 0)
+    .map(node => {
+      const marginAmount = roundMoney(node.totalPrice - node.totalCost);
+      return {
+        ...node,
+        marginAmount,
+        marginPercent: node.totalPrice > 0 ? roundQuantity((marginAmount / node.totalPrice) * 100) : 0
+      };
+    });
+  const totalCost = roundMoney(nodes.reduce((sum, node) => sum + node.totalCost, 0));
+  const totalPrice = roundMoney(nodes.reduce((sum, node) => sum + node.totalPrice, 0));
+  const result = {
+    format: TAKEOFF_WBS_FORMAT,
+    packageCount: nodes.length,
+    rootCount: new Set(nodes.map(node => node.code.split('.')[0])).size,
+    maxDepth: nodes.reduce((maximum, node) => Math.max(maximum, node.depth), 0),
+    itemCount: nodes.reduce((sum, node) => sum + node.itemCount, 0),
+    totalCost,
+    totalPrice,
+    marginAmount: roundMoney(totalPrice - totalCost),
+    valid: conflicts.length === 0 && invalidItemIds.length === 0,
+    conflicts,
+    invalidItemIds,
+    nodes
+  };
+  return { ...result, hash: sha256Json(result) };
+}
+
 function normalizeTakeoffItem(payload = {}) {
   const description = normalizeText(payload.description || payload.name, '');
   if (description.length < 2 || description.length > 240) {
@@ -543,6 +626,8 @@ function normalizeTakeoffItem(payload = {}) {
   const defaultUnit = { count: 'ea', linear: 'm', area: 'm2', volume: 'm3', manual: 'unit' }[measurementType];
   const unit = normalizeText(payload.unit, defaultUnit);
   const costCode = normalizeText(payload.costCode || payload.cost_code, 'estimate');
+  const wbsCode = normalizeTakeoffWbsCode(payload.wbsCode || payload.wbs_code);
+  const workPackage = normalizeTakeoffWorkPackage(payload.workPackage || payload.work_package);
   const sourceReference = normalizeText(payload.sourceReference || payload.source_reference, '');
   if (unit.length < 1 || unit.length > 24) throw ledgerInputError('takeoff_unit_invalid', 'Takeoff unit must be between 1 and 24 characters.');
   if (costCode.length > 80) throw ledgerInputError('takeoff_cost_code_invalid', 'Takeoff cost code must be 80 characters or fewer.');
@@ -563,6 +648,8 @@ function normalizeTakeoffItem(payload = {}) {
     totalCost,
     totalPrice,
     costCode: costCode || 'estimate',
+    wbsCode,
+    workPackage,
     sourceReference: sourceReference || null
   };
 }
@@ -1529,11 +1616,15 @@ function normalizeCommercialLineItems(rawItems, {
     if (costCode.length > 80) {
       throw ledgerInputError('commercial_line_item_invalid', `Line item ${index + 1} cost code is too long.`);
     }
+    const hasWbs = item.wbsCode !== undefined || item.wbs_code !== undefined || item.workPackage !== undefined || item.work_package !== undefined;
+    const wbsCode = hasWbs ? normalizeTakeoffWbsCode(item.wbsCode || item.wbs_code) : null;
+    const workPackage = hasWbs ? normalizeTakeoffWorkPackage(item.workPackage || item.work_package) : null;
     return {
       description,
       quantity,
       unitPrice: roundMoney(unitPrice),
-      costCode
+      costCode,
+      ...(hasWbs ? { wbsCode, workPackage } : {})
     };
   });
 }
@@ -4199,6 +4290,23 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_opportunity_site_survey_approval
           ON opportunity_site_surveys(approval_id, status) WHERE approval_id IS NOT NULL;
       `);
+    }
+  },
+  {
+    version: '053_work_breakdown_takeoffs',
+    description: 'Classify measured scope into retained WBS work packages with server-derived commercial rollups.',
+    apply(db) {
+      db.exec(`
+        ALTER TABLE takeoff_items ADD COLUMN wbs_code TEXT NOT NULL DEFAULT '01';
+        ALTER TABLE takeoff_items ADD COLUMN work_package TEXT NOT NULL DEFAULT 'General scope';
+        CREATE INDEX IF NOT EXISTS idx_takeoff_items_wbs
+          ON takeoff_items(takeoff_id, wbs_code, sequence_number);
+      `);
+      const editableRows = db.prepare("SELECT id, data_json FROM takeoff_sheets WHERE status <> 'converted'").all();
+      const update = db.prepare('UPDATE takeoff_sheets SET data_json = ? WHERE id = ?');
+      for (const row of editableRows) {
+        update.run(toJson({ ...fromJson(row.data_json, {}), workBreakdownFormat: TAKEOFF_WBS_FORMAT }), row.id);
+      }
     }
   }
 ];
@@ -12620,10 +12728,33 @@ class ContractorOperatingLedger {
     return { totalCost, subtotal, taxAmount, total };
   }
 
+  assertTakeoffWbsPackage(takeoffId, normalized, excludeItemId = null) {
+    const conflict = excludeItemId
+      ? this.db.prepare(`
+          SELECT id, work_package FROM takeoff_items
+          WHERE takeoff_id = ? AND wbs_code = ? AND id <> ? AND work_package <> ?
+          LIMIT 1
+        `).get(takeoffId, normalized.wbsCode, excludeItemId, normalized.workPackage)
+      : this.db.prepare(`
+          SELECT id, work_package FROM takeoff_items
+          WHERE takeoff_id = ? AND wbs_code = ? AND work_package <> ?
+          LIMIT 1
+        `).get(takeoffId, normalized.wbsCode, normalized.workPackage);
+    if (conflict) {
+      throw ledgerInputError(
+        'takeoff_wbs_package_conflict',
+        `WBS code ${normalized.wbsCode} is already assigned to work package ${conflict.work_package}.`,
+        { code: normalized.wbsCode, retainedName: conflict.work_package, proposedName: normalized.workPackage },
+        409
+      );
+    }
+  }
+
   insertTakeoffItem(takeoffId, payload = {}) {
     const itemCount = Number(this.db.prepare('SELECT COUNT(*) AS count FROM takeoff_items WHERE takeoff_id = ?').get(takeoffId).count || 0);
     if (itemCount >= 50) throw ledgerInputError('takeoff_item_limit', 'A takeoff can retain at most 50 measurement rows.');
     const normalized = normalizeTakeoffItem(payload);
+    this.assertTakeoffWbsPackage(takeoffId, normalized);
     const sequence = Number(this.db.prepare('SELECT COALESCE(MAX(sequence_number), 0) AS value FROM takeoff_items WHERE takeoff_id = ?').get(takeoffId).value || 0) + 1;
     const id = makeId('takeoff_item');
     const timestamp = nowIso();
@@ -12631,14 +12762,15 @@ class ContractorOperatingLedger {
       INSERT INTO takeoff_items (
         id, takeoff_id, sequence_number, category, description, measurement_type, unit,
         count_value, length_value, width_value, height_value, waste_percent, quantity,
-        unit_cost, unit_price, total_cost, total_price, cost_code, source_reference,
+        unit_cost, unit_price, total_cost, total_price, cost_code, wbs_code, work_package, source_reference,
         data_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, takeoffId, sequence, normalized.category, normalized.description, normalized.measurementType, normalized.unit,
       normalized.count, normalized.length, normalized.width, normalized.height, normalized.wastePercent, normalized.quantity,
       normalized.unitCost, normalized.unitPrice, normalized.totalCost, normalized.totalPrice, normalized.costCode,
-      normalized.sourceReference, toJson({ calculation: 'server_derived' }), timestamp, timestamp
+      normalized.wbsCode, normalized.workPackage, normalized.sourceReference,
+      toJson({ calculation: 'server_derived', workBreakdownFormat: TAKEOFF_WBS_FORMAT }), timestamp, timestamp
     );
     return this.mapTakeoffItem(this.db.prepare('SELECT * FROM takeoff_items WHERE id = ?').get(id));
   }
@@ -12665,7 +12797,12 @@ class ContractorOperatingLedger {
         ) VALUES (?, ?, ?, 'draft', ?, ?, 0, 0, 0, 0, ?, ?, ?)
       `).run(
         id, jobId, title, currency, taxRate,
-        toJson({ notes: notes || null, calculation: 'server_derived', externalCommitments: 0 }),
+        toJson({
+          notes: notes || null,
+          calculation: 'server_derived',
+          workBreakdownFormat: TAKEOFF_WBS_FORMAT,
+          externalCommitments: 0
+        }),
         timestamp, timestamp
       );
       for (const item of items) this.insertTakeoffItem(id, item);
@@ -12733,18 +12870,21 @@ class ContractorOperatingLedger {
       if (!row) throw ledgerInputError('takeoff_item_not_found', 'Takeoff measurement was not found.', null, 404);
       const before = this.mapTakeoffItem(row);
       const normalized = normalizeTakeoffItem({ ...before, ...payload });
+      this.assertTakeoffWbsPackage(takeoffId, normalized, itemId);
       this.db.prepare(`
         UPDATE takeoff_items SET
           category = ?, description = ?, measurement_type = ?, unit = ?, count_value = ?,
           length_value = ?, width_value = ?, height_value = ?, waste_percent = ?, quantity = ?,
           unit_cost = ?, unit_price = ?, total_cost = ?, total_price = ?, cost_code = ?,
-          source_reference = ?, data_json = ?, updated_at = ?
+          wbs_code = ?, work_package = ?, source_reference = ?, data_json = ?, updated_at = ?
         WHERE id = ? AND takeoff_id = ?
       `).run(
         normalized.category, normalized.description, normalized.measurementType, normalized.unit, normalized.count,
         normalized.length, normalized.width, normalized.height, normalized.wastePercent, normalized.quantity,
         normalized.unitCost, normalized.unitPrice, normalized.totalCost, normalized.totalPrice, normalized.costCode,
-        normalized.sourceReference, toJson({ ...before.data, calculation: 'server_derived' }), nowIso(), itemId, takeoffId
+        normalized.wbsCode, normalized.workPackage, normalized.sourceReference,
+        toJson({ ...before.data, calculation: 'server_derived', workBreakdownFormat: TAKEOFF_WBS_FORMAT }),
+        nowIso(), itemId, takeoffId
       );
       this.refreshTakeoffTotals(takeoffId);
       const item = this.mapTakeoffItem(this.db.prepare('SELECT * FROM takeoff_items WHERE id = ?').get(itemId));
@@ -12771,6 +12911,7 @@ class ContractorOperatingLedger {
   }
 
   takeoffSnapshot(takeoff) {
+    const includeWorkBreakdown = takeoff.data?.workBreakdownFormat === TAKEOFF_WBS_FORMAT;
     return {
       id: takeoff.id,
       jobId: takeoff.jobId,
@@ -12799,6 +12940,7 @@ class ContractorOperatingLedger {
         totalCost: item.totalCost,
         totalPrice: item.totalPrice,
         costCode: item.costCode,
+        ...(includeWorkBreakdown ? { wbsCode: item.wbsCode, workPackage: item.workPackage } : {}),
         sourceReference: item.sourceReference
       }))
     };
@@ -12809,6 +12951,7 @@ class ContractorOperatingLedger {
     const takeoff = this.mapTakeoff(row);
     takeoff.items = this.db.prepare('SELECT * FROM takeoff_items WHERE takeoff_id = ? ORDER BY sequence_number').all(takeoffId).map(item => this.mapTakeoffItem(item));
     takeoff.itemCount = takeoff.items.length;
+    takeoff.workBreakdown = buildTakeoffWorkBreakdown(takeoff.items);
     takeoff.marginAmount = roundMoney(takeoff.subtotal - takeoff.totalCost);
     takeoff.marginPercent = takeoff.subtotal > 0 ? roundQuantity((takeoff.marginAmount / takeoff.subtotal) * 100) : 0;
     takeoff.integrityValid = takeoff.snapshotHash ? sha256Json(this.takeoffSnapshot(takeoff)) === takeoff.snapshotHash : null;
@@ -12843,31 +12986,51 @@ class ContractorOperatingLedger {
         const quote = row.quote_id ? this.mapQuote(this.db.prepare('SELECT * FROM quotes WHERE id = ? AND job_id = ?').get(row.quote_id, jobId)) : null;
         if (!quote) throw ledgerInputError('takeoff_quote_missing', 'Converted takeoff no longer references its estimate.', null, 409);
         const source = quote.data?.source;
-        if (source?.type !== 'quantity_takeoff' || source?.id !== takeoffId || source?.snapshotHash !== current.snapshotHash) {
+        const requiresWorkBreakdownTrace = current.data?.workBreakdownFormat === TAKEOFF_WBS_FORMAT;
+        if (
+          source?.type !== 'quantity_takeoff'
+          || source?.id !== takeoffId
+          || source?.snapshotHash !== current.snapshotHash
+          || (requiresWorkBreakdownTrace && source?.workBreakdownHash !== current.workBreakdown.hash)
+        ) {
           throw ledgerInputError('takeoff_quote_trace_invalid', 'Converted takeoff estimate trace no longer matches the retained snapshot.', null, 409);
         }
         return { replayed: true, takeoff: current, quote, externalCommitments: 0 };
       }
       this.assertTakeoffEditable(row);
       if (!current.items.length) throw ledgerInputError('takeoff_items_required', 'Add at least one measurement before preparing an estimate.');
+      if (!current.workBreakdown.valid) {
+        throw ledgerInputError('takeoff_wbs_invalid', 'Resolve invalid or conflicting WBS work packages before preparing an estimate.', null, 409);
+      }
       if (current.subtotal <= 0) throw ledgerInputError('takeoff_price_required', 'A positive sell price is required before preparing an estimate.');
       const snapshotHash = sha256Json(this.takeoffSnapshot(current));
       const actor = options.actor || 'Contractor.AI';
       const notes = [normalizeText(current.data?.notes, ''), normalizeText(payload.notes, '')].filter(Boolean).join('\n\n');
+      const includesWorkBreakdown = current.data?.workBreakdownFormat === TAKEOFF_WBS_FORMAT;
       const quote = this.createQuote(jobId, {
         currency: current.currency,
         taxRate: current.taxRate,
         validUntil: payload.validUntil || payload.valid_until || null,
         notes: notes || `Estimate prepared from quantity takeoff ${current.title}.`,
         lineItems: current.items.map(item => ({
-          description: `${item.description} (${item.quantity} ${item.unit})`,
+          description: `[${item.wbsCode} ${item.workPackage}] ${item.description} (${item.quantity} ${item.unit})`,
           quantity: item.quantity,
           unitPrice: item.unitPrice,
-          costCode: item.costCode
+          costCode: item.costCode,
+          wbsCode: item.wbsCode,
+          workPackage: item.workPackage
         }))
       }, {
         actor,
-        source: { type: 'quantity_takeoff', id: takeoffId, snapshotHash }
+        source: {
+          type: 'quantity_takeoff',
+          id: takeoffId,
+          snapshotHash,
+          ...(includesWorkBreakdown ? {
+            workBreakdownFormat: TAKEOFF_WBS_FORMAT,
+            workBreakdownHash: current.workBreakdown.hash
+          } : {})
+        }
       });
       const data = fromJson(row.data_json, {});
       this.db.prepare(`
@@ -48569,6 +48732,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ) {
         issues.push({ severity: 'error', message: `Quantity takeoff ${takeoff.id} totals no longer match its retained measurement rows.` });
       }
+      if (
+        Math.abs(takeoff.workBreakdown.totalCost - takeoff.totalCost) > 0.01
+        || Math.abs(takeoff.workBreakdown.totalPrice - takeoff.subtotal) > 0.01
+        || takeoff.workBreakdown.itemCount !== takeoff.itemCount
+      ) {
+        issues.push({ severity: 'error', message: `Quantity takeoff ${takeoff.id} WBS rollups no longer match its retained measurement rows.` });
+      }
+      if (!takeoff.workBreakdown.valid) {
+        issues.push({ severity: 'error', message: `Quantity takeoff ${takeoff.id} contains invalid or conflicting WBS work-package classifications.` });
+      }
       for (const item of takeoff.items) {
         try {
           const expected = normalizeTakeoffItem(item);
@@ -48576,6 +48749,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             Math.abs(expected.quantity - item.quantity) > 0.0001
             || Math.abs(expected.totalCost - item.totalCost) > 0.01
             || Math.abs(expected.totalPrice - item.totalPrice) > 0.01
+            || expected.wbsCode !== item.wbsCode
+            || expected.workPackage !== item.workPackage
           ) {
             issues.push({ severity: 'error', message: `Quantity takeoff item ${item.id} failed server-calculation verification.` });
           }
@@ -48589,7 +48764,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (!takeoff.snapshotHash || takeoff.integrityValid !== true) {
           issues.push({ severity: 'error', message: `Converted quantity takeoff ${takeoff.id} failed retained snapshot verification.` });
         }
-        if (!quoteRow || quoteSource?.type !== 'quantity_takeoff' || quoteSource?.id !== takeoff.id || quoteSource?.snapshotHash !== takeoff.snapshotHash) {
+        const requiresWorkBreakdownTrace = takeoff.data?.workBreakdownFormat === TAKEOFF_WBS_FORMAT;
+        if (
+          !quoteRow
+          || quoteSource?.type !== 'quantity_takeoff'
+          || quoteSource?.id !== takeoff.id
+          || quoteSource?.snapshotHash !== takeoff.snapshotHash
+          || (requiresWorkBreakdownTrace && quoteSource?.workBreakdownHash !== takeoff.workBreakdown.hash)
+        ) {
           issues.push({ severity: 'error', message: `Converted quantity takeoff ${takeoff.id} lacks its same-job traceable estimate.` });
         }
       } else if (takeoff.quoteId || takeoff.snapshotHash) {
@@ -49498,6 +49680,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       totalCost: normalizeNumber(row.total_cost, 0),
       totalPrice: normalizeNumber(row.total_price, 0),
       costCode: row.cost_code,
+      wbsCode: row.wbs_code || '01',
+      workPackage: row.work_package || 'General scope',
       sourceReference: row.source_reference || null,
       data: fromJson(row.data_json),
       createdAt: row.created_at,

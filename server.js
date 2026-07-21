@@ -6875,6 +6875,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         siteSurveyApproval: 'source_current_approval_gated',
         siteSurveyEstimatingReadiness: 'derived_from_approved_snapshot',
         siteSurveyAutonomy: 'internal_review_task_only',
+        takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups',
+        takeoffEstimateTrace: 'snapshot_and_work_breakdown_hash',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',

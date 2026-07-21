@@ -1474,7 +1474,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '052_governed_site_surveys');
+    assert.equal(migrations.currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1555,12 +1555,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('052_governed_site_surveys'));
+  assert.deepEqual(versions, Array(4).fill('053_work_breakdown_takeoffs'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 52);
+    assert.equal(Number(migrationCount.count), 53);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -2136,7 +2136,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2340,7 +2340,9 @@ test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceab
           wastePercent: 8,
           unitCost: 19.5,
           unitPrice: 34.75,
-          costCode: 'PG-FIN-100'
+          costCode: 'PG-FIN-100',
+          wbsCode: '03.20',
+          workPackage: 'Hosted floor finishes'
         },
         {
           description: 'Hosted door sets',
@@ -2348,17 +2350,23 @@ test('PostgreSQL quantity takeoff parity preserves formulas and estimate traceab
           count: 4,
           unitCost: 275,
           unitPrice: 440,
-          costCode: 'PG-JOIN-100'
+          costCode: 'PG-JOIN-100',
+          wbsCode: '02.10',
+          workPackage: 'Hosted openings'
         }
       ]
     }, { actor: 'postgres_takeoff_test' });
     assert.deepEqual(takeoff.items.map(item => item.quantity), [32.13, 4]);
+    assert.equal(takeoff.workBreakdown.packageCount, 2);
+    assert.equal(takeoff.workBreakdown.valid, true);
     const converted = ledger.convertTakeoffToQuote(job.id, takeoff.id, {
       validUntil: '2026-12-31'
     }, { actor: 'postgres_takeoff_test' });
     assert.equal(converted.takeoff.integrityValid, true);
     assert.equal(converted.quote.subtotal, converted.takeoff.subtotal);
     assert.equal(converted.quote.data.source.snapshotHash, converted.takeoff.snapshotHash);
+    assert.equal(converted.quote.data.source.workBreakdownHash, converted.takeoff.workBreakdown.hash);
+    assert.deepEqual(converted.quote.lineItems.map(item => item.wbsCode), ['03.20', '02.10']);
     assert.equal(ledger.convertTakeoffToQuote(job.id, takeoff.id).replayed, true);
     assert.equal(ledger.diagnose().valid, true);
   } finally {
@@ -2489,7 +2497,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2597,7 +2605,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2696,7 +2704,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2783,7 +2791,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
   } finally {
     ledger?.close();
   }
@@ -2888,7 +2896,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -2954,7 +2962,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
   } finally {
     ledger.close();
   }
@@ -3009,7 +3017,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(ledger.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
   } finally {
     ledger.close();
   }

@@ -222,7 +222,7 @@ test('migration 024 upgrades a 023 ledger and diagnostics detect meeting snapsho
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '052_governed_site_surveys');
+    assert.equal(upgraded.migrationStatus().currentVersion, '053_work_breakdown_takeoffs');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
     for (const table of ['project_meeting_number_sequences', 'project_meetings', 'meeting_action_items']) {
       assert.ok(upgraded.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));

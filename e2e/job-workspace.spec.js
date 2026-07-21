@@ -1603,7 +1603,7 @@ test('clients workspace prepares closeout and aftercare without delivery or book
       title: 'Choose worktop finish',
       category: 'finish',
       status: 'pending_client',
-      dueAt: '2026-07-20T12:00:00.000Z',
+      dueAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
       options: ['light terrazzo', 'charcoal composite'],
       value: 850
     }

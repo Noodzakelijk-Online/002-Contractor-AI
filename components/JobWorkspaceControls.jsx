@@ -339,6 +339,7 @@ function TakeoffControl({
   const takeoffs = job.takeoffs || EMPTY_LIST
   const draftCount = takeoffs.filter((takeoff) => takeoff.status === 'draft').length
   const convertedCount = takeoffs.filter((takeoff) => takeoff.status === 'converted').length
+  const packageCount = takeoffs.reduce((sum, takeoff) => sum + Number(takeoff.workBreakdown?.packageCount || 0), 0)
   const draftValue = takeoffs
     .filter((takeoff) => takeoff.status === 'draft')
     .reduce((sum, takeoff) => sum + Number(takeoff.subtotal || 0), 0)
@@ -348,8 +349,8 @@ function TakeoffControl({
       <div className="section-heading takeoff-heading">
         <Ruler size={18} />
         <div>
-          <h3>Quantity takeoff</h3>
-          <p>Measure retained scope and convert one sealed basis into the approval-gated estimate workflow.</p>
+          <h3>WBS & quantity takeoff</h3>
+          <p>Structure work packages, measure retained scope, and convert one sealed basis into the approval-gated estimate workflow.</p>
         </div>
         {canCoordinate ? (
           <button type="button" className="secondary-button" disabled={submitting} onClick={onNewTakeoff}>
@@ -360,6 +361,7 @@ function TakeoffControl({
       </div>
       <div className="takeoff-summary" aria-label="Quantity takeoff summary">
         <div><span>Sheets</span><strong>{takeoffs.length}</strong></div>
+        <div><span>Work packages</span><strong>{packageCount}</strong></div>
         <div><span>Drafts</span><strong>{draftCount}</strong></div>
         <div><span>Converted</span><strong>{convertedCount}</strong></div>
         <div><span>Draft sell value</span><strong>{currency.format(draftValue)}</strong></div>
@@ -380,7 +382,7 @@ function TakeoffControl({
                     ) : null}
                   </div>
                   <small>
-                    {takeoff.itemCount || 0} measurement{takeoff.itemCount === 1 ? '' : 's'} / VAT {takeoff.taxRate || 0}%
+                    {takeoff.workBreakdown?.packageCount || 0} work package{takeoff.workBreakdown?.packageCount === 1 ? '' : 's'} / {takeoff.itemCount || 0} measurement{takeoff.itemCount === 1 ? '' : 's'} / VAT {takeoff.taxRate || 0}%
                     {takeoff.quoteId ? ` / estimate ${takeoff.quoteId}` : ''}
                   </small>
                 </div>
@@ -403,6 +405,26 @@ function TakeoffControl({
                 <div><span>Margin</span><strong>{currency.format(takeoff.marginAmount || 0)} / {takeoff.marginPercent || 0}%</strong></div>
                 <div><span>Gross</span><strong>{currency.format(takeoff.total || 0)}</strong></div>
               </div>
+              {takeoff.workBreakdown?.nodes?.length ? (
+                <div className="takeoff-wbs" role="table" aria-label={`${takeoff.title} work breakdown`}>
+                  <div className="takeoff-wbs-heading" role="row">
+                    <strong role="columnheader">WBS work package</strong>
+                    <span role="columnheader">Measurements</span>
+                    <span role="columnheader">Cost</span>
+                    <span role="columnheader">Sell</span>
+                    <span role="columnheader">Margin</span>
+                  </div>
+                  {takeoff.workBreakdown.nodes.map((node) => (
+                    <div className="takeoff-wbs-row" role="row" key={node.code} data-testid={`takeoff-wbs-${takeoff.id}-${node.code}`}>
+                      <div role="cell"><strong>{node.code}</strong><span>{node.name}</span></div>
+                      <span role="cell"><small>Measurements</small><strong>{node.itemCount}</strong></span>
+                      <span role="cell"><small>Cost</small><strong>{currency.format(node.totalCost || 0)}</strong></span>
+                      <span role="cell"><small>Sell</small><strong>{currency.format(node.totalPrice || 0)}</strong></span>
+                      <span role="cell"><small>Margin</small><strong>{currency.format(node.marginAmount || 0)} / {node.marginPercent || 0}%</strong></span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {takeoff.items?.length ? (
                 <div className="takeoff-items" role="table" aria-label={`${takeoff.title} measurements`}>
                   {takeoff.items.map((item) => (
@@ -410,6 +432,7 @@ function TakeoffControl({
                       <div className="takeoff-item-copy" role="cell">
                         <div>
                           <strong>{item.description}</strong>
+                          <span className="tag tag-wbs">{item.wbsCode} / {item.workPackage}</span>
                           <span className="tag">{formatStatus(item.category)}</span>
                         </div>
                         <small>{takeoffMeasurementSummary(item)} / {item.sourceReference || 'No drawing reference'}</small>
@@ -442,10 +465,10 @@ function TakeoffControl({
           ))}
         </div>
       ) : (
-        <Empty title="No quantity takeoffs" detail="Create a measured scope before preparing an estimate from drawings, surveys, or site dimensions." />
+        <Empty title="No WBS or quantity takeoffs" detail="Create a structured measured scope before preparing an estimate from drawings, surveys, or site dimensions." />
       )}
       <p className="workflow-note">
-        Takeoff conversion seals the measured basis and creates an internal quote approval. It does not issue a proposal, contact the client, or alter contract value.
+        Takeoff conversion seals the WBS, measured basis, and package rollups into one internal quote approval. It does not issue a proposal, contact the client, or alter contract value.
       </p>
     </section>
   )
