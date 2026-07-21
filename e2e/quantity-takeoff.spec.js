@@ -1,5 +1,25 @@
 const { test, expect } = require('@playwright/test');
 
+async function retainFixedPriceBasis(request, jobId, entryKey) {
+  const basisResponse = await request.get(`/api/ledger/jobs/${jobId}/pricing-basis`);
+  expect(basisResponse.ok()).toBeTruthy();
+  const basis = (await basisResponse.json()).pricingBasis;
+  const response = await request.post(`/api/ledger/jobs/${jobId}/pricing-decisions`, {
+    data: {
+      entryKey,
+      selectedModel: 'fixed_price',
+      rationale: 'The measured scope and governed rate evidence support a fixed-price estimate.',
+      factors: basis.factors.map(factor => ({
+        key: factor.key,
+        status: 'yes',
+        evidence: `${factor.label} is verified in the measured-scope browser fixture.`
+      }))
+    }
+  });
+  expect(response.ok()).toBeTruthy();
+  return (await response.json()).decision;
+}
+
 test('operator measures scope and seals it into one approval-gated estimate', async ({ page, request }) => {
   const key = Date.now();
   const title = `Browser measured scope ${key}`;
@@ -121,6 +141,13 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(sheet.getByText('Rate v1')).toBeVisible();
   await expect(sheet.getByText(/Labour.*40,00.*overhead.*15,00.*cost.*82,00.*margin 20%/)).toBeVisible();
   await expect(workBreakdown).toContainText('2.818,75');
+
+  await retainFixedPriceBasis(request, intake.job.id, `browser-takeoff-basis-${key}`);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await page.getByRole('button', { name: `Open ${title}` }).first().click();
+  await expect(workspace.getByRole('heading', { name: title })).toBeVisible();
+  await expect(takeoffControl.getByTestId('takeoff-pricing-basis')).toContainText('Fixed price');
 
   await sheet.getByRole('button', { name: 'Prepare estimate' }).click();
   const convertModal = page.getByTestId('takeoff-convert-modal');

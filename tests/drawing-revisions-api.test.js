@@ -178,5 +178,5 @@ test('drawing revision API enforces approval and exposes only current field-safe
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '054_estimate_rate_buildups');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '055_pricing_basis_decisions');
 });

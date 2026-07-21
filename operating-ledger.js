@@ -121,6 +121,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
       readyStatuses: ['approved'],
       ledgerOnly: true
     },
+    { key: 'pricing_basis', label: 'Current fixed-price or time-and-materials decision', table: 'pricing_basis_decisions', detailKey: 'pricingBasis', readyStatuses: ['current'] },
     { key: 'quote', label: 'Quote or estimate', table: 'quotes', detailKey: 'quotes' },
     { key: 'site_visit', label: 'Site visit / survey', table: 'site_visits', detailKey: 'siteVisits' },
     { key: 'materials', label: 'Material scope', table: 'material_requirements', detailKey: 'materials' },
@@ -1108,6 +1109,18 @@ const MARKET_FIT_PROFILE_FORMAT = 'contractor-ai-market-fit-profile/v1';
 const MARKET_FIT_ASSESSMENT_FORMAT = 'contractor-ai-market-fit-assessment/v1';
 const ESTIMATE_RATE_POLICY_FORMAT = 'contractor-ai-estimate-rate-policy/v1';
 const UNIT_RATE_BUILD_UP_FORMAT = 'contractor-ai-unit-rate-build-up/v1';
+const PRICING_BASIS_DECISION_FORMAT = 'contractor-ai-pricing-basis-decision/v1';
+const PRICING_BASIS_FACTORS = Object.freeze([
+  { key: 'scope_defined', label: 'Scope is fully defined', weight: 15, critical: true },
+  { key: 'design_complete', label: 'Design information is complete', weight: 10, critical: true },
+  { key: 'quantities_verifiable', label: 'Quantities can be verified', weight: 15, critical: true },
+  { key: 'site_conditions_known', label: 'Site conditions are known', weight: 15, critical: true },
+  { key: 'selections_locked', label: 'Client selections are locked', weight: 10, critical: false },
+  { key: 'productivity_predictable', label: 'Productivity is predictable', weight: 10, critical: false },
+  { key: 'schedule_constraints_defined', label: 'Schedule constraints are defined', weight: 5, critical: false },
+  { key: 'price_exposure_controlled', label: 'Supplier and price exposure is controlled', weight: 10, critical: false },
+  { key: 'change_risk_low', label: 'Change risk is low', weight: 10, critical: false }
+]);
 const MARKET_FIT_CRITERIA = Object.freeze([
   { key: 'service', label: 'Service fit', weight: 30 },
   { key: 'service_area', label: 'Service-area fit', weight: 30 },
@@ -4553,6 +4566,39 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_takeoff_items_rate_policy
           ON takeoff_items(rate_policy_id, takeoff_id, sequence_number)
           WHERE rate_policy_id IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '055_pricing_basis_decisions',
+    description: 'Retain versioned fixed-price versus time-and-materials decisions and bind estimates to their exact commercial basis.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pricing_basis_decisions (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          recommendation TEXT NOT NULL,
+          selected_model TEXT NOT NULL,
+          score REAL NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pricing_basis_one_current
+          ON pricing_basis_decisions(job_id)
+          WHERE status = 'current';
+        CREATE INDEX IF NOT EXISTS idx_pricing_basis_job_history
+          ON pricing_basis_decisions(job_id, version_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_pricing_basis_model_status
+          ON pricing_basis_decisions(selected_model, status);
       `);
     }
   }
@@ -13506,6 +13552,347 @@ class ContractorOperatingLedger {
       .map(row => this.mapTakeoffItem(row));
   }
 
+  pricingBasisSource(jobId) {
+    const job = this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+    if (!job) throw ledgerInputError('job_not_found', 'Ledger job not found.', { jobId }, 404);
+    const sheets = this.db.prepare(`
+      SELECT id, title, currency, tax_rate
+      FROM takeoff_sheets
+      WHERE job_id = ?
+      ORDER BY id
+    `).all(jobId);
+    const itemRows = this.db.prepare(`
+      SELECT items.*
+      FROM takeoff_items items
+      JOIN takeoff_sheets sheets ON sheets.id = items.takeoff_id
+      WHERE sheets.job_id = ?
+      ORDER BY items.takeoff_id, items.sequence_number, items.id
+    `).all(jobId);
+    const estimates = sheets.map(sheet => ({
+      id: sheet.id,
+      title: sheet.title,
+      currency: sheet.currency,
+      taxRate: normalizeNumber(sheet.tax_rate, 0),
+      items: itemRows.filter(item => item.takeoff_id === sheet.id).map(item => ({
+        id: item.id,
+        sequenceNumber: normalizeNumber(item.sequence_number, 0),
+        category: item.category,
+        description: item.description,
+        measurementType: item.measurement_type,
+        unit: item.unit,
+        quantity: roundMeasurement(item.quantity, 6),
+        unitCost: roundMoney(item.unit_cost),
+        unitPrice: roundMoney(item.unit_price),
+        costCode: item.cost_code,
+        wbsCode: item.wbs_code || '01',
+        workPackage: item.work_package || 'General scope',
+        sourceReference: item.source_reference || null,
+        ratePolicyId: item.rate_policy_id || null,
+        rateBuildUpHash: item.rate_build_up_hash || null
+      }))
+    }));
+    const estimateItemCount = estimates.reduce((sum, sheet) => sum + sheet.items.length, 0);
+    return {
+      job: {
+        id: job.id,
+        title: job.title,
+        jobType: job.job_type,
+        description: job.description || null,
+        city: job.city || null,
+        region: job.region || null,
+        country: job.country,
+        riskLevel: job.risk_level,
+        estimatedHours: normalizeNumber(job.estimated_hours, 0),
+        estimatedCost: roundMoney(job.estimated_cost),
+        marginTargetPercent: normalizeNumber(job.margin_target_percent, 0)
+      },
+      estimateBasis: {
+        sheetCount: estimates.length,
+        itemCount: estimateItemCount,
+        hash: sha256Json(estimates)
+      }
+    };
+  }
+
+  normalizePricingBasisFactors(payload = {}, options = {}) {
+    const strict = options.strict === true;
+    const source = payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input)
+      ? payload.input
+      : payload;
+    const raw = source.factors;
+    const entries = Array.isArray(raw)
+      ? raw.map(item => [normalizeStatus(item?.key, ''), item])
+      : raw && typeof raw === 'object'
+        ? Object.entries(raw).map(([key, value]) => [normalizeStatus(key, ''), value])
+        : [];
+    const allowed = new Set(PRICING_BASIS_FACTORS.map(factor => factor.key));
+    const submittedKeys = entries.map(([key]) => key).filter(Boolean);
+    const duplicates = submittedKeys.filter((key, index) => submittedKeys.indexOf(key) !== index);
+    const unexpected = submittedKeys.filter(key => !allowed.has(key));
+    if (strict && (duplicates.length || unexpected.length)) {
+      throw ledgerInputError('pricing_basis_factor_invalid', 'Pricing-basis factors must use each supported key exactly once.', {
+        duplicates: [...new Set(duplicates)],
+        unexpected: [...new Set(unexpected)]
+      });
+    }
+    return PRICING_BASIS_FACTORS.map(definition => {
+      const match = entries.find(([key]) => key === definition.key);
+      if (strict && !match) {
+        throw ledgerInputError('pricing_basis_factor_required', `${definition.label} requires a retained yes, no, or unknown assessment.`, { factor: definition.key });
+      }
+      const submitted = match?.[1];
+      const rawStatus = submitted && typeof submitted === 'object' && !Array.isArray(submitted)
+        ? submitted.status ?? submitted.value
+        : submitted;
+      let status = normalizeStatus(rawStatus, 'unknown');
+      if (!['yes', 'no', 'unknown'].includes(status)) {
+        if (strict) {
+          throw ledgerInputError('pricing_basis_factor_status_invalid', `${definition.label} must be assessed as yes, no, or unknown.`, { factor: definition.key });
+        }
+        status = 'unknown';
+      }
+      const evidence = normalizeText(
+        submitted && typeof submitted === 'object' && !Array.isArray(submitted)
+          ? submitted.evidence || submitted.reason || submitted.notes
+          : '',
+        ''
+      );
+      if (strict && (evidence.length < 8 || evidence.length > 500)) {
+        throw ledgerInputError('pricing_basis_factor_evidence_invalid', `${definition.label} requires evidence between 8 and 500 characters.`, { factor: definition.key });
+      }
+      return { ...definition, status, evidence: evidence || null };
+    });
+  }
+
+  evaluatePricingBasisDecision(jobId, payload = {}, options = {}) {
+    const factors = this.normalizePricingBasisFactors(payload, options);
+    const blockers = factors.filter(factor => factor.critical && factor.status === 'no').map(factor => factor.key);
+    const evidenceGaps = factors.filter(factor => factor.status === 'unknown').map(factor => factor.key);
+    const score = roundMeasurement(factors.reduce((sum, factor) => sum + (factor.status === 'yes' ? factor.weight : 0), 0), 1);
+    const recommendation = evidenceGaps.length
+      ? 'review'
+      : blockers.length
+        ? 'time_and_materials'
+        : score >= 75
+          ? 'fixed_price'
+          : 'time_and_materials';
+    const source = this.pricingBasisSource(jobId);
+    const input = {
+      factors: factors.map(factor => ({ key: factor.key, status: factor.status, evidence: factor.evidence }))
+    };
+    const sourceHash = sha256Json({ source, input });
+    return {
+      format: PRICING_BASIS_DECISION_FORMAT,
+      jobId,
+      input,
+      source,
+      sourceHash,
+      score,
+      recommendation,
+      blockers,
+      evidenceGaps,
+      factors,
+      decisionTree: factors.map((factor, index) => ({
+        sequence: index + 1,
+        key: factor.key,
+        label: factor.label,
+        status: factor.status,
+        weight: factor.weight,
+        critical: factor.critical,
+        branch: factor.status === 'unknown'
+          ? 'review_required'
+          : factor.critical && factor.status === 'no'
+            ? 'time_and_materials_blocker'
+            : factor.status === 'yes'
+              ? 'supports_fixed_price'
+              : 'commercial_risk'
+      })),
+      threshold: 75,
+      approvalRequiredForQuote: true,
+      externalCommitments: 0
+    };
+  }
+
+  listPricingBasisDecisions(options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const limit = safeLimit(options.limit, 500, 5_000);
+    return this.db.prepare(`
+      SELECT * FROM pricing_basis_decisions
+      WHERE (? = '' OR job_id = ?)
+      ORDER BY job_id, version_number DESC
+      LIMIT ?
+    `).all(jobId, jobId, limit).map(row => this.mapPricingBasisDecision(row));
+  }
+
+  getPricingBasisDecision(decisionId) {
+    const row = this.db.prepare('SELECT * FROM pricing_basis_decisions WHERE id = ?').get(decisionId);
+    if (!row) throw ledgerInputError('pricing_basis_decision_not_found', 'Pricing-basis decision not found.', { decisionId }, 404);
+    const decision = this.mapPricingBasisDecision(row);
+    if (!decision.integrityValid) {
+      throw ledgerInputError('pricing_basis_integrity_failed', 'The retained pricing-basis decision failed checksum verification.', { decisionId }, 409);
+    }
+    return decision;
+  }
+
+  retainPricingBasisDecision(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('pricing_basis_entry_key_invalid', 'A pricing-basis decision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const selectedModel = normalizeStatus(payload.selectedModel || payload.selected_model || payload.model, '');
+      if (!['fixed_price', 'time_and_materials'].includes(selectedModel)) {
+        throw ledgerInputError('pricing_basis_model_invalid', 'Select fixed_price or time_and_materials as the commercial model.');
+      }
+      const rationale = normalizeText(payload.rationale || payload.reason, '');
+      if (rationale.length < 8 || rationale.length > 1_000) {
+        throw ledgerInputError('pricing_basis_rationale_invalid', 'A pricing-basis decision requires a rationale between 8 and 1,000 characters.');
+      }
+      const evaluation = this.evaluatePricingBasisDecision(jobId, payload, { strict: true });
+      const override = selectedModel !== evaluation.recommendation;
+      const overrideReason = normalizeText(payload.overrideReason || payload.override_reason, '');
+      if (override && (overrideReason.length < 12 || overrideReason.length > 500)) {
+        throw ledgerInputError('pricing_basis_override_reason_required', 'Overriding or proceeding without a conclusive recommendation requires a reason between 12 and 500 characters.', {
+          recommendation: evaluation.recommendation,
+          selectedModel
+        });
+      }
+      const fingerprint = sha256Json({ jobId, sourceHash: evaluation.sourceHash, selectedModel, rationale, overrideReason: overrideReason || null });
+      const replay = this.db.prepare('SELECT * FROM pricing_basis_decisions WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('pricing_basis_replay_conflict', 'This pricing-basis entryKey was already used with different evidence or a different selection.', { entryKey, decisionId: replay.id }, 409);
+        }
+        return { decision: this.getPricingBasisDecision(replay.id), replayed: true, externalCommitments: 0 };
+      }
+      const versionNumber = Number(this.db.prepare('SELECT COALESCE(MAX(version_number), 0) AS value FROM pricing_basis_decisions WHERE job_id = ?').get(jobId)?.value || 0) + 1;
+      const id = makeId('pricingbasis');
+      const timestamp = nowIso();
+      const snapshot = {
+        ...evaluation,
+        decisionId: id,
+        versionNumber,
+        selectedModel,
+        rationale,
+        override,
+        overrideReason: overrideReason || null,
+        retainedAt: timestamp,
+        retainedBy: actor
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare("UPDATE pricing_basis_decisions SET status = 'superseded', updated_at = ? WHERE job_id = ? AND status = 'current'")
+        .run(timestamp, jobId);
+      this.db.prepare(`
+        INSERT INTO pricing_basis_decisions (
+          id, job_id, version_number, status, recommendation, selected_model, score,
+          source_hash, snapshot_hash, snapshot_json, entry_key, entry_fingerprint,
+          data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, versionNumber, evaluation.recommendation, selectedModel, evaluation.score,
+        evaluation.sourceHash, snapshotHash, snapshotJson, entryKey, fingerprint,
+        toJson({ rationale, override, overrideReason: overrideReason || null, retainedBy: actor, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const decision = this.getPricingBasisDecision(id);
+      this.audit({
+        entityType: 'pricing_basis_decision', entityId: id, jobId, action: 'retain_pricing_basis_decision', actor,
+        after: decision,
+        metadata: {
+          versionNumber, recommendation: evaluation.recommendation, selectedModel, score: evaluation.score,
+          override, sourceHash: evaluation.sourceHash, snapshotHash, externalCommitments: 0
+        }
+      });
+      return { decision, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  pricingBasisForJob(jobId) {
+    const decisions = this.listPricingBasisDecisions({ jobId, limit: 500 });
+    const currentDecision = decisions.find(decision => decision.status === 'current') || null;
+    const latestDecision = currentDecision || decisions[0] || null;
+    const evaluation = this.evaluatePricingBasisDecision(jobId, latestDecision?.snapshot?.input || {});
+    const stale = Boolean(
+      latestDecision
+      && (!latestDecision.integrityValid || latestDecision.status !== 'current' || latestDecision.sourceHash !== evaluation.sourceHash)
+    );
+    return {
+      currentDecision,
+      latestDecision,
+      evaluation,
+      stale,
+      decisions,
+      factors: PRICING_BASIS_FACTORS,
+      quoteApprovalRequired: true,
+      externalCommitments: 0
+    };
+  }
+
+  assertPricingBasisDecisionCurrent(jobId, decisionId) {
+    const normalizedId = normalizeText(decisionId, '');
+    if (!normalizedId) {
+      throw ledgerInputError('pricing_basis_decision_required', 'Retain a current fixed-price or time-and-materials decision before preparing this estimate.', { jobId }, 409);
+    }
+    const decision = this.getPricingBasisDecision(normalizedId);
+    if (decision.jobId !== jobId) {
+      throw ledgerInputError('pricing_basis_job_mismatch', 'The pricing-basis decision belongs to a different job.', { jobId, decisionId: normalizedId }, 409);
+    }
+    if (decision.status !== 'current') {
+      throw ledgerInputError('pricing_basis_decision_stale', 'The selected pricing-basis decision has been superseded.', { jobId, decisionId: normalizedId }, 409);
+    }
+    const current = this.evaluatePricingBasisDecision(jobId, decision.snapshot.input);
+    if (current.sourceHash !== decision.sourceHash) {
+      throw ledgerInputError('pricing_basis_decision_stale', 'Job scope or estimate evidence changed after the pricing-basis decision was retained.', {
+        jobId,
+        decisionId: normalizedId,
+        retainedSourceHash: decision.sourceHash,
+        currentSourceHash: current.sourceHash
+      }, 409);
+    }
+    return decision;
+  }
+
+  quotePricingBasisState(jobId, basis) {
+    if (!basis) return null;
+    const row = basis.decisionId
+      ? this.db.prepare('SELECT * FROM pricing_basis_decisions WHERE id = ? AND job_id = ?').get(basis.decisionId, jobId)
+      : null;
+    const decision = row ? this.mapPricingBasisDecision(row) : null;
+    const integrityValid = Boolean(
+      decision?.integrityValid
+      && basis.format === PRICING_BASIS_DECISION_FORMAT
+      && basis.decisionSnapshotHash === decision.snapshotHash
+      && basis.decisionSourceHash === decision.sourceHash
+      && basis.selectedModel === decision.selectedModel
+      && basis.recommendation === decision.recommendation
+      && normalizeNumber(basis.versionNumber, 0) === decision.versionNumber
+    );
+    let current = false;
+    if (integrityValid && decision.status === 'current') {
+      try {
+        current = this.evaluatePricingBasisDecision(jobId, decision.snapshot.input).sourceHash === decision.sourceHash;
+      } catch {
+        current = false;
+      }
+    }
+    return { ...basis, integrityValid, current };
+  }
+
+  assertQuotePricingBasisCurrent(quoteId) {
+    const row = this.db.prepare('SELECT * FROM quotes WHERE id = ?').get(quoteId);
+    if (!row) throw ledgerInputError('quote_not_found', 'Quote not found.', { quoteId }, 404);
+    const basis = fromJson(row.data_json, {}).pricingBasis || null;
+    if (!basis) return null;
+    const decision = this.assertPricingBasisDecisionCurrent(row.job_id, basis.decisionId);
+    const state = this.quotePricingBasisState(row.job_id, basis);
+    if (!state?.integrityValid || !state.current || decision.id !== basis.decisionId) {
+      throw ledgerInputError('quote_pricing_basis_invalid', 'The quote no longer matches its retained current pricing-basis decision.', { quoteId, decisionId: basis.decisionId }, 409);
+    }
+    return decision;
+  }
+
   convertTakeoffToQuote(jobId, takeoffId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
@@ -13524,6 +13911,14 @@ class ContractorOperatingLedger {
           || (requiresWorkBreakdownTrace && source?.workBreakdownHash !== current.workBreakdown.hash)
         ) {
           throw ledgerInputError('takeoff_quote_trace_invalid', 'Converted takeoff estimate trace no longer matches the retained snapshot.', null, 409);
+        }
+        const requestedPricingDecisionId = normalizeText(payload.pricingDecisionId || payload.pricing_decision_id, '');
+        if (requestedPricingDecisionId && quote.data?.pricingBasis?.decisionId !== requestedPricingDecisionId) {
+          throw ledgerInputError('takeoff_quote_pricing_basis_conflict', 'This takeoff was already converted using a different pricing-basis decision.', {
+            quoteId: quote.id,
+            retainedDecisionId: quote.data?.pricingBasis?.decisionId || null,
+            requestedDecisionId: requestedPricingDecisionId
+          }, 409);
         }
         return { replayed: true, takeoff: current, quote, externalCommitments: 0 };
       }
@@ -13552,6 +13947,7 @@ class ContractorOperatingLedger {
         currency: current.currency,
         taxRate: current.taxRate,
         validUntil: payload.validUntil || payload.valid_until || null,
+        pricingDecisionId: payload.pricingDecisionId || payload.pricing_decision_id || null,
         notes: notes || `Estimate prepared from quantity takeoff ${current.title}.`,
         lineItems: current.items.map(item => ({
           description: `[${item.wbsCode} ${item.workPackage}] ${item.description} (${item.quantity} ${item.unit})`,
@@ -13624,6 +14020,24 @@ class ContractorOperatingLedger {
       if (notes.length > 4000) {
         throw ledgerInputError('quote_notes_too_long', 'Quote notes must be 4,000 characters or fewer.');
       }
+      const pricingDecisionId = normalizeText(
+        payload.pricingDecisionId || payload.pricing_decision_id || options.pricingDecisionId || options.pricing_decision_id,
+        ''
+      );
+      const pricingDecision = pricingDecisionId ? this.assertPricingBasisDecisionCurrent(jobId, pricingDecisionId) : null;
+      const pricingBasis = pricingDecision ? {
+        format: PRICING_BASIS_DECISION_FORMAT,
+        decisionId: pricingDecision.id,
+        versionNumber: pricingDecision.versionNumber,
+        selectedModel: pricingDecision.selectedModel,
+        recommendation: pricingDecision.recommendation,
+        score: pricingDecision.score,
+        override: Boolean(pricingDecision.snapshot?.override),
+        overrideReason: pricingDecision.snapshot?.overrideReason || null,
+        rationale: pricingDecision.snapshot?.rationale || null,
+        decisionSourceHash: pricingDecision.sourceHash,
+        decisionSnapshotHash: pricingDecision.snapshotHash
+      } : null;
 
       this.db.prepare(`
         INSERT INTO quotes (id, job_id, status, currency, subtotal, tax_rate, tax_amount, total, valid_until, line_items_json, data_json, created_at, updated_at)
@@ -13639,7 +14053,7 @@ class ContractorOperatingLedger {
         total,
         validUntil,
         toJson(lineItems, []),
-        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null }),
+        toJson({ notes: notes || null, calculation: 'server_derived', source: options.source || null, pricingBasis }),
         timestamp,
         timestamp
       );
@@ -13651,7 +14065,7 @@ class ContractorOperatingLedger {
         approvalType: 'quote_issue',
         summary: `Approve quote ${id} for ${total.toFixed(2)} ${currency}`,
         reason: 'Quotes must be approved before sending externally.',
-        data: { subtotal, taxAmount, total, taxRate, currency, lineItems }
+        data: { subtotal, taxAmount, total, taxRate, currency, lineItems, pricingBasis }
       }, { actor, audit: false });
       this.db.prepare('UPDATE quotes SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
 
@@ -13755,6 +14169,17 @@ class ContractorOperatingLedger {
             taxAmount: quote.taxAmount,
             total: quote.total,
             validUntil: quote.validUntil,
+            pricingBasis: quote.pricingBasis ? {
+              decisionId: quote.pricingBasis.decisionId,
+              versionNumber: quote.pricingBasis.versionNumber,
+              selectedModel: quote.pricingBasis.selectedModel,
+              recommendation: quote.pricingBasis.recommendation,
+              score: quote.pricingBasis.score,
+              override: quote.pricingBasis.override,
+              rationale: quote.pricingBasis.rationale,
+              decisionSourceHash: quote.pricingBasis.decisionSourceHash,
+              decisionSnapshotHash: quote.pricingBasis.decisionSnapshotHash
+            } : null,
             notes: quote.data?.notes || null,
             lineItems: quote.lineItems
           }
@@ -13883,6 +14308,14 @@ class ContractorOperatingLedger {
     const client = snapshot.client || {};
     const job = snapshot.job || {};
     const quote = snapshot.quote || {};
+    const pricingBasis = quote.pricingBasis || null;
+    const timeAndMaterials = pricingBasis?.selectedModel === 'time_and_materials';
+    const pricingLabel = timeAndMaterials ? 'Time and materials' : pricingBasis?.selectedModel === 'fixed_price' ? 'Fixed price' : null;
+    const pricingExplanation = timeAndMaterials
+      ? 'Amounts shown are a budget estimate. Actual billing must follow retained time, material, rate, and work evidence.'
+      : pricingBasis?.selectedModel === 'fixed_price'
+        ? 'The fixed price applies to the stated scope, assumptions, exclusions, and allowances. Approved changes are handled separately.'
+        : null;
     const money = value => {
       try {
         return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: quote.currency || 'EUR' }).format(Number(value || 0));
@@ -13953,11 +14386,11 @@ class ContractorOperatingLedger {
     <div class="party"><span>Prepared for</span><strong>${escapeHtml(client.company || client.name)}</strong>${client.company && client.name ? `<p>${escapeHtml(client.name)}</p>` : ''}<p>${clientAddress || 'Address not retained'}</p><p>${escapeHtml(client.email || client.phone || '')}</p></div>
     <div class="party"><span>Project</span><strong>${escapeHtml(job.title)}</strong><p>${siteAddress || 'Site address not retained'}</p><p class="muted">Job reference ${escapeHtml(job.id)}</p></div>
   </section>
-  <h2>Scope and pricing</h2>
+  <h2>${timeAndMaterials ? 'Scope and budget estimate' : 'Scope and pricing'}</h2>
   ${job.description ? `<p>${escapeHtml(job.description)}</p>` : ''}
   <table><thead><tr><th>Description</th><th class="number">Quantity</th><th class="number">Unit price</th><th class="number">Amount</th></tr></thead><tbody>${lines}</tbody></table>
-  <div class="totals"><div><span>Subtotal</span><strong>${escapeHtml(money(quote.subtotal))}</strong></div><div><span>VAT (${escapeHtml(quote.taxRate)}%)</span><strong>${escapeHtml(money(quote.taxAmount))}</strong></div><div class="grand"><span>Total</span><strong>${escapeHtml(money(quote.total))}</strong></div></div>
-  <section class="terms"><strong>Commercial terms</strong><p>Payment term: ${escapeHtml(organization.paymentTermsDays || 30)} days.</p>${payment ? `<p>${payment}</p>` : ''}${quote.notes ? `<p>${escapeHtml(quote.notes)}</p>` : ''}${organization.quoteTerms ? `<p>${escapeHtml(organization.quoteTerms)}</p>` : ''}<p>Client acceptance is recorded separately and is not implied by receipt of this package.</p></section>
+  <div class="totals"><div><span>${timeAndMaterials ? 'Estimated subtotal' : 'Subtotal'}</span><strong>${escapeHtml(money(quote.subtotal))}</strong></div><div><span>VAT (${escapeHtml(quote.taxRate)}%)</span><strong>${escapeHtml(money(quote.taxAmount))}</strong></div><div class="grand"><span>${timeAndMaterials ? 'Estimated total' : 'Total'}</span><strong>${escapeHtml(money(quote.total))}</strong></div></div>
+  <section class="terms"><strong>Commercial terms</strong>${pricingLabel ? `<p><strong>Pricing model:</strong> ${escapeHtml(pricingLabel)}.</p><p>${escapeHtml(pricingExplanation)}</p>` : ''}<p>Payment term: ${escapeHtml(organization.paymentTermsDays || 30)} days.</p>${payment ? `<p>${payment}</p>` : ''}${quote.notes ? `<p>${escapeHtml(quote.notes)}</p>` : ''}${organization.quoteTerms ? `<p>${escapeHtml(organization.quoteTerms)}</p>` : ''}<p>Client acceptance is recorded separately and is not implied by receipt of this package.</p></section>
   <footer>Integrity: SHA-256 ${escapeHtml(packageHash)} &middot; Package version ${escapeHtml(snapshot.packageVersion || 1)} &middot; Source quote ${escapeHtml(quote.id)}</footer>
 </body>
 </html>`;
@@ -38135,19 +38568,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const job = this.db.prepare('SELECT contract_value, data_json FROM jobs WHERE id = ?').get(jobId);
     if (!job) return null;
     const acceptedQuote = this.db.prepare(`
-      SELECT subtotal
+      SELECT subtotal, data_json
       FROM quotes
       WHERE job_id = ? AND status = 'accepted'
       ORDER BY updated_at DESC, created_at DESC
       LIMIT 1
     `).get(jobId);
     const data = fromJson(job.data_json, {});
-    if (!acceptedQuote && captureBaseline && data.commercialBaselineNet === undefined) {
+    const acceptedQuoteData = fromJson(acceptedQuote?.data_json, {});
+    const pricingModel = acceptedQuoteData.pricingBasis?.selectedModel || (acceptedQuote ? 'fixed_price' : null);
+    if ((!acceptedQuote || pricingModel === 'time_and_materials') && (captureBaseline || acceptedQuote) && data.commercialBaselineNet === undefined) {
       data.commercialBaselineNet = roundMoney(job.contract_value);
     }
-    const baseline = acceptedQuote
+    const baseline = acceptedQuote && pricingModel !== 'time_and_materials'
       ? roundMoney(acceptedQuote.subtotal)
       : roundMoney(data.commercialBaselineNet ?? job.contract_value);
+    if (pricingModel === 'time_and_materials') {
+      data.commercialBudgetEstimateNet = roundMoney(acceptedQuote.subtotal);
+    } else if (acceptedQuote) {
+      delete data.commercialBudgetEstimateNet;
+    }
+    if (pricingModel) data.commercialPricingModel = pricingModel;
     const acceptedChanges = this.db.prepare(`
       SELECT COALESCE(SUM(amount), 0) AS amount
       FROM change_orders
@@ -38160,7 +38601,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       SET contract_value = ?, data_json = ?, updated_at = ?
       WHERE id = ?
     `).run(contractValue, toJson(data, {}), nowIso(), jobId);
-    return { baseline, changeOrderNet, contractValue };
+    return {
+      pricingModel,
+      baseline,
+      budgetEstimateNet: pricingModel === 'time_and_materials' ? roundMoney(acceptedQuote.subtotal) : null,
+      changeOrderNet,
+      contractValue
+    };
   }
 
   applyProjectMeetingApproval(meetingId, timestamp = nowIso()) {
@@ -38275,6 +38722,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (targetType === 'bid_package_selection') {
       this.applyBidPackageSelection(targetId, timestamp);
     } else if (targetType === 'quote') {
+      this.assertQuotePricingBasisCurrent(targetId);
       this.db.prepare("UPDATE quotes SET status = 'approved', updated_at = ? WHERE id = ? AND status IN ('draft', 'pending_approval')").run(timestamp, targetId);
       this.db.prepare("UPDATE jobs SET approval_state = 'quote_approved', phase = CASE WHEN phase = 'intake' THEN 'planned' ELSE phase END, updated_at = ? WHERE id = (SELECT job_id FROM quotes WHERE id = ?)")
         .run(timestamp, targetId);
@@ -42726,6 +43174,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       error.statusCode = 404;
       throw error;
     }
+    const pricingBasis = this.pricingBasisForJob(jobId);
     const detail = {
       ...this.mapJob(row),
       client: this.mapClient(this.db.prepare('SELECT * FROM clients WHERE id = ?').get(row.client_id)),
@@ -42733,6 +43182,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       taskDependencies: this.db.prepare('SELECT * FROM task_dependencies WHERE job_id = ? ORDER BY created_at ASC').all(jobId).map(row => this.mapTaskDependency(row)),
       scheduleBaselines: this.db.prepare('SELECT * FROM schedule_baselines WHERE job_id = ? ORDER BY version_number DESC').all(jobId).map(row => this.mapScheduleBaseline(row)),
       takeoffs: this.listTakeoffs(jobId),
+      pricingBasis,
+      pricingDecisions: pricingBasis.decisions,
       quotes: this.db.prepare('SELECT * FROM quotes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapQuote(row)),
       siteVisits: this.db.prepare('SELECT * FROM site_visits WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapSiteVisit(row)),
       dayworkTickets: this.listDayworkTickets({ jobId, limit: 500 }),
@@ -42982,6 +43433,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   describeCapabilityRequirement(requirement = {}, jobDetail = null) {
     const automation = capabilityRequirementAutomation(requirement.key);
     if (jobDetail && requirement.ledgerOnly) return this.describeCapabilityRequirement(requirement, null);
+    if (jobDetail && requirement.key === 'pricing_basis') {
+      const currentDecision = jobDetail.pricingBasis?.currentDecision || null;
+      const covered = Boolean(currentDecision);
+      const openCount = covered && (jobDetail.pricingBasis?.stale || !currentDecision.integrityValid) ? 1 : 0;
+      return {
+        ...requirement,
+        ...automation,
+        count: covered ? 1 : 0,
+        openCount,
+        covered,
+        status: covered ? (openCount ? 'action_required' : 'ready') : 'missing'
+      };
+    }
     if (jobDetail) {
       const value = jobDetail[requirement.detailKey];
       const allRecords = Array.isArray(value)
@@ -48276,6 +48740,38 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Opportunity bid/no-bid decision ${decision.id} cannot be verified: ${error.code || error.message}.` });
       }
     }
+    const pricingDecisionRows = this.db.prepare('SELECT * FROM pricing_basis_decisions ORDER BY job_id, version_number').all();
+    for (const decisionRow of pricingDecisionRows) {
+      const decision = this.mapPricingBasisDecision(decisionRow);
+      if (!['current', 'superseded'].includes(decision.status)) {
+        issues.push({ severity: 'error', message: `Pricing-basis decision ${decision.id} has an unsupported lifecycle status.` });
+      }
+      if (!decision.integrityValid) {
+        issues.push({ severity: 'error', message: `Pricing-basis decision ${decision.id} failed retained snapshot verification.` });
+        continue;
+      }
+      if (decision.status === 'current') {
+        try {
+          const current = this.evaluatePricingBasisDecision(decision.jobId, decision.snapshot.input);
+          if (current.sourceHash !== decision.sourceHash) {
+            issues.push({ severity: 'warning', message: `Pricing-basis decision ${decision.id} is stale because material job scope or estimate evidence changed.` });
+          }
+        } catch (error) {
+          issues.push({ severity: 'error', message: `Pricing-basis decision ${decision.id} cannot be recalculated: ${error.code || error.message}.` });
+        }
+      }
+    }
+    const pricedQuoteRows = this.db.prepare('SELECT * FROM quotes ORDER BY created_at').all();
+    for (const quoteRow of pricedQuoteRows) {
+      const quoteData = fromJson(quoteRow.data_json, {});
+      if (!quoteData.pricingBasis) continue;
+      const quote = this.mapQuote(quoteRow);
+      if (quote.pricingBasisIntegrityValid !== true) {
+        issues.push({ severity: 'error', message: `Quote ${quote.id} failed retained pricing-basis verification.` });
+      } else if (['draft', 'pending_approval'].includes(quote.status) && quote.pricingBasisCurrent !== true) {
+        issues.push({ severity: 'warning', message: `Quote ${quote.id} cannot be approved until its pricing-basis decision is reassessed.` });
+      }
+    }
     const approvedEstimateRatePoliciesWithoutApproval = Number(this.db.prepare(`
       SELECT COUNT(*) AS count
       FROM estimate_rate_policies policies
@@ -49560,6 +50056,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         bidDecisionPolicies: this.count('bid_decision_policies'),
         opportunityBidDecisions: this.count('opportunity_bid_decisions'),
         estimateRatePolicies: this.count('estimate_rate_policies'),
+        pricingBasisDecisions: this.count('pricing_basis_decisions'),
         unitRateBuildUps: Number(this.db.prepare('SELECT COUNT(*) AS count FROM takeoff_items WHERE rate_build_up_hash IS NOT NULL').get().count || 0),
         opportunityEvidence: this.count('opportunity_evidence'),
         opportunitySiteSurveys: this.count('opportunity_site_surveys'),
@@ -50259,7 +50756,46 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapPricingBasisDecision(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const versionNumber = Math.round(normalizeNumber(row.version_number, 0));
+    const score = roundMeasurement(row.score, 1);
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      versionNumber,
+      status: row.status,
+      recommendation: row.recommendation,
+      selectedModel: row.selected_model,
+      score,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid: Boolean(
+        snapshot
+        && snapshot.format === PRICING_BASIS_DECISION_FORMAT
+        && snapshot.decisionId === row.id
+        && snapshot.jobId === row.job_id
+        && snapshot.versionNumber === versionNumber
+        && snapshot.recommendation === row.recommendation
+        && snapshot.selectedModel === row.selected_model
+        && roundMeasurement(snapshot.score, 1) === score
+        && snapshot.sourceHash === row.source_hash
+        && sha256Text(snapshotJson) === row.snapshot_hash
+      ),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapQuote(row) {
+    const data = fromJson(row.data_json);
+    const pricingBasis = this.quotePricingBasisState(row.job_id, data?.pricingBasis || null);
     return {
       id: row.id,
       jobId: row.job_id,
@@ -50272,7 +50808,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       validUntil: row.valid_until,
       approvalId: row.approval_id,
       lineItems: fromJson(row.line_items_json, []),
-      data: fromJson(row.data_json),
+      pricingModel: pricingBasis?.selectedModel || null,
+      pricingBasis,
+      pricingBasisIntegrityValid: pricingBasis?.integrityValid ?? null,
+      pricingBasisCurrent: pricingBasis?.current ?? null,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -53458,6 +53998,8 @@ module.exports = {
   LEDGER_CAPABILITY_BLUEPRINT,
   BID_DECISION_CRITERIA,
   BID_DECISION_GATES,
+  PRICING_BASIS_DECISION_FORMAT,
+  PRICING_BASIS_FACTORS,
   MARKET_FIT_CRITERIA,
   SITE_SURVEY_FORMAT,
   SITE_SURVEY_TEMPLATE,

@@ -130,6 +130,20 @@ test('backup verification rejects a migration 054 ledger with missing estimating
   );
 });
 
+test('backup verification rejects a migration 055 ledger with missing pricing-basis constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-pricing-basis-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Pricing-basis schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_pricing_basis_one_current');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /pricing-basis constraints are incomplete: idx_pricing_basis_one_current/i
+  );
+});
+
 test('backup verification rejects a migration 028 ledger with missing bid-commitment constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-commitment-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

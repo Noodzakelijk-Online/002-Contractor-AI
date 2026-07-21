@@ -7,7 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 const { spawnSync } = require('node:child_process');
 const { Client } = require('pg');
-const { ContractorOperatingLedger, BID_DECISION_CRITERIA, BID_DECISION_GATES } = require('../operating-ledger');
+const { ContractorOperatingLedger, BID_DECISION_CRITERIA, BID_DECISION_GATES, PRICING_BASIS_FACTORS } = require('../operating-ledger');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
 const {
   migrateLocalBackupToHosted,
@@ -418,8 +418,19 @@ function createBackupFixture(t, suffix = 'success') {
     otherDirectCostPerUnit: 2,
     targetMarginPercent: 20
   }, { actor: 'migration_fixture' });
+  const pricingDecision = source.retainPricingBasisDecision(job.id, {
+    entryKey: `migration-pricing-basis-${suffix}`,
+    factors: PRICING_BASIS_FACTORS.map(factor => ({
+      key: factor.key,
+      status: 'yes',
+      evidence: `${factor.label} is retained in the local migration fixture.`
+    })),
+    selectedModel: 'fixed_price',
+    rationale: 'Retained local evidence supports the fixed-price migration fixture.'
+  }, { actor: 'migration_fixture' }).decision;
   const convertedTakeoff = source.convertTakeoffToQuote(job.id, takeoff.id, {
-    validUntil: '2026-12-31'
+    validUntil: '2026-12-31',
+    pricingDecisionId: pricingDecision.id
   }, { actor: 'migration_fixture' });
   const bidOpportunity = source.createOpportunity({
     clientName: `Migration tender client ${suffix}`,
@@ -892,7 +903,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1020,7 +1031,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '054_estimate_rate_buildups');
+  assert.equal(migration.migrationVersion, '055_pricing_basis_decisions');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1193,6 +1204,15 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedPursuit.currentDecision.integrityValid, true);
     assert.equal(migratedPursuit.stale, false);
     assert.equal(hosted.getOpportunity(fixture.pursuitOpportunity.id).stage, 'estimating');
+    const migratedPricingBasis = hosted.pricingBasisForJob(fixture.job.id);
+    assert.equal(migratedPricingBasis.currentDecision.id, fixture.pricingDecision.id);
+    assert.equal(migratedPricingBasis.currentDecision.selectedModel, 'fixed_price');
+    assert.equal(migratedPricingBasis.currentDecision.integrityValid, true);
+    assert.equal(migratedPricingBasis.stale, false);
+    const migratedQuote = detail.quotes.find(item => item.id === fixture.convertedTakeoff.quote.id);
+    assert.equal(migratedQuote.pricingModel, 'fixed_price');
+    assert.equal(migratedQuote.pricingBasisIntegrityValid, true);
+    assert.equal(migratedQuote.pricingBasisCurrent, true);
     const migratedOrderUbl = hosted.getPurchaseOrderIssueDocument(fixture.bidOrderPackage.ublDocument.id, { audit: false });
     assert.equal(migratedOrderUbl.packageHash, fixture.bidOrderPackage.packageHash);
     assert.match(migratedOrderUbl.content, /urn:oasis:names:specification:ubl:schema:xsd:Order-2/);

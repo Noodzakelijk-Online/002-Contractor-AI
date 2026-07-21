@@ -182,7 +182,7 @@ test('estimating rate policies are approval-gated, replay-safe, and produce exac
   assert.equal(invalidated.item.rateBuildUp, null);
   assert.equal(invalidated.item.data.rateBuildUpInvalidated.reason, 'manual_rate_or_unit_change');
   assert.equal(ledger.diagnose().valid, true);
-  assert.equal(ledger.migrationStatus().currentVersion, '054_estimate_rate_buildups');
+  assert.equal(ledger.migrationStatus().currentVersion, '055_pricing_basis_decisions');
 });
 
 test('rate-policy revisions preserve historical build-ups and conversion retains their source trace', t => {

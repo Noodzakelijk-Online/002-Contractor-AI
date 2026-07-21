@@ -11,6 +11,7 @@ const {
   LEDGER_CAPABILITY_BLUEPRINT,
   BID_DECISION_CRITERIA,
   BID_DECISION_GATES,
+  PRICING_BASIS_FACTORS,
   MARKET_FIT_CRITERIA,
   PERFORMANCE_SCORECARD_POINT_IN_TIME_METRICS,
   JOB_OPERATING_PLAYBOOKS
@@ -1930,6 +1931,7 @@ app.get('/api/session', (req, res) => {
         tenders: !fieldWorker,
         takeoffs: !fieldWorker,
         estimateRates: !fieldWorker,
+        pricingBasis: !fieldWorker,
         schedule: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
@@ -2952,6 +2954,24 @@ app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert', (req, res) => {
     ...operatingLedger.convertTakeoffToQuote(req.params.id, req.params.takeoffId, req.body || {}, {
       actor: actorFromRequest(req, 'commercial')
     }),
+    job: operatingLedger.getJobDetail(req.params.id)
+  }), 201);
+});
+
+app.get('/api/ledger/jobs/:id/pricing-basis', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    pricingBasis: operatingLedger.pricingBasisForJob(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/pricing-decisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.retainPricingBasisDecision(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'commercial')
+    }),
+    pricingBasis: operatingLedger.pricingBasisForJob(req.params.id),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
 });
@@ -6090,6 +6110,7 @@ function operationalExport() {
     bidDecisionPolicies: operatingLedger.listBidDecisionPolicies({ includeHistory: true }),
     opportunityBidDecisions: operatingLedger.listOpportunityBidDecisions({ limit: 5_000 }),
     estimateRatePolicies: operatingLedger.listEstimateRatePolicies({ includeHistory: true }),
+    pricingBasisDecisions: operatingLedger.listPricingBasisDecisions({ limit: 5_000 }),
     opportunityEvidence: operatingLedger.listOpportunityEvidence({ limit: 5_000 }),
     opportunitySiteSurveys: operatingLedger.listOpportunitySiteSurveys({ limit: 5_000 }),
     bidPackages: operatingLedger.listBidPackages({ includeClosed: true, limit: 500 }),
@@ -6183,6 +6204,7 @@ function validateOperationalExport(snapshot) {
     'bidDecisionPolicies',
     'opportunityBidDecisions',
     'estimateRatePolicies',
+    'pricingBasisDecisions',
     'opportunityEvidence',
     'opportunitySiteSurveys',
     'attendanceSessions',
@@ -6259,6 +6281,7 @@ function validateOperationalExport(snapshot) {
       bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
       opportunityBidDecisions: Array.isArray(snapshot.opportunityBidDecisions) ? snapshot.opportunityBidDecisions.length : 0,
       estimateRatePolicies: Array.isArray(snapshot.estimateRatePolicies) ? snapshot.estimateRatePolicies.length : 0,
+      pricingBasisDecisions: Array.isArray(snapshot.pricingBasisDecisions) ? snapshot.pricingBasisDecisions.length : 0,
       opportunityEvidence: Array.isArray(snapshot.opportunityEvidence) ? snapshot.opportunityEvidence.length : 0,
       opportunitySiteSurveys: Array.isArray(snapshot.opportunitySiteSurveys) ? snapshot.opportunitySiteSurveys.length : 0,
       productionBaselines: snapshot.productionBaselines.length,
@@ -6916,6 +6939,9 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         labourBurdenBasis: 'explicit_assumptions_and_productive_utilization',
         overheadRecoveryBasis: 'labor_hour_or_direct_cost_percent',
         unitRateCommercialEffect: 'draft_takeoff_only',
+        pricingBasisDecision: 'versioned_source_bound_exact_replay',
+        pricingBasisOverride: 'explicit_reason_retained',
+        quotePricingBasisApproval: 'source_current_required',
         dailyLogEntryKey: 'durable',
         safetyBriefingEntryKey: 'durable',
         safetyBriefingAcknowledgement: 'worker_scoped_exact_replay',
@@ -7122,6 +7148,21 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         draftTakeoffMutationOnly: true,
         workerDirectoryRatesAffected: false,
         quotesIssued: false,
+        externalCommitments: 0
+      },
+      pricingBasis: {
+        framework: 'fixed_price_versus_time_and_materials_decision_tree',
+        factors: PRICING_BASIS_FACTORS,
+        assessmentMode: 'deterministic_source_bound_operator_evidence',
+        recommendationOutcomes: ['fixed_price', 'time_and_materials', 'review'],
+        overrideControl: 'explicit_reason_retained',
+        decisionHistory: 'immutable_versioned_supersession',
+        quoteBinding: 'decision_snapshot_and_source_hash',
+        quoteApproval: 'current_source_required',
+        timeAndMaterialsEvidence: 'daywork_and_retained_field_evidence',
+        autonomousSelection: false,
+        messagesSent: false,
+        contractsCommitted: false,
         externalCommitments: 0
       },
       productionControl: {

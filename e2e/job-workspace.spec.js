@@ -17,6 +17,26 @@ async function createBrowserJob(request, title, overrides = {}) {
   return response.json();
 }
 
+async function retainFixedPriceBasis(request, jobId, entryKey) {
+  const basisResponse = await request.get(`/api/ledger/jobs/${jobId}/pricing-basis`);
+  expect(basisResponse.ok()).toBeTruthy();
+  const basis = (await basisResponse.json()).pricingBasis;
+  const response = await request.post(`/api/ledger/jobs/${jobId}/pricing-decisions`, {
+    data: {
+      entryKey,
+      selectedModel: 'fixed_price',
+      rationale: 'The retained scope and commercial evidence support a fixed-price estimate.',
+      factors: basis.factors.map(factor => ({
+        key: factor.key,
+        status: 'yes',
+        evidence: `${factor.label} is verified in the browser workflow fixture.`
+      }))
+    }
+  });
+  expect(response.ok()).toBeTruthy();
+  return (await response.json()).decision;
+}
+
 async function ensureBrowserOrganization(request) {
   const response = await request.put('/api/ledger/organization', {
     data: {
@@ -220,6 +240,7 @@ test('commercial control retains server totals and changes contract value only a
     service: 'Interior renovation',
     estimatedCost: 0
   });
+  await retainFixedPriceBasis(request, intake.job.id, `browser-commercial-basis-${Date.now()}`);
   const openJob = async () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
@@ -236,7 +257,7 @@ test('commercial control retains server totals and changes contract value only a
   const estimateButton = commercial.getByRole('button', { name: 'New estimate' });
   await estimateButton.click();
   const quoteModal = page.getByTestId('commercial-draft-modal');
-  await expect(quoteModal.getByRole('heading', { name: 'New estimate' })).toBeVisible();
+  await expect(quoteModal.getByRole('heading', { name: 'New fixed-price estimate' })).toBeVisible();
   const firstQuoteLine = quoteModal.locator('.commercial-line-item').first();
   await firstQuoteLine.getByLabel('Description').fill('Carpentry installation');
   await firstQuoteLine.getByLabel('Quantity').fill('2');
@@ -247,7 +268,7 @@ test('commercial control retains server totals and changes contract value only a
   await secondQuoteLine.getByLabel('Quantity').fill('3');
   await secondQuoteLine.getByLabel('Unit price').fill('100');
   await expect(quoteModal.getByLabel('Commercial totals')).toContainText(/1[.,]500/);
-  await quoteModal.getByRole('button', { name: 'Retain estimate' }).click();
+  await quoteModal.getByRole('button', { name: 'Retain fixed-price estimate' }).click();
   await expect(quoteModal).toBeHidden();
   await expect(estimateButton).toBeFocused();
 

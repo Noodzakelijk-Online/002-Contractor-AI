@@ -416,6 +416,56 @@ function rateMoney(value, currencyCode = 'EUR') {
   }
 }
 
+const FALLBACK_PRICING_BASIS_FACTORS = [
+  { key: 'scope_defined', label: 'Scope is fully defined', weight: 15, critical: true },
+  { key: 'design_complete', label: 'Design information is complete', weight: 10, critical: true },
+  { key: 'quantities_verifiable', label: 'Quantities can be verified', weight: 15, critical: true },
+  { key: 'site_conditions_known', label: 'Site conditions are known', weight: 15, critical: true },
+  { key: 'selections_locked', label: 'Client selections are locked', weight: 10, critical: false },
+  { key: 'productivity_predictable', label: 'Productivity is predictable', weight: 10, critical: false },
+  { key: 'schedule_constraints_defined', label: 'Schedule constraints are defined', weight: 5, critical: false },
+  { key: 'price_exposure_controlled', label: 'Supplier and price exposure is controlled', weight: 10, critical: false },
+  { key: 'change_risk_low', label: 'Change risk is low', weight: 10, critical: false },
+]
+
+function pricingModelLabel(value) {
+  if (value === 'fixed_price') return 'Fixed price'
+  if (value === 'time_and_materials') return 'Time and materials'
+  return 'Review required'
+}
+
+function pricingBasisDraft(pricingBasis = {}) {
+  const definitions = pricingBasis.factors?.length ? pricingBasis.factors : FALLBACK_PRICING_BASIS_FACTORS
+  const retained = pricingBasis.currentDecision?.snapshot?.factors || EMPTY_LIST
+  return {
+    selectedModel: pricingBasis.currentDecision?.selectedModel || 'fixed_price',
+    rationale: pricingBasis.currentDecision?.snapshot?.rationale || '',
+    overrideReason: '',
+    factors: definitions.map((definition) => {
+      const current = retained.find((factor) => factor.key === definition.key)
+      return {
+        ...definition,
+        status: current?.status || 'unknown',
+        evidence: current?.evidence || '',
+      }
+    }),
+  }
+}
+
+function pricingBasisPreview(factors = EMPTY_LIST) {
+  const blockers = factors.filter((factor) => factor.critical && factor.status === 'no')
+  const evidenceGaps = factors.filter((factor) => factor.status === 'unknown')
+  const score = factors.reduce((sum, factor) => sum + (factor.status === 'yes' ? Number(factor.weight || 0) : 0), 0)
+  const recommendation = evidenceGaps.length
+    ? 'review'
+    : blockers.length
+      ? 'time_and_materials'
+      : score >= 75
+        ? 'fixed_price'
+        : 'time_and_materials'
+  return { blockers, evidenceGaps, score, recommendation }
+}
+
 function TakeoffControl({
   job,
   estimateRates,
@@ -431,6 +481,8 @@ function TakeoffControl({
   onConvert,
 }) {
   const activeRatePolicy = estimateRates?.activePolicy || null
+  const currentPricingBasis = job.pricingBasis?.currentDecision || null
+  const pricingBasisReady = Boolean(currentPricingBasis && job.pricingBasis?.stale !== true)
   const pendingRatePolicies = estimateRates?.pendingPolicies || EMPTY_LIST
   const takeoffs = job.takeoffs || EMPTY_LIST
   const draftCount = takeoffs.filter((takeoff) => takeoff.status === 'draft').length
@@ -571,6 +623,18 @@ function TakeoffControl({
           </button>
         ) : null}
       </div>
+      <div className={`takeoff-pricing-basis-strip ${pricingBasisReady ? 'pricing-basis-active' : 'pricing-basis-missing'}`} data-testid="takeoff-pricing-basis">
+        <GitBranch size={17} />
+        <div>
+          <strong>{pricingBasisReady ? pricingModelLabel(currentPricingBasis.selectedModel) : job.pricingBasis?.stale ? 'Pricing basis is stale' : 'Pricing basis required'}</strong>
+          <span>
+            {pricingBasisReady
+              ? `Decision v${currentPricingBasis.versionNumber} / ${currentPricingBasis.score}% fixed-price readiness / ${currentPricingBasis.snapshot?.override ? 'operator override retained' : 'recommendation followed'}`
+              : 'Estimate approval remains blocked until current scope and estimate evidence have been assessed.'}
+          </span>
+        </div>
+        {pricingBasisReady ? <span className="tag tag-green">Source current</span> : <span className="tag tag-amber">Action required</span>}
+      </div>
       <div className="takeoff-summary" aria-label="Quantity takeoff summary">
         <div><span>Sheets</span><strong>{takeoffs.length}</strong></div>
         <div><span>Work packages</span><strong>{packageCount}</strong></div>
@@ -604,7 +668,13 @@ function TakeoffControl({
                       <Plus size={14} />
                       Measurement
                     </button>
-                    <button type="button" className="secondary-button" disabled={submitting || !takeoff.itemCount || takeoff.subtotal <= 0} onClick={() => onConvert(takeoff)}>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={submitting || !takeoff.itemCount || takeoff.subtotal <= 0 || !pricingBasisReady}
+                      title={pricingBasisReady ? `Prepare a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'A current pricing-basis decision is required'}
+                      onClick={() => onConvert(takeoff)}
+                    >
                       <ArrowUpRight size={14} />
                       Prepare estimate
                     </button>
@@ -1316,9 +1386,13 @@ function CommercialControl({
   onRequestAcceptance,
   onRecordChangeDelivery,
   onOpenApprovals,
+  onRetainPricingBasis,
 }) {
   const quotes = job.quotes || EMPTY_LIST
   const changeOrders = job.changeOrders || EMPTY_LIST
+  const pricingBasis = job.pricingBasis || {}
+  const currentPricingBasis = pricingBasis.currentDecision || null
+  const pricingBasisReady = Boolean(currentPricingBasis && pricingBasis.stale !== true)
   const pendingApprovals = job.approvals?.filter((approval) => approval.status === 'pending') || EMPTY_LIST
   const pendingFor = (targetType, targetId) =>
     pendingApprovals.find((approval) => approval.targetType === targetType && approval.targetId === targetId)
@@ -1326,6 +1400,49 @@ function CommercialControl({
   const acceptedChanges = changeOrders.filter((changeOrder) => changeOrder.status === 'accepted')
   const acceptedChangeNet = acceptedChanges.reduce((sum, changeOrder) => sum + Number(changeOrder.amount || 0), 0)
   const commercialCurrency = acceptedQuote?.currency || quotes[0]?.currency || 'EUR'
+  const acceptedPricingModel = acceptedQuote?.pricingModel || job.data?.commercialPricingModel || null
+  const [editingPricingBasis, setEditingPricingBasis] = useState(false)
+  const [pricingDraft, setPricingDraft] = useState(() => pricingBasisDraft(pricingBasis))
+  const pricingPreview = useMemo(() => pricingBasisPreview(pricingDraft.factors), [pricingDraft.factors])
+  const pricingOverride = pricingDraft.selectedModel !== pricingPreview.recommendation
+  const pricingDraftReady = pricingDraft.factors.length > 0
+    && pricingDraft.factors.every((factor) => ['yes', 'no', 'unknown'].includes(factor.status) && factor.evidence.trim().length >= 8)
+    && ['fixed_price', 'time_and_materials'].includes(pricingDraft.selectedModel)
+    && pricingDraft.rationale.trim().length >= 8
+    && (!pricingOverride || pricingDraft.overrideReason.trim().length >= 12)
+
+  useEffect(() => {
+    if (!editingPricingBasis) setPricingDraft(pricingBasisDraft(pricingBasis))
+  }, [editingPricingBasis, job.id, currentPricingBasis?.id, pricingBasis.stale])
+
+  function openPricingBasisEditor() {
+    setPricingDraft(pricingBasisDraft(pricingBasis))
+    setEditingPricingBasis(true)
+  }
+
+  function updatePricingFactor(index, patch) {
+    setPricingDraft((current) => ({
+      ...current,
+      factors: current.factors.map((factor, factorIndex) => factorIndex === index ? { ...factor, ...patch } : factor),
+    }))
+  }
+
+  async function submitPricingBasis(event) {
+    event.preventDefault()
+    if (!pricingDraftReady) return
+    const retained = await onRetainPricingBasis({
+      entryKey: `pricing-basis:${job.id}:${Date.now()}`,
+      selectedModel: pricingDraft.selectedModel,
+      rationale: pricingDraft.rationale.trim(),
+      overrideReason: pricingOverride ? pricingDraft.overrideReason.trim() : null,
+      factors: pricingDraft.factors.map((factor) => ({
+        key: factor.key,
+        status: factor.status,
+        evidence: factor.evidence.trim(),
+      })),
+    })
+    if (retained) setEditingPricingBasis(false)
+  }
 
   return (
     <section className="job-workspace-section commercial-control" data-testid="commercial-control">
@@ -1336,13 +1453,35 @@ function CommercialControl({
           <p>Separate internal approval from retained client acceptance before contract value changes.</p>
         </div>
       </div>
+      <div className={`pricing-basis-strip ${pricingBasisReady ? 'pricing-basis-active' : 'pricing-basis-missing'}`} data-testid="pricing-basis-control">
+        <GitBranch size={18} />
+        <div className="pricing-basis-copy">
+          <div>
+            <strong>{pricingBasisReady ? pricingModelLabel(currentPricingBasis.selectedModel) : pricingBasis.stale ? 'Commercial basis requires reassessment' : 'Commercial pricing basis not retained'}</strong>
+            {currentPricingBasis ? <span className="tag">v{currentPricingBasis.versionNumber}</span> : null}
+            {currentPricingBasis?.snapshot?.override ? <span className="tag tag-amber">Override</span> : null}
+          </div>
+          <span>
+            {currentPricingBasis
+              ? `${currentPricingBasis.score}% fixed-price readiness / recommendation ${pricingModelLabel(currentPricingBasis.recommendation).toLowerCase()} / ${currentPricingBasis.snapshot?.rationale || 'No rationale retained'}`
+              : 'No quote can enter approval until the current scope, quantities, site conditions, selections, productivity, schedule, price exposure, and change risk have been assessed.'}
+          </span>
+        </div>
+        {pricingBasis.stale ? <span className="tag tag-amber">Source changed</span> : pricingBasisReady ? <span className="tag tag-green">Source current</span> : null}
+        {canCoordinate ? (
+          <button type="button" className="secondary-button" disabled={submitting} onClick={openPricingBasisEditor}>
+            <ClipboardPenLine size={14} />
+            {currentPricingBasis ? 'Reassess' : 'Assess basis'}
+          </button>
+        ) : null}
+      </div>
       <div className="commercial-summary" aria-label="Accepted commercial value">
         <div>
-          <span>Accepted contract net</span>
+          <span>{acceptedPricingModel === 'time_and_materials' ? 'Recorded contract value' : 'Accepted contract net'}</span>
           <strong>{currency.format(job.contractValue || 0)}</strong>
         </div>
         <div>
-          <span>Accepted quote</span>
+          <span>{acceptedPricingModel === 'time_and_materials' ? 'Accepted T&M budget' : 'Accepted quote'}</span>
           <strong>{acceptedQuote ? currency.format(acceptedQuote.subtotal || 0) : 'Not retained'}</strong>
         </div>
         <div>
@@ -1362,7 +1501,7 @@ function CommercialControl({
       </div>
       {canCoordinate ? (
         <div className="commercial-actions">
-          <button type="button" className="secondary-button" disabled={submitting} onClick={onNewQuote}>
+          <button type="button" className="secondary-button" disabled={submitting || !pricingBasisReady} title={pricingBasisReady ? `Create a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'Retain a current pricing-basis decision first'} onClick={onNewQuote}>
             <Plus size={15} />
             New estimate
           </button>
@@ -1370,6 +1509,63 @@ function CommercialControl({
             <Plus size={15} />
             Scope change
           </button>
+        </div>
+      ) : null}
+      {editingPricingBasis ? (
+        <div className="modal-backdrop pricing-basis-backdrop" role="presentation">
+          <form className="modal pricing-basis-modal" role="dialog" aria-modal="true" aria-labelledby="pricing-basis-title" data-testid="pricing-basis-form" onSubmit={submitPricingBasis}>
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">Source-bound commercial decision</p>
+                <h2 id="pricing-basis-title">Fixed price or time and materials</h2>
+                <p>{job.title} / decision history remains retained</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close pricing-basis assessment" onClick={() => setEditingPricingBasis(false)}><X size={17} /></button>
+            </div>
+            <div className="pricing-basis-modal-body">
+              <div className="pricing-basis-preview" aria-label="Pricing-basis recommendation">
+                <div><span>Recommendation</span><strong>{pricingModelLabel(pricingPreview.recommendation)}</strong></div>
+                <div><span>Fixed-price readiness</span><strong>{pricingPreview.score}%</strong></div>
+                <div><span>Critical blockers</span><strong>{pricingPreview.blockers.length}</strong></div>
+                <div><span>Evidence gaps</span><strong>{pricingPreview.evidenceGaps.length}</strong></div>
+              </div>
+              <div className="pricing-factor-list">
+                {pricingDraft.factors.map((factor, index) => (
+                  <div className="pricing-factor-row" key={factor.key} data-testid={`pricing-factor-${factor.key}`}>
+                    <div><strong>{factor.label}</strong><small>{factor.weight}% weight{factor.critical ? ' / critical' : ''}</small></div>
+                    <label>
+                      Assessment
+                      <select value={factor.status} onChange={(event) => updatePricingFactor(index, { status: event.target.value })}>
+                        <option value="yes">Yes</option>
+                        <option value="no">No</option>
+                        <option value="unknown">Unknown</option>
+                      </select>
+                    </label>
+                    <label>
+                      Retained evidence
+                      <input required minLength="8" maxLength="500" value={factor.evidence} onChange={(event) => updatePricingFactor(index, { evidence: event.target.value })} placeholder="Reference the scope, survey, drawing, takeoff, selection, schedule, or supplier evidence." />
+                    </label>
+                  </div>
+                ))}
+              </div>
+              <fieldset className="pricing-model-fieldset">
+                <legend>Selected commercial model</legend>
+                <div className="pricing-model-options">
+                  <label className={pricingDraft.selectedModel === 'fixed_price' ? 'selected' : ''}><input type="radio" name="pricing-model" value="fixed_price" checked={pricingDraft.selectedModel === 'fixed_price'} onChange={(event) => setPricingDraft({ ...pricingDraft, selectedModel: event.target.value })} /><span>Fixed price</span></label>
+                  <label className={pricingDraft.selectedModel === 'time_and_materials' ? 'selected' : ''}><input type="radio" name="pricing-model" value="time_and_materials" checked={pricingDraft.selectedModel === 'time_and_materials'} onChange={(event) => setPricingDraft({ ...pricingDraft, selectedModel: event.target.value })} /><span>Time and materials</span></label>
+                </div>
+              </fieldset>
+              <label className="pricing-basis-textarea">Decision rationale<textarea required minLength="8" maxLength="1000" value={pricingDraft.rationale} onChange={(event) => setPricingDraft({ ...pricingDraft, rationale: event.target.value })} placeholder="State why this model fits the retained risk and estimate basis." /></label>
+              {pricingOverride ? (
+                <label className="pricing-basis-textarea pricing-override-reason">Override reason<textarea required minLength="12" maxLength="500" value={pricingDraft.overrideReason} onChange={(event) => setPricingDraft({ ...pricingDraft, overrideReason: event.target.value })} placeholder="Explain the commercial control that justifies departing from the recommendation or proceeding with evidence gaps." /></label>
+              ) : null}
+              <p className="workflow-note">This retains an internal commercial decision. Quote issue, client acceptance, schedule commitments, supplier spend, invoices, and payments remain separately gated.</p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setEditingPricingBasis(false)}>Cancel</button>
+              <button className="primary-button" disabled={submitting || !pricingDraftReady}><ShieldCheck size={15} />{submitting ? 'Retaining...' : 'Retain pricing basis'}</button>
+            </div>
+          </form>
         </div>
       ) : null}
       <div className="commercial-ledger">
@@ -1398,8 +1594,11 @@ function CommercialControl({
                   <div className="activity-row commercial-row" key={quote.id} data-testid={`commercial-quote-${quote.id}`}>
                     <div className="commercial-record">
                       <div>
-                        <strong>{currency.format(quote.subtotal || 0)} net</strong>
+                        <strong>{currency.format(quote.subtotal || 0)} {quote.pricingModel === 'time_and_materials' ? 'budget net' : 'net'}</strong>
                         <span className={`status status-${quote.status}`}>{formatStatus(quote.status)}</span>
+                        {quote.pricingModel ? <span className="tag">{pricingModelLabel(quote.pricingModel)}</span> : null}
+                        {quote.pricingBasisIntegrityValid === false ? <span className="tag tag-red">Basis integrity failed</span> : null}
+                        {issueApproval && quote.pricingBasisCurrent === false ? <span className="tag tag-amber">Reassessment required</span> : null}
                       </div>
                       <small>
                         {quote.lineItems?.length || 0} line item{quote.lineItems?.length === 1 ? '' : 's'} · VAT {quote.taxRate || 0}% ·
@@ -1416,7 +1615,8 @@ function CommercialControl({
                         <button
                           type="button"
                           className="secondary-button"
-                          disabled={submitting}
+                          disabled={submitting || quote.pricingBasisIntegrityValid === false || quote.pricingBasisCurrent === false}
+                          title={quote.pricingBasisCurrent === false ? 'Reassess the pricing basis before approving this quote' : 'Review quote approval'}
                           onClick={() => onOpenApprovals({ approvalId: issueApproval.id })}
                         >
                           <ShieldCheck size={15} />

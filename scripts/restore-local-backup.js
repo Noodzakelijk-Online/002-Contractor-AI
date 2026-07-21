@@ -1011,6 +1011,19 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup estimating rate constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('055_pricing_basis_decisions')) {
+        if (!retainedTables.has('pricing_basis_decisions')) {
+          throw new Error('Backup pricing-basis schema is incomplete: pricing_basis_decisions.');
+        }
+        const decisionColumns = new Set(database.prepare('PRAGMA table_info(pricing_basis_decisions)').all().map(row => row.name));
+        for (const column of ['job_id', 'version_number', 'status', 'recommendation', 'selected_model', 'score', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint']) {
+          if (!decisionColumns.has(column)) throw new Error(`Backup pricing-basis schema is incomplete: pricing_basis_decisions.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of ['idx_pricing_basis_one_current', 'idx_pricing_basis_job_history', 'idx_pricing_basis_model_status']) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup pricing-basis constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

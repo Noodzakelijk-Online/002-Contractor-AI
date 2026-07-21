@@ -3078,6 +3078,7 @@ function App() {
     )
   const commercialDraftReady =
     commercialLinesValid &&
+    (commercialDraftMode !== 'quote' || Boolean(selectedJob?.pricingBasis?.currentDecision && selectedJob?.pricingBasis?.stale !== true)) &&
     (commercialDraftMode !== 'change_order' ||
       (changeOrderDraft.title.trim().length >= 2 && changeOrderDraft.scopeDelta.trim().length >= 3))
   const takeoffPreviewQuantity = takeoffDraftQuantity(takeoffItemDraft)
@@ -5940,6 +5941,11 @@ function App() {
   async function convertTakeoff(event) {
     event.preventDefault()
     if (!selectedJobId || takeoffDialog?.mode !== 'convert') return
+    const pricingDecision = selectedJob?.pricingBasis?.currentDecision
+    if (!pricingDecision || selectedJob?.pricingBasis?.stale === true) {
+      setError('Retain a current fixed-price or time-and-materials decision before preparing the estimate.')
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
@@ -5950,6 +5956,7 @@ function App() {
           body: JSON.stringify({
             validUntil: takeoffConversionDraft.validUntil,
             notes: takeoffConversionDraft.notes.trim() || null,
+            pricingDecisionId: pricingDecision.id,
           }),
         },
       )
@@ -5967,6 +5974,10 @@ function App() {
 
   function openCommercialDraft(mode) {
     if (!selectedJob) return
+    if (mode === 'quote' && (!selectedJob.pricingBasis?.currentDecision || selectedJob.pricingBasis?.stale === true)) {
+      setError('Retain a current fixed-price or time-and-materials decision before creating an estimate.')
+      return
+    }
     commercialDialogReturnFocusRef.current = false
     commercialDialogOpenerRef.current = document.activeElement
     setCommercialDraftMode(mode)
@@ -6033,6 +6044,7 @@ function App() {
       const payload =
         mode === 'quote'
           ? {
+              pricingDecisionId: selectedJob?.pricingBasis?.currentDecision?.id || null,
               currency: 'EUR',
               taxRate: Number(draft.taxRate),
               validUntil: draft.validUntil || null,
@@ -6091,6 +6103,27 @@ function App() {
       )
     } catch (requestError) {
       setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function retainPricingBasisDecision(payload) {
+    if (!selectedJobId) return false
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/pricing-decisions`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      await refresh()
+      notify(`${formatStatus(result.decision.selectedModel)} pricing basis v${result.decision.versionNumber} retained. Estimates now bind to this exact decision.`)
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
     } finally {
       setSubmitting(false)
     }
@@ -13889,6 +13922,7 @@ function App() {
                       onRequestAcceptance={openCommercialAcceptance}
                       onRecordChangeDelivery={openChangeOrderDelivery}
                       onOpenApprovals={openApprovals}
+                      onRetainPricingBasis={retainPricingBasisDecision}
                     />
                   ) : null}
                   {!fieldScoped ? (
@@ -14586,6 +14620,13 @@ function App() {
             </div>
             <form onSubmit={convertTakeoff}>
               <div className="takeoff-modal-body">
+                <div className="commercial-draft-pricing" data-testid="takeoff-conversion-pricing-basis">
+                  <GitBranch size={16} />
+                  <div>
+                    <strong>{formatStatus(selectedJob?.pricingBasis?.currentDecision?.selectedModel || 'review')}</strong>
+                    <span>Decision v{selectedJob?.pricingBasis?.currentDecision?.versionNumber || '-'} / {selectedJob?.pricingBasis?.currentDecision?.score || 0}% fixed-price readiness / source current</span>
+                  </div>
+                </div>
                 <div className="takeoff-preview takeoff-convert-preview">
                   <div><span>Work packages</span><strong>{takeoffDialog.takeoff.workBreakdown?.packageCount || 0}</strong></div>
                   <div><span>Measurements</span><strong>{takeoffDialog.takeoff.itemCount}</strong></div>
@@ -14631,7 +14672,11 @@ function App() {
             <div className="modal-heading">
               <div>
                 <p className="eyebrow">Approval-gated commercial record</p>
-                <h2 id="commercial-draft-title">{commercialDraftMode === 'quote' ? 'New estimate' : 'New scope change'}</h2>
+                <h2 id="commercial-draft-title">
+                  {commercialDraftMode === 'quote'
+                    ? selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'New T&M budget estimate' : 'New fixed-price estimate'
+                    : 'New scope change'}
+                </h2>
                 <p>{selectedJob?.title} / server-derived totals</p>
               </div>
               <button type="button" className="icon-button" aria-label="Close commercial draft" onClick={closeCommercialDialog}>
@@ -14641,31 +14686,44 @@ function App() {
             <form onSubmit={submitCommercialDraft}>
               <div className="commercial-draft-body">
                 {commercialDraftMode === 'quote' ? (
-                  <div className="form-grid compact-form">
-                    <label>
-                      Valid until
-                      <input
-                        autoFocus
-                        required
-                        type="date"
-                        min={new Date().toISOString().slice(0, 10)}
-                        value={quoteDraft.validUntil}
-                        onChange={(event) => setQuoteDraft({ ...quoteDraft, validUntil: event.target.value })}
-                      />
-                    </label>
-                    <label>
-                      VAT rate (%)
-                      <input
-                        required
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.01"
-                        value={quoteDraft.taxRate}
-                        onChange={(event) => setQuoteDraft({ ...quoteDraft, taxRate: event.target.value })}
-                      />
-                    </label>
-                  </div>
+                  <>
+                    <div className="commercial-draft-pricing" data-testid="commercial-draft-pricing-basis">
+                      <GitBranch size={16} />
+                      <div>
+                        <strong>{formatStatus(selectedJob?.pricingBasis?.currentDecision?.selectedModel || 'review')}</strong>
+                        <span>
+                          {selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials'
+                            ? 'Amounts form a budget estimate; actual billing requires retained time, material, rate, and work evidence.'
+                            : 'The price applies to the stated scope, assumptions, exclusions, and allowances; approved changes remain separate.'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="form-grid compact-form">
+                      <label>
+                        Valid until
+                        <input
+                          autoFocus
+                          required
+                          type="date"
+                          min={new Date().toISOString().slice(0, 10)}
+                          value={quoteDraft.validUntil}
+                          onChange={(event) => setQuoteDraft({ ...quoteDraft, validUntil: event.target.value })}
+                        />
+                      </label>
+                      <label>
+                        VAT rate (%)
+                        <input
+                          required
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.01"
+                          value={quoteDraft.taxRate}
+                          onChange={(event) => setQuoteDraft({ ...quoteDraft, taxRate: event.target.value })}
+                        />
+                      </label>
+                    </div>
+                  </>
                 ) : (
                   <div className="form-grid compact-form">
                     <label className="form-span">
@@ -14805,13 +14863,13 @@ function App() {
                 </div>
                 <div className="commercial-total-strip" aria-label="Commercial totals">
                   <span>
-                    Net <strong>{currency.format(commercialDraftNet)}</strong>
+                    {commercialDraftMode === 'quote' && selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'Budget net' : 'Net'} <strong>{currency.format(commercialDraftNet)}</strong>
                   </span>
                   <span>
                     VAT <strong>{currency.format(commercialDraftTax)}</strong>
                   </span>
                   <span>
-                    Gross <strong>{currency.format(commercialDraftTotal)}</strong>
+                    {commercialDraftMode === 'quote' && selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'Budget gross' : 'Gross'} <strong>{currency.format(commercialDraftTotal)}</strong>
                   </span>
                 </div>
                 <label>
@@ -14838,7 +14896,11 @@ function App() {
                 </button>
                 <button className="primary-button" disabled={submitting || !commercialDraftReady}>
                   <ShieldCheck size={16} />
-                  {submitting ? 'Saving...' : commercialDraftMode === 'quote' ? 'Retain estimate' : 'Request change approval'}
+                  {submitting
+                    ? 'Saving...'
+                    : commercialDraftMode === 'quote'
+                      ? selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'Retain T&M budget' : 'Retain fixed-price estimate'
+                      : 'Request change approval'}
                 </button>
               </div>
             </form>

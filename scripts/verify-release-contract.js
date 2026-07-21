@@ -147,6 +147,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/ledger/jobs/:id/takeoffs'",
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/rate-build-up'",
     "app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert'",
+    "app.get('/api/ledger/jobs/:id/pricing-basis'",
+    "app.post('/api/ledger/jobs/:id/pricing-decisions'",
     "app.post('/api/ledger/upload'",
     "app.post('/api/ledger/opportunities/:id/site-surveys'",
     "app.post('/api/ledger/opportunities/:id/site-surveys/:surveyId/submissions'",
@@ -184,6 +186,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '054_estimate_rate_buildups'")) {
     failures.push('Canonical estimating rate build-up migration is missing.');
   }
+  if (!ledgerSource.includes("version: '055_pricing_basis_decisions'")) {
+    failures.push('Canonical pricing-basis decision migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }
@@ -198,6 +203,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes("buildUpIntegrity: 'retained_policy_hash_and_sha256'")) {
     failures.push('Unit-rate capability does not bind build-ups to the retained policy hash.');
+  }
+  if (!serverSource.includes("quotePricingBasisApproval: 'source_current_required'")) {
+    failures.push('Quote approval does not declare current pricing-basis source enforcement.');
+  }
+  if (!serverSource.includes("framework: 'fixed_price_versus_time_and_materials_decision_tree'")) {
+    failures.push('Pricing-basis capability does not declare its deterministic decision-tree framework.');
   }
   if (!serverSource.includes("siteSurveyApproval: 'source_current_approval_gated'")) {
     failures.push('Site-survey capability does not declare source-current approval semantics.');
