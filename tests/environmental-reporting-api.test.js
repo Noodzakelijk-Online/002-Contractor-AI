@@ -162,5 +162,5 @@ test('environmental API enforces field scope, approval, report integrity, and of
   assert.equal(capabilities.body.capabilities.requestSafety.environmentalCertificationClaimed, false);
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '060_daily_operating_cycles');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '061_last_planner_lite');
 });

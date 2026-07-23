@@ -207,8 +207,27 @@ test('backup verification accepts a complete migration 059 ledger without migrat
   createBackupLedger(ledgerFile, 'Crew planning compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE last_planner_outcomes;
+    DROP TABLE last_planner_weekly_plans;
+    DROP TABLE last_planner_constraints;
     DROP TABLE daily_operating_cycles;
-    DELETE FROM ledger_schema_migrations WHERE version = '060_daily_operating_cycles';
+    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite');
+  `);
+  database.close();
+  assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
+});
+
+test('backup verification accepts a complete migration 060 ledger without migration 061', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-daily-cycle-compatibility-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Daily cycle compatibility fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP TABLE last_planner_outcomes;
+    DROP TABLE last_planner_weekly_plans;
+    DROP TABLE last_planner_constraints;
+    DELETE FROM ledger_schema_migrations WHERE version = '061_last_planner_lite';
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -225,6 +244,20 @@ test('backup verification rejects a migration 060 ledger with missing daily oper
   assert.throws(
     () => verifySqliteBackupDatabase(ledgerFile),
     /daily operating-cycle constraints are incomplete: idx_daily_operating_cycles_status_date/i
+  );
+});
+
+test('backup verification rejects a migration 061 ledger with missing Last Planner constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-last-planner-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Last Planner schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_last_planner_outcomes_result');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /Last Planner constraints are incomplete: idx_last_planner_outcomes_result/i
   );
 });
 

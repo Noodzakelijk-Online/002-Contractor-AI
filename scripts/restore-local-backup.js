@@ -1129,6 +1129,35 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup daily operating-cycle constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('061_last_planner_lite')) {
+        for (const table of ['last_planner_constraints', 'last_planner_weekly_plans', 'last_planner_outcomes']) {
+          if (!retainedTables.has(table)) throw new Error(`Backup Last Planner schema is incomplete: ${table}.`);
+        }
+        const constraintColumns = new Set(database.prepare('PRAGMA table_info(last_planner_constraints)').all().map(row => row.name));
+        for (const column of ['job_id', 'task_id', 'category', 'title', 'owner', 'due_date', 'status', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint', 'release_source_hash', 'release_snapshot_hash', 'release_snapshot_json', 'release_entry_key', 'release_entry_fingerprint']) {
+          if (!constraintColumns.has(column)) throw new Error(`Backup Last Planner schema is incomplete: last_planner_constraints.${column}.`);
+        }
+        const planColumns = new Set(database.prepare('PRAGMA table_info(last_planner_weekly_plans)').all().map(row => row.name));
+        for (const column of ['job_id', 'version_number', 'week_start', 'week_end', 'status', 'lookahead_plan_id', 'source_hash', 'snapshot_hash', 'snapshot_json', 'approval_id', 'entry_key', 'entry_fingerprint']) {
+          if (!planColumns.has(column)) throw new Error(`Backup Last Planner schema is incomplete: last_planner_weekly_plans.${column}.`);
+        }
+        const outcomeColumns = new Set(database.prepare('PRAGMA table_info(last_planner_outcomes)').all().map(row => row.name));
+        for (const column of ['plan_id', 'job_id', 'commitment_id', 'result', 'evidence_references_json', 'variance_category', 'variance_reason', 'daily_cycle_ids_json', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint']) {
+          if (!outcomeColumns.has(column)) throw new Error(`Backup Last Planner schema is incomplete: last_planner_outcomes.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_last_planner_constraints_job_due',
+          'idx_last_planner_constraints_task',
+          'idx_last_planner_one_pending',
+          'idx_last_planner_one_approved',
+          'idx_last_planner_plan_history',
+          'idx_last_planner_outcomes_job',
+          'idx_last_planner_outcomes_result'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup Last Planner constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

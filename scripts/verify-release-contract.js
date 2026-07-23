@@ -210,6 +210,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '060_daily_operating_cycles'")) {
     failures.push('Canonical daily start-huddle and end-of-day operating-cycle migration is missing.');
   }
+  if (!ledgerSource.includes("version: '061_last_planner_lite'")) {
+    failures.push('Canonical Last Planner lite migration is missing.');
+  }
+  if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
+    failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }

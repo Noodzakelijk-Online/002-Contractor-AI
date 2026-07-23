@@ -1944,6 +1944,7 @@ app.get('/api/session', (req, res) => {
         pricingBasis: !fieldWorker,
         schedule: !fieldWorker,
         crewCapacity: !fieldWorker,
+        lastPlanner: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
         resources: !fieldWorker,
@@ -5921,6 +5922,85 @@ app.post('/api/ledger/crew-lookahead/plans', (req, res) => {
   }, 201);
 });
 
+app.get('/api/ledger/last-planner', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    board: operatingLedger.getLastPlannerBoard(req.query || {})
+  }));
+});
+
+app.get('/api/ledger/last-planner/constraints', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    constraints: operatingLedger.listLastPlannerConstraints(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/last-planner/constraints', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createLastPlannerConstraint(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.getLastPlannerBoard({
+      weekStart: req.body?.weekStart || req.body?.week_start || req.body?.dueDate || req.body?.due_date
+    })
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/last-planner/constraints/:constraintId/release', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.releaseLastPlannerConstraint(req.params.id, req.params.constraintId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.getLastPlannerBoard({
+      weekStart: req.body?.weekStart || req.body?.week_start
+    })
+  }));
+});
+
+app.get('/api/ledger/last-planner/plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    plans: operatingLedger.listLastPlannerWeeklyPlans(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/last-planner/plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.requestLastPlannerWeeklyPlan(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      ...result,
+      board: operatingLedger.getLastPlannerBoard({ weekStart: result.plan.weekStart })
+    };
+  }, 201);
+});
+
+app.get('/api/ledger/last-planner/outcomes', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    outcomes: operatingLedger.listLastPlannerOutcomes(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/last-planner/plans/:planId/commitments/:commitmentId/outcome', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.recordLastPlannerOutcome(
+      req.params.id,
+      req.params.planId,
+      req.params.commitmentId,
+      req.body || {},
+      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+    ),
+    board: operatingLedger.getLastPlannerBoard({ weekStart: req.body?.weekStart || req.body?.week_start })
+  }), 201);
+});
+
 app.post('/api/ledger/schedule/recommend', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -6375,6 +6455,9 @@ function operationalExport() {
     crewCapacityAllocations: operatingLedger.listCrewCapacityAllocations({ status: 'all', limit: 20_000 }),
     crewLookaheadPlans: operatingLedger.listCrewLookaheadPlans({ status: 'all', limit: 5_000 }),
     dailyOperatingCycles: operatingLedger.listDailyOperatingCycles({ limit: 10_000 }),
+    lastPlannerConstraints: operatingLedger.listLastPlannerConstraints({ status: 'all', limit: 10_000 }),
+    lastPlannerWeeklyPlans: operatingLedger.listLastPlannerWeeklyPlans({ status: 'all', limit: 10_000 }),
+    lastPlannerOutcomes: operatingLedger.listLastPlannerOutcomes({ limit: 20_000 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
@@ -6454,6 +6537,9 @@ function validateOperationalExport(snapshot) {
     'crewCapacityAllocations',
     'crewLookaheadPlans',
     'dailyOperatingCycles',
+    'lastPlannerConstraints',
+    'lastPlannerWeeklyPlans',
+    'lastPlannerOutcomes',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
     'dayworkTickets',
@@ -6543,6 +6629,9 @@ function validateOperationalExport(snapshot) {
       crewCapacityAllocations: Array.isArray(snapshot.crewCapacityAllocations) ? snapshot.crewCapacityAllocations.length : 0,
       crewLookaheadPlans: Array.isArray(snapshot.crewLookaheadPlans) ? snapshot.crewLookaheadPlans.length : 0,
       dailyOperatingCycles: Array.isArray(snapshot.dailyOperatingCycles) ? snapshot.dailyOperatingCycles.length : 0,
+      lastPlannerConstraints: Array.isArray(snapshot.lastPlannerConstraints) ? snapshot.lastPlannerConstraints.length : 0,
+      lastPlannerWeeklyPlans: Array.isArray(snapshot.lastPlannerWeeklyPlans) ? snapshot.lastPlannerWeeklyPlans.length : 0,
+      lastPlannerOutcomes: Array.isArray(snapshot.lastPlannerOutcomes) ? snapshot.lastPlannerOutcomes.length : 0,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
@@ -7186,6 +7275,23 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         supplierCommitments: 0,
         externalCommitments: 0
       },
+      lastPlannerLite: {
+        available: true,
+        period: 'monday_to_sunday',
+        makeReadyConstraints: 'source_and_release_evidence_bound',
+        weeklyPromises: 'task_date_crew_allocation_bound',
+        planApproval: 'immutable_source_current_snapshot',
+        actualEvidence: 'closed_daily_operating_cycle_required',
+        measurement: ['percent_plan_complete', 'reasons_for_variance'],
+        exactReplay: true,
+        autonomy: 'internal_review_task_only',
+        scheduleChanged: false,
+        assignmentsCreated: 0,
+        crewNotifications: 0,
+        clientCommitments: 0,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
@@ -7244,6 +7350,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         crewLookaheadApproval: 'source_current_approval_gated',
         crewLookaheadAutonomy: 'internal_review_task_only',
         crewLookaheadCommitmentInference: false,
+        lastPlannerConstraintEntryKey: 'durable_exact_replay',
+        lastPlannerConstraintRelease: 'evidence_bound_exact_replay',
+        lastPlannerWeeklyPlanApproval: 'source_current_approval_gated',
+        lastPlannerOutcomeEvidence: 'closed_daily_cycle_and_sha256_snapshot',
+        lastPlannerAutonomy: 'internal_review_task_only',
+        lastPlannerCommitmentInference: false,
         formalVariationEntryKey: 'durable_exact_replay',
         formalVariationSnapshot: 'accepted_contract_source_sha256',
         formalVariationRevision: 'explicit_approved_supersession',

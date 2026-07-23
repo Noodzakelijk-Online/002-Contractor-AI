@@ -89,6 +89,7 @@ const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
 const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
+const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -1056,11 +1057,12 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     return { jobs: jobs.jobs || [], inspectionTemplates: templates.templates || [] }
   }
   if (section === 'schedule') {
-    const [schedule, crewCapacity] = await Promise.all([
+    const [schedule, crewCapacity, lastPlanner] = await Promise.all([
       api('/api/ledger/schedule?horizonDays=180&limit=500'),
       api('/api/ledger/crew-capacity'),
+      api('/api/ledger/last-planner'),
     ])
-    return { schedule, crewCapacity: crewCapacity.board || null }
+    return { schedule, crewCapacity: crewCapacity.board || null, lastPlanner: lastPlanner.board || null }
   }
   if (section === 'approvals') {
     const result = await api('/api/ledger/approvals?status=pending&limit=100')
@@ -2919,6 +2921,7 @@ function App() {
           dispatch: { rows: [] },
           schedule: { jobs: [], summary: {}, window: null },
           crewCapacity: null,
+          lastPlanner: null,
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
@@ -2966,6 +2969,7 @@ function App() {
           dispatch: { rows: [] },
           schedule: { jobs: [], summary: {}, window: null },
           crewCapacity: null,
+          lastPlanner: null,
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
@@ -9917,6 +9921,109 @@ function App() {
     openJobWorkspace(job)
   }
 
+  async function loadLastPlannerWeek(weekStart) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/last-planner?weekStart=${encodeURIComponent(weekStart)}`)
+      setData((current) => current ? { ...current, lastPlanner: result.board || current.lastPlanner } : current)
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function createLastPlannerConstraint(jobId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/last-planner/constraints`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? { ...current, lastPlanner: result.board || current.lastPlanner } : current)
+      notify(result.replayed ? 'The exact make-ready constraint was already retained.' : 'Make-ready constraint retained without changing the schedule or creating external commitments.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function releaseLastPlannerConstraint(jobId, constraintId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/last-planner/constraints/${encodeURIComponent(constraintId)}/release`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? { ...current, lastPlanner: result.board || current.lastPlanner } : current)
+      notify(result.replayed ? 'This make-ready release was already retained.' : 'Constraint released against retained evidence. No permit or compliance claim was created.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestLastPlannerPlan(jobId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/last-planner/plans`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? {
+        ...current,
+        lastPlanner: result.board || current.lastPlanner,
+        approvals: result.approval ? upsertById(current.approvals, result.approval) : current.approvals,
+      } : current)
+      notify(result.replayed ? 'The exact weekly plan is already waiting for review.' : 'Immutable weekly promises sent to the internal approval queue. No schedule or external commitment was changed.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function reviewLastPlannerApproval(plan) {
+    if (!plan?.approvalId) {
+      setError('The retained weekly plan is not linked to an approval decision.')
+      return
+    }
+    openApprovals({ approvalId: plan.approvalId, jobTitle: `${plan.jobTitle || 'Weekly plan'} / ${formatDate(plan.weekStart)}` })
+  }
+
+  async function recordLastPlannerOutcome(jobId, planId, commitmentId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/last-planner/plans/${encodeURIComponent(planId)}/commitments/${encodeURIComponent(commitmentId)}/outcome`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? { ...current, lastPlanner: result.board || current.lastPlanner } : current)
+      notify(result.replayed ? 'The exact weekly outcome was already retained.' : 'Weekly outcome retained against closed daily-cycle evidence and included in PPC.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function reviewPortfolioDispatch() {
     sectionRef.current = 'dispatch'
     setSection('dispatch')
@@ -10485,6 +10592,21 @@ function App() {
                     onCancelAllocation={cancelCrewCapacityAllocation}
                     onRequestPlan={requestCrewLookaheadApproval}
                     onReviewApproval={reviewCrewLookaheadApproval}
+                    onOpenJob={openCrewCapacityJob}
+                  />
+                </LazyControlBoundary>
+                <LazyControlBoundary label="Last Planner weekly control">
+                  <LastPlannerBoard
+                    board={data.lastPlanner}
+                    jobs={jobs}
+                    canApprove={capabilities.approvals === true}
+                    submitting={submitting}
+                    onLoadWeek={loadLastPlannerWeek}
+                    onCreateConstraint={createLastPlannerConstraint}
+                    onReleaseConstraint={releaseLastPlannerConstraint}
+                    onRequestPlan={requestLastPlannerPlan}
+                    onReviewApproval={reviewLastPlannerApproval}
+                    onRecordOutcome={recordLastPlannerOutcome}
                     onOpenJob={openCrewCapacityJob}
                   />
                 </LazyControlBoundary>

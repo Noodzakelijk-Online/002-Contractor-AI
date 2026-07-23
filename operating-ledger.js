@@ -1109,6 +1109,39 @@ const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
 const CREW_CAPACITY_PROFILE_FORMAT = 'contractor-ai-crew-capacity-profile/v1';
 const CREW_LOOKAHEAD_FORMAT = 'contractor-ai-crew-lookahead/v1';
 const DAILY_OPERATING_CYCLE_FORMAT = 'contractor-ai-daily-operating-cycle/v1';
+const LAST_PLANNER_CONSTRAINT_FORMAT = 'contractor-ai-last-planner-constraint/v1';
+const LAST_PLANNER_WEEKLY_PLAN_FORMAT = 'contractor-ai-last-planner-weekly-plan/v1';
+const LAST_PLANNER_OUTCOME_FORMAT = 'contractor-ai-last-planner-outcome/v1';
+const LAST_PLANNER_CONSTRAINT_CATEGORIES = new Set([
+  'design',
+  'information',
+  'material',
+  'equipment',
+  'labor',
+  'access',
+  'predecessor',
+  'permit',
+  'safety',
+  'quality',
+  'client_decision',
+  'weather',
+  'other'
+]);
+const LAST_PLANNER_VARIANCE_CATEGORIES = new Set([
+  'prerequisite',
+  'labor',
+  'material',
+  'equipment',
+  'information',
+  'access',
+  'safety',
+  'quality',
+  'weather',
+  'client_change',
+  'overcommitment',
+  'productivity',
+  'other'
+]);
 const CREW_LOOKAHEAD_DAYS = 14;
 const CREW_CAPACITY_DAY_KEYS = Object.freeze(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
@@ -5202,6 +5235,100 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_daily_operating_cycles_field_report
           ON daily_operating_cycles(field_report_id)
           WHERE field_report_id IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '061_last_planner_lite',
+    description: 'Retain make-ready constraints, approval-backed weekly promises, and daily-evidence-linked PPC outcomes.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS last_planner_constraints (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT REFERENCES job_tasks(id) ON DELETE SET NULL,
+          category TEXT NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          due_date TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          evidence_reference TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          release_evidence_reference TEXT,
+          release_source_hash TEXT,
+          release_snapshot_hash TEXT,
+          release_snapshot_json TEXT,
+          release_entry_key TEXT UNIQUE,
+          release_entry_fingerprint TEXT,
+          released_at TEXT,
+          released_by TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_last_planner_constraints_job_due
+          ON last_planner_constraints(job_id, due_date, status);
+        CREATE INDEX IF NOT EXISTS idx_last_planner_constraints_task
+          ON last_planner_constraints(task_id, status)
+          WHERE task_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS last_planner_weekly_plans (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          version_number INTEGER NOT NULL,
+          week_start TEXT NOT NULL,
+          week_end TEXT NOT NULL,
+          status TEXT NOT NULL,
+          lookahead_plan_id TEXT NOT NULL REFERENCES crew_lookahead_plans(id),
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, week_start, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_last_planner_one_pending
+          ON last_planner_weekly_plans(job_id, week_start)
+          WHERE status = 'pending_approval';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_last_planner_one_approved
+          ON last_planner_weekly_plans(job_id, week_start)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_last_planner_plan_history
+          ON last_planner_weekly_plans(job_id, week_start DESC, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS last_planner_outcomes (
+          id TEXT PRIMARY KEY,
+          plan_id TEXT NOT NULL REFERENCES last_planner_weekly_plans(id) ON DELETE CASCADE,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          commitment_id TEXT NOT NULL,
+          result TEXT NOT NULL,
+          evidence_references_json TEXT NOT NULL DEFAULT '[]',
+          variance_category TEXT,
+          variance_reason TEXT,
+          daily_cycle_ids_json TEXT NOT NULL DEFAULT '[]',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(plan_id, commitment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_last_planner_outcomes_job
+          ON last_planner_outcomes(job_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_last_planner_outcomes_result
+          ON last_planner_outcomes(result, created_at DESC);
       `);
     }
   }
@@ -27525,6 +27652,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ORDER BY version_number DESC LIMIT 1
     `).get(workDate, workDate);
     const plan = planRow ? this.mapCrewLookaheadPlan(planRow) : null;
+    const weeklyPlanRow = this.db.prepare(`
+      SELECT * FROM last_planner_weekly_plans
+      WHERE job_id = ? AND status = 'approved' AND week_start <= ? AND week_end >= ?
+      ORDER BY version_number DESC LIMIT 1
+    `).get(jobId, workDate, workDate);
+    const weeklyPlan = weeklyPlanRow ? this.mapLastPlannerWeeklyPlan(weeklyPlanRow) : null;
     const allocations = this.db.prepare(`
       SELECT allocations.*, workers.name AS worker_name, job_tasks.title AS task_title
       FROM crew_capacity_allocations allocations
@@ -27559,6 +27692,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         sourceHash: plan.sourceHash,
         snapshotHash: plan.snapshotHash,
         integrityValid: plan.integrityValid
+      } : null,
+      lastPlannerWeeklyPlan: weeklyPlan ? {
+        id: weeklyPlan.id,
+        versionNumber: weeklyPlan.versionNumber,
+        weekStart: weeklyPlan.weekStart,
+        weekEnd: weeklyPlan.weekEnd,
+        sourceHash: weeklyPlan.sourceHash,
+        snapshotHash: weeklyPlan.snapshotHash,
+        integrityValid: weeklyPlan.integrityValid,
+        commitments: weeklyPlan.commitments.filter(commitment => commitment.workDate === workDate)
       } : null,
       allocations,
       activePermits,
@@ -27917,6 +28060,750 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
       return { cycle, dailyLog, replayed: false, externalCommitments: 0 };
     });
+  }
+
+  lastPlannerPeriod(value) {
+    const retained = normalizeRetainedDate(value || nowIso().slice(0, 10), {
+      required: true,
+      label: 'Last Planner week start',
+      code: 'last_planner_week_invalid'
+    }).slice(0, 10);
+    return this.normalizeTimesheetPeriod(this.cashFlowWeekStart(retained));
+  }
+
+  listLastPlannerConstraints(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.jobId || filters.job_id) {
+      conditions.push('constraints.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    if (filters.taskId || filters.task_id) {
+      conditions.push('constraints.task_id = ?');
+      values.push(filters.taskId || filters.task_id);
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('constraints.status = ?');
+      values.push(status);
+    }
+    if (filters.dueOnOrBefore || filters.due_on_or_before) {
+      conditions.push('constraints.due_date <= ?');
+      values.push(normalizeRetainedDate(filters.dueOnOrBefore || filters.due_on_or_before, {
+        required: true,
+        label: 'Constraint due date',
+        code: 'last_planner_constraint_due_invalid'
+      }).slice(0, 10));
+    }
+    const limit = Math.max(1, Math.min(5_000, Math.round(normalizeNumber(filters.limit, 500))));
+    return this.db.prepare(`
+      SELECT constraints.*, jobs.title AS job_title, job_tasks.title AS task_title
+      FROM last_planner_constraints constraints
+      JOIN jobs ON jobs.id = constraints.job_id
+      LEFT JOIN job_tasks ON job_tasks.id = constraints.task_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY constraints.due_date, constraints.created_at, constraints.id
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapLastPlannerConstraint(row));
+  }
+
+  createLastPlannerConstraint(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const taskId = normalizeText(payload.taskId || payload.task_id, '') || null;
+      let task = null;
+      if (taskId) {
+        const taskRow = this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, jobId);
+        if (!taskRow) throw ledgerInputError('last_planner_constraint_task_invalid', 'Make-ready constraint task was not found in this job.', { jobId, taskId }, 404);
+        task = this.mapTask(taskRow);
+      }
+      const category = normalizeStatus(payload.category, 'other');
+      if (!LAST_PLANNER_CONSTRAINT_CATEGORIES.has(category)) {
+        throw ledgerInputError('last_planner_constraint_category_invalid', 'Make-ready constraint category is not supported.');
+      }
+      const title = normalizeText(payload.title, '');
+      const description = normalizeText(payload.description || payload.details, '');
+      const owner = normalizeText(payload.owner || payload.responsible, '');
+      if (title.length < 3 || title.length > 160) throw ledgerInputError('last_planner_constraint_title_invalid', 'Constraint title must contain 3 to 160 characters.');
+      if (description.length < 5 || description.length > 2_000) throw ledgerInputError('last_planner_constraint_description_invalid', 'Constraint description must contain 5 to 2,000 characters.');
+      if (owner.length < 2 || owner.length > 160) throw ledgerInputError('last_planner_constraint_owner_invalid', 'Constraint owner must contain 2 to 160 characters.');
+      const dueDate = normalizeRetainedDate(payload.dueDate || payload.due_date, {
+        required: true,
+        label: 'Constraint due date',
+        code: 'last_planner_constraint_due_invalid'
+      }).slice(0, 10);
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('last_planner_constraint_evidence_required', 'Constraint source evidence must contain 3 to 500 characters.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('last_planner_constraint_entry_key_invalid', 'Constraint replay key must contain 8 to 200 safe characters.');
+      }
+      const normalized = { jobId, taskId, category, title, description, owner, dueDate, evidenceReference };
+      const entryFingerprint = sha256Json(normalized);
+      const replay = this.db.prepare('SELECT * FROM last_planner_constraints WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.job_id !== jobId || replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('last_planner_constraint_entry_key_reused', 'Constraint replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { constraint: this.mapLastPlannerConstraint(replay), replayed: true, externalCommitments: 0 };
+      }
+      const id = makeId('make_ready');
+      const timestamp = nowIso();
+      const sourceBasis = { format: LAST_PLANNER_CONSTRAINT_FORMAT, constraintId: id, ...normalized };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis,
+        sourceHash,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: { internalPlanningOnly: true, scheduleChanged: false, externalCommitments: 0 }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO last_planner_constraints (
+          id, job_id, task_id, category, title, description, owner, due_date, status,
+          evidence_reference, source_hash, snapshot_hash, snapshot_json, entry_key,
+          entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, taskId, category, title, description, owner, dueDate,
+        evidenceReference, sourceHash, snapshotHash, snapshotJson, entryKey, entryFingerprint,
+        toJson({ jobTitle: job.title, taskTitle: task?.title || null, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const constraint = this.mapLastPlannerConstraint(this.db.prepare(`
+        SELECT constraints.*, jobs.title AS job_title, job_tasks.title AS task_title
+        FROM last_planner_constraints constraints
+        JOIN jobs ON jobs.id = constraints.job_id
+        LEFT JOIN job_tasks ON job_tasks.id = constraints.task_id
+        WHERE constraints.id = ?
+      `).get(id));
+      this.audit({
+        entityType: 'last_planner_constraint', entityId: id, jobId,
+        action: 'retain_make_ready_constraint', actor, after: constraint,
+        metadata: { taskId, category, dueDate, sourceHash, snapshotHash, entryKey, externalCommitments: 0 }
+      });
+      return { constraint, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  releaseLastPlannerConstraint(jobId, constraintId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM last_planner_constraints WHERE id = ? AND job_id = ?').get(constraintId, jobId);
+      if (!row) throw ledgerInputError('last_planner_constraint_not_found', 'Make-ready constraint not found for this job.', { constraintId }, 404);
+      const before = this.mapLastPlannerConstraint(row);
+      if (!before.integrityValid) throw ledgerInputError('last_planner_constraint_integrity_failed', 'The retained constraint failed integrity verification.', { constraintId }, 409);
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('last_planner_constraint_release_evidence_required', 'Constraint release evidence must contain 3 to 500 characters.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('last_planner_constraint_release_key_invalid', 'Constraint release replay key must contain 8 to 200 safe characters.');
+      }
+      const normalized = { constraintId, constraintSourceHash: before.sourceHash, evidenceReference };
+      const entryFingerprint = sha256Json(normalized);
+      const replay = this.db.prepare('SELECT * FROM last_planner_constraints WHERE release_entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.id !== constraintId || replay.release_entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('last_planner_constraint_release_key_reused', 'Constraint release replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { constraint: this.mapLastPlannerConstraint(replay), replayed: true, externalCommitments: 0 };
+      }
+      if (row.status !== 'open') {
+        throw ledgerInputError('last_planner_constraint_state_conflict', `Constraint cannot be released from ${row.status}.`, { constraintId, status: row.status }, 409);
+      }
+      const timestamp = nowIso();
+      const sourceBasis = { format: LAST_PLANNER_CONSTRAINT_FORMAT, ...normalized };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis, sourceHash, releasedAt: timestamp, releasedBy: actor,
+        safeguards: { internalMakeReadyReleaseOnly: true, permitIssued: false, complianceCertified: false, externalCommitments: 0 }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        UPDATE last_planner_constraints
+        SET status = 'released', release_evidence_reference = ?, release_source_hash = ?,
+          release_snapshot_hash = ?, release_snapshot_json = ?, release_entry_key = ?,
+          release_entry_fingerprint = ?, released_at = ?, released_by = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'open'
+      `).run(
+        evidenceReference, sourceHash, snapshotHash, snapshotJson, entryKey, entryFingerprint,
+        timestamp, actor, toJson({ ...fromJson(row.data_json, {}), releaseEvidenceReference: evidenceReference, externalCommitments: 0 }),
+        timestamp, constraintId
+      );
+      const after = this.mapLastPlannerConstraint(this.db.prepare('SELECT * FROM last_planner_constraints WHERE id = ?').get(constraintId));
+      this.audit({
+        entityType: 'last_planner_constraint', entityId: constraintId, jobId,
+        action: 'release_make_ready_constraint', actor, before, after,
+        metadata: { sourceHash, snapshotHash, entryKey, externalCommitments: 0 }
+      });
+      return { constraint: after, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  lastPlannerPlanSource(jobId, weekStartValue, commitmentInputs = []) {
+    this.requireJob(jobId);
+    const { periodStart: weekStart, periodEnd: weekEnd } = this.lastPlannerPeriod(weekStartValue);
+    const lookaheadRow = this.db.prepare(`
+      SELECT * FROM crew_lookahead_plans
+      WHERE status = 'approved' AND window_start <= ? AND window_end >= ?
+      ORDER BY version_number DESC LIMIT 1
+    `).get(weekStart, weekEnd);
+    if (!lookaheadRow) {
+      throw ledgerInputError('last_planner_lookahead_required', 'An approved two-week crew look-ahead covering the full week is required.', { weekStart, weekEnd }, 409);
+    }
+    const lookahead = this.mapCrewLookaheadPlan(lookaheadRow);
+    if (!lookahead.integrityValid) {
+      throw ledgerInputError('last_planner_lookahead_integrity_failed', 'The approved crew look-ahead failed retained snapshot verification.', { planId: lookahead.id }, 409);
+    }
+    const crewBoard = this.listCrewCapacityBoard({ referenceDate: lookahead.windowStart, horizonDays: lookahead.horizonDays });
+    if (!crewBoard.ready || crewBoard.sourceHash !== lookahead.sourceHash) {
+      throw ledgerInputError('last_planner_lookahead_stale', 'Crew capacity or planning evidence changed after the approved look-ahead was retained.', { planId: lookahead.id, blockers: crewBoard.blockers }, 409);
+    }
+    if (!Array.isArray(commitmentInputs) || !commitmentInputs.length || commitmentInputs.length > 50) {
+      throw ledgerInputError('last_planner_commitments_invalid', 'A weekly plan requires between 1 and 50 promises.');
+    }
+    const taskRows = this.db.prepare('SELECT * FROM job_tasks WHERE job_id = ?').all(jobId);
+    const tasks = new Map(taskRows.map(row => [row.id, this.mapTask(row)]));
+    const constraintRows = this.db.prepare(`
+      SELECT * FROM last_planner_constraints
+      WHERE job_id = ? AND status <> 'cancelled'
+      ORDER BY due_date, created_at, id
+    `).all(jobId);
+    const constraints = constraintRows.map(row => this.mapLastPlannerConstraint(row));
+    const seen = new Set();
+    const commitments = commitmentInputs.map((input, index) => {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw ledgerInputError('last_planner_commitment_invalid', `Weekly promise ${index + 1} must be an object.`);
+      }
+      const taskId = normalizeText(input.taskId || input.task_id, '');
+      const task = tasks.get(taskId);
+      if (!task || task.data?.excludeFromWorkPlan === true || ['completed', 'closed', 'cancelled', 'canceled', 'rejected'].includes(normalizeStatus(task.status, 'open'))) {
+        throw ledgerInputError('last_planner_commitment_task_invalid', `Weekly promise ${index + 1} must reference a current work-plan task in this job.`, { taskId }, 409);
+      }
+      const workDate = normalizeRetainedDate(input.workDate || input.work_date, {
+        required: true,
+        label: `Weekly promise ${index + 1} work date`,
+        code: 'last_planner_commitment_date_invalid'
+      }).slice(0, 10);
+      if (workDate < weekStart || workDate > weekEnd) {
+        throw ledgerInputError('last_planner_commitment_outside_week', `Weekly promise ${index + 1} must fall inside the selected Monday-to-Sunday period.`, { workDate, weekStart, weekEnd });
+      }
+      const promise = normalizeText(input.promise || input.description, '');
+      const promisedBy = normalizeText(input.promisedBy || input.promised_by || input.owner, '');
+      if (promise.length < 5 || promise.length > 1_000) throw ledgerInputError('last_planner_commitment_promise_invalid', `Weekly promise ${index + 1} must contain 5 to 1,000 characters.`);
+      if (promisedBy.length < 2 || promisedBy.length > 160) throw ledgerInputError('last_planner_commitment_owner_invalid', `Weekly promise ${index + 1} owner must contain 2 to 160 characters.`);
+      const matchingAllocations = crewBoard.allocations.filter(allocation => (
+        allocation.status === 'active'
+        && allocation.jobId === jobId
+        && allocation.taskId === taskId
+        && allocation.workDate === workDate
+        && allocation.integrityValid
+      ));
+      if (!matchingAllocations.length) {
+        throw ledgerInputError('last_planner_commitment_allocation_required', `Weekly promise ${index + 1} requires retained task-level crew hours on the promised date.`, { taskId, workDate }, 409);
+      }
+      const allocatedHours = roundScheduleHours(matchingAllocations.reduce((sum, allocation) => sum + allocation.plannedHours, 0));
+      const plannedHours = roundScheduleHours(input.plannedHours ?? input.planned_hours ?? allocatedHours);
+      if (!Number.isFinite(plannedHours) || plannedHours <= 0 || plannedHours > allocatedHours) {
+        throw ledgerInputError('last_planner_commitment_hours_invalid', `Weekly promise ${index + 1} hours must be greater than zero and no more than the retained ${allocatedHours} allocated hours.`);
+      }
+      const relevantConstraints = constraints.filter(constraint => (
+        (!constraint.taskId || constraint.taskId === taskId) && constraint.dueDate <= workDate
+      ));
+      const unresolved = relevantConstraints.filter(constraint => constraint.status !== 'released' || !constraint.integrityValid);
+      if (unresolved.length) {
+        throw ledgerInputError('last_planner_commitment_not_ready', `Weekly promise ${index + 1} has unresolved make-ready constraints.`, {
+          taskId, workDate,
+          constraints: unresolved.map(constraint => ({ id: constraint.id, title: constraint.title, status: constraint.status }))
+        }, 409);
+      }
+      const duplicateKey = `${taskId}:${workDate}`;
+      if (seen.has(duplicateKey)) throw ledgerInputError('last_planner_commitment_duplicate', 'Only one weekly promise per task and work date can be retained.');
+      seen.add(duplicateKey);
+      const identity = { jobId, weekStart, taskId, workDate, promise, promisedBy };
+      return {
+        id: `promise_${sha256Json(identity).slice(0, 24)}`,
+        taskId,
+        taskTitle: task.title,
+        taskStatus: task.status,
+        taskPlannedStart: task.plannedStart,
+        taskPlannedEnd: task.plannedEnd,
+        taskDurationHours: task.durationHours,
+        taskUpdatedAt: task.updatedAt,
+        workDate,
+        promise,
+        promisedBy,
+        plannedHours,
+        allocatedHours,
+        allocationIds: matchingAllocations.map(allocation => allocation.id).sort(),
+        workerIds: [...new Set(matchingAllocations.map(allocation => allocation.workerId))].sort(),
+        workerNames: [...new Set(matchingAllocations.map(allocation => allocation.workerName).filter(Boolean))].sort(),
+        constraintIds: relevantConstraints.map(constraint => constraint.id),
+        constraintReleaseHashes: relevantConstraints.map(constraint => constraint.releaseSnapshotHash).filter(Boolean).sort(),
+        ready: true
+      };
+    });
+    const sourceBasis = {
+      format: LAST_PLANNER_WEEKLY_PLAN_FORMAT,
+      jobId,
+      weekStart,
+      weekEnd,
+      lookaheadPlan: {
+        id: lookahead.id,
+        versionNumber: lookahead.versionNumber,
+        sourceHash: lookahead.sourceHash,
+        snapshotHash: lookahead.snapshotHash
+      },
+      commitments
+    };
+    return { weekStart, weekEnd, lookahead, crewBoard, commitments, sourceBasis, sourceHash: sha256Json(sourceBasis) };
+  }
+
+  requestLastPlannerWeeklyPlan(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('last_planner_plan_entry_key_invalid', 'Weekly-plan replay key must contain 8 to 200 safe characters.');
+      }
+      const source = this.lastPlannerPlanSource(jobId, payload.weekStart || payload.week_start, payload.commitments);
+      const entryFingerprint = sha256Json({
+        jobId,
+        weekStart: source.weekStart,
+        commitments: source.commitments.map(commitment => ({
+          taskId: commitment.taskId,
+          workDate: commitment.workDate,
+          promise: commitment.promise,
+          promisedBy: commitment.promisedBy,
+          plannedHours: commitment.plannedHours
+        }))
+      });
+      const replay = this.db.prepare('SELECT * FROM last_planner_weekly_plans WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.job_id !== jobId || replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('last_planner_plan_entry_key_reused', 'Weekly-plan replay key was already used for different content.', { entryKey }, 409);
+        }
+        return {
+          plan: this.mapLastPlannerWeeklyPlan(replay),
+          approval: replay.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id)) : null,
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      const pending = this.db.prepare(`
+        SELECT * FROM last_planner_weekly_plans
+        WHERE job_id = ? AND week_start = ? AND status = 'pending_approval'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(jobId, source.weekStart);
+      if (pending) {
+        throw ledgerInputError('last_planner_plan_pending', 'Resolve the pending weekly plan before requesting a revised version.', { planId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const versionNumber = normalizeNumber(this.db.prepare(`
+        SELECT MAX(version_number) AS version_number FROM last_planner_weekly_plans
+        WHERE job_id = ? AND week_start = ?
+      `).get(jobId, source.weekStart)?.version_number, 0) + 1;
+      const id = makeId('weekly_plan');
+      const timestamp = nowIso();
+      const snapshot = {
+        ...source.sourceBasis,
+        planId: id,
+        versionNumber,
+        sourceHash: source.sourceHash,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          internalWeeklyControlOnly: true,
+          scheduleChanged: false,
+          assignmentsCreated: 0,
+          crewNotifications: 0,
+          clientCommitments: 0,
+          supplierCommitments: 0,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO last_planner_weekly_plans (
+          id, job_id, version_number, week_start, week_end, status, lookahead_plan_id,
+          source_hash, snapshot_hash, snapshot_json, approval_id, entry_key,
+          entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, versionNumber, source.weekStart, source.weekEnd, source.lookahead.id,
+        source.sourceHash, snapshotHash, snapshotJson, entryKey, entryFingerprint,
+        toJson({ reason: normalizeText(payload.reason || payload.notes, '') || null, jobTitle: job.title, externalCommitments: 0 }),
+        timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'last_planner_weekly_plan',
+        targetId: id,
+        jobId,
+        approvalType: 'internal_weekly_commitment_plan',
+        summary: `Approve ${source.commitments.length} weekly promise(s) for ${job.title}, ${source.weekStart} through ${source.weekEnd}`,
+        reason: 'Verify source-current crew hours, task scope, released make-ready constraints, promise ownership, and internal weekly capacity before reliance.',
+        data: {
+          versionNumber,
+          weekStart: source.weekStart,
+          weekEnd: source.weekEnd,
+          lookaheadPlanId: source.lookahead.id,
+          sourceHash: source.sourceHash,
+          snapshotHash,
+          commitmentCount: source.commitments.length,
+          plannedHours: roundScheduleHours(source.commitments.reduce((sum, commitment) => sum + commitment.plannedHours, 0)),
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE last_planner_weekly_plans SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const plan = this.mapLastPlannerWeeklyPlan(this.db.prepare('SELECT * FROM last_planner_weekly_plans WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'last_planner_weekly_plan', entityId: id, jobId,
+        action: 'request_last_planner_weekly_plan_approval', actor, after: plan,
+        metadata: { approvalId: approval.id, versionNumber, weekStart: source.weekStart, sourceHash: source.sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { plan, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  listLastPlannerWeeklyPlans(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.jobId || filters.job_id) {
+      conditions.push('plans.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    if (filters.weekStart || filters.week_start) {
+      conditions.push('plans.week_start = ?');
+      values.push(this.lastPlannerPeriod(filters.weekStart || filters.week_start).periodStart);
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('plans.status = ?');
+      values.push(status);
+    }
+    const limit = Math.max(1, Math.min(5_000, Math.round(normalizeNumber(filters.limit, 500))));
+    return this.db.prepare(`
+      SELECT plans.*, jobs.title AS job_title
+      FROM last_planner_weekly_plans plans
+      JOIN jobs ON jobs.id = plans.job_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY plans.week_start DESC, plans.job_id, plans.version_number DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapLastPlannerWeeklyPlan(row));
+  }
+
+  applyLastPlannerWeeklyPlanApproval(planId) {
+    const row = this.db.prepare('SELECT * FROM last_planner_weekly_plans WHERE id = ?').get(planId);
+    if (!row) throw ledgerInputError('last_planner_plan_not_found', 'Weekly plan not found.', { planId }, 404);
+    if (row.status === 'approved') return this.mapLastPlannerWeeklyPlan(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('last_planner_plan_state_conflict', `Weekly plan cannot be approved from ${row.status}.`, { planId, status: row.status }, 409);
+    }
+    const before = this.mapLastPlannerWeeklyPlan(row);
+    if (!before.integrityValid) throw ledgerInputError('last_planner_plan_integrity_failed', 'The retained weekly plan failed snapshot verification.', { planId }, 409);
+    const current = this.lastPlannerPlanSource(row.job_id, row.week_start, before.commitments);
+    if (current.sourceHash !== row.source_hash) {
+      throw ledgerInputError('last_planner_plan_stale', 'Crew hours, task scope, or make-ready evidence changed after the weekly plan was requested.', { planId, currentSourceHash: current.sourceHash }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE last_planner_weekly_plans SET status = 'superseded', updated_at = ?
+      WHERE job_id = ? AND week_start = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.job_id, row.week_start, planId);
+    this.db.prepare(`
+      UPDATE last_planner_weekly_plans SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor },
+      externalCommitments: 0
+    }), timestamp, planId);
+    const after = this.mapLastPlannerWeeklyPlan(this.db.prepare('SELECT * FROM last_planner_weekly_plans WHERE id = ?').get(planId));
+    this.audit({
+      entityType: 'last_planner_weekly_plan', entityId: planId, jobId: row.job_id,
+      action: 'approve_last_planner_weekly_plan', actor, before, after,
+      metadata: { approvalId: row.approval_id || null, versionNumber: row.version_number, sourceHash: row.source_hash, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  listLastPlannerOutcomes(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.jobId || filters.job_id) {
+      conditions.push('outcomes.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    if (filters.planId || filters.plan_id) {
+      conditions.push('outcomes.plan_id = ?');
+      values.push(filters.planId || filters.plan_id);
+    }
+    const limit = Math.max(1, Math.min(10_000, Math.round(normalizeNumber(filters.limit, 1_000))));
+    return this.db.prepare(`
+      SELECT outcomes.*, plans.week_start, plans.week_end
+      FROM last_planner_outcomes outcomes
+      JOIN last_planner_weekly_plans plans ON plans.id = outcomes.plan_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY plans.week_start DESC, outcomes.created_at, outcomes.id
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapLastPlannerOutcome(row));
+  }
+
+  recordLastPlannerOutcome(jobId, planId, commitmentId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const planRow = this.db.prepare('SELECT * FROM last_planner_weekly_plans WHERE id = ? AND job_id = ?').get(planId, jobId);
+      if (!planRow) throw ledgerInputError('last_planner_plan_not_found', 'Weekly plan not found for this job.', { planId }, 404);
+      const plan = this.mapLastPlannerWeeklyPlan(planRow);
+      if (plan.status !== 'approved' || !plan.integrityValid) {
+        throw ledgerInputError('last_planner_outcome_plan_not_approved', 'A valid approved weekly plan is required before recording promise outcomes.', { planId, status: plan.status }, 409);
+      }
+      const commitment = plan.commitments.find(item => item.id === commitmentId);
+      if (!commitment) throw ledgerInputError('last_planner_commitment_not_found', 'Weekly promise was not found in the retained plan.', { commitmentId }, 404);
+      const result = normalizeStatus(payload.result || payload.status, '');
+      if (!['completed', 'not_completed'].includes(result)) {
+        throw ledgerInputError('last_planner_outcome_result_invalid', 'Weekly promise result must be completed or not_completed.');
+      }
+      const evidenceReferences = normalizeList(payload.evidenceReferences || payload.evidence_references || payload.evidenceReference || payload.evidence_reference)
+        .map(reference => normalizeText(reference, '')).filter(Boolean);
+      if (!evidenceReferences.length || evidenceReferences.some(reference => reference.length < 3 || reference.length > 500)) {
+        throw ledgerInputError('last_planner_outcome_evidence_required', 'Weekly promise outcome requires at least one evidence reference containing 3 to 500 characters.');
+      }
+      const varianceCategory = result === 'not_completed' ? normalizeStatus(payload.varianceCategory || payload.variance_category, '') : null;
+      const varianceReason = result === 'not_completed' ? normalizeText(payload.varianceReason || payload.variance_reason, '') : null;
+      if (result === 'not_completed' && !LAST_PLANNER_VARIANCE_CATEGORIES.has(varianceCategory)) {
+        throw ledgerInputError('last_planner_variance_category_invalid', 'A supported reason category is required when a weekly promise was not completed.');
+      }
+      if (result === 'not_completed' && (varianceReason.length < 5 || varianceReason.length > 2_000)) {
+        throw ledgerInputError('last_planner_variance_reason_required', 'A 5 to 2,000 character learning reason is required when a weekly promise was not completed.');
+      }
+      const dailyCycleIds = [...new Set(normalizeList(payload.dailyCycleIds || payload.daily_cycle_ids || payload.dailyCycleId || payload.daily_cycle_id)
+        .map(value => normalizeText(value, '')).filter(Boolean))];
+      if (!dailyCycleIds.length) {
+        throw ledgerInputError('last_planner_outcome_daily_evidence_required', 'Weekly promise outcome requires at least one closed daily operating cycle from the promised date.');
+      }
+      const dailyCycles = dailyCycleIds.map(cycleId => {
+        const cycle = this.getDailyOperatingCycle(cycleId, { jobId });
+        if (cycle.workDate !== commitment.workDate || cycle.status !== 'closed' || !cycle.integrityValid) {
+          throw ledgerInputError('last_planner_outcome_daily_evidence_invalid', 'Daily operating-cycle evidence must be closed, integrity-valid, and match the promised job and date.', { cycleId, commitmentId }, 409);
+        }
+        return cycle;
+      });
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('last_planner_outcome_entry_key_invalid', 'Weekly outcome replay key must contain 8 to 200 safe characters.');
+      }
+      const normalized = {
+        planId, commitmentId, result, evidenceReferences, varianceCategory, varianceReason,
+        dailyCycleIds: [...dailyCycleIds].sort()
+      };
+      const entryFingerprint = sha256Json(normalized);
+      const replay = this.db.prepare('SELECT * FROM last_planner_outcomes WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.plan_id !== planId || replay.commitment_id !== commitmentId || replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('last_planner_outcome_entry_key_reused', 'Weekly outcome replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { outcome: this.mapLastPlannerOutcome(replay), replayed: true, externalCommitments: 0 };
+      }
+      const existing = this.db.prepare('SELECT id FROM last_planner_outcomes WHERE plan_id = ? AND commitment_id = ?').get(planId, commitmentId);
+      if (existing) throw ledgerInputError('last_planner_outcome_exists', 'This weekly promise already has a retained outcome.', { outcomeId: existing.id }, 409);
+      const id = makeId('weekly_outcome');
+      const timestamp = nowIso();
+      const sourceBasis = {
+        format: LAST_PLANNER_OUTCOME_FORMAT,
+        outcomeId: id,
+        jobId,
+        planId,
+        planSnapshotHash: plan.snapshotHash,
+        commitment,
+        result,
+        evidenceReferences,
+        varianceCategory,
+        varianceReason,
+        dailyCycles: dailyCycles.map(cycle => ({
+          id: cycle.id,
+          workDate: cycle.workDate,
+          planAchieved: cycle.planAchieved,
+          huddleSnapshotHash: cycle.huddleSnapshotHash,
+          eodSnapshotHash: cycle.eodSnapshotHash
+        }))
+      };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis, sourceHash, retainedAt: timestamp, retainedBy: actor,
+        safeguards: { internalPerformanceEvidenceOnly: true, scheduleChanged: false, externalCommitments: 0 }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO last_planner_outcomes (
+          id, plan_id, job_id, commitment_id, result, evidence_references_json,
+          variance_category, variance_reason, daily_cycle_ids_json, source_hash,
+          snapshot_hash, snapshot_json, entry_key, entry_fingerprint, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, planId, jobId, commitmentId, result, toJson(evidenceReferences, []),
+        varianceCategory, varianceReason, toJson([...dailyCycleIds].sort(), []), sourceHash,
+        snapshotHash, snapshotJson, entryKey, entryFingerprint,
+        toJson({ dailyPlanAchieved: dailyCycles.map(cycle => cycle.planAchieved), externalCommitments: 0 }), timestamp, timestamp
+      );
+      const outcome = this.mapLastPlannerOutcome(this.db.prepare('SELECT * FROM last_planner_outcomes WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'last_planner_outcome', entityId: id, jobId,
+        action: 'retain_last_planner_outcome', actor, after: outcome,
+        metadata: { planId, commitmentId, result, varianceCategory, sourceHash, snapshotHash, entryKey, externalCommitments: 0 }
+      });
+      return { outcome, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  getLastPlannerBoard(filters = {}) {
+    const { periodStart: weekStart, periodEnd: weekEnd } = this.lastPlannerPeriod(filters.weekStart || filters.week_start);
+    const jobId = normalizeText(filters.jobId || filters.job_id, '') || null;
+    const constraints = this.listLastPlannerConstraints({ jobId, dueOnOrBefore: weekEnd, limit: 5_000 });
+    const plans = this.listLastPlannerWeeklyPlans({ jobId, weekStart, status: 'all', limit: 5_000 });
+    const outcomes = this.listLastPlannerOutcomes({ jobId, limit: 10_000 }).filter(outcome => outcome.weekStart === weekStart);
+    const dailyCycles = this.listDailyOperatingCycles({ jobId, limit: 5_000 }).filter(cycle => (
+      cycle.workDate >= weekStart && cycle.workDate <= weekEnd && cycle.status === 'closed' && cycle.integrityValid
+    ));
+    const outcomesByCommitment = new Map(outcomes.map(outcome => [`${outcome.planId}:${outcome.commitmentId}`, outcome]));
+    const activePlans = plans.filter(plan => ['approved', 'pending_approval'].includes(plan.status));
+    const commitments = activePlans.flatMap(plan => plan.commitments.map(commitment => {
+      const currentConstraints = constraints.filter(constraint => (
+        constraint.jobId === plan.jobId
+        && (!constraint.taskId || constraint.taskId === commitment.taskId)
+        && constraint.dueDate <= commitment.workDate
+      ));
+      const currentOpenConstraints = currentConstraints.filter(constraint => constraint.status !== 'released' || !constraint.integrityValid);
+      return {
+        ...commitment,
+        planId: plan.id,
+        planStatus: plan.status,
+        jobId: plan.jobId,
+        jobTitle: plan.jobTitle,
+        currentConstraintIds: currentConstraints.map(constraint => constraint.id),
+        currentOpenConstraintIds: currentOpenConstraints.map(constraint => constraint.id),
+        currentReady: !currentOpenConstraints.length,
+        atRisk: currentOpenConstraints.length > 0,
+        outcome: outcomesByCommitment.get(`${plan.id}:${commitment.id}`) || null
+      };
+    }));
+    let lookahead = null;
+    let crewBoard = null;
+    const lookaheadRow = this.db.prepare(`
+      SELECT * FROM crew_lookahead_plans
+      WHERE status = 'approved' AND window_start <= ? AND window_end >= ?
+      ORDER BY version_number DESC LIMIT 1
+    `).get(weekStart, weekEnd);
+    if (lookaheadRow) {
+      lookahead = this.mapCrewLookaheadPlan(lookaheadRow);
+      try {
+        crewBoard = this.listCrewCapacityBoard({ referenceDate: lookahead.windowStart, horizonDays: lookahead.horizonDays });
+      } catch {
+        crewBoard = null;
+      }
+    }
+    const candidateGroups = new Map();
+    if (lookahead?.integrityValid && crewBoard?.ready && crewBoard.sourceHash === lookahead.sourceHash) {
+      for (const allocation of crewBoard.allocations) {
+        if (allocation.status !== 'active' || !allocation.taskId || allocation.workDate < weekStart || allocation.workDate > weekEnd) continue;
+        if (jobId && allocation.jobId !== jobId) continue;
+        const key = `${allocation.jobId}:${allocation.taskId}:${allocation.workDate}`;
+        const group = candidateGroups.get(key) || {
+          jobId: allocation.jobId,
+          jobTitle: allocation.jobTitle,
+          taskId: allocation.taskId,
+          taskTitle: allocation.taskTitle,
+          workDate: allocation.workDate,
+          allocatedHours: 0,
+          workerIds: [],
+          workerNames: [],
+          allocationIds: []
+        };
+        group.allocatedHours = roundScheduleHours(group.allocatedHours + allocation.plannedHours);
+        group.workerIds.push(allocation.workerId);
+        if (allocation.workerName) group.workerNames.push(allocation.workerName);
+        group.allocationIds.push(allocation.id);
+        candidateGroups.set(key, group);
+      }
+    }
+    const candidates = [...candidateGroups.values()].map(candidate => {
+      const relevantConstraints = constraints.filter(constraint => (
+        constraint.jobId === candidate.jobId
+        && (!constraint.taskId || constraint.taskId === candidate.taskId)
+        && constraint.dueDate <= candidate.workDate
+      ));
+      const openConstraints = relevantConstraints.filter(constraint => constraint.status !== 'released' || !constraint.integrityValid);
+      const alreadyPlanned = commitments.some(commitment => (
+        commitment.jobId === candidate.jobId && commitment.taskId === candidate.taskId && commitment.workDate === candidate.workDate
+      ));
+      return {
+        ...candidate,
+        workerIds: [...new Set(candidate.workerIds)].sort(),
+        workerNames: [...new Set(candidate.workerNames)].sort(),
+        allocationIds: [...new Set(candidate.allocationIds)].sort(),
+        constraintIds: relevantConstraints.map(constraint => constraint.id),
+        openConstraintIds: openConstraints.map(constraint => constraint.id),
+        ready: !openConstraints.length,
+        alreadyPlanned
+      };
+    }).sort((left, right) => left.workDate.localeCompare(right.workDate) || left.jobTitle.localeCompare(right.jobTitle));
+    const decided = commitments.filter(commitment => commitment.outcome);
+    const completed = decided.filter(commitment => commitment.outcome.result === 'completed').length;
+    const missed = decided.filter(commitment => commitment.outcome.result === 'not_completed').length;
+    const openConstraints = constraints.filter(constraint => constraint.status === 'open').length;
+    const varianceReasons = outcomes.filter(outcome => outcome.result === 'not_completed').reduce((counts, outcome) => {
+      const key = outcome.varianceCategory || 'other';
+      counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {});
+    return {
+      format: LAST_PLANNER_WEEKLY_PLAN_FORMAT,
+      week: { weekStart, weekEnd },
+      ready: Boolean(lookahead?.integrityValid && crewBoard?.ready && crewBoard.sourceHash === lookahead.sourceHash),
+      lookaheadPlan: lookahead,
+      plans,
+      constraints,
+      commitments,
+      candidates,
+      outcomes,
+      dailyCycles,
+      summary: {
+        candidatePromises: candidates.length,
+        makeReadyCandidates: candidates.filter(candidate => candidate.ready).length,
+        openConstraints,
+        weeklyPromises: commitments.length,
+        atRiskPromises: commitments.filter(commitment => commitment.atRisk).length,
+        completedPromises: completed,
+        missedPromises: missed,
+        pendingOutcomes: commitments.filter(commitment => commitment.planStatus === 'approved' && !commitment.outcome).length,
+        ppcPercent: decided.length ? Math.round((completed / decided.length) * 1000) / 10 : null
+      },
+      varianceReasons,
+      safeguards: {
+        approvalRequired: true,
+        dailyCycleEvidenceRequired: true,
+        scheduleChanged: false,
+        assignmentsCreated: 0,
+        crewNotifications: 0,
+        clientCommitments: 0,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      }
+    };
   }
 
   expenseReceiptFingerprint(payload = {}) {
@@ -41309,6 +42196,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'last_planner_weekly_plan') {
+        this.db.prepare(`
+          UPDATE last_planner_weekly_plans
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM last_planner_weekly_plans WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            },
+            externalCommitments: 0
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'cost_forecast') {
         this.db.prepare(`
           UPDATE cost_forecast_snapshots
@@ -41888,6 +42796,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyScheduleBaselineApproval(targetId);
     } else if (targetType === 'crew_lookahead_plan') {
       this.applyCrewLookaheadApproval(targetId);
+    } else if (targetType === 'last_planner_weekly_plan') {
+      this.applyLastPlannerWeeklyPlanApproval(targetId);
     } else if (targetType === 'cost_forecast') {
       this.applyCostForecastApproval(targetId);
     } else if (targetType === 'cash_flow_forecast') {
@@ -46792,6 +47702,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       changeOrders: this.db.prepare('SELECT * FROM change_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapChangeOrder(row)),
       fieldReports: this.db.prepare('SELECT * FROM field_reports WHERE job_id = ? ORDER BY report_date DESC, created_at DESC').all(jobId).map(row => this.mapFieldReport(row)),
       dailyOperatingCycles: this.listDailyOperatingCycles({ jobId, limit: 500 }),
+      lastPlannerConstraints: this.listLastPlannerConstraints({ jobId, limit: 500 }),
+      lastPlannerWeeklyPlans: this.listLastPlannerWeeklyPlans({ jobId, limit: 500 }),
+      lastPlannerOutcomes: this.listLastPlannerOutcomes({ jobId, limit: 1_000 }),
       rfis: this.db.prepare('SELECT * FROM rfi_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRfi(row)),
       submittals: this.db.prepare('SELECT * FROM submittal_records WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapSubmittal(row)),
       transmittals: this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC').all(jobId)
@@ -49623,6 +50536,72 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
     }
 
+    if (options.includeLastPlanner === true) {
+      try {
+        const board = this.getLastPlannerBoard({ weekStart: nowIso().slice(0, 10) });
+        const openConstraints = this.listLastPlannerConstraints({ status: 'open', limit: 5_000 });
+        for (const constraint of openConstraints) {
+          const taskId = `task_last_planner_${sha256Json({ type: 'constraint', id: constraint.id, sourceHash: constraint.sourceHash }).slice(0, 24)}`;
+          if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+          actions.push({
+            type: 'review_last_planner_constraint',
+            jobId: constraint.jobId,
+            constraintId: constraint.id,
+            taskId,
+            sourceHash: constraint.sourceHash,
+            severity: constraint.dueDate <= nowIso().slice(0, 10) ? 'high' : 'medium',
+            message: `${constraint.jobTitle || 'Job'} has an open ${constraint.category} make-ready constraint due ${constraint.dueDate}: ${constraint.title}.`
+          });
+        }
+        for (const commitment of board.commitments.filter(item => (
+          item.planStatus === 'approved' && !item.outcome && item.workDate <= nowIso().slice(0, 10)
+        ))) {
+          const taskId = `task_last_planner_${sha256Json({ type: 'outcome', planId: commitment.planId, commitmentId: commitment.id }).slice(0, 24)}`;
+          if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+          actions.push({
+            type: 'review_last_planner_outcome',
+            jobId: commitment.jobId,
+            planId: commitment.planId,
+            commitmentId: commitment.id,
+            taskId,
+            sourceHash: commitment.planId,
+            severity: commitment.workDate < nowIso().slice(0, 10) ? 'high' : 'medium',
+            message: `${commitment.jobTitle || 'Job'} needs a closed daily-cycle-backed outcome for the weekly promise "${commitment.promise}".`
+          });
+        }
+        const candidatesByJob = new Map();
+        for (const candidate of board.candidates.filter(item => item.ready && !item.alreadyPlanned)) {
+          const group = candidatesByJob.get(candidate.jobId) || [];
+          group.push(candidate);
+          candidatesByJob.set(candidate.jobId, group);
+        }
+        for (const [jobId, candidates] of candidatesByJob) {
+          const hasActivePlan = board.plans.some(plan => plan.jobId === jobId && ['pending_approval', 'approved'].includes(plan.status));
+          if (hasActivePlan) continue;
+          const sourceHash = sha256Json(candidates.map(candidate => ({
+            taskId: candidate.taskId,
+            workDate: candidate.workDate,
+            allocatedHours: candidate.allocatedHours,
+            allocationIds: candidate.allocationIds
+          })));
+          const taskId = `task_last_planner_${sha256Json({ type: 'weekly_plan', jobId, weekStart: board.week.weekStart, sourceHash }).slice(0, 24)}`;
+          if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+          actions.push({
+            type: 'prepare_last_planner_week',
+            jobId,
+            taskId,
+            sourceHash,
+            candidateCount: candidates.length,
+            weekStart: board.week.weekStart,
+            severity: 'medium',
+            message: `${candidates[0]?.jobTitle || 'Job'} has ${candidates.length} make-ready crew-backed promise candidate(s) requiring an operator-owned weekly plan.`
+          });
+        }
+      } catch {
+        // Diagnostics reports malformed retained weekly-planning evidence; autonomy remains fail-closed.
+      }
+    }
+
     const procurementWithoutPurchaseOrders = this.db.prepare(`
       SELECT procurement_orders.id, procurement_orders.job_id, procurement_orders.supplier, procurement_orders.amount, jobs.title
       FROM procurement_orders
@@ -50228,6 +51207,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'prepare_schedule_baseline',
       'review_crew_capacity',
       'review_daily_cycle',
+      'review_last_planner_constraint',
+      'review_last_planner_outcome',
+      'prepare_last_planner_week',
       'draft_invoice',
       'create_finance_handoff',
       'create_procurement_order',
@@ -50606,7 +51588,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ? Math.max(1, Math.min(25, Number(options.maxActions ?? options.max_actions)))
       : null;
     const preview = this.nextActions({
-      includeCrewCapacity: !actionTypeFilter.size || actionTypeFilter.has('review_crew_capacity')
+      includeCrewCapacity: !actionTypeFilter.size || actionTypeFilter.has('review_crew_capacity'),
+      includeLastPlanner: !actionTypeFilter.size
+        || actionTypeFilter.has('review_last_planner_constraint')
+        || actionTypeFilter.has('review_last_planner_outcome')
+        || actionTypeFilter.has('prepare_last_planner_week')
     }).filter(action => {
       if (actionTypeFilter.size && !actionTypeFilter.has(normalizeStatus(action.type, ''))) return false;
       if (jobFilter.size && action.jobId && !jobFilter.has(action.jobId)) return false;
@@ -51175,6 +52161,55 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               entityType: 'task', entityId: task.id, jobId: action.jobId,
               action: 'autonomous_create_daily_cycle_review_task', actor, after: task,
               metadata: { actionKind: action.actionKind, sourceHash: action.sourceHash, externalCommitments: 0 }
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
+        const lastPlannerReviews = preview.filter(action => [
+          'review_last_planner_constraint',
+          'review_last_planner_outcome',
+          'prepare_last_planner_week'
+        ].includes(action.type)).slice(0, 15);
+        for (const action of lastPlannerReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0 });
+            continue;
+          }
+          try {
+            const title = action.type === 'review_last_planner_constraint'
+              ? 'Release make-ready constraint with evidence'
+              : action.type === 'review_last_planner_outcome'
+                ? 'Record weekly promise outcome'
+                : 'Prepare operator-owned weekly work plan';
+            const task = this.addTask(action.jobId, {
+              title,
+              description: `${action.message} Verify retained source evidence in the Last Planner workspace. Automation cannot release constraints, make promises, infer field outcomes, alter schedules, or contact external parties.`,
+              status: 'open',
+              priority: action.severity,
+              source: 'autonomous_cycle',
+              data: {
+                internalOnly: true,
+                excludeFromWorkPlan: true,
+                lastPlannerAction: action.type,
+                lastPlannerSourceHash: action.sourceHash,
+                constraintId: action.constraintId || null,
+                planId: action.planId || null,
+                commitmentId: action.commitmentId || null,
+                weekStart: action.weekStart || null,
+                scheduleChanged: false,
+                assignmentsCreated: 0,
+                notificationsSent: 0,
+                externalCommitments: 0
+              }
+            }, { id: action.taskId, actor, audit: false });
+            applied.push({ ...action, taskId: task.id, status: 'task_created', assignmentsCreated: 0, notificationsSent: 0, externalCommitments: 0 });
+            this.audit({
+              entityType: 'task', entityId: task.id, jobId: action.jobId,
+              action: 'autonomous_create_last_planner_review_task', actor, after: task,
+              metadata: { lastPlannerAction: action.type, sourceHash: action.sourceHash, externalCommitments: 0 }
             });
           } catch (error) {
             blocked.push({ ...action, status: 'blocked', reason: error.message });
@@ -52428,6 +53463,49 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }
         } catch (error) {
           issues.push({ severity: 'error', message: `Crew look-ahead plan v${plan.versionNumber} cannot be recalculated: ${error.message}` });
+        }
+      }
+    }
+    for (const constraint of this.listLastPlannerConstraints({ status: 'all', limit: 5_000 })) {
+      if (!constraint.integrityValid) {
+        issues.push({ severity: 'error', message: `Last Planner constraint ${constraint.id} failed retained source or release integrity verification.` });
+      }
+    }
+    const lastPlannerPlans = this.listLastPlannerWeeklyPlans({ status: 'all', limit: 5_000 });
+    for (const plan of lastPlannerPlans) {
+      if (!plan.integrityValid) {
+        issues.push({ severity: 'error', message: `Last Planner weekly plan ${plan.id} failed retained snapshot integrity verification.` });
+      }
+      if (plan.status === 'approved') {
+        const approval = plan.approvalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'last_planner_weekly_plan' AND target_id = ? AND status = 'approved'").get(plan.approvalId, plan.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Approved Last Planner weekly plan ${plan.id} lacks its matching approval decision.` });
+      }
+      if (plan.status === 'pending_approval') {
+        try {
+          const source = this.lastPlannerPlanSource(plan.jobId, plan.weekStart, plan.commitments);
+          if (source.sourceHash !== plan.sourceHash) {
+            issues.push({ severity: 'warning', message: `Pending Last Planner weekly plan ${plan.id} is stale because crew, task, or make-ready evidence changed.` });
+          }
+        } catch (error) {
+          issues.push({ severity: 'warning', message: `Pending Last Planner weekly plan ${plan.id} is not currently approvable: ${error.message}` });
+        }
+      }
+    }
+    for (const outcome of this.listLastPlannerOutcomes({ limit: 10_000 })) {
+      if (!outcome.integrityValid) {
+        issues.push({ severity: 'error', message: `Last Planner outcome ${outcome.id} failed retained snapshot integrity verification.` });
+      }
+      const plan = lastPlannerPlans.find(candidate => candidate.id === outcome.planId);
+      if (!plan || plan.status !== 'approved' || !plan.commitments.some(commitment => commitment.id === outcome.commitmentId)) {
+        issues.push({ severity: 'error', message: `Last Planner outcome ${outcome.id} is not bound to an approved retained weekly promise.` });
+      }
+      for (const cycleId of outcome.dailyCycleIds) {
+        const cycleRow = this.db.prepare('SELECT id, job_id, work_date, status FROM daily_operating_cycles WHERE id = ?').get(cycleId);
+        const commitment = plan?.commitments.find(candidate => candidate.id === outcome.commitmentId);
+        if (!cycleRow || cycleRow.job_id !== outcome.jobId || cycleRow.work_date !== commitment?.workDate || cycleRow.status !== 'closed') {
+          issues.push({ severity: 'error', message: `Last Planner outcome ${outcome.id} has invalid daily-cycle source evidence ${cycleId}.` });
         }
       }
     }
@@ -54086,6 +55164,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         dayworkTickets: this.count('daywork_tickets'),
         fieldReports: this.count('field_reports'),
         dailyOperatingCycles: this.count('daily_operating_cycles'),
+        lastPlannerConstraints: this.count('last_planner_constraints'),
+        lastPlannerWeeklyPlans: this.count('last_planner_weekly_plans'),
+        lastPlannerOutcomes: this.count('last_planner_outcomes'),
         rfiRecords: this.count('rfi_records'),
         submittals: this.count('submittal_records'),
         governedDrawingRevisions: Number(this.db.prepare("SELECT COUNT(*) AS count FROM documents WHERE type = 'drawing_revision'").get().count || 0),
@@ -55518,6 +56599,184 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvalRequiredForClose: true,
         externalCommitments: 0
       },
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapLastPlannerConstraint(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === LAST_PLANNER_CONSTRAINT_FORMAT
+      && snapshot.constraintId === row.id
+      && snapshot.jobId === row.job_id
+      && snapshot.taskId === (row.task_id || null)
+      && snapshot.sourceHash === row.source_hash
+      && retainedSnapshotSourceHash(snapshot, ['sourceHash', 'retainedAt', 'retainedBy', 'safeguards']) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && sha256Json({
+        jobId: row.job_id,
+        taskId: row.task_id || null,
+        category: row.category,
+        title: row.title,
+        description: row.description,
+        owner: row.owner,
+        dueDate: row.due_date,
+        evidenceReference: row.evidence_reference
+      }) === row.entry_fingerprint
+    );
+    const releaseSnapshotJson = normalizeText(row.release_snapshot_json, '');
+    const releaseSnapshot = fromJson(releaseSnapshotJson, null);
+    const releaseIntegrityValid = row.status !== 'released' ? !row.release_snapshot_hash : Boolean(
+      releaseSnapshot
+      && releaseSnapshot.format === LAST_PLANNER_CONSTRAINT_FORMAT
+      && releaseSnapshot.constraintId === row.id
+      && releaseSnapshot.sourceHash === row.release_source_hash
+      && releaseSnapshot.evidenceReference === row.release_evidence_reference
+      && retainedSnapshotSourceHash(releaseSnapshot, ['sourceHash', 'releasedAt', 'releasedBy', 'safeguards']) === row.release_source_hash
+      && sha256Text(releaseSnapshotJson) === row.release_snapshot_hash
+      && sha256Json({
+        constraintId: row.id,
+        constraintSourceHash: row.source_hash,
+        evidenceReference: row.release_evidence_reference
+      }) === row.release_entry_fingerprint
+    );
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      jobTitle: row.job_title || data.jobTitle || null,
+      taskId: row.task_id || null,
+      taskTitle: row.task_title || data.taskTitle || null,
+      category: row.category,
+      title: row.title,
+      description: row.description,
+      owner: row.owner,
+      dueDate: row.due_date,
+      status: row.status,
+      evidenceReference: row.evidence_reference,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      releaseEvidenceReference: row.release_evidence_reference || null,
+      releaseSourceHash: row.release_source_hash || null,
+      releaseSnapshotHash: row.release_snapshot_hash || null,
+      releaseSnapshot,
+      releasedAt: row.released_at || null,
+      releasedBy: row.released_by || null,
+      entryKey: row.entry_key,
+      releaseEntryKey: row.release_entry_key || null,
+      integrityValid: integrityValid && releaseIntegrityValid,
+      releaseIntegrityValid,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapLastPlannerWeeklyPlan(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const entryFingerprint = snapshot ? sha256Json({
+      jobId: row.job_id,
+      weekStart: row.week_start,
+      commitments: (Array.isArray(snapshot.commitments) ? snapshot.commitments : []).map(commitment => ({
+        taskId: commitment.taskId,
+        workDate: commitment.workDate,
+        promise: commitment.promise,
+        promisedBy: commitment.promisedBy,
+        plannedHours: commitment.plannedHours
+      }))
+    }) : null;
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === LAST_PLANNER_WEEKLY_PLAN_FORMAT
+      && snapshot.planId === row.id
+      && snapshot.jobId === row.job_id
+      && snapshot.versionNumber === normalizeNumber(row.version_number, 0)
+      && snapshot.weekStart === row.week_start
+      && snapshot.weekEnd === row.week_end
+      && snapshot.lookaheadPlan?.id === row.lookahead_plan_id
+      && snapshot.sourceHash === row.source_hash
+      && retainedSnapshotSourceHash(snapshot, ['planId', 'versionNumber', 'sourceHash', 'retainedAt', 'retainedBy', 'safeguards']) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && entryFingerprint === row.entry_fingerprint
+    );
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      jobTitle: row.job_title || data.jobTitle || null,
+      versionNumber: normalizeNumber(row.version_number, 0),
+      weekStart: row.week_start,
+      weekEnd: row.week_end,
+      status: row.status,
+      lookaheadPlanId: row.lookahead_plan_id,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      commitments: Array.isArray(snapshot?.commitments) ? snapshot.commitments : [],
+      integrityValid,
+      approvalId: row.approval_id || null,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapLastPlannerOutcome(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const evidenceReferences = fromJson(row.evidence_references_json, []);
+    const dailyCycleIds = fromJson(row.daily_cycle_ids_json, []);
+    const entryFingerprint = sha256Json({
+      planId: row.plan_id,
+      commitmentId: row.commitment_id,
+      result: row.result,
+      evidenceReferences,
+      varianceCategory: row.variance_category || null,
+      varianceReason: row.variance_reason || null,
+      dailyCycleIds
+    });
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === LAST_PLANNER_OUTCOME_FORMAT
+      && snapshot.outcomeId === row.id
+      && snapshot.planId === row.plan_id
+      && snapshot.jobId === row.job_id
+      && snapshot.commitment?.id === row.commitment_id
+      && snapshot.result === row.result
+      && snapshot.sourceHash === row.source_hash
+      && retainedSnapshotSourceHash(snapshot, ['sourceHash', 'retainedAt', 'retainedBy', 'safeguards']) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && entryFingerprint === row.entry_fingerprint
+    );
+    return {
+      id: row.id,
+      planId: row.plan_id,
+      jobId: row.job_id,
+      commitmentId: row.commitment_id,
+      result: row.result,
+      evidenceReferences,
+      varianceCategory: row.variance_category || null,
+      varianceReason: row.variance_reason || null,
+      dailyCycleIds,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      weekStart: row.week_start || null,
+      weekEnd: row.week_end || null,
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -57329,6 +58588,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.windowStart = plan?.windowStart || data.windowStart || null;
       preview.windowEnd = plan?.windowEnd || data.windowEnd || null;
       preview.summary = plan?.snapshot?.summary || data.summary || null;
+      preview.integrityValid = plan?.integrityValid === true;
+      preview.sourceHash = plan?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = plan?.snapshotHash || data.snapshotHash || null;
+      preview.externalCommitments = 0;
+    } else if (targetType === 'last_planner_weekly_plan') {
+      const row = this.db.prepare('SELECT * FROM last_planner_weekly_plans WHERE id = ?').get(approval.targetId || approval.target_id);
+      const plan = row ? this.mapLastPlannerWeeklyPlan(row) : null;
+      primaryEffect = `Approve ${plan?.commitments?.length ?? data.commitmentCount ?? 0} internal weekly promise(s) for ${plan?.jobTitle || 'the retained job'}.`;
+      addEffect(`Freeze the make-ready weekly work plan for ${plan?.weekStart || data.weekStart || 'the retained week'} through ${plan?.weekEnd || data.weekEnd || 'the retained week end'}.`);
+      addEffect(`Retain ${plan?.commitments?.length ?? data.commitmentCount ?? 0} task/date promise(s) against approved crew hours and released constraints.`);
+      addSafeguard('Approval is blocked if crew hours, task scope, or make-ready release evidence changed after the request.');
+      addSafeguard('Does not change the schedule, assign or notify crew, contact clients, order materials, authorize spend, or certify safety or compliance.');
+      riskLevel = 'high';
+      preview.weekStart = plan?.weekStart || data.weekStart || null;
+      preview.weekEnd = plan?.weekEnd || data.weekEnd || null;
+      preview.commitmentCount = plan?.commitments?.length ?? data.commitmentCount ?? 0;
+      preview.plannedHours = data.plannedHours ?? null;
       preview.integrityValid = plan?.integrityValid === true;
       preview.sourceHash = plan?.sourceHash || data.sourceHash || null;
       preview.snapshotHash = plan?.snapshotHash || data.snapshotHash || null;
