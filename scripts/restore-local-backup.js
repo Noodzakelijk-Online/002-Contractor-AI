@@ -1345,6 +1345,65 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('066_governed_client_feedback')) {
+        if (!retainedTables.has('client_feedback')) {
+          throw new Error('Backup client-feedback schema is incomplete: client_feedback.');
+        }
+        const clientFeedbackColumns = new Set(
+          database.prepare('PRAGMA table_info(client_feedback)').all().map(row => row.name)
+        );
+        for (const column of [
+          'id',
+          'job_id',
+          'client_id',
+          'portal_access_id',
+          'survey_type',
+          'source',
+          'status',
+          'respondent_name',
+          'nps_score',
+          'csat_score',
+          'effort_score',
+          'comment',
+          'follow_up_consent',
+          'testimonial_consent',
+          'evidence_reference',
+          'submitted_at',
+          'entry_key',
+          'entry_fingerprint',
+          'snapshot_json',
+          'snapshot_hash',
+          'data_json',
+          'created_at',
+          'updated_at'
+        ]) {
+          if (!clientFeedbackColumns.has(column)) {
+            throw new Error(`Backup client-feedback schema is incomplete: client_feedback.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name)
+        );
+        for (const index of [
+          'idx_client_feedback_job_submitted',
+          'idx_client_feedback_client_submitted',
+          'idx_client_feedback_portal_survey'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup client-feedback constraints are incomplete: ${index}.`);
+          }
+        }
+        const portalSurveyIndex = database.prepare(`
+          SELECT sql
+          FROM sqlite_master
+          WHERE type = 'index' AND name = 'idx_client_feedback_portal_survey'
+        `).get();
+        if (!portalSurveyIndex?.sql
+          || !/CREATE\s+UNIQUE\s+INDEX/i.test(portalSurveyIndex.sql)
+          || !/WHERE\s+portal_access_id\s+IS\s+NOT\s+NULL/i.test(portalSurveyIndex.sql)) {
+          throw new Error('Backup client-feedback constraints are incomplete: idx_client_feedback_portal_survey must be a partial unique index.');
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

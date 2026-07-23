@@ -29,13 +29,19 @@
 .client-portal-empty, .client-portal-note { margin: 0; color: #687873; font-size: 13px; line-height: 1.5; }
 .client-portal-form { display: grid; gap: 13px; margin-top: 16px; }
 .client-portal-form label { display: grid; gap: 6px; color: #40564e; font-size: 12px; font-weight: 700; }
-.client-portal-form input, .client-portal-form textarea { width: 100%; padding: 10px 11px; color: #20312b; background: #fff; border: 1px solid #c9d8d2; border-radius: 5px; font: inherit; outline: none; }
+.client-portal-form input, .client-portal-form select, .client-portal-form textarea { width: 100%; padding: 10px 11px; color: #20312b; background: #fff; border: 1px solid #c9d8d2; border-radius: 5px; font: inherit; outline: none; }
 .client-portal-form textarea { min-height: 118px; resize: vertical; }
-.client-portal-form input:focus, .client-portal-form textarea:focus { border-color: #0a7b65; box-shadow: 0 0 0 3px #dff2eb; }
+.client-portal-form input:focus, .client-portal-form select:focus, .client-portal-form textarea:focus { border-color: #0a7b65; box-shadow: 0 0 0 3px #dff2eb; }
 .client-portal-submit { display: flex; align-items: center; gap: 13px; }
 .client-portal-submit button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 14px; color: #fff; background: #0c5b4e; border: 1px solid #0c5b4e; border-radius: 5px; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
 .client-portal-submit button:disabled { cursor: not-allowed; opacity: .62; }
 .client-portal-submit span { color: #58726a; font-size: 12px; }
+.client-feedback-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.client-feedback-form .client-feedback-comment, .client-feedback-form .client-feedback-consent, .client-feedback-form .client-feedback-submit { grid-column: 1 / -1; }
+.client-feedback-form .client-feedback-consent { display: flex; grid-template-columns: none; align-items: flex-start; gap: 9px; font-weight: 600; }
+.client-feedback-form .client-feedback-consent input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: #0a7b65; }
+.client-feedback-thanks { display: flex; align-items: flex-start; gap: 10px; margin-top: 14px; padding: 14px; color: #174f43; background: #e8f5f0; border: 1px solid #b9dacf; border-radius: 6px; }
+.client-feedback-thanks p { margin: 3px 0 0; color: #49685f; font-size: 13px; }
 .client-portal-selections { padding-bottom: 6px; }
 .client-portal-selection { display: grid; gap: 14px; padding: 19px 0; border-top: 1px solid #e1e9e5; }
 .client-portal-selection:first-of-type { border-top: 0; }
@@ -95,4 +101,6 @@
   .client-variation-facts span { border-top: 1px solid #dbe5e1; border-left: 0; }
   .client-variation-facts span:first-child { border-top: 0; }
   .client-portal-submit { align-items: stretch; flex-direction: column; }
+  .client-feedback-form { grid-template-columns: 1fr; }
+  .client-feedback-form .client-feedback-comment, .client-feedback-form .client-feedback-consent, .client-feedback-form .client-feedback-submit { grid-column: auto; }
 }

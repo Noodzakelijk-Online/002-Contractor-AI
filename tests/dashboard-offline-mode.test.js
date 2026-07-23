@@ -69,7 +69,7 @@ test('performance workspace renders ten evidence-backed perspectives with govern
   assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\?/);
   assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\/targets/);
   assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\/snapshots/);
-  assert.match(dashboardSource, /summary\.metricCount \|\| 20/);
+  assert.match(dashboardSource, /summary\.metricCount \|\| 23/);
   assert.match(dashboardSource, /if \(status === 'no_data'\) return 'No data'/);
   assert.match(dashboardSource, /canApprove && pendingSnapshot\?\.approvalId/);
   assert.match(dashboardSource, /No external action was created/);
@@ -464,6 +464,7 @@ test('client success exposes immutable handover readiness, preparation, and down
 test('client portal is a scoped React workflow without imperative HTML rendering', () => {
   assert.match(clientPortalSource, /\/api\/client-portal\/\$\{encodeURIComponent\(token\)\}/);
   assert.match(clientPortalSource, /\/messages`/);
+  assert.match(clientPortalSource, /\/feedback`/);
   assert.match(clientPortalSource, /\/selections\/\$\{encodeURIComponent\(selection\.id\)\}\/responses/);
   assert.match(clientPortalSource, /\/change-orders\/\$\{encodeURIComponent\(variation\.id\)\}\/responses/);
   assert.match(clientPortalSource, /\/change-orders\/\$\{encodeURIComponent\(variation\.id\)\}\/package/);
@@ -473,7 +474,18 @@ test('client portal is a scoped React workflow without imperative HTML rendering
   assert.match(clientPortalSource, /Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren/);
   assert.match(clientPortalSource, /Tot die verificatie wijzigt geen contractsom en is het extra werk niet geautoriseerd/);
   assert.match(clientPortalSource, /Hiermee wijzigt u geen prijs, planning, opdracht of bestelling/);
+  assert.match(clientPortalSource, /Hoe waarschijnlijk is het dat u ons aanbeveelt/);
+  assert.match(clientPortalSource, /Mijn reactie mag intern worden beoordeeld voor een mogelijke referentie/);
+  assert.match(clientPortalSource, /payload\.portal\?\.feedback\?\.submitted === true/);
   assert.match(clientPortalSource, /new URLSearchParams\(window\.location\.hash\.slice\(1\)\)/);
   assert.match(clientPortalSource, /noindex, nofollow/);
   assert.doesNotMatch(clientPortalSource, /innerHTML|document\.getElementById|addEventListener/);
+});
+
+test('operator closeout connects evidence-backed feedback to internal-only recovery visibility', () => {
+  assert.match(dashboardSource, /recordType === 'client_feedback'\s*\? 'client-feedback'/);
+  assert.match(dashboardSource, /`\/api\/ledger\/jobs\/\$\{encodeURIComponent\(selectedJobId\)\}\/\$\{route\}`/);
+  assert.match(dashboardSource, /data-testid=\{`closeout-\$\{view\}-form`\}/);
+  assert.match(dashboardSource, /Internal recovery required/);
+  assert.match(dashboardSource, /This retains an internal record only\. It does not certify completion, accept liability, authorize cost, book work, or contact the client\./);
 });

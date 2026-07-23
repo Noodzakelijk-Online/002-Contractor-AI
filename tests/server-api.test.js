@@ -43,6 +43,13 @@ test('JSON request boundaries reject malformed and oversized bodies without inte
   assert.equal(oversized.response.status, 413);
   assert.equal(oversized.body.error.code, 'request_body_too_large');
 
+  const largeExportValidation = await request(baseUrl, '/api/operations/exports/validate', {
+    method: 'POST',
+    body: JSON.stringify({ format: 'invalid-export', padding: 'x'.repeat(3 * 1024 * 1024) })
+  });
+  assert.equal(largeExportValidation.response.status, 422);
+  assert.equal(largeExportValidation.body.error.code, 'invalid_operational_export');
+
   const readiness = await request(baseUrl, '/api/health/ready');
   assert.equal(readiness.response.status, 200);
   assert.equal(readiness.body.status, 'ready');

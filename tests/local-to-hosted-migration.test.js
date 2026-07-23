@@ -950,6 +950,18 @@ function createBackupFixture(t, suffix = 'success') {
       note: 'Checked against the approved migration standard.'
     }))
   }, { actor: 'migration_fixture' }).audit;
+  const clientFeedback = source.createClientFeedback(job.id, {
+    entryKey: `migration-client-feedback-${suffix}`,
+    surveyType: 'handover',
+    respondentName: 'Migration client',
+    npsScore: 9,
+    csatScore: 5,
+    effortScore: 4,
+    comment: 'The migrated handover evidence was clear and complete.',
+    followUpConsent: true,
+    testimonialConsent: false,
+    evidenceReference: `migration-signed-client-survey-${suffix}`
+  }, { actor: 'migration_fixture' }).feedback;
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -981,7 +993,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1109,7 +1121,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '065_governed_photo_evidence');
+  assert.equal(migration.migrationVersion, '066_governed_client_feedback');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1122,6 +1134,12 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   const hosted = new ContractorOperatingLedger({ databaseUrl: targetUrl });
   try {
     const detail = hosted.getJobDetail(fixture.job.id, { includeAudit: true });
+    const migratedFeedback = detail.clientFeedback.find(item => item.id === fixture.clientFeedback.id);
+    assert.equal(migratedFeedback.integrityValid, true);
+    assert.equal(migratedFeedback.snapshotHash, fixture.clientFeedback.snapshotHash);
+    assert.equal(migratedFeedback.entryFingerprint, fixture.clientFeedback.entryFingerprint);
+    assert.equal(migratedFeedback.npsScore, 9);
+    assert.equal(migratedFeedback.followUpConsent, true);
     const migratedMeeting = detail.projectMeetings.find(item => item.id === fixture.projectMeeting.id);
     assert.equal(migratedMeeting.status, 'issued');
     assert.equal(migratedMeeting.deliveryReference, `migration-meeting-receipt:success`);

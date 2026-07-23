@@ -1001,7 +1001,7 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
 
     const scopedFieldDetail = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}`, { headers: fieldHeaders });
     assert.equal(scopedFieldDetail.response.status, 200);
-    for (const privateKey of ['quotes', 'changeOrders', 'communications', 'expenses', 'invoices', 'payments', 'portalAccess', 'approvals', 'audit']) {
+    for (const privateKey of ['quotes', 'changeOrders', 'communications', 'expenses', 'invoices', 'payments', 'portalAccess', 'clientFeedback', 'approvals', 'audit']) {
       if (privateKey === 'communications' || privateKey === 'approvals') {
         assert.deepEqual(scopedFieldDetail.body.job[privateKey], []);
       } else {

@@ -7518,9 +7518,9 @@ function App() {
   }
 
   async function createCloseoutRecord(recordType, values) {
-    if (!selectedJobId || !['punch_item', 'warranty_claim', 'aftercare'].includes(recordType)) return null
+    if (!selectedJobId || !['punch_item', 'warranty_claim', 'aftercare', 'client_feedback'].includes(recordType)) return null
     if (recordType !== 'punch_item' && (!canCoordinate || navigator.onLine === false)) {
-      setError('Reconnect before retaining warranty or aftercare records. Offline exact retry is limited to field punch capture.')
+      setError('Reconnect before retaining warranty, aftercare, or feedback records. Offline exact retry is limited to field punch capture.')
       return null
     }
 
@@ -7572,10 +7572,16 @@ function App() {
       }
     }
 
-    const route = recordType === 'warranty_claim' ? 'warranty-claims' : 'aftercare'
+    const route = recordType === 'warranty_claim'
+      ? 'warranty-claims'
+      : recordType === 'client_feedback'
+        ? 'client-feedback'
+        : 'aftercare'
     const payload = recordType === 'warranty_claim'
       ? { ...values, status: 'open', source: 'closeout_register' }
-      : { ...values, status: 'open' }
+      : recordType === 'client_feedback'
+        ? { ...values, source: 'closeout_register' }
+        : { ...values, status: 'open' }
     setSubmitting(true)
     setError('')
     try {
@@ -7587,7 +7593,9 @@ function App() {
       setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
       notify(recordType === 'warranty_claim'
         ? 'Warranty claim retained for internal review. No liability, visit, remedy, or client commitment was accepted.'
-        : 'Aftercare follow-up retained internally. No message was delivered and no work was booked.')
+        : recordType === 'client_feedback'
+          ? 'Client feedback retained as immutable NPS, satisfaction, and effort evidence. No review or referral request was sent.'
+          : 'Aftercare follow-up retained internally. No message was delivered and no work was booked.')
       await refresh()
       return result
     } catch (requestError) {

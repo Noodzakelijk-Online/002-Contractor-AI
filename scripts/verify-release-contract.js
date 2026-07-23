@@ -225,6 +225,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '065_governed_photo_evidence'")) {
     failures.push('Canonical governed photo-evidence migration is missing.');
   }
+  if (!ledgerSource.includes("version: '066_governed_client_feedback'")) {
+    failures.push('Canonical governed client-feedback migration is missing.');
+  }
   if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
     failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
   }
@@ -242,6 +245,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes('photoEvidenceReleaseInference: false')) {
     failures.push('Photo-evidence capability does not explicitly block inferred release.');
+  }
+  if (!serverSource.includes("clientFeedbackIntegrity: 'immutable_snapshot_and_entry_fingerprint'")) {
+    failures.push('Client feedback does not advertise immutable snapshot and replay integrity.');
+  }
+  if (!serverSource.includes("clientFeedbackAutonomy: 'internal_service_recovery_only'")) {
+    failures.push('Client feedback autonomy is not constrained to internal service recovery.');
   }
   if (!serverSource.includes("installationQcSourceValidation: 'server_current_at_receipt_and_release'")) {
     failures.push('Installation-QC capability does not require current source checks at receipt and release.');

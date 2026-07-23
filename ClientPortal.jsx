@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CalendarDays, CircleAlert, CircleCheckBig, Download, FileSignature, FileText, HardHat, ListChecks, LoaderCircle, MessageSquareText, Send, ShieldCheck } from 'lucide-react'
+import { CalendarDays, CircleAlert, CircleCheckBig, Download, FileSignature, FileText, HardHat, ListChecks, LoaderCircle, MessageSquareText, Send, ShieldCheck, Star } from 'lucide-react'
 import './ClientPortal.css'
 
 function formatPortalDate(value) {
@@ -44,6 +44,18 @@ function emptyVariationDraft() {
     signerName: '',
     authorityConfirmed: false,
     note: '',
+    responseId: createResponseId()
+  }
+}
+
+function emptyFeedbackDraft() {
+  return {
+    npsScore: '',
+    csatScore: '',
+    effortScore: '',
+    comment: '',
+    followUpConsent: false,
+    testimonialConsent: false,
     responseId: createResponseId()
   }
 }
@@ -161,6 +173,10 @@ export default function ClientPortal() {
   const [variationDrafts, setVariationDrafts] = useState({})
   const [variationResults, setVariationResults] = useState({})
   const [variationSubmitting, setVariationSubmitting] = useState('')
+  const [feedbackDraft, setFeedbackDraft] = useState(() => emptyFeedbackDraft())
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false)
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [feedbackResult, setFeedbackResult] = useState('')
 
   useEffect(() => {
     const previousTitle = document.title
@@ -195,6 +211,7 @@ export default function ClientPortal() {
         const payload = await response.json().catch(() => ({}))
         if (!response.ok) throw new Error(payload?.error?.message || 'Deze projectlink is niet beschikbaar.')
         setJob(payload.job)
+        setFeedbackSubmitted(payload.portal?.feedback?.submitted === true)
         setSelectionDrafts(Object.fromEntries((payload.job?.selections || [])
           .filter(selection => selection.responseAllowed)
           .map(selection => [selection.id, emptySelectionDraft(selection)])))
@@ -305,6 +322,28 @@ export default function ClientPortal() {
     }
   }
 
+  async function submitFeedback(event) {
+    event.preventDefault()
+    if (feedbackSubmitting || feedbackSubmitted) return
+    setFeedbackSubmitting(true)
+    setFeedbackResult('Uw feedback wordt veilig opgeslagen...')
+    try {
+      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(feedbackDraft)
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload?.error?.message || 'Uw feedback kon niet worden opgeslagen.')
+      setFeedbackSubmitted(true)
+      setFeedbackResult('Bedankt. Uw feedback is toegevoegd aan het projectdossier.')
+    } catch (requestError) {
+      setFeedbackResult(requestError.message || 'Uw feedback kon niet worden opgeslagen.')
+    } finally {
+      setFeedbackSubmitting(false)
+    }
+  }
+
   return <div className="client-portal-shell">
     <header className="client-portal-header">
       <div><span className="client-portal-mark"><HardHat size={19} /></span><strong>Contractor.AI</strong></div>
@@ -372,6 +411,21 @@ export default function ClientPortal() {
           <section className="client-portal-panel client-portal-wide">
             <div className="client-portal-panel-title"><FileText size={18} /><h2>Beschikbare documenten</h2></div>
             <PortalList items={job.documents} empty="Er zijn nog geen documenten beschikbaar." render={item => `${item.title || 'Document'} (${item.type || 'document'})`} />
+          </section>
+          <section className="client-portal-panel client-portal-wide" data-testid="client-feedback-panel">
+            <div className="client-portal-panel-title"><Star size={18} /><h2>Uw ervaring</h2></div>
+            {feedbackSubmitted ? <div className="client-feedback-thanks" role="status"><CircleCheckBig size={20} /><div><strong>Feedback ontvangen</strong><p>{feedbackResult || 'Uw eerdere reactie is veilig vastgelegd in het projectdossier.'}</p></div></div> : <>
+              <p className="client-portal-note">Met drie korte scores helpt u ons de uitvoering en service te verbeteren. Een reactie wijzigt geen contract, planning of garantie.</p>
+              <form className="client-portal-form client-feedback-form" onSubmit={submitFeedback}>
+                <label>Aanbeveling (0-10)<select required aria-label="Hoe waarschijnlijk is het dat u ons aanbeveelt?" value={feedbackDraft.npsScore} onChange={event => setFeedbackDraft(current => ({ ...current, npsScore: Number(event.target.value) }))}><option value="" disabled>Selecteer een score</option>{Array.from({ length: 11 }, (_, score) => <option key={score} value={score}>{score}{score === 0 ? ' - zeer onwaarschijnlijk' : score === 10 ? ' - zeer waarschijnlijk' : ''}</option>)}</select></label>
+                <label>Tevredenheid (1-5)<select required aria-label="Hoe tevreden bent u?" value={feedbackDraft.csatScore} onChange={event => setFeedbackDraft(current => ({ ...current, csatScore: Number(event.target.value) }))}><option value="" disabled>Selecteer een score</option>{[1, 2, 3, 4, 5].map(score => <option key={score} value={score}>{score}{score === 1 ? ' - zeer ontevreden' : score === 5 ? ' - zeer tevreden' : ''}</option>)}</select></label>
+                <label>Gemak (1-5)<select required aria-label="Hoe gemakkelijk was samenwerken?" value={feedbackDraft.effortScore} onChange={event => setFeedbackDraft(current => ({ ...current, effortScore: Number(event.target.value) }))}><option value="" disabled>Selecteer een score</option>{[1, 2, 3, 4, 5].map(score => <option key={score} value={score}>{score}{score === 1 ? ' - zeer moeilijk' : score === 5 ? ' - zeer gemakkelijk' : ''}</option>)}</select></label>
+                <label className="client-feedback-comment">Toelichting (optioneel)<textarea maxLength="4000" value={feedbackDraft.comment} onChange={event => setFeedbackDraft(current => ({ ...current, comment: event.target.value }))} placeholder="Wat ging goed en wat kan beter?" /></label>
+                <label className="client-feedback-consent"><input type="checkbox" checked={feedbackDraft.followUpConsent} onChange={event => setFeedbackDraft(current => ({ ...current, followUpConsent: event.target.checked }))} />U mag contact met mij opnemen over deze feedback.</label>
+                <label className="client-feedback-consent"><input type="checkbox" checked={feedbackDraft.testimonialConsent} onChange={event => setFeedbackDraft(current => ({ ...current, testimonialConsent: event.target.checked }))} />Mijn reactie mag intern worden beoordeeld voor een mogelijke referentie. Publicatie vraagt altijd aparte afstemming.</label>
+                <div className="client-portal-submit client-feedback-submit"><button type="submit" disabled={feedbackSubmitting}><ShieldCheck size={16} />{feedbackSubmitting ? 'Opslaan...' : 'Feedback opslaan'}</button><span role="status" aria-live="polite">{feedbackResult}</span></div>
+              </form>
+            </>}
           </section>
           <section className="client-portal-panel client-portal-wide">
             <div className="client-portal-panel-title"><MessageSquareText size={18} /><h2>Stuur een bericht</h2></div>

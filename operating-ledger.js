@@ -198,7 +198,8 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ],
   'performance-management': [
     { key: 'balanced_scorecard', label: 'Approved Contractor Balanced Scorecard', table: 'performance_scorecard_snapshots', readyStatuses: ['approved'], ledgerOnly: true },
-    { key: 'performance_targets', label: 'Approved KPI target revisions', table: 'performance_scorecard_targets', readyStatuses: ['approved'], ledgerOnly: true }
+    { key: 'performance_targets', label: 'Approved KPI target revisions', table: 'performance_scorecard_targets', readyStatuses: ['approved'], ledgerOnly: true },
+    { key: 'client_feedback', label: 'Governed NPS, CSAT, and customer-effort evidence', table: 'client_feedback', detailKey: 'clientFeedback', readyStatuses: ['retained'] }
   ],
   'client-portal': [
     { key: 'communication', label: 'Client communication', table: 'communication_records', detailKey: 'communications' },
@@ -207,6 +208,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'punch', label: 'Punch items', table: 'punch_items', detailKey: 'punchItems' },
     { key: 'warranty', label: 'Warranty claims', table: 'warranty_claims', detailKey: 'warrantyClaims' },
     { key: 'aftercare', label: 'Aftercare', table: 'aftercare_items', detailKey: 'aftercare' },
+    { key: 'feedback', label: 'Client feedback', table: 'client_feedback', detailKey: 'clientFeedback', readyStatuses: ['retained'] },
     { key: 'recurring', label: 'Recurring service', table: 'recurring_plans', detailKey: 'recurringPlans' }
   ],
   'eu-compliance': [
@@ -1344,6 +1346,8 @@ const SITE_SURVEY_TEMPLATE = Object.freeze({
   ])
 });
 const PERFORMANCE_SCORECARD_DEFAULT_WEEKS = 13;
+const CLIENT_FEEDBACK_FORMAT = 'contractor-ai-client-feedback/v1';
+const CLIENT_FEEDBACK_SURVEY_TYPES = new Set(['project_experience', 'handover', 'aftercare', 'warranty']);
 const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
   { key: 'recordable_incidents', perspective: 'safety', label: 'Recordable incidents', unit: 'count', comparison: 'at_most', target: 0 },
   { key: 'safety_action_closure_pct', perspective: 'safety', label: 'Safety actions closed', unit: 'percent', comparison: 'at_least', target: 95 },
@@ -1353,6 +1357,9 @@ const PERFORMANCE_SCORECARD_METRICS = Object.freeze([
   { key: 'overdue_active_jobs', perspective: 'delivery_reliability', label: 'Overdue active jobs', unit: 'count', comparison: 'at_most', target: 0 },
   { key: 'warranty_resolution_pct', perspective: 'customer_satisfaction', label: 'Warranty claims resolved', unit: 'percent', comparison: 'at_least', target: 90 },
   { key: 'handover_delivery_pct', perspective: 'customer_satisfaction', label: 'Handover delivery coverage', unit: 'percent', comparison: 'at_least', target: 90 },
+  { key: 'net_promoter_score', perspective: 'customer_satisfaction', label: 'Net Promoter Score', unit: 'score', comparison: 'at_least', target: 30 },
+  { key: 'customer_satisfaction_pct', perspective: 'customer_satisfaction', label: 'Customer satisfaction', unit: 'percent', comparison: 'at_least', target: 80 },
+  { key: 'customer_effort_pct', perspective: 'customer_satisfaction', label: 'Customer effort ease', unit: 'percent', comparison: 'at_least', target: 80 },
   { key: 'billable_utilization_pct', perspective: 'employee_capacity', label: 'Billable crew utilization', unit: 'percent', comparison: 'at_least', target: 70 },
   { key: 'assignment_coverage_pct', perspective: 'employee_capacity', label: 'Active-job crew coverage', unit: 'percent', comparison: 'at_least', target: 95 },
   { key: 'portfolio_margin_pct', perspective: 'financial_performance', label: 'Projected portfolio margin', unit: 'percent', comparison: 'at_least', target: 20 },
@@ -5813,6 +5820,46 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON photo_evidence_captures(set_id, phase, captured_at DESC, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_photo_evidence_capture_worker
           ON photo_evidence_captures(captured_by_worker_id, captured_at DESC);
+      `);
+    }
+  },
+  {
+    version: '066_governed_client_feedback',
+    description: 'Retain immutable NPS, CSAT, and customer-effort evidence from scoped client portals or operator evidence without triggering external review, referral, or service commitments.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_feedback (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          client_id TEXT REFERENCES clients(id) ON DELETE RESTRICT,
+          portal_access_id TEXT REFERENCES client_portal_access(id) ON DELETE RESTRICT,
+          survey_type TEXT NOT NULL,
+          source TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'retained',
+          respondent_name TEXT,
+          nps_score INTEGER NOT NULL,
+          csat_score INTEGER NOT NULL,
+          effort_score INTEGER NOT NULL,
+          comment TEXT,
+          follow_up_consent INTEGER NOT NULL DEFAULT 0,
+          testimonial_consent INTEGER NOT NULL DEFAULT 0,
+          evidence_reference TEXT,
+          submitted_at TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_feedback_job_submitted
+          ON client_feedback(job_id, submitted_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_client_feedback_client_submitted
+          ON client_feedback(client_id, submitted_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_client_feedback_portal_survey
+          ON client_feedback(portal_access_id, survey_type)
+          WHERE portal_access_id IS NOT NULL;
       `);
     }
   }
@@ -33188,10 +33235,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const actor = options.actor || payload.actor || 'Contractor.AI';
       const definition = this.performanceScorecardMetric(payload.metricKey || payload.metric_key);
       const targetValue = Number(payload.targetValue ?? payload.target_value);
-      if (!Number.isFinite(targetValue) || targetValue < 0 || targetValue > (definition.unit === 'percent' ? 100 : 1_000_000_000)) {
+      const minimumTarget = definition.key === 'net_promoter_score' ? -100 : 0;
+      const maximumTarget = definition.unit === 'percent' || definition.key === 'net_promoter_score' ? 100 : 1_000_000_000;
+      if (!Number.isFinite(targetValue) || targetValue < minimumTarget || targetValue > maximumTarget) {
         throw ledgerInputError(
           'performance_target_value_invalid',
-          `${definition.label} target must be between 0 and ${definition.unit === 'percent' ? 100 : '1,000,000,000'}.`,
+          `${definition.label} target must be between ${minimumTarget} and ${maximumTarget.toLocaleString('en-US')}.`,
           { metricKey: definition.key }
         );
       }
@@ -33441,6 +33490,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const checklistSubmissions = this.db.prepare('SELECT * FROM inspection_checklist_submissions ORDER BY id').all();
     const nonconformances = this.db.prepare('SELECT * FROM nonconformance_records ORDER BY id').all();
     const warrantyClaims = this.db.prepare('SELECT * FROM warranty_claims ORDER BY id').all();
+    const clientFeedback = this.db.prepare('SELECT * FROM client_feedback ORDER BY id').all();
     const communications = this.db.prepare('SELECT * FROM communication_records ORDER BY id').all();
     const timesheets = this.db.prepare('SELECT * FROM weekly_timesheets ORDER BY id').all();
     const assignments = this.db.prepare('SELECT * FROM assignments ORDER BY id').all();
@@ -33499,6 +33549,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         && inWindow(row.created_at, start, end)
         && !['cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(row.status, '')));
       const resolvedWarranty = periodWarranty.filter(row => ['closed', 'resolved', 'accepted'].includes(normalizeStatus(row.status, '')));
+      const periodFeedback = clientFeedback.filter(row => operationalJobIds.has(row.job_id)
+        && inWindow(row.submitted_at || row.created_at, start, end)
+        && normalizeStatus(row.status, '') === 'retained');
+      const feedbackPromoters = periodFeedback.filter(row => Number(row.nps_score) >= 9).length;
+      const feedbackDetractors = periodFeedback.filter(row => Number(row.nps_score) <= 6).length;
+      const satisfiedFeedback = periodFeedback.filter(row => Number(row.csat_score) >= 4).length;
+      const easyFeedback = periodFeedback.filter(row => Number(row.effort_score) >= 4).length;
+      const netPromoterScore = periodFeedback.length
+        ? roundMeasurement((feedbackPromoters - feedbackDetractors) / periodFeedback.length * 100, 1)
+        : null;
+      const customerSatisfaction = percent(satisfiedFeedback, periodFeedback.length);
+      const customerEffort = percent(easyFeedback, periodFeedback.length);
       const handoverDeliveredJobIds = new Set(communications.filter(row => {
         const data = fromJson(row.data_json, {});
         return data.source === 'handover_issue_package'
@@ -33569,6 +33631,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         overdue_active_jobs: { value: includePointInTime && activeJobs.length ? overdueJobs.length : null, sampleSize: includePointInTime ? activeJobs.length : 0, evidenceIds: includePointInTime ? overdueJobs.map(row => row.id) : [], periodBased: false },
         warranty_resolution_pct: { value: percent(resolvedWarranty.length, periodWarranty.length), sampleSize: periodWarranty.length, numerator: resolvedWarranty.length, denominator: periodWarranty.length, evidenceIds: periodWarranty.map(row => row.id), periodBased: true },
         handover_delivery_pct: { value: percent(completedJobs.filter(row => handoverDeliveredJobIds.has(row.id)).length, completedJobs.length), sampleSize: completedJobs.length, numerator: completedJobs.filter(row => handoverDeliveredJobIds.has(row.id)).length, denominator: completedJobs.length, evidenceIds: completedJobs.map(row => row.id), periodBased: true },
+        net_promoter_score: { value: netPromoterScore, sampleSize: periodFeedback.length, numerator: feedbackPromoters - feedbackDetractors, denominator: periodFeedback.length, evidenceIds: periodFeedback.map(row => row.id), periodBased: true },
+        customer_satisfaction_pct: { value: customerSatisfaction, sampleSize: periodFeedback.length, numerator: satisfiedFeedback, denominator: periodFeedback.length, evidenceIds: periodFeedback.map(row => row.id), periodBased: true },
+        customer_effort_pct: { value: customerEffort, sampleSize: periodFeedback.length, numerator: easyFeedback, denominator: periodFeedback.length, evidenceIds: periodFeedback.map(row => row.id), periodBased: true },
         billable_utilization_pct: { value: percent(billableHours, totalHours), sampleSize: periodTimesheets.length, numerator: roundMeasurement(billableHours, 2), denominator: roundMeasurement(totalHours, 2), evidenceIds: periodTimesheets.map(row => row.id), periodBased: true },
         assignment_coverage_pct: { value: includePointInTime ? percent(assignedJobIds.size, activeJobs.length) : null, sampleSize: includePointInTime ? activeJobs.length : 0, numerator: includePointInTime ? assignedJobIds.size : null, denominator: includePointInTime ? activeJobs.length : null, evidenceIds: includePointInTime ? [...assignedJobIds].sort() : [], periodBased: false },
         portfolio_margin_pct: { value: includePointInTime ? (portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length ? roundMeasurement(portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).reduce((sum, row) => sum + row.projectedMarginPercent, 0) / portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length, 1) : null) : null, sampleSize: includePointInTime ? portfolioForecasts.filter(row => row.projectedMarginPercent !== undefined).length : 0, evidenceIds: includePointInTime ? portfolioForecasts.map(row => row.jobId) : [], periodBased: false },
@@ -33589,8 +33654,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const priorInputs = metricInputs(priorPeriodStart, priorPeriodEnd, false);
     const targetRegister = this.listPerformanceScorecardTargets({ includeHistory: true });
     const targetByMetric = new Map(targetRegister.effective.map(target => [target.metricKey, target]));
-    const scoreValue = (value, target, comparison) => {
+    const scoreValue = (value, target, comparison, metricKey) => {
       if (value === null || value === undefined) return 0;
+      if (metricKey === 'net_promoter_score') {
+        if (value >= target) return 100;
+        if (target <= -100) return 0;
+        return Math.max(0, Math.min(100, (value + 100) / (target + 100) * 100));
+      }
       if (comparison === 'at_least') return target <= 0 ? 100 : Math.max(0, Math.min(100, value / target * 100));
       if (target <= 0) return value <= 0 ? 100 : 0;
       return Math.max(0, Math.min(100, target / Math.max(value, 0.000001) * 100));
@@ -33602,7 +33672,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const value = input.value;
       const targetValue = target.targetValue;
       const meetsTarget = value !== null && value !== undefined && (definition.comparison === 'at_least' ? value >= targetValue : value <= targetValue);
-      const score = roundMeasurement(scoreValue(value, targetValue, definition.comparison), 1);
+      const score = roundMeasurement(scoreValue(value, targetValue, definition.comparison, definition.key), 1);
       const priorValue = input.periodBased ? prior.value : null;
       const trendDelta = value !== null && priorValue !== null ? roundMeasurement(value - priorValue, 1) : null;
       const improving = trendDelta === null ? null : definition.comparison === 'at_least' ? trendDelta > 0 : trendDelta < 0;
@@ -42245,7 +42315,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   addAftercareItem(jobId, payload = {}, options = {}) {
     this.requireJob(jobId);
     const actor = options.actor || 'Contractor.AI';
-    const id = makeId('aftercare');
+    const id = options.id || makeId('aftercare');
+    const existing = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(id);
+    if (existing) {
+      if (existing.job_id !== jobId) {
+        throw ledgerInputError(
+          'aftercare_id_conflict',
+          'This aftercare identifier is already retained for a different job.',
+          { aftercareId: id, jobId },
+          409
+        );
+      }
+      return this.mapAftercareItem(existing);
+    }
     const timestamp = nowIso();
     this.db.prepare(`
       INSERT INTO aftercare_items (id, job_id, type, title, status, owner, due_at, completed_at, notes, data_json, created_at, updated_at)
@@ -42261,9 +42343,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       payload.completedAt || payload.completed_at || null,
       payload.notes || payload.note || null,
       toJson({
+        ...(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {}),
         channel: payload.channel || 'portal',
         warranty: payload.warranty === true,
-        maintenanceOffer: payload.maintenanceOffer === true
+        maintenanceOffer: payload.maintenanceOffer === true,
+        feedbackId: payload.feedbackId || payload.feedback_id || payload.data?.feedbackId || null
       }),
       timestamp,
       timestamp
@@ -42273,6 +42357,221 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.audit({ entityType: 'aftercare_item', entityId: id, jobId, action: 'create_aftercare_item', actor, after: aftercare });
     }
     return aftercare;
+  }
+
+  createClientFeedback(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const source = options.source === 'client_portal' ? 'client_portal' : 'operator_evidence';
+      const portalAccessId = source === 'client_portal'
+        ? normalizeText(options.portalAccessId || options.portal_access_id, '')
+        : '';
+      if (source === 'client_portal') {
+        const access = this.db.prepare(`
+          SELECT id FROM client_portal_access
+          WHERE id = ? AND job_id = ? AND status = 'active'
+          LIMIT 1
+        `).get(portalAccessId, jobId);
+        if (!access) throw this.portalAccessError();
+      }
+
+      const surveyType = normalizeStatus(payload.surveyType || payload.survey_type, 'project_experience');
+      if (!CLIENT_FEEDBACK_SURVEY_TYPES.has(surveyType)) {
+        throw ledgerInputError(
+          'client_feedback_survey_type_invalid',
+          `Feedback survey type must be one of: ${[...CLIENT_FEEDBACK_SURVEY_TYPES].join(', ')}.`
+        );
+      }
+      const integerScore = (value, minimum, maximum, code, label) => {
+        const score = Number(value);
+        if (!Number.isInteger(score) || score < minimum || score > maximum) {
+          throw ledgerInputError(code, `${label} must be a whole number from ${minimum} through ${maximum}.`);
+        }
+        return score;
+      };
+      const npsScore = integerScore(payload.npsScore ?? payload.nps_score, 0, 10, 'client_feedback_nps_invalid', 'NPS score');
+      const csatScore = integerScore(payload.csatScore ?? payload.csat_score, 1, 5, 'client_feedback_csat_invalid', 'CSAT score');
+      const effortScore = integerScore(payload.effortScore ?? payload.effort_score, 1, 5, 'client_feedback_effort_invalid', 'Customer effort score');
+      const respondentName = normalizeText(payload.respondentName || payload.respondent_name, '');
+      if (respondentName.length > 160) {
+        throw ledgerInputError('client_feedback_respondent_invalid', 'Feedback respondent name must be 160 characters or fewer.');
+      }
+      const comment = normalizeText(payload.comment || payload.notes, '');
+      if (comment.length > 4_000) {
+        throw ledgerInputError('client_feedback_comment_invalid', 'Feedback comment must be 4,000 characters or fewer.');
+      }
+      const evidenceReference = source === 'client_portal'
+        ? `portal_access:${portalAccessId}`
+        : normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (source === 'operator_evidence' && (evidenceReference.length < 4 || evidenceReference.length > 500)) {
+        throw ledgerInputError(
+          'client_feedback_evidence_required',
+          'Operator-recorded feedback requires an evidence reference between 4 and 500 characters.'
+        );
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key || payload.responseId || payload.response_id, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError(
+          'client_feedback_entry_key_invalid',
+          'Feedback requires an entryKey or responseId containing 8 to 200 safe characters.'
+        );
+      }
+      const followUpConsent = normalizeBoolean(payload.followUpConsent ?? payload.follow_up_consent);
+      const testimonialConsent = normalizeBoolean(payload.testimonialConsent ?? payload.testimonial_consent);
+      const canonicalInput = {
+        format: CLIENT_FEEDBACK_FORMAT,
+        jobId,
+        clientId: job.client_id,
+        portalAccessId: portalAccessId || null,
+        surveyType,
+        source,
+        respondentName: respondentName || null,
+        npsScore,
+        csatScore,
+        effortScore,
+        comment: comment || null,
+        followUpConsent,
+        testimonialConsent,
+        evidenceReference
+      };
+      const entryFingerprint = sha256Json(canonicalInput);
+      const replay = this.db.prepare('SELECT * FROM client_feedback WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError(
+            'client_feedback_replay_conflict',
+            'This feedback entryKey was already used with different values.',
+            { entryKey, feedbackId: replay.id },
+            409
+          );
+        }
+        return { feedback: this.mapClientFeedback(replay), replayed: true };
+      }
+      if (portalAccessId) {
+        const priorPortalFeedback = this.db.prepare(`
+          SELECT * FROM client_feedback
+          WHERE portal_access_id = ? AND survey_type = ?
+          LIMIT 1
+        `).get(portalAccessId, surveyType);
+        if (priorPortalFeedback) {
+          throw ledgerInputError(
+            'client_feedback_already_submitted',
+            'Feedback for this project survey was already submitted.',
+            { feedbackId: priorPortalFeedback.id, surveyType },
+            409
+          );
+        }
+      }
+
+      const requestedSubmittedAt = normalizeText(payload.submittedAt || payload.submitted_at, '');
+      const submittedAt = requestedSubmittedAt || nowIso();
+      const submittedTime = Date.parse(submittedAt);
+      if (Number.isNaN(submittedTime) || submittedTime > Date.now() + 5 * 60 * 1_000) {
+        throw ledgerInputError('client_feedback_submitted_at_invalid', 'Feedback submission time must be a valid time that is not in the future.');
+      }
+      const id = makeId('feedback');
+      const timestamp = nowIso();
+      const npsCategory = npsScore >= 9 ? 'promoter' : npsScore >= 7 ? 'passive' : 'detractor';
+      const followUpRequired = npsScore <= 6 || csatScore <= 2 || effortScore <= 2;
+      const recordData = {
+        npsCategory,
+        followUpRequired,
+        referralEligible: npsScore >= 9 && csatScore >= 4 && testimonialConsent,
+        externalReviewRequested: false,
+        referralRequested: false,
+        externalCommitments: 0
+      };
+      const snapshot = {
+        ...canonicalInput,
+        id,
+        submittedAt,
+        npsCategory,
+        followUpRequired,
+        data: recordData
+      };
+      const snapshotJson = canonicalJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO client_feedback (
+          id, job_id, client_id, portal_access_id, survey_type, source, status,
+          respondent_name, nps_score, csat_score, effort_score, comment,
+          follow_up_consent, testimonial_consent, evidence_reference, submitted_at,
+          entry_key, entry_fingerprint, snapshot_json, snapshot_hash, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'retained', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        job.client_id,
+        portalAccessId || null,
+        surveyType,
+        source,
+        respondentName || null,
+        npsScore,
+        csatScore,
+        effortScore,
+        comment || null,
+        followUpConsent ? 1 : 0,
+        testimonialConsent ? 1 : 0,
+        evidenceReference,
+        submittedAt,
+        entryKey,
+        entryFingerprint,
+        snapshotJson,
+        snapshotHash,
+        toJson(recordData),
+        timestamp,
+        timestamp
+      );
+      const feedback = this.mapClientFeedback(this.db.prepare('SELECT * FROM client_feedback WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'client_feedback',
+        entityId: id,
+        jobId,
+        action: 'retain_client_feedback',
+        actor,
+        after: feedback,
+        metadata: {
+          source,
+          surveyType,
+          followUpRequired,
+          consentCaptured: followUpConsent || testimonialConsent,
+          externalReviewRequested: false,
+          referralRequested: false,
+          externalCommitments: 0
+        }
+      });
+      return { feedback, replayed: false };
+    });
+  }
+
+  listClientFeedback(options = {}) {
+    const clauses = [];
+    const values = [];
+    if (options.jobId || options.job_id) {
+      clauses.push('job_id = ?');
+      values.push(String(options.jobId || options.job_id));
+    }
+    if (options.clientId || options.client_id) {
+      clauses.push('client_id = ?');
+      values.push(String(options.clientId || options.client_id));
+    }
+    if (options.portalAccessId || options.portal_access_id) {
+      clauses.push('portal_access_id = ?');
+      values.push(String(options.portalAccessId || options.portal_access_id));
+    }
+    if (options.surveyType || options.survey_type) {
+      clauses.push('survey_type = ?');
+      values.push(normalizeStatus(options.surveyType || options.survey_type, ''));
+    }
+    const limit = safeLimit(options.limit, 500, 10_000);
+    return this.db.prepare(`
+      SELECT * FROM client_feedback
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY submitted_at DESC, created_at DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapClientFeedback(row));
   }
 
   transitionLifecycleRecord(jobId, recordType, recordId, payload = {}, options = {}) {
@@ -48417,12 +48716,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           response
         };
       });
+    const retainedFeedback = this.listClientFeedback({
+      portalAccessId: row.id,
+      surveyType: 'project_experience',
+      limit: 1
+    })[0] || null;
 
     return {
       portal: {
         accessId: row.id,
         expiresAt: row.expires_at,
-        label: fromJson(row.data_json).label || 'Client job portal'
+        label: fromJson(row.data_json).label || 'Client job portal',
+        feedback: retainedFeedback
+          ? {
+              submitted: true,
+              submittedAt: retainedFeedback.submittedAt,
+              surveyType: retainedFeedback.surveyType
+            }
+          : {
+              submitted: false,
+              surveyType: 'project_experience'
+            }
       },
       job: {
         id: detail.id,
@@ -48440,6 +48754,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         variations: clientVisibleVariations,
         updates: clientVisibleMessages,
         documents: clientVisibleDocuments
+      }
+    };
+  }
+
+  submitClientPortalFeedback(portalToken, payload = {}, options = {}) {
+    const snapshot = this.getClientPortalSnapshot(portalToken);
+    const result = this.createClientFeedback(snapshot.job.id, {
+      responseId: payload.responseId || payload.response_id,
+      surveyType: 'project_experience',
+      npsScore: payload.npsScore ?? payload.nps_score,
+      csatScore: payload.csatScore ?? payload.csat_score,
+      effortScore: payload.effortScore ?? payload.effort_score,
+      comment: payload.comment,
+      followUpConsent: payload.followUpConsent ?? payload.follow_up_consent,
+      testimonialConsent: payload.testimonialConsent ?? payload.testimonial_consent,
+      submittedAt: nowIso()
+    }, {
+      actor: options.actor || 'client_portal',
+      source: 'client_portal',
+      portalAccessId: snapshot.portal.accessId
+    });
+    return {
+      ...result,
+      portal: {
+        ...snapshot.portal,
+        feedback: {
+          submitted: true,
+          submittedAt: result.feedback.submittedAt,
+          surveyType: result.feedback.surveyType
+        }
       }
     };
   }
@@ -51480,6 +51824,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       safetyChecks: this.db.prepare('SELECT * FROM safety_checks WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapSafetyCheck(row)),
       payments: this.db.prepare('SELECT * FROM payments WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapPayment(row)),
       aftercare: this.db.prepare('SELECT * FROM aftercare_items WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapAftercareItem(row)),
+      clientFeedback: this.listClientFeedback({ jobId, limit: 500 }),
       punchItems: this.db.prepare('SELECT * FROM punch_items WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapPunchItem(row)),
       warrantyClaims: this.db.prepare('SELECT * FROM warranty_claims WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapWarrantyClaim(row)),
       recurringPlans: this.db.prepare('SELECT * FROM recurring_plans WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRecurringPlan(row)),
@@ -52630,6 +52975,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       WHERE ${this.operationalJobStatusSql('jobs')}
     `).all().map(row => this.mapNonconformance(row));
     const openNonconformances = activeNonconformances.filter(record => record.status !== 'closed');
+    const lowFeedback = this.db.prepare(`
+      SELECT records.*
+      FROM client_feedback records
+      JOIN jobs ON jobs.id = records.job_id
+      WHERE ${this.operationalJobStatusSql('jobs')}
+        AND records.status = 'retained'
+        AND (records.nps_score <= 6 OR records.csat_score <= 2 OR records.effort_score <= 2)
+    `).all();
+    const terminalFeedbackRecoveries = new Set(this.db.prepare(`
+      SELECT records.*
+      FROM aftercare_items records
+      JOIN jobs ON jobs.id = records.job_id
+      WHERE ${this.operationalJobStatusSql('jobs')}
+        AND records.status IN ('completed', 'closed', 'cancelled')
+    `).all().flatMap(row => {
+      const data = fromJson(row.data_json, {});
+      return data.feedbackRecovery === true && data.feedbackId ? [data.feedbackId] : [];
+    }));
     const today = nowIso().slice(0, 10);
     const metrics = {
       clients: this.count('clients'),
@@ -52728,6 +53091,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       safetyChecks: activeCount('safety_checks'),
       paymentFollowUps: activeCount('payments', "records.status NOT IN ('paid', 'received', 'cancelled')"),
       openAftercare: activeCount('aftercare_items', "records.status NOT IN ('completed', 'cancelled', 'closed')"),
+      clientFeedback: activeCount('client_feedback', "records.status = 'retained'"),
+      clientFeedbackRecoveryRequired: lowFeedback.filter(record => !terminalFeedbackRecoveries.has(record.id)).length,
       punchItems: activeCount('punch_items'),
       openPunchItems: activeCount('punch_items', "records.status NOT IN ('closed', 'resolved', 'accepted', 'verified', 'cancelled', 'rejected')"),
       warrantyClaims: activeCount('warranty_claims'),
@@ -54985,9 +55350,42 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const feedbackRecoveryGaps = this.db.prepare(`
+      SELECT feedback.id, feedback.job_id, feedback.nps_score, feedback.csat_score,
+        feedback.effort_score, feedback.follow_up_consent, feedback.snapshot_hash,
+        jobs.title AS job_title
+      FROM client_feedback feedback
+      JOIN jobs ON jobs.id = feedback.job_id
+      WHERE feedback.status = 'retained'
+        AND (feedback.nps_score <= 6 OR feedback.csat_score <= 2 OR feedback.effort_score <= 2)
+        AND jobs.status NOT IN ('archived', 'cancelled', 'canceled', 'rejected', 'deleted', 'void')
+      ORDER BY feedback.submitted_at ASC
+      LIMIT 25
+    `).all();
+    for (const feedback of feedbackRecoveryGaps) {
+      const existing = this.db.prepare(`
+        SELECT id FROM aftercare_items
+        WHERE job_id = ? AND data_json LIKE ?
+        LIMIT 1
+      `).get(feedback.job_id, `%"feedbackId":"${feedback.id}"%`);
+      if (existing) continue;
+      const aftercareId = `aftercare_${sha256Text(`client-feedback:${feedback.id}:${feedback.snapshot_hash}`).slice(0, 24)}`;
+      actions.push({
+        type: 'prepare_client_feedback_recovery',
+        feedbackId: feedback.id,
+        aftercareId,
+        jobId: feedback.job_id,
+        sourceHash: feedback.snapshot_hash,
+        severity: Number(feedback.nps_score) <= 3 || Number(feedback.csat_score) === 1 || Number(feedback.effort_score) === 1 ? 'high' : 'medium',
+        followUpConsent: normalizeBoolean(feedback.follow_up_consent),
+        message: `${feedback.job_title} has low client feedback (NPS ${feedback.nps_score}, satisfaction ${feedback.csat_score}/5, effort ${feedback.effort_score}/5). Prepare internal service recovery without contacting the client.`
+      });
+    }
+
     const aftercareDue = this.db.prepare(`
       SELECT id, job_id, title, due_at FROM aftercare_items
       WHERE status NOT IN ('completed', 'closed', 'cancelled')
+        AND data_json NOT LIKE '%"feedbackRecovery":true%'
       ORDER BY due_at ASC, created_at DESC
       LIMIT 5
     `).all();
@@ -55184,6 +55582,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_worker_availability_conflict',
       'review_worker_qualification_gap',
       'review_expiring_worker_credential',
+      'prepare_client_feedback_recovery',
       'aftercare_follow_up',
       'recurring_job_due',
       'refresh_learning_profile'
@@ -57328,6 +57727,60 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const feedbackRecoveryActions = preview.filter(action => action.type === 'prepare_client_feedback_recovery').slice(0, 10);
+        for (const action of feedbackRecoveryActions) {
+          try {
+            const existing = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
+            const aftercare = this.addAftercareItem(action.jobId, {
+              type: 'client_feedback_recovery',
+              title: 'Review low client feedback and prepare service recovery',
+              status: 'open',
+              owner: actor,
+              dueAt: futureIsoDate(action.severity === 'high' ? 1 : 2),
+              notes: `${action.message} Verify the retained feedback, identify the service gap, and decide any response separately. Follow-up consent is ${action.followUpConsent ? 'retained' : 'not retained'}; no message, review request, referral request, visit, remedy, or spend is authorized.`,
+              channel: 'internal',
+              feedbackId: action.feedbackId,
+              data: {
+                feedbackId: action.feedbackId,
+                feedbackRecovery: true,
+                sourceHash: action.sourceHash,
+                internalOnly: true,
+                followUpConsent: action.followUpConsent,
+                externalReviewRequested: false,
+                referralRequested: false,
+                notificationsSent: 0,
+                externalCommitments: 0
+              }
+            }, { id: action.aftercareId, actor, audit: false });
+            applied.push({
+              ...action,
+              aftercareId: aftercare.id,
+              status: existing ? 'replayed' : 'aftercare_created',
+              notificationsSent: 0,
+              externalCommitments: 0
+            });
+            if (!existing) {
+              this.audit({
+                entityType: 'aftercare_item',
+                entityId: aftercare.id,
+                jobId: action.jobId,
+                action: 'autonomous_prepare_client_feedback_recovery',
+                actor,
+                after: aftercare,
+                metadata: {
+                  feedbackId: action.feedbackId,
+                  sourceHash: action.sourceHash,
+                  followUpConsent: action.followUpConsent,
+                  notificationsSent: 0,
+                  externalCommitments: 0
+                }
+              });
+            }
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
         const aftercareFollowUps = preview.filter(action => action.type === 'aftercare_follow_up').slice(0, 3);
         for (const action of aftercareFollowUps) {
           const aftercare = this.db.prepare('SELECT * FROM aftercare_items WHERE id = ?').get(action.aftercareId);
@@ -59388,6 +59841,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Released photo-evidence set ${set.id} lacks source-current, independently approved before/during/after evidence.` });
       }
     }
+    const clientFeedbackRows = this.db.prepare('SELECT * FROM client_feedback ORDER BY created_at').all();
+    for (const feedbackRow of clientFeedbackRows) {
+      try {
+        const feedback = this.mapClientFeedback(feedbackRow);
+        if (feedback.status !== 'retained') {
+          issues.push({ severity: 'error', message: `Client feedback ${feedback.id} has unsupported mutable status ${feedback.status}.` });
+        }
+      } catch (error) {
+        issues.push({
+          severity: 'error',
+          message: `Client feedback ${feedbackRow.id} failed retained snapshot or entry integrity verification: ${error.message}`
+        });
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -59505,6 +59972,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         creditNotes: this.count('credit_notes'),
         payments: this.count('payments'),
         aftercareItems: this.count('aftercare_items'),
+        clientFeedback: this.count('client_feedback'),
         punchItems: this.count('punch_items'),
         warrantyClaims: this.count('warranty_claims'),
         recurringPlans: this.count('recurring_plans'),
@@ -63422,6 +63890,96 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       completedAt: row.completed_at,
       notes: row.notes,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapClientFeedback(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const data = fromJson(row.data_json, {});
+    const expectedNpsCategory = Number(row.nps_score) >= 9 ? 'promoter' : Number(row.nps_score) >= 7 ? 'passive' : 'detractor';
+    const expectedFollowUpRequired = Number(row.nps_score) <= 6 || Number(row.csat_score) <= 2 || Number(row.effort_score) <= 2;
+    const expectedReferralEligible = Number(row.nps_score) >= 9
+      && Number(row.csat_score) >= 4
+      && normalizeBoolean(row.testimonial_consent);
+    const canonicalInput = snapshot ? {
+      format: snapshot.format,
+      jobId: snapshot.jobId,
+      clientId: snapshot.clientId,
+      portalAccessId: snapshot.portalAccessId,
+      surveyType: snapshot.surveyType,
+      source: snapshot.source,
+      respondentName: snapshot.respondentName,
+      npsScore: snapshot.npsScore,
+      csatScore: snapshot.csatScore,
+      effortScore: snapshot.effortScore,
+      comment: snapshot.comment,
+      followUpConsent: snapshot.followUpConsent,
+      testimonialConsent: snapshot.testimonialConsent,
+      evidenceReference: snapshot.evidenceReference
+    } : null;
+    if (!snapshot
+      || snapshot.format !== CLIENT_FEEDBACK_FORMAT
+      || snapshot.id !== row.id
+      || snapshot.jobId !== row.job_id
+      || snapshot.clientId !== row.client_id
+      || snapshot.portalAccessId !== (row.portal_access_id || null)
+      || snapshot.surveyType !== row.survey_type
+      || snapshot.source !== row.source
+      || snapshot.npsScore !== Number(row.nps_score)
+      || snapshot.csatScore !== Number(row.csat_score)
+      || snapshot.effortScore !== Number(row.effort_score)
+      || snapshot.submittedAt !== row.submitted_at
+      || snapshot.respondentName !== (row.respondent_name || null)
+      || snapshot.comment !== (row.comment || null)
+      || snapshot.followUpConsent !== normalizeBoolean(row.follow_up_consent)
+      || snapshot.testimonialConsent !== normalizeBoolean(row.testimonial_consent)
+      || snapshot.evidenceReference !== row.evidence_reference
+      || snapshot.npsCategory !== expectedNpsCategory
+      || snapshot.followUpRequired !== expectedFollowUpRequired
+      || !snapshot.data
+      || canonicalJson(snapshot.data) !== canonicalJson(data)
+      || normalizeBoolean(snapshot.data.referralEligible) !== expectedReferralEligible
+      || snapshot.data.externalReviewRequested !== false
+      || snapshot.data.referralRequested !== false
+      || Number(snapshot.data.externalCommitments) !== 0
+      || sha256Json(canonicalInput) !== row.entry_fingerprint
+      || sha256Text(snapshotJson) !== row.snapshot_hash) {
+      throw ledgerInputError(
+        'client_feedback_integrity_failed',
+        'The retained client feedback failed integrity verification.',
+        { feedbackId: row.id },
+        409
+      );
+    }
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      clientId: row.client_id || null,
+      portalAccessId: row.portal_access_id || null,
+      surveyType: row.survey_type,
+      source: row.source,
+      status: row.status,
+      respondentName: row.respondent_name || null,
+      npsScore: Number(row.nps_score),
+      npsCategory: snapshot.npsCategory,
+      csatScore: Number(row.csat_score),
+      effortScore: Number(row.effort_score),
+      comment: row.comment || null,
+      followUpConsent: normalizeBoolean(row.follow_up_consent),
+      testimonialConsent: normalizeBoolean(row.testimonial_consent),
+      followUpRequired: snapshot.followUpRequired,
+      referralEligible: normalizeBoolean(snapshot.data.referralEligible),
+      evidenceReference: row.evidence_reference,
+      submittedAt: row.submitted_at,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      snapshotHash: row.snapshot_hash,
+      integrityValid: true,
+      data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

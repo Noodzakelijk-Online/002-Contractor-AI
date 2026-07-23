@@ -55,8 +55,8 @@ test('performance scorecard API enforces roles, target governance, immutable sna
   const approverRead = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${scorecardPeriodEnd}&weeks=13`, tokens.approver);
   assert.equal(approverRead.response.status, 200, JSON.stringify(approverRead.body));
   assert.equal(approverRead.body.scorecard.perspectives.length, 10);
-  assert.equal(approverRead.body.scorecard.metrics.length, 20);
-  assert.equal(approverRead.body.scorecard.summary.noData, 20);
+  assert.equal(approverRead.body.scorecard.metrics.length, 23);
+  assert.equal(approverRead.body.scorecard.summary.noData, 23);
   const historicalRead = await request(baseUrl, `/api/ledger/performance-scorecard?periodEnd=${historicalPeriodEnd}&weeks=13`, tokens.approver);
   assert.equal(historicalRead.response.status, 200, JSON.stringify(historicalRead.body));
   assert.equal(historicalRead.body.scorecard.metrics.filter(metric => metric.availability === 'historical_state_not_retained').length, 9);
@@ -167,7 +167,12 @@ test('performance scorecard API enforces roles, target governance, immutable sna
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities', tokens.owner);
   assert.equal(capabilities.response.status, 200, JSON.stringify(capabilities.body));
-  assert.equal(capabilities.body.capabilities.performanceScorecard.metricCount, 20);
+  assert.equal(capabilities.body.capabilities.performanceScorecard.metricCount, 23);
+  assert.deepEqual(capabilities.body.capabilities.performanceScorecard.customerExperienceEvidence, [
+    'net_promoter_score',
+    'customer_satisfaction_pct',
+    'customer_effort_pct'
+  ]);
   assert.equal(capabilities.body.capabilities.performanceScorecard.perspectives.length, 10);
   assert.equal(capabilities.body.capabilities.performanceScorecard.sourceHashScope, 'material_metric_inputs');
   assert.equal(capabilities.body.capabilities.performanceScorecard.pointInTimeMetricCount, 9);

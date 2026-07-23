@@ -2061,12 +2061,12 @@
 .closeout-register { display: grid; gap: 14px; min-width: 0; }
 .closeout-register-heading { align-items: center; }
 .closeout-register-heading > .secondary-button { margin-left: auto; white-space: nowrap; }
-.closeout-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #dfe7e3; }
+.closeout-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid #dfe7e3; }
 .closeout-summary div { display: grid; gap: 4px; min-width: 0; padding: 11px 12px; border-right: 1px solid #dfe7e3; }
 .closeout-summary div:last-child { border-right: 0; }
 .closeout-summary span { overflow-wrap: anywhere; color: #6a7973; font-size: 9px; font-weight: 750; text-transform: uppercase; }
 .closeout-summary strong { color: #263b32; font-size: 17px; }
-.closeout-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid #cedbd5; border-radius: 6px; }
+.closeout-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid #cedbd5; border-radius: 6px; }
 .closeout-tabs.single-tab { grid-template-columns: minmax(0, 1fr); }
 .closeout-tabs button { display: inline-flex; min-width: 0; min-height: 36px; align-items: center; justify-content: center; gap: 7px; color: #53675e; font: inherit; font-size: 11px; font-weight: 750; background: #fff; border: 0; border-right: 1px solid #d7e1dc; cursor: pointer; }
 .closeout-tabs button:last-child { border-right: 0; }
@@ -2094,7 +2094,7 @@
   .closeout-register-heading > .secondary-button { width: calc(100% - 28px); margin-left: 28px; }
   .closeout-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .closeout-summary div:nth-child(2n) { border-right: 0; }
-  .closeout-summary div:nth-child(-n + 2) { border-bottom: 1px solid #dfe7e3; }
+  .closeout-summary div:not(:last-child) { border-bottom: 1px solid #dfe7e3; }
   .closeout-tabs { grid-template-columns: 1fr; }
   .closeout-tabs button { border-right: 0; border-bottom: 1px solid #d7e1dc; }
   .closeout-tabs button:last-child { border-bottom: 0; }

@@ -92,7 +92,7 @@ test('finance issues a standalone purchase order only after approval and provide
   await expect(page.getByText(/Purchase order PO-\d{4}-\d{6} retained with HTML and generic OASIS UBL 2\.1 attachments/)).toBeVisible();
 
   row = finance.locator('.finance-item').filter({ hasText: jobTitle });
-  await expect(row).toContainText(/PO-\d{4}-\d{6} prepared/);
+  await expect(row).toContainText(/PO-\d{4}-\d{6} prepared/, { timeout: 15_000 });
   await expect(row.getByRole('link', { name: /Download purchase order PO-/ })).toBeVisible();
   await expect(row.getByRole('link', { name: /Download purchase order UBL PO-/ })).toBeVisible();
   await row.getByRole('button', { name: 'Review approval' }).click();

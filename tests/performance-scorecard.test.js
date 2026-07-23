@@ -194,8 +194,8 @@ test('Contractor Balanced Scorecard derives all ten perspectives and freezes sou
   const { active } = seedPerformanceEvidence(ledger);
   let scorecard = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   assert.equal(scorecard.perspectives.length, 10);
-  assert.equal(scorecard.metrics.length, 20);
-  assert.equal(scorecard.targets.effective.length, 20);
+  assert.equal(scorecard.metrics.length, 23);
+  assert.equal(scorecard.targets.effective.length, 23);
   assert.equal(scorecard.ready, true);
   const value = key => scorecard.metrics.find(metric => metric.key === key);
   assert.equal(value('recordable_incidents').value, 1);
@@ -273,7 +273,7 @@ test('Contractor Balanced Scorecard derives all ten perspectives and freezes sou
     () => ledger.resolveApproval(revised.approval.id, { status: 'approved', resolvedBy: 'owner', reason: 'Stale source must be rejected.' }),
     error => error.code === 'performance_scorecard_stale' && error.statusCode === 409
   );
-  assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
+  assert.equal(ledger.migrationStatus().currentVersion, '066_governed_client_feedback');
   const diagnostics = ledger.diagnose();
   assert.equal(
     diagnostics.issues.some(issue => /approved performance .*lack|Performance scorecard .*failed retained snapshot verification/i.test(issue.message)),
@@ -352,7 +352,7 @@ test('empty scorecards expose missing evidence and tampered snapshots fail diagn
   const empty = ledger.calculatePerformanceScorecard({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   assert.equal(empty.summary.overallScore, 0);
   assert.equal(empty.summary.dataCoveragePct, 0);
-  assert.equal(empty.summary.noData, 20);
+  assert.equal(empty.summary.noData, 23);
   assert.equal(empty.metrics.every(metric => metric.status === 'no_data'), true);
   const requested = ledger.requestPerformanceScorecardSnapshot({ periodEnd: SCORECARD_PERIOD_END, weeks: 13 });
   const row = ledger.db.prepare('SELECT snapshot_json FROM performance_scorecard_snapshots WHERE id = ?').get(requested.snapshot.id);

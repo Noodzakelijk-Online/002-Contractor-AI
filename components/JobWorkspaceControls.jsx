@@ -173,6 +173,20 @@ function emptyCloseoutDraft(type = 'punch_item') {
       notes: '',
     }
   }
+  if (type === 'client_feedback') {
+    return {
+      entryKey: createFieldEvidenceDraftId(),
+      surveyType: 'project_experience',
+      respondentName: '',
+      npsScore: '',
+      csatScore: '',
+      effortScore: '',
+      evidenceReference: '',
+      comment: '',
+      followUpConsent: false,
+      testimonialConsent: false,
+    }
+  }
   return {
     entryKey: createFieldEvidenceDraftId(),
     title: '',
@@ -4130,23 +4144,41 @@ function CloseoutRegister({
   const punchItems = job.punchItems || EMPTY_LIST
   const warrantyClaims = job.warrantyClaims || EMPTY_LIST
   const aftercare = job.aftercare || EMPTY_LIST
+  const clientFeedback = job.clientFeedback || EMPTY_LIST
   const visibleViews = fieldScoped
     ? [{ key: 'punch_item', label: 'Punch', count: punchItems.length }]
     : [
         { key: 'punch_item', label: 'Punch', count: punchItems.length },
         { key: 'warranty_claim', label: 'Warranty', count: warrantyClaims.length },
         { key: 'aftercare', label: 'Aftercare', count: aftercare.length },
+        { key: 'client_feedback', label: 'Feedback', count: clientFeedback.length },
       ]
-  const records = view === 'warranty_claim' ? warrantyClaims : view === 'aftercare' ? aftercare : punchItems
+  const records = view === 'warranty_claim'
+    ? warrantyClaims
+    : view === 'aftercare'
+      ? aftercare
+      : view === 'client_feedback'
+        ? clientFeedback
+        : punchItems
   const canCreate = view === 'punch_item' ? canReportPunch : canCoordinate
   const activeStatuses = view === 'punch_item'
     ? new Set(['open', 'in_progress', 'pending_approval'])
     : view === 'warranty_claim'
       ? new Set(['open', 'under_review', 'pending_approval'])
-      : new Set(['open', 'planned', 'due'])
+      : view === 'aftercare'
+        ? new Set(['open', 'planned', 'due'])
+        : new Set()
   const openPunch = punchItems.filter((record) => !['closed', 'resolved', 'accepted', 'verified'].includes(record.status)).length
   const openWarranty = warrantyClaims.filter((record) => !['closed', 'resolved', 'accepted', 'rejected'].includes(record.status)).length
   const openAftercare = aftercare.filter((record) => !['completed', 'closed', 'cancelled'].includes(record.status)).length
+  const feedbackRecoveryFor = (record) => aftercare.find((item) =>
+    item.data?.feedbackRecovery === true && item.data?.feedbackId === record.id,
+  ) || null
+  const recoveryRequired = clientFeedback.filter((record) => {
+    if (!record.followUpRequired) return false
+    const recovery = feedbackRecoveryFor(record)
+    return !recovery || !['completed', 'closed', 'cancelled'].includes(recovery.status)
+  }).length
   const pendingReview = (job.approvals || EMPTY_LIST).filter((approval) =>
     approval.status === 'pending' && ['punch_item', 'warranty_claim'].includes(approval.targetType),
   ).length
@@ -4195,10 +4227,21 @@ function CloseoutRegister({
     }
   }
 
-  const invalidDraft = draft.title.trim().length < 3
-    || (view === 'punch_item' && (draft.description.trim().length < 4 || draft.assignee.trim().length < 2))
-    || (view === 'warranty_claim' && draft.issue.trim().length < 4)
-    || (view === 'aftercare' && (draft.notes.trim().length < 4 || draft.owner.trim().length < 2))
+  const invalidDraft = view === 'client_feedback'
+    ? draft.evidenceReference.trim().length < 4
+      || !Number.isInteger(draft.npsScore)
+      || draft.npsScore < 0
+      || draft.npsScore > 10
+      || !Number.isInteger(draft.csatScore)
+      || draft.csatScore < 1
+      || draft.csatScore > 5
+      || !Number.isInteger(draft.effortScore)
+      || draft.effortScore < 1
+      || draft.effortScore > 5
+    : draft.title.trim().length < 3
+      || (view === 'punch_item' && (draft.description.trim().length < 4 || draft.assignee.trim().length < 2))
+      || (view === 'warranty_claim' && draft.issue.trim().length < 4)
+      || (view === 'aftercare' && (draft.notes.trim().length < 4 || draft.owner.trim().length < 2))
 
   return (
     <section className="job-workspace-section closeout-register" data-testid="closeout-register">
@@ -4208,13 +4251,14 @@ function CloseoutRegister({
           <h3>Closeout and aftercare</h3>
           <p>Retain defects, warranty issues, and follow-up work without asserting acceptance or contacting the client.</p>
         </div>
-        {canCreate ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'punch_item' ? 'New punch item' : view === 'warranty_claim' ? 'New warranty claim' : 'New follow-up'}</button> : null}
+        {canCreate ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'punch_item' ? 'New punch item' : view === 'warranty_claim' ? 'New warranty claim' : view === 'aftercare' ? 'New follow-up' : 'Record feedback'}</button> : null}
       </div>
 
       <div className="closeout-summary" aria-label="Closeout summary">
         <div><span>Open punch</span><strong>{openPunch}</strong></div>
         <div><span>Warranty</span><strong>{openWarranty}</strong></div>
         <div><span>Aftercare</span><strong>{openAftercare}</strong></div>
+        <div><span>Feedback recovery</span><strong>{recoveryRequired}</strong></div>
         <div><span>Pending review</span><strong>{pendingReview}</strong></div>
       </div>
 
@@ -4245,7 +4289,7 @@ function CloseoutRegister({
               <label>Review due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
               <label className="form-span">Reported issue<textarea required minLength="4" maxLength="4000" value={draft.issue} onChange={(event) => setDraft({ ...draft, issue: event.target.value })} placeholder="Retain the reported facts without admitting liability or promising a remedy." /></label>
             </>
-          ) : (
+          ) : view === 'aftercare' ? (
             <>
               <label>Follow-up type<select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value })}><option value="client_follow_up">Client follow-up</option><option value="warranty_review">Warranty review</option><option value="maintenance_review">Maintenance review</option><option value="quality_check">Quality check</option></select></label>
               <label>Channel<select value={draft.channel} onChange={(event) => setDraft({ ...draft, channel: event.target.value })}><option value="portal">Portal</option><option value="phone">Phone</option><option value="email">Email</option><option value="site_visit">Site visit</option></select></label>
@@ -4254,10 +4298,22 @@ function CloseoutRegister({
               <label>Due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
               <label className="form-span">Follow-up purpose<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="What should be checked and what evidence should be retained?" /></label>
             </>
+          ) : (
+            <>
+              <label>Survey point<select value={draft.surveyType} onChange={(event) => setDraft({ ...draft, surveyType: event.target.value })}><option value="project_experience">Project experience</option><option value="handover">Handover</option><option value="aftercare">Aftercare</option><option value="warranty">Warranty</option></select></label>
+              <label>Respondent<input maxLength="160" value={draft.respondentName} onChange={(event) => setDraft({ ...draft, respondentName: event.target.value })} placeholder="Optional name" /></label>
+              <label>NPS (0-10)<input required type="number" min="0" max="10" step="1" value={draft.npsScore} onChange={(event) => setDraft({ ...draft, npsScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
+              <label>Satisfaction (1-5)<input required type="number" min="1" max="5" step="1" value={draft.csatScore} onChange={(event) => setDraft({ ...draft, csatScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
+              <label>Ease (1-5)<input required type="number" min="1" max="5" step="1" value={draft.effortScore} onChange={(event) => setDraft({ ...draft, effortScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
+              <label className="form-span">Evidence reference<input autoFocus required minLength="4" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder="Call note, signed survey, message, or import reference" /></label>
+              <label className="form-span">Client comment<textarea maxLength="4000" value={draft.comment} onChange={(event) => setDraft({ ...draft, comment: event.target.value })} placeholder="Retain the client's words without adding inferred sentiment." /></label>
+              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.followUpConsent} onChange={(event) => setDraft({ ...draft, followUpConsent: event.target.checked })} />Client consented to feedback follow-up</label>
+              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.testimonialConsent} onChange={(event) => setDraft({ ...draft, testimonialConsent: event.target.checked })} />Client consented to internal testimonial review; publication still requires separate coordination</label>
+            </>
           )}
           <p className="workflow-note form-span">This retains an internal record only. It does not certify completion, accept liability, authorize cost, book work, or contact the client.</p>
           <div className="form-actions form-span">
-            <button className="primary-button" disabled={submitting || invalidDraft || (view !== 'punch_item' && !online)}><ClipboardCheck size={15} />{view === 'punch_item' && !online ? 'Save punch item offline' : view !== 'punch_item' && !online ? 'Reconnect to retain' : view === 'punch_item' ? 'Retain punch item' : view === 'warranty_claim' ? 'Retain warranty claim' : 'Retain follow-up'}</button>
+            <button className="primary-button" disabled={submitting || invalidDraft || (view !== 'punch_item' && !online)}><ClipboardCheck size={15} />{view === 'punch_item' && !online ? 'Save punch item offline' : view !== 'punch_item' && !online ? 'Reconnect to retain' : view === 'punch_item' ? 'Retain punch item' : view === 'warranty_claim' ? 'Retain warranty claim' : view === 'aftercare' ? 'Retain follow-up' : 'Retain feedback'}</button>
             <button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button>
           </div>
         </form>
@@ -4266,15 +4322,43 @@ function CloseoutRegister({
       <div className="closeout-records">
         {records.length ? records.map((record) => {
           const pending = (job.approvals || EMPTY_LIST).find((approval) => approval.id === record.approvalId && approval.status === 'pending')
-          const detail = view === 'punch_item' ? record.data?.description : view === 'warranty_claim' ? record.data?.issue : record.notes
+          const feedbackRecovery = view === 'client_feedback' ? feedbackRecoveryFor(record) : null
+          const feedbackRecoveryLabel = !record.followUpRequired
+            ? null
+            : !feedbackRecovery
+              ? 'Internal recovery required'
+              : ['completed', 'closed'].includes(feedbackRecovery.status)
+                ? 'Recovery completed'
+                : feedbackRecovery.status === 'cancelled'
+                  ? 'Recovery closed'
+                  : 'Recovery in progress'
+          const feedbackRecoveryClass = !feedbackRecovery
+            ? 'tag-amber'
+            : ['completed', 'closed'].includes(feedbackRecovery.status)
+              ? 'tag-green'
+              : feedbackRecovery.status === 'cancelled'
+                ? 'tag-amber'
+                : 'tag-blue'
+          const detail = view === 'punch_item'
+            ? record.data?.description
+            : view === 'warranty_claim'
+              ? record.data?.issue
+              : view === 'aftercare'
+                ? record.notes
+                : record.comment
           const meta = view === 'punch_item'
             ? `${formatStatus(record.severity)} / ${record.assignee || 'Unassigned'} / due ${formatDate(record.dueAt)}`
             : view === 'warranty_claim'
               ? `${formatStatus(record.data?.warrantyType || 'workmanship')} / ${formatStatus(record.severity)} / due ${formatDate(record.dueAt)}`
-              : `${formatStatus(record.type)} / ${record.owner || 'Unassigned'} / due ${formatDate(record.dueAt)}`
+              : view === 'aftercare'
+                ? `${formatStatus(record.type)} / ${record.owner || 'Unassigned'} / due ${formatDate(record.dueAt)}`
+                : `NPS ${record.npsScore}/10 / satisfaction ${record.csatScore}/5 / ease ${record.effortScore}/5 / ${formatDate(record.submittedAt)}`
+          const title = view === 'client_feedback'
+            ? `${formatStatus(record.surveyType)} feedback${record.respondentName ? ` from ${record.respondentName}` : ''}`
+            : record.title
           return (
-            <article className={`closeout-row ${view !== 'aftercare' ? `closeout-${record.severity}` : ''}`} key={record.id} data-testid={`closeout-${record.id}`}>
-              <div className="closeout-row-copy"><div><strong>{record.title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div><small>{meta}</small>{detail ? <p>{detail}</p> : null}</div>
+            <article className={`closeout-row ${!['aftercare', 'client_feedback'].includes(view) ? `closeout-${record.severity}` : ''}`} key={record.id} data-testid={`closeout-${record.id}`}>
+              <div className="closeout-row-copy"><div><strong>{title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div><small>{meta}</small>{detail ? <p>{detail}</p> : null}{view === 'client_feedback' && feedbackRecoveryLabel ? <span className={`tag ${feedbackRecoveryClass}`}>{feedbackRecoveryLabel}</span> : null}</div>
               <div className="closeout-row-actions">
                 {pending ? <span className="tag tag-amber">Approval pending</span> : null}
                 {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}
@@ -4282,7 +4366,7 @@ function CloseoutRegister({
               </div>
             </article>
           )
-        }) : <p className="workflow-note">No {view === 'punch_item' ? 'punch items' : view === 'warranty_claim' ? 'warranty claims' : 'aftercare follow-ups'} are retained for this job.</p>}
+        }) : <p className="workflow-note">No {view === 'punch_item' ? 'punch items' : view === 'warranty_claim' ? 'warranty claims' : view === 'aftercare' ? 'aftercare follow-ups' : 'client feedback'} are retained for this job.</p>}
       </div>
       {fieldScoped ? <p className="workflow-note">Assigned field workers can capture punch evidence. Resolution, acceptance, and client visibility remain office-controlled.</p> : null}
     </section>

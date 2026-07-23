@@ -3028,7 +3028,8 @@ test('client portal records an inbound message and approval-gated selection resp
 
   await page.getByLabel('Ik bevestig deze keuze').check();
   await page.getByLabel('Gekozen optie voor Bestratingskleur kiezen').selectOption('Lichtgrijs');
-  await page.getByLabel('Toelichting (optioneel)').fill('De lichtgrijze steen komt overeen met het getoonde monster.');
+  const selectionCard = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Bestratingskleur kiezen' }) });
+  await selectionCard.getByLabel('Toelichting (optioneel)').fill('De lichtgrijze steen komt overeen met het getoonde monster.');
   await page.getByRole('button', { name: 'Ter beoordeling indienen' }).click();
   await expect(page.getByText('Wacht op interne controle')).toBeVisible();
   await expect(page.getByText('Keuze: Lichtgrijs')).toBeVisible();

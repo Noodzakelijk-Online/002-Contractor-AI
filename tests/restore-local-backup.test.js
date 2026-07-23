@@ -207,6 +207,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
   createBackupLedger(ledgerFile, 'Crew planning compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
@@ -219,7 +220,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
     DROP TABLE daily_operating_cycles;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -232,6 +233,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
   createBackupLedger(ledgerFile, 'Daily cycle compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
@@ -243,7 +245,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
     DROP TABLE last_planner_outcomes;
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -284,6 +286,7 @@ test('backup verification accepts a complete migration 061 ledger without migrat
   createBackupLedger(ledgerFile, 'Last Planner compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
@@ -292,7 +295,7 @@ test('backup verification accepts a complete migration 061 ledger without migrat
     DROP TABLE five_s_audits;
     DROP TABLE five_s_standards;
     DROP TABLE five_s_locations;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -319,11 +322,12 @@ test('backup verification accepts a complete migration 062 ledger without migrat
   createBackupLedger(ledgerFile, '5S compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
     DROP TABLE lmra_assessments;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -350,10 +354,11 @@ test('backup verification accepts a complete migration 063 ledger without migrat
   createBackupLedger(ledgerFile, 'LMRA compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('064_governed_installation_qc', '065_governed_photo_evidence');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -380,9 +385,10 @@ test('backup verification accepts a complete migration 064 ledger without migrat
   createBackupLedger(ledgerFile, 'Installation QC compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
-    DELETE FROM ledger_schema_migrations WHERE version = '065_governed_photo_evidence';
+    DELETE FROM ledger_schema_migrations WHERE version IN ('065_governed_photo_evidence', '066_governed_client_feedback');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -399,6 +405,38 @@ test('backup verification rejects a migration 065 ledger with missing photo-evid
   assert.throws(
     () => verifySqliteBackupDatabase(ledgerFile),
     /photo-evidence constraints are incomplete: idx_photo_evidence_capture_set_phase/i
+  );
+});
+
+test('backup verification accepts a complete migration 065 ledger without migration 066', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-photo-evidence-compatibility-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Photo evidence compatibility fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP TABLE client_feedback;
+    DELETE FROM ledger_schema_migrations WHERE version = '066_governed_client_feedback';
+  `);
+  database.close();
+  assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
+});
+
+test('backup verification rejects a migration 066 ledger with missing client-feedback constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-client-feedback-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Client feedback schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP INDEX idx_client_feedback_portal_survey;
+    CREATE INDEX idx_client_feedback_portal_survey
+      ON client_feedback(portal_access_id, survey_type);
+  `);
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /client-feedback constraints are incomplete: idx_client_feedback_portal_survey must be a partial unique index/i
   );
 });
 

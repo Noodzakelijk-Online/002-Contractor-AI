@@ -10,7 +10,7 @@ test('operator governs KPI targets and freezes the Contractor Balanced Scorecard
   await expect(scorecard.getByRole('heading', { name: 'Contractor Balanced Scorecard' })).toBeVisible();
   await expect(scorecard.getByRole('tab')).toHaveCount(10);
   await expect(scorecard.getByTestId('performance-metric-table').locator('tbody tr')).toHaveCount(2);
-  await expect(scorecard.getByText('20 governed KPIs')).toBeVisible();
+  await expect(scorecard.getByText('23 governed KPIs')).toBeVisible();
   await expect(scorecard.getByText('No data', { exact: true }).first()).toBeVisible();
 
   const today = new Date().toISOString().slice(0, 10);
@@ -24,9 +24,21 @@ test('operator governs KPI targets and freezes the Contractor Balanced Scorecard
   await scorecard.getByRole('button', { name: 'Recalculate' }).click();
   await expect(scorecard.getByText(/point-in-time KPI\(s\) are unavailable for a past period/)).toHaveCount(0);
 
-  for (const name of ['Safety', 'Quality', 'Delivery', 'Customer', 'People', 'Financial', 'Commercial', 'Assets', 'Compliance', 'Sustainability']) {
+  const expectedMetricCounts = {
+    Safety: 2,
+    Quality: 2,
+    Delivery: 2,
+    Customer: 5,
+    People: 2,
+    Financial: 2,
+    Commercial: 2,
+    Assets: 2,
+    Compliance: 2,
+    Sustainability: 2,
+  };
+  for (const [name, metricCount] of Object.entries(expectedMetricCounts)) {
     await scorecard.getByRole('tab', { name: new RegExp(`^${name}`) }).click();
-    await expect(scorecard.getByTestId('performance-metric-table').locator('tbody tr')).toHaveCount(2);
+    await expect(scorecard.getByTestId('performance-metric-table').locator('tbody tr')).toHaveCount(metricCount);
   }
 
   await scorecard.getByRole('tab', { name: /^Quality/ }).click();

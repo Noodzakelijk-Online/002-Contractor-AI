@@ -847,7 +847,7 @@ function logSafeRequestPath(req) {
 }
 
 function isClientPortalApiPath(pathname) {
-  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/.test(String(pathname || ''));
+  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/feedback|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/.test(String(pathname || ''));
 }
 
 function sendError(req, res, statusCode, code, message, details) {
@@ -1903,7 +1903,13 @@ app.use(rateLimitApi);
 app.use(requireDashboardAuth);
 app.use(requireSessionMutationOrigin);
 app.use(requireOperatorAuthorization);
-app.use(express.json({ limit: '2mb' }));
+const standardJsonParser = express.json({ limit: '2mb' });
+const operationalExportJsonParser = express.json({ limit: '16mb' });
+app.use((req, res, next) => (
+  req.path === '/api/operations/exports/validate'
+    ? operationalExportJsonParser(req, res, next)
+    : standardJsonParser(req, res, next)
+));
 app.use((req, res, next) => {
   if (
     req.operator?.authenticated
@@ -4711,6 +4717,26 @@ app.post('/api/ledger/client-portal-access/:id/revoke', (req, res) => {
   }));
 });
 
+app.get('/api/ledger/client-feedback', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    feedback: operatingLedger.listClientFeedback(req.query || {}),
+    dashboard: operatingLedger.dashboardSummary()
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/client-feedback', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createClientFeedback(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req),
+    externalCommitments: 0
+  }), 201);
+});
+
 app.get('/api/client-portal/:token', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -4746,6 +4772,16 @@ app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, re
       ...result
     };
   }, 201);
+});
+
+app.post('/api/client-portal/:token/feedback', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.submitClientPortalFeedback(req.params.token, req.body || {}, { actor: 'client_portal' }),
+    reviewRequested: false,
+    referralRequested: false,
+    externalCommitments: 0
+  }), 201);
 });
 
 app.get('/api/client-portal/:token/change-orders/:changeOrderId/package', (req, res) => {
@@ -6823,6 +6859,7 @@ function operationalExport() {
     cashFlowForecastSnapshots: operatingLedger.listCashFlowForecastSnapshots({ limit: 5_000 }),
     performanceScorecardTargets: operatingLedger.listPerformanceScorecardTargets({ includeHistory: true }).revisions,
     performanceScorecardSnapshots: operatingLedger.listPerformanceScorecardSnapshots({ limit: 5_000 }),
+    clientFeedback: operatingLedger.listClientFeedback({ limit: 10_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     dayworkTickets: operatingLedger.listDayworkTickets({ limit: 5_000 }),
@@ -6890,6 +6927,7 @@ function validateOperationalExport(snapshot) {
     'scheduleBaselines',
     'productionBaselines',
     'productionEntries',
+    'clientFeedback',
     'handoverPackages',
     'approvals',
     'audit'
@@ -7004,6 +7042,7 @@ function validateOperationalExport(snapshot) {
       cashFlowForecastSnapshots: Array.isArray(snapshot.cashFlowForecastSnapshots) ? snapshot.cashFlowForecastSnapshots.length : 0,
       performanceScorecardTargets: Array.isArray(snapshot.performanceScorecardTargets) ? snapshot.performanceScorecardTargets.length : 0,
       performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
+      clientFeedback: snapshot.clientFeedback.length,
       marketFitProfiles: Array.isArray(snapshot.marketFitProfiles) ? snapshot.marketFitProfiles.length : 0,
       opportunityFitAssessments: Array.isArray(snapshot.opportunityFitAssessments) ? snapshot.opportunityFitAssessments.length : 0,
       bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
@@ -7873,6 +7912,12 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         photoEvidenceOfflineRelease: false,
         photoEvidenceAutonomy: 'internal_review_task_only',
         photoEvidenceReleaseInference: false,
+        clientFeedbackMetrics: ['nps', 'csat', 'customer_effort'],
+        clientFeedbackIntegrity: 'immutable_snapshot_and_entry_fingerprint',
+        clientFeedbackPortalScope: 'one_response_per_access_and_survey',
+        clientFeedbackAutonomy: 'internal_service_recovery_only',
+        clientFeedbackExternalReviewRequest: false,
+        clientFeedbackReferralRequest: false,
         sdsRevisionEntryKey: 'durable',
         sdsRevisionSourceIntegrity: 'product_document_snapshot_sha256',
         sdsRevisionApproval: 'source_current_approval_gated',
@@ -8008,7 +8053,8 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       performanceScorecard: {
         framework: 'contractor_balanced_scorecard',
         perspectives: ['safety', 'quality', 'delivery_reliability', 'customer_satisfaction', 'employee_capacity', 'financial_performance', 'commercial_pipeline', 'asset_productivity', 'compliance', 'sustainability'],
-        metricCount: 20,
+        metricCount: 23,
+        customerExperienceEvidence: ['net_promoter_score', 'customer_satisfaction_pct', 'customer_effort_pct'],
         periodWeeks: { default: 13, minimum: 4, maximum: 52 },
         priorPeriodComparison: true,
         sourceHashScope: 'material_metric_inputs',
