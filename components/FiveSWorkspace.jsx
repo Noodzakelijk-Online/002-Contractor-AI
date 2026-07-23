@@ -370,7 +370,7 @@ function FiveSWorkspace({
     if (!rows.some((row) => row.location.id === selectedLocationId)) setSelectedLocationId(rows[0].location.id)
   }, [board, selectedLocationId])
 
-  const rows = board?.rows || []
+  const rows = useMemo(() => board?.rows || [], [board])
   const selectedRow = useMemo(
     () => rows.find((row) => row.location.id === selectedLocationId) || rows[0] || null,
     [rows, selectedLocationId],
