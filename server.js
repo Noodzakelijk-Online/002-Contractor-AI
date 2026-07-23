@@ -1937,6 +1937,7 @@ app.get('/api/session', (req, res) => {
         riskRegister: !fieldWorker,
         pricingBasis: !fieldWorker,
         schedule: !fieldWorker,
+        crewCapacity: !fieldWorker,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
         resources: !fieldWorker,
@@ -5773,6 +5774,71 @@ app.get('/api/ledger/schedule', (req, res) => {
   }));
 });
 
+app.get('/api/ledger/crew-capacity', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    board: operatingLedger.listCrewCapacityBoard(req.query || {})
+  }));
+});
+
+app.put('/api/ledger/workers/:workerId/capacity-profile', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.setCrewCapacityProfile(req.params.workerId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.listCrewCapacityBoard({
+      referenceDate: req.body?.referenceDate || req.body?.reference_date
+    })
+  }));
+});
+
+app.post('/api/ledger/crew-capacity/allocations', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createCrewCapacityAllocation(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.listCrewCapacityBoard({
+      referenceDate: req.body?.referenceDate || req.body?.reference_date || req.body?.workDate || req.body?.work_date
+    })
+  }), 201);
+});
+
+app.post('/api/ledger/crew-capacity/allocations/:allocationId/cancel', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.cancelCrewCapacityAllocation(req.params.allocationId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.listCrewCapacityBoard({
+      referenceDate: req.body?.referenceDate || req.body?.reference_date
+    })
+  }));
+});
+
+app.get('/api/ledger/crew-lookahead/plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    plans: operatingLedger.listCrewLookaheadPlans(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/crew-lookahead/plans', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.requestCrewLookaheadPlan(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      ...result,
+      board: operatingLedger.listCrewCapacityBoard({
+        referenceDate: req.body?.referenceDate || req.body?.reference_date
+      })
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/schedule/recommend', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -6223,6 +6289,9 @@ function operationalExport() {
     timesheetExports: operatingLedger.listTimesheetExports({ limit: 5_000 }),
     taskDependencies: operatingLedger.listAllTaskDependencies({ limit: 1000 }),
     scheduleBaselines: operatingLedger.listAllScheduleBaselines({ limit: 500 }),
+    crewCapacityProfiles: operatingLedger.listCrewCapacityProfiles({ includeHistory: true, limit: 5_000 }),
+    crewCapacityAllocations: operatingLedger.listCrewCapacityAllocations({ status: 'all', limit: 20_000 }),
+    crewLookaheadPlans: operatingLedger.listCrewLookaheadPlans({ status: 'all', limit: 5_000 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
@@ -6298,6 +6367,9 @@ function validateOperationalExport(snapshot) {
     'attendanceAdjustments',
     'weeklyTimesheets',
     'timesheetExports',
+    'crewCapacityProfiles',
+    'crewCapacityAllocations',
+    'crewLookaheadPlans',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
     'dayworkTickets',
@@ -6383,6 +6455,9 @@ function validateOperationalExport(snapshot) {
       timesheetExports: Array.isArray(snapshot.timesheetExports) ? snapshot.timesheetExports.length : 0,
       taskDependencies: snapshot.taskDependencies.length,
       scheduleBaselines: snapshot.scheduleBaselines.length,
+      crewCapacityProfiles: Array.isArray(snapshot.crewCapacityProfiles) ? snapshot.crewCapacityProfiles.length : 0,
+      crewCapacityAllocations: Array.isArray(snapshot.crewCapacityAllocations) ? snapshot.crewCapacityAllocations.length : 0,
+      crewLookaheadPlans: Array.isArray(snapshot.crewLookaheadPlans) ? snapshot.crewLookaheadPlans.length : 0,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
@@ -6995,6 +7070,21 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         workAuthorization: 'verified_client_acceptance_only',
         externalCommitments: 0
       },
+      crewCapacityPlanning: {
+        available: true,
+        horizonDays: 14,
+        capacityBasis: 'explicit_worker_weekday_profiles',
+        allocationBasis: 'day_level_approved_assignment_and_optional_task',
+        availabilityConflicts: 'retained_absence_zero_capacity',
+        overloadDetection: 'server_derived',
+        taskCoverage: 'scheduled_duration_hours',
+        planApproval: 'immutable_source_current_snapshot',
+        autonomy: 'internal_review_task_only',
+        crewNotifications: 0,
+        clientCommitments: 0,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
@@ -7048,6 +7138,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         riskRegisterPremortem: 'linked_failure_modes_required',
         riskRegisterScoring: 'server_derived_probability_impact_and_exposure',
         quoteRiskRegisterApproval: 'source_current_required',
+        crewCapacityProfileRevision: 'versioned_explicit_weekday_hours',
+        crewCapacityAllocationEntryKey: 'durable_exact_replay',
+        crewLookaheadApproval: 'source_current_approval_gated',
+        crewLookaheadAutonomy: 'internal_review_task_only',
+        crewLookaheadCommitmentInference: false,
         formalVariationEntryKey: 'durable_exact_replay',
         formalVariationSnapshot: 'accepted_contract_source_sha256',
         formalVariationRevision: 'explicit_approved_supersession',

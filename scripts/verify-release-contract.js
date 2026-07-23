@@ -204,6 +204,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '058_formal_variation_control'")) {
     failures.push('Canonical formal-variation control migration is missing.');
   }
+  if (!ledgerSource.includes("version: '059_crew_capacity_lookahead'")) {
+    failures.push('Canonical crew-capacity and two-week look-ahead migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }
@@ -242,6 +245,15 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes("formalVariationClientResponse: 'package_and_delivery_bound_internal_verification'")) {
     failures.push('Formal variation client decisions are not declared as package-bound and internally verified.');
+  }
+  if (!serverSource.includes("capacityBasis: 'explicit_worker_weekday_profiles'")) {
+    failures.push('Crew capacity planning does not declare explicit worker weekday profiles.');
+  }
+  if (!serverSource.includes("planApproval: 'immutable_source_current_snapshot'")) {
+    failures.push('Crew look-ahead planning does not declare immutable source-current approval semantics.');
+  }
+  if (!serverSource.includes("crewLookaheadAutonomy: 'internal_review_task_only'")) {
+    failures.push('Crew look-ahead autonomy is not constrained to internal review tasks.');
   }
   if (!serverSource.includes('autonomousAuthoring: false')) {
     failures.push('Risk-management capability does not explicitly prohibit autonomous risk authoring.');

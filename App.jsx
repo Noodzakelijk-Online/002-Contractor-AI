@@ -88,6 +88,7 @@ const SiteSurveyControl = lazy(() => import('./components/SiteSurveyControl'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
+const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -1020,7 +1021,13 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     ])
     return { jobs: jobs.jobs || [], inspectionTemplates: templates.templates || [] }
   }
-  if (section === 'schedule') return { schedule: await api('/api/ledger/schedule?horizonDays=180&limit=500') }
+  if (section === 'schedule') {
+    const [schedule, crewCapacity] = await Promise.all([
+      api('/api/ledger/schedule?horizonDays=180&limit=500'),
+      api('/api/ledger/crew-capacity'),
+    ])
+    return { schedule, crewCapacity: crewCapacity.board || null }
+  }
   if (section === 'approvals') {
     const result = await api('/api/ledger/approvals?status=pending&limit=100')
     return { approvals: result.approvals || [] }
@@ -2864,6 +2871,7 @@ function App() {
           approvals: [],
           dispatch: { rows: [] },
           schedule: { jobs: [], summary: {}, window: null },
+          crewCapacity: null,
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
@@ -2910,6 +2918,7 @@ function App() {
           approvals: [],
           dispatch: { rows: [] },
           schedule: { jobs: [], summary: {}, window: null },
+          crewCapacity: null,
           workforce: { jobs: [], summary: {} },
           workers: [],
           workerSummary: {},
@@ -5039,7 +5048,7 @@ function App() {
           ? `This ${checkingOut ? 'check-out' : 'check-in'} was already retained; no duplicate was created.`
           : `${checkingOut ? 'Check-out' : 'Check-in'} retained on the live labor board.`,
       )
-      await refresh()
+      void refresh()
     } catch (requestError) {
       if (shouldQueueFieldMutation(requestError)) {
         try {
@@ -5188,12 +5197,18 @@ function App() {
         body: JSON.stringify({ evidenceReference: safetyBriefingDraft.completionEvidence.trim(), status: 'completed' }),
       })
       retainSafetyMeeting(result.safetyMeeting)
+      if (result.approval?.id) {
+        setData((current) => current ? {
+          ...current,
+          approvals: upsertById(current.approvals, result.approval),
+        } : current)
+      }
       setSafetyBriefingDraft((current) => ({ ...current, completionEvidence: '' }))
       notify(result.replayed ? 'The briefing signoff request is already pending.' : 'Briefing evidence was frozen and sent to the approval queue.')
-      await refresh()
       if (capabilities.approvals && result.approval?.id) {
         openApprovals({ jobId: selectedSafetyMeeting.jobId, jobTitle: selectedSafetyMeeting.jobTitle, approvalId: result.approval.id })
       }
+      void refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -9222,6 +9237,16 @@ function App() {
     setSubmitting(true)
     try {
       const result = await api(route, { method: 'POST', body: JSON.stringify({ ...body, actor: 'office_operator' }) })
+      const financePatch = await loadSectionPatch('finance', resourceViewRef.current, fieldScoped)
+      setData((current) => {
+        if (!current) return current
+        const next = {
+          ...current,
+          ...financePatch,
+          dashboard: result.dashboard || current.dashboard,
+        }
+        return result.job ? reconcileJobCollections(next, result.job) : next
+      })
       if (type === 'request_expense_reversal') {
         notify(`Expense ${result.expense?.receiptReference || reference || ''} is pending reversal approval. The original evidence remains retained and no funds moved.`)
       } else if (type === 'create_credit_note') {
@@ -9260,7 +9285,6 @@ function App() {
         notify(`${FINANCE_ACTION_LABELS[type]} retained for approver review. No export, funding request, or external commitment was made.`)
       }
       closeFinanceControl()
-      await refresh()
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -9576,6 +9600,121 @@ function App() {
     sectionRef.current = 'resources'
     setSection('resources')
     selectResourceView('workforce')
+  }
+
+  async function loadCrewCapacityWindow(referenceDate) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/crew-capacity?referenceDate=${encodeURIComponent(referenceDate)}`)
+      setData((current) => current ? { ...current, crewCapacity: result.board || current.crewCapacity } : current)
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function saveCrewCapacityProfile(workerId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/workers/${encodeURIComponent(workerId)}/capacity-profile`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? { ...current, crewCapacity: result.board || current.crewCapacity } : current)
+      notify(result.unchanged ? 'The current capacity profile already retains these hours.' : 'Versioned crew capacity profile retained. Existing approved plans now show stale when their source changed.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function createCrewCapacityAllocation(payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/crew-capacity/allocations', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? { ...current, crewCapacity: result.board || current.crewCapacity } : current)
+      notify(result.replayed ? 'The exact crew allocation was already retained.' : 'Day-level crew allocation retained without notifications or external commitments.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function cancelCrewCapacityAllocation(allocationId, payload) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/crew-capacity/allocations/${encodeURIComponent(allocationId)}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setData((current) => current ? { ...current, crewCapacity: result.board || current.crewCapacity } : current)
+      notify(result.replayed ? 'This crew allocation was already cancelled.' : 'Crew allocation cancelled with retained reason evidence.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestCrewLookaheadApproval(referenceDate) {
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api('/api/ledger/crew-lookahead/plans', {
+        method: 'POST',
+        body: JSON.stringify({
+          referenceDate,
+          reason: 'Capacity, availability, assignment, task coverage, and schedule evidence reviewed in the two-week board.',
+        }),
+      })
+      setData((current) => current ? {
+        ...current,
+        crewCapacity: result.board || current.crewCapacity,
+        approvals: result.approval ? upsertById(current.approvals, result.approval) : current.approvals,
+      } : current)
+      notify(result.replayed ? 'The source-current crew plan is already waiting for approval.' : 'Immutable two-week crew plan sent to the internal approval queue. No notifications or commitments were made.')
+      return true
+    } catch (requestError) {
+      setError(requestError.message)
+      return false
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function reviewCrewLookaheadApproval(plan) {
+    if (!plan?.approvalId) {
+      setError('The retained crew plan is not linked to an approval decision.')
+      return
+    }
+    openApprovals({ approvalId: plan.approvalId, jobTitle: `Crew look-ahead v${plan.versionNumber}` })
+  }
+
+  function openCrewCapacityJob(jobId) {
+    const job = jobs.find((candidate) => candidate.id === jobId)
+    if (!job) {
+      setError('The crew-planning record is not linked to an active job in this view.')
+      return
+    }
+    openJobWorkspace(job)
   }
 
   function reviewPortfolioDispatch() {
@@ -10126,14 +10265,30 @@ function App() {
             )}
 
             {section === 'schedule' && capabilities.schedule ? (
-              <PortfolioScheduleWorkspace
-                schedule={data.schedule}
-                jobs={jobs}
-                canApprove={capabilities.approvals === true}
-                onOpenApprovals={openApprovals}
-                onOpenDispatch={reviewPortfolioDispatch}
-                onOpen={openJobWorkspace}
-              />
+              <>
+                <PortfolioScheduleWorkspace
+                  schedule={data.schedule}
+                  jobs={jobs}
+                  canApprove={capabilities.approvals === true}
+                  onOpenApprovals={openApprovals}
+                  onOpenDispatch={reviewPortfolioDispatch}
+                  onOpen={openJobWorkspace}
+                />
+                <LazyControlBoundary label="crew capacity board">
+                  <CrewCapacityBoard
+                    board={data.crewCapacity}
+                    canApprove={capabilities.approvals === true}
+                    submitting={submitting}
+                    onLoadWindow={loadCrewCapacityWindow}
+                    onSaveProfile={saveCrewCapacityProfile}
+                    onCreateAllocation={createCrewCapacityAllocation}
+                    onCancelAllocation={cancelCrewCapacityAllocation}
+                    onRequestPlan={requestCrewLookaheadApproval}
+                    onReviewApproval={reviewCrewLookaheadApproval}
+                    onOpenJob={openCrewCapacityJob}
+                  />
+                </LazyControlBoundary>
+              </>
             ) : null}
 
             {section === 'approvals' && capabilities.approvals && (

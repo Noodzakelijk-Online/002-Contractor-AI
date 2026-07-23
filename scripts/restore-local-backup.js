@@ -1063,6 +1063,36 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup formal-variation constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('059_crew_capacity_lookahead')) {
+        for (const table of ['crew_capacity_profiles', 'crew_capacity_allocations', 'crew_lookahead_plans']) {
+          if (!retainedTables.has(table)) throw new Error(`Backup crew-planning schema is incomplete: ${table}.`);
+        }
+        const profileColumns = new Set(database.prepare('PRAGMA table_info(crew_capacity_profiles)').all().map(row => row.name));
+        for (const column of ['worker_id', 'version_number', 'status', 'effective_from', 'timezone', 'weekly_hours', 'daily_hours_json', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint']) {
+          if (!profileColumns.has(column)) throw new Error(`Backup crew-planning schema is incomplete: crew_capacity_profiles.${column}.`);
+        }
+        const allocationColumns = new Set(database.prepare('PRAGMA table_info(crew_capacity_allocations)').all().map(row => row.name));
+        for (const column of ['worker_id', 'assignment_id', 'job_id', 'task_id', 'work_date', 'planned_hours', 'status', 'entry_key', 'entry_fingerprint']) {
+          if (!allocationColumns.has(column)) throw new Error(`Backup crew-planning schema is incomplete: crew_capacity_allocations.${column}.`);
+        }
+        const lookaheadColumns = new Set(database.prepare('PRAGMA table_info(crew_lookahead_plans)').all().map(row => row.name));
+        for (const column of ['version_number', 'status', 'window_start', 'window_end', 'horizon_days', 'source_hash', 'snapshot_hash', 'snapshot_json', 'approval_id']) {
+          if (!lookaheadColumns.has(column)) throw new Error(`Backup crew-planning schema is incomplete: crew_lookahead_plans.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_crew_capacity_profile_one_active',
+          'idx_crew_capacity_profile_history',
+          'idx_crew_capacity_allocation_worker_day',
+          'idx_crew_capacity_allocation_job_day',
+          'idx_crew_capacity_allocation_task',
+          'idx_crew_lookahead_one_approved',
+          'idx_crew_lookahead_one_pending',
+          'idx_crew_lookahead_history'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup crew-planning constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

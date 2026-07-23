@@ -2360,7 +2360,8 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   await expect(page.getByText('Time was retained and the expense receipt is pending source review. No reimbursement, payment, or export was initiated.')).toBeVisible();
 
   costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
-  await expect(costRow.getByRole('button', { name: `Budget baseline for ${costJob.job.title}` })).toBeDisabled();
+  await expect(costRow.getByRole('button', { name: 'Review approval' })).toBeVisible();
+  await expect(costRow.getByRole('button', { name: `Budget baseline for ${costJob.job.title}` })).toHaveCount(0);
   let costDetailResponse = await request.get(`/api/ledger/jobs/${costJob.job.id}`);
   expect(costDetailResponse.ok()).toBeTruthy();
   let costDetail = await costDetailResponse.json();

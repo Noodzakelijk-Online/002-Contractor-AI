@@ -1106,6 +1106,10 @@ const AUDIT_CHAIN_FORMAT = 'contractor-ai-audit-chain/v1';
 const AUDIT_CHAIN_ALGORITHM = 'sha256';
 const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
 const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
+const CREW_CAPACITY_PROFILE_FORMAT = 'contractor-ai-crew-capacity-profile/v1';
+const CREW_LOOKAHEAD_FORMAT = 'contractor-ai-crew-lookahead/v1';
+const CREW_LOOKAHEAD_DAYS = 14;
+const CREW_CAPACITY_DAY_KEYS = Object.freeze(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
 const CASH_FLOW_FORECAST_FORMAT = 'contractor-ai-cash-flow-forecast/v1';
 const CASH_FLOW_FORECAST_WEEKS = 13;
@@ -5052,6 +5056,85 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           WHERE supersedes_change_order_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_change_orders_formal_status
           ON change_orders(job_id, status, revision_number DESC, updated_at DESC);
+      `);
+    }
+  },
+  {
+    version: '059_crew_capacity_lookahead',
+    description: 'Retain explicit crew capacity, day-level work allocations, and approval-backed two-week look-ahead plans.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS crew_capacity_profiles (
+          id TEXT PRIMARY KEY,
+          worker_id TEXT NOT NULL REFERENCES workers(id),
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          effective_from TEXT NOT NULL,
+          timezone TEXT NOT NULL DEFAULT 'Europe/Amsterdam',
+          weekly_hours DOUBLE PRECISION NOT NULL,
+          daily_hours_json TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(worker_id, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_crew_capacity_profile_one_active
+          ON crew_capacity_profiles(worker_id)
+          WHERE status = 'active';
+        CREATE INDEX IF NOT EXISTS idx_crew_capacity_profile_history
+          ON crew_capacity_profiles(worker_id, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS crew_capacity_allocations (
+          id TEXT PRIMARY KEY,
+          worker_id TEXT NOT NULL REFERENCES workers(id),
+          assignment_id TEXT NOT NULL REFERENCES assignments(id),
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT REFERENCES job_tasks(id) ON DELETE SET NULL,
+          work_date TEXT NOT NULL,
+          planned_hours DOUBLE PRECISION NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_crew_capacity_allocation_worker_day
+          ON crew_capacity_allocations(worker_id, work_date, status);
+        CREATE INDEX IF NOT EXISTS idx_crew_capacity_allocation_job_day
+          ON crew_capacity_allocations(job_id, work_date, status);
+        CREATE INDEX IF NOT EXISTS idx_crew_capacity_allocation_task
+          ON crew_capacity_allocations(task_id, status)
+          WHERE task_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS crew_lookahead_plans (
+          id TEXT PRIMARY KEY,
+          version_number INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          horizon_days INTEGER NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_crew_lookahead_one_approved
+          ON crew_lookahead_plans(status)
+          WHERE status = 'approved';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_crew_lookahead_one_pending
+          ON crew_lookahead_plans(status)
+          WHERE status = 'pending_approval';
+        CREATE INDEX IF NOT EXISTS idx_crew_lookahead_history
+          ON crew_lookahead_plans(version_number DESC, updated_at DESC);
       `);
     }
   }
@@ -20347,7 +20430,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   calculateJobSchedule(jobId, payload = {}) {
     const job = this.mapJob(this.requireJob(jobId, { allowInactive: true }));
     const taskRows = this.db.prepare('SELECT * FROM job_tasks WHERE job_id = ? ORDER BY created_at ASC').all(jobId);
-    const tasks = taskRows.map(row => this.mapTask(row)).filter(task => SCHEDULE_TASK_STATUSES.has(normalizeStatus(task.status, 'open')));
+    const tasks = taskRows.map(row => this.mapTask(row)).filter(task => (
+      SCHEDULE_TASK_STATUSES.has(normalizeStatus(task.status, 'open'))
+      && task.data?.excludeFromWorkPlan !== true
+    ));
     const activeTaskIds = new Set(tasks.map(task => task.id));
     const dependencies = this.listTaskDependencies(jobId).filter(dependency => (
       activeTaskIds.has(dependency.predecessorTaskId) && activeTaskIds.has(dependency.successorTaskId)
@@ -20932,6 +21018,775 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
       return { baseline, approval, plan, idempotent: false };
     });
+  }
+
+  normalizeCrewCapacityDailyHours(payload = {}) {
+    const supplied = payload.dailyHours || payload.daily_hours;
+    if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) {
+      throw ledgerInputError(
+        'crew_capacity_daily_hours_required',
+        'Retain explicit planned hours for each weekday before relying on crew capacity.'
+      );
+    }
+    const dailyHours = {};
+    for (const day of CREW_CAPACITY_DAY_KEYS) {
+      const hours = Number(supplied[day] ?? 0);
+      if (!Number.isFinite(hours) || hours < 0 || hours > 24) {
+        throw ledgerInputError(
+          'crew_capacity_daily_hours_invalid',
+          `Crew capacity for ${day} must be between zero and 24 hours.`,
+          { day }
+        );
+      }
+      dailyHours[day] = roundScheduleHours(hours);
+    }
+    const weeklyHours = roundScheduleHours(Object.values(dailyHours).reduce((sum, value) => sum + value, 0));
+    if (!(weeklyHours > 0) || weeklyHours > 168) {
+      throw ledgerInputError('crew_capacity_weekly_hours_invalid', 'Weekly crew capacity must be greater than zero and no more than 168 hours.');
+    }
+    return { dailyHours, weeklyHours };
+  }
+
+  setCrewCapacityProfile(workerId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const workerRow = this.db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+      if (!workerRow) throw ledgerInputError('worker_not_found', 'Crew member not found.', { workerId }, 404);
+      if (['retired', 'inactive'].includes(normalizeStatus(workerRow.status, 'available'))) {
+        throw ledgerInputError('crew_capacity_worker_inactive', 'Capacity cannot be planned for a retired or inactive crew member.', { workerId }, 409);
+      }
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const { dailyHours, weeklyHours } = this.normalizeCrewCapacityDailyHours(payload);
+      const effectiveFrom = normalizeRetainedDate(payload.effectiveFrom || payload.effective_from || nowIso().slice(0, 10), {
+        required: true,
+        label: 'Capacity effective date',
+        code: 'crew_capacity_effective_date_invalid'
+      });
+      const timezone = normalizeText(payload.timezone, 'Europe/Amsterdam');
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: timezone }).format(new Date());
+      } catch {
+        throw ledgerInputError('crew_capacity_timezone_invalid', 'Crew capacity timezone must be a valid IANA timezone.');
+      }
+      const source = {
+        format: CREW_CAPACITY_PROFILE_FORMAT,
+        workerId,
+        effectiveFrom,
+        timezone,
+        dailyHours,
+        weeklyHours
+      };
+      const sourceHash = sha256Json(source);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '')
+        || `crew-capacity:${workerId}:${effectiveFrom}:${sourceHash.slice(0, 16)}`;
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('crew_capacity_entry_key_invalid', 'Capacity entryKey must contain 8 to 200 safe characters.');
+      }
+      const entryFingerprint = sha256Json({ ...source, notes: normalizeText(payload.notes, '') || null });
+      const replay = this.db.prepare('SELECT * FROM crew_capacity_profiles WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('crew_capacity_replay_conflict', 'This capacity entryKey was already used for different retained hours.', { entryKey }, 409);
+        }
+        return { profile: this.mapCrewCapacityProfile(replay), replayed: true, unchanged: replay.status === 'active' };
+      }
+      const active = this.db.prepare("SELECT * FROM crew_capacity_profiles WHERE worker_id = ? AND status = 'active'").get(workerId);
+      if (active?.source_hash === sourceHash) {
+        return { profile: this.mapCrewCapacityProfile(active), replayed: true, unchanged: true };
+      }
+      const versionNumber = normalizeNumber(this.db.prepare('SELECT MAX(version_number) AS version_number FROM crew_capacity_profiles WHERE worker_id = ?').get(workerId)?.version_number, 0) + 1;
+      const timestamp = nowIso();
+      const id = makeId('capacity_profile');
+      const snapshot = {
+        ...source,
+        profileId: id,
+        versionNumber,
+        workerName: workerRow.name,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        dataMinimization: 'operational_capacity_only'
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      if (active) {
+        this.db.prepare("UPDATE crew_capacity_profiles SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'active'")
+          .run(timestamp, active.id);
+      }
+      this.db.prepare(`
+        INSERT INTO crew_capacity_profiles (
+          id, worker_id, version_number, status, effective_from, timezone, weekly_hours,
+          daily_hours_json, source_hash, snapshot_hash, snapshot_json, entry_key,
+          entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        workerId,
+        versionNumber,
+        effectiveFrom,
+        timezone,
+        weeklyHours,
+        toJson(dailyHours),
+        sourceHash,
+        snapshotHash,
+        snapshotJson,
+        entryKey,
+        entryFingerprint,
+        toJson({ notes: normalizeText(payload.notes, '') || null, externalCommitments: 0 }),
+        timestamp,
+        timestamp
+      );
+      const profile = this.mapCrewCapacityProfile(this.db.prepare('SELECT * FROM crew_capacity_profiles WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'crew_capacity_profile',
+        entityId: id,
+        action: active ? 'revise_crew_capacity_profile' : 'create_crew_capacity_profile',
+        actor,
+        before: active ? this.mapCrewCapacityProfile(active) : null,
+        after: profile,
+        metadata: { workerId, versionNumber, sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { profile, replayed: false, unchanged: false };
+    });
+  }
+
+  listCrewCapacityProfiles(options = {}) {
+    const limit = Math.max(1, Math.min(10_000, Math.round(normalizeNumber(options.limit, 1_000))));
+    const includeHistory = normalizeBoolean(options.includeHistory ?? options.include_history, false);
+    const workerId = normalizeText(options.workerId || options.worker_id, '');
+    const conditions = [];
+    const values = [];
+    if (!includeHistory) conditions.push("profiles.status = 'active'");
+    if (workerId) {
+      conditions.push('profiles.worker_id = ?');
+      values.push(workerId);
+    }
+    return this.db.prepare(`
+      SELECT profiles.*, workers.name AS worker_name
+      FROM crew_capacity_profiles profiles
+      JOIN workers ON workers.id = profiles.worker_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY profiles.worker_id, profiles.version_number DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapCrewCapacityProfile(row));
+  }
+
+  createCrewCapacityAllocation(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const assignmentId = normalizeText(payload.assignmentId || payload.assignment_id, '');
+      if (!assignmentId) throw ledgerInputError('crew_allocation_assignment_required', 'Select a retained crew assignment before planning hours.');
+      const assignmentRow = this.db.prepare(`
+        SELECT assignments.*, workers.name AS worker_name, workers.status AS worker_status, jobs.title AS job_title
+        FROM assignments
+        JOIN workers ON workers.id = assignments.worker_id
+        JOIN jobs ON jobs.id = assignments.job_id
+        WHERE assignments.id = ?
+      `).get(assignmentId);
+      if (!assignmentRow) throw ledgerInputError('crew_allocation_assignment_missing', 'The retained crew assignment was not found.', { assignmentId }, 404);
+      const assignment = this.mapAssignment(assignmentRow);
+      this.requireJob(assignment.jobId);
+      if (!this.activeAssignmentStatus(assignment.status) || assignment.status === 'pending_approval' || assignment.requiresApproval) {
+        throw ledgerInputError('crew_allocation_assignment_not_ready', 'Resolve or replace the crew assignment before allocating look-ahead hours.', { assignmentId, status: assignment.status }, 409);
+      }
+      if (['retired', 'inactive', 'offline'].includes(normalizeStatus(assignmentRow.worker_status, 'available'))) {
+        throw ledgerInputError('crew_allocation_worker_unavailable', 'The assigned crew member is not available for look-ahead planning.', { workerId: assignment.workerId }, 409);
+      }
+      const workDate = normalizeRetainedDate(payload.workDate || payload.work_date, {
+        required: true,
+        label: 'Allocation work date',
+        code: 'crew_allocation_work_date_invalid'
+      });
+      const suppliedPlannedHours = Number(payload.plannedHours ?? payload.planned_hours);
+      if (!Number.isFinite(suppliedPlannedHours) || suppliedPlannedHours < 0.25 || suppliedPlannedHours > 24) {
+        throw ledgerInputError('crew_allocation_hours_invalid', 'Planned crew hours must be between 0.25 and 24.');
+      }
+      const plannedHours = roundScheduleHours(suppliedPlannedHours);
+      if (!assignment.scheduledStart || !assignment.scheduledEnd) {
+        throw ledgerInputError('crew_allocation_assignment_window_required', 'Retain assignment start and end dates before allocating daily hours.', { assignmentId }, 409);
+      }
+      const assignmentStartDate = String(assignment.scheduledStart).slice(0, 10);
+      const assignmentEndDate = String(assignment.scheduledEnd).slice(0, 10);
+      if (workDate < assignmentStartDate || workDate > assignmentEndDate) {
+        throw ledgerInputError('crew_allocation_outside_assignment', 'The allocation date must fall inside the retained assignment window.', { assignmentId, workDate, assignmentStartDate, assignmentEndDate }, 409);
+      }
+      const taskId = normalizeText(payload.taskId || payload.task_id, '') || null;
+      let task = null;
+      if (taskId) {
+        const taskRow = this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, assignment.jobId);
+        if (!taskRow) throw ledgerInputError('crew_allocation_task_missing', 'The selected task does not belong to the assignment job.', { taskId, jobId: assignment.jobId }, 404);
+        task = this.mapTask(taskRow);
+        if (!SCHEDULE_TASK_STATUSES.has(normalizeStatus(task.status, 'open'))) {
+          throw ledgerInputError('crew_allocation_task_closed', 'Hours cannot be planned against a completed or cancelled task.', { taskId, status: task.status }, 409);
+        }
+        if (!task.plannedStart || !task.plannedEnd) {
+          throw ledgerInputError('crew_allocation_task_unscheduled', 'Approve a source-current task schedule before allocating task hours.', { taskId }, 409);
+        }
+        if (workDate < String(task.plannedStart).slice(0, 10) || workDate > String(task.plannedEnd).slice(0, 10)) {
+          throw ledgerInputError('crew_allocation_outside_task', 'The allocation date must fall inside the retained task window.', { taskId, workDate }, 409);
+        }
+        if (task.assigneeId && String(task.assigneeId) !== String(assignment.workerId)) {
+          throw ledgerInputError('crew_allocation_task_assignee_mismatch', 'The selected task is retained against a different crew member.', { taskId, workerId: assignment.workerId, taskAssigneeId: task.assigneeId }, 409);
+        }
+      }
+      const notes = normalizeText(payload.notes || payload.note, '').slice(0, 1_000);
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '')
+        || `crew-allocation:${assignmentId}:${taskId || 'job'}:${workDate}:${sha256Text(`${plannedHours}:${notes}`).slice(0, 16)}`;
+      if (!/^[A-Za-z0-9._:-]{8,220}$/.test(entryKey)) {
+        throw ledgerInputError('crew_allocation_entry_key_invalid', 'Allocation entryKey must contain 8 to 220 safe characters.');
+      }
+      const entryFingerprint = sha256Json({ assignmentId, workerId: assignment.workerId, jobId: assignment.jobId, taskId, workDate, plannedHours, notes: notes || null });
+      const replay = this.db.prepare('SELECT * FROM crew_capacity_allocations WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('crew_allocation_replay_conflict', 'This allocation entryKey was already used for different crew, work, date, or hours.', { entryKey }, 409);
+        }
+        return { allocation: this.mapCrewCapacityAllocation(replay), replayed: true };
+      }
+      const id = makeId('capacity_allocation');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO crew_capacity_allocations (
+          id, worker_id, assignment_id, job_id, task_id, work_date, planned_hours,
+          status, entry_key, entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        assignment.workerId,
+        assignmentId,
+        assignment.jobId,
+        taskId,
+        workDate,
+        plannedHours,
+        entryKey,
+        entryFingerprint,
+        toJson({ notes: notes || null, retainedBy: actor, externalCommitments: 0 }),
+        timestamp,
+        timestamp
+      );
+      const allocation = this.getCrewCapacityAllocation(id);
+      this.audit({
+        entityType: 'crew_capacity_allocation',
+        entityId: id,
+        jobId: assignment.jobId,
+        action: 'create_crew_capacity_allocation',
+        actor,
+        after: allocation,
+        metadata: { workerId: assignment.workerId, assignmentId, taskId, workDate, plannedHours, externalCommitments: 0 }
+      });
+      return { allocation, replayed: false };
+    });
+  }
+
+  getCrewCapacityAllocation(allocationId) {
+    const row = this.db.prepare(`
+      SELECT allocations.*, workers.name AS worker_name, jobs.title AS job_title, job_tasks.title AS task_title,
+        assignments.status AS assignment_status
+      FROM crew_capacity_allocations allocations
+      JOIN workers ON workers.id = allocations.worker_id
+      JOIN jobs ON jobs.id = allocations.job_id
+      JOIN assignments ON assignments.id = allocations.assignment_id
+      LEFT JOIN job_tasks ON job_tasks.id = allocations.task_id
+      WHERE allocations.id = ?
+    `).get(allocationId);
+    if (!row) throw ledgerInputError('crew_allocation_not_found', 'Crew capacity allocation not found.', { allocationId }, 404);
+    return this.mapCrewCapacityAllocation(row);
+  }
+
+  listCrewCapacityAllocations(options = {}) {
+    const conditions = [];
+    const values = [];
+    const status = normalizeStatus(options.status, 'active');
+    if (status !== 'all') {
+      conditions.push('allocations.status = ?');
+      values.push(status);
+    }
+    for (const [column, value] of [
+      ['allocations.worker_id', normalizeText(options.workerId || options.worker_id, '')],
+      ['allocations.job_id', normalizeText(options.jobId || options.job_id, '')]
+    ]) {
+      if (value) {
+        conditions.push(`${column} = ?`);
+        values.push(value);
+      }
+    }
+    const startDate = normalizeText(options.startDate || options.start_date, '');
+    const endDate = normalizeText(options.endDate || options.end_date, '');
+    if (startDate) {
+      conditions.push('allocations.work_date >= ?');
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push('allocations.work_date <= ?');
+      values.push(endDate);
+    }
+    const limit = Math.max(1, Math.min(20_000, Math.round(normalizeNumber(options.limit, 5_000))));
+    return this.db.prepare(`
+      SELECT allocations.*, workers.name AS worker_name, jobs.title AS job_title, job_tasks.title AS task_title,
+        assignments.status AS assignment_status
+      FROM crew_capacity_allocations allocations
+      JOIN workers ON workers.id = allocations.worker_id
+      JOIN jobs ON jobs.id = allocations.job_id
+      JOIN assignments ON assignments.id = allocations.assignment_id
+      LEFT JOIN job_tasks ON job_tasks.id = allocations.task_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY allocations.work_date ASC, workers.name ASC, allocations.created_at ASC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapCrewCapacityAllocation(row));
+  }
+
+  cancelCrewCapacityAllocation(allocationId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getCrewCapacityAllocation(allocationId);
+      if (before.status === 'cancelled') return { allocation: before, replayed: true };
+      const reason = normalizeText(payload.reason || payload.notes, 'Allocation removed from the current two-week plan.');
+      if (reason.length < 5 || reason.length > 1_000) {
+        throw ledgerInputError('crew_allocation_cancellation_reason_invalid', 'Allocation cancellation reason must contain between 5 and 1,000 characters.');
+      }
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE crew_capacity_allocations
+        SET status = 'cancelled', data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'active'
+      `).run(toJson({
+        ...(before.data || {}),
+        cancellation: { reason, cancelledAt: timestamp, cancelledBy: actor },
+        externalCommitments: 0
+      }), timestamp, allocationId);
+      const allocation = this.getCrewCapacityAllocation(allocationId);
+      this.audit({
+        entityType: 'crew_capacity_allocation',
+        entityId: allocationId,
+        jobId: before.jobId,
+        action: 'cancel_crew_capacity_allocation',
+        actor,
+        before,
+        after: allocation,
+        metadata: { reason, externalCommitments: 0 }
+      });
+      return { allocation, replayed: false };
+    });
+  }
+
+  crewCapacityDateRange(referenceDate, horizonDays = CREW_LOOKAHEAD_DAYS) {
+    const normalizedReference = normalizeRetainedDate(referenceDate || nowIso().slice(0, 10), {
+      required: true,
+      label: 'Look-ahead start date',
+      code: 'crew_lookahead_start_invalid'
+    });
+    if (Number(horizonDays) !== CREW_LOOKAHEAD_DAYS) {
+      throw ledgerInputError('crew_lookahead_horizon_invalid', `The governed crew look-ahead must cover exactly ${CREW_LOOKAHEAD_DAYS} calendar days.`);
+    }
+    const startMs = Date.parse(`${normalizedReference}T00:00:00.000Z`);
+    const dates = Array.from({ length: CREW_LOOKAHEAD_DAYS }, (_, index) => (
+      new Date(startMs + index * 24 * SCHEDULE_HOUR_MS).toISOString().slice(0, 10)
+    ));
+    return { dates, windowStart: dates[0], windowEnd: dates[dates.length - 1], horizonDays: CREW_LOOKAHEAD_DAYS };
+  }
+
+  listCrewCapacityBoard(filters = {}) {
+    const range = this.crewCapacityDateRange(filters.referenceDate || filters.reference_date, filters.horizonDays || filters.horizon_days || CREW_LOOKAHEAD_DAYS);
+    const profiles = this.listCrewCapacityProfiles({ includeHistory: false, limit: 10_000 });
+    const profileByWorker = new Map(profiles.map(profile => [String(profile.workerId), profile]));
+    const workerRows = this.db.prepare(`
+      SELECT * FROM workers
+      WHERE status NOT IN ('retired', 'inactive')
+      ORDER BY name ASC
+    `).all();
+    const allocations = this.listCrewCapacityAllocations({
+      status: 'active',
+      startDate: range.windowStart,
+      endDate: range.windowEnd,
+      limit: 20_000
+    });
+    const assignments = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, workers.status AS worker_status, jobs.title AS job_title, jobs.status AS job_status
+      FROM assignments
+      JOIN workers ON workers.id = assignments.worker_id
+      JOIN jobs ON jobs.id = assignments.job_id
+      WHERE assignments.status NOT IN ('released', 'cancelled', 'completed', 'closed', 'rejected', 'declined', 'offline')
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY assignments.created_at ASC
+    `).all().map(row => ({ ...this.mapAssignment(row), workerStatus: row.worker_status, jobTitle: row.job_title, jobStatus: row.job_status }));
+    const availability = this.db.prepare(`
+      SELECT periods.*, workers.name AS worker_name, workers.role AS worker_role
+      FROM worker_availability_periods periods
+      JOIN workers ON workers.id = periods.worker_id
+      WHERE periods.status IN ('active', 'pending_cancellation')
+      ORDER BY periods.starts_at ASC
+    `).all().map(row => this.mapWorkerAvailabilityPeriod(row));
+    const allocationsByWorkerDate = new Map();
+    for (const allocation of allocations) {
+      const key = `${allocation.workerId}:${allocation.workDate}`;
+      if (!allocationsByWorkerDate.has(key)) allocationsByWorkerDate.set(key, []);
+      allocationsByWorkerDate.get(key).push(allocation);
+    }
+    const availabilityByWorker = new Map();
+    for (const period of availability) {
+      if (!availabilityByWorker.has(String(period.workerId))) availabilityByWorker.set(String(period.workerId), []);
+      availabilityByWorker.get(String(period.workerId)).push(period);
+    }
+    const dayOverlapsPeriod = (date, period) => {
+      const dayStart = Date.parse(`${date}T00:00:00.000Z`);
+      const dayEnd = Date.parse(`${date}T23:59:59.999Z`);
+      return Date.parse(period.endsAt) >= dayStart && Date.parse(period.startsAt) <= dayEnd;
+    };
+    const workers = workerRows.map(row => {
+      const worker = this.mapWorker(row);
+      const profile = profileByWorker.get(String(worker.id)) || null;
+      const periods = availabilityByWorker.get(String(worker.id)) || [];
+      const days = range.dates.map(date => {
+        const dayKey = CREW_CAPACITY_DAY_KEYS[new Date(`${date}T00:00:00.000Z`).getUTCDay()];
+        const absences = periods.filter(period => dayOverlapsPeriod(date, period));
+        const planned = allocationsByWorkerDate.get(`${worker.id}:${date}`) || [];
+        const plannedHours = roundScheduleHours(planned.reduce((sum, allocation) => sum + allocation.plannedHours, 0));
+        const profileHours = profile && date >= profile.effectiveFrom
+          ? roundScheduleHours(profile.dailyHours?.[dayKey] || 0)
+          : 0;
+        const availableHours = absences.length ? 0 : profileHours;
+        const remainingHours = roundScheduleHours(availableHours - plannedHours);
+        return {
+          date,
+          dayKey,
+          profileHours,
+          availableHours,
+          plannedHours,
+          remainingHours,
+          utilizationPercent: availableHours > 0 ? Math.round((plannedHours / availableHours) * 1000) / 10 : (plannedHours > 0 ? 100 : 0),
+          overload: plannedHours > availableHours,
+          unavailableConflict: absences.length > 0 && plannedHours > 0,
+          absences,
+          allocations: planned
+        };
+      });
+      const plannedHours = roundScheduleHours(days.reduce((sum, day) => sum + day.plannedHours, 0));
+      const availableHours = roundScheduleHours(days.reduce((sum, day) => sum + day.availableHours, 0));
+      return {
+        ...worker,
+        profile,
+        profileMissing: !profile,
+        days,
+        totals: {
+          profileHours: roundScheduleHours(days.reduce((sum, day) => sum + day.profileHours, 0)),
+          availableHours,
+          plannedHours,
+          remainingHours: roundScheduleHours(availableHours - plannedHours),
+          utilizationPercent: availableHours > 0 ? Math.round((plannedHours / availableHours) * 1000) / 10 : (plannedHours > 0 ? 100 : 0),
+          overloadDays: days.filter(day => day.overload).length,
+          unavailableConflicts: days.filter(day => day.unavailableConflict).length
+        }
+      };
+    });
+
+    const taskRows = this.db.prepare(`
+      SELECT job_tasks.*, jobs.title AS job_title, jobs.status AS job_status
+      FROM job_tasks
+      JOIN jobs ON jobs.id = job_tasks.job_id
+      WHERE job_tasks.status IN ('open', 'in_progress', 'blocked')
+        AND job_tasks.duration_hours > 0
+        AND ${this.operationalJobStatusSql('jobs')}
+      ORDER BY job_tasks.planned_start ASC, job_tasks.created_at ASC
+    `).all();
+    const taskCoverage = taskRows
+      .map(row => ({ ...this.mapTask(row), jobTitle: row.job_title, jobStatus: row.job_status }))
+      .filter(task => task.plannedStart && task.plannedEnd
+        && String(task.plannedEnd).slice(0, 10) >= range.windowStart
+        && String(task.plannedStart).slice(0, 10) <= range.windowEnd)
+      .map(task => {
+        const taskAllocations = allocations.filter(allocation => allocation.taskId === task.id);
+        const allocatedHours = roundScheduleHours(taskAllocations.reduce((sum, allocation) => sum + allocation.plannedHours, 0));
+        const requiredHours = roundScheduleHours(task.durationHours);
+        return {
+          taskId: task.id,
+          jobId: task.jobId,
+          jobTitle: task.jobTitle,
+          title: task.title,
+          assigneeId: task.assigneeId || null,
+          plannedStart: task.plannedStart,
+          plannedEnd: task.plannedEnd,
+          requiredHours,
+          allocatedHours,
+          remainingHours: roundScheduleHours(Math.max(0, requiredHours - allocatedHours)),
+          coveragePercent: requiredHours > 0 ? Math.min(100, Math.round((allocatedHours / requiredHours) * 1000) / 10) : 100,
+          ready: allocatedHours >= requiredHours,
+          allocationIds: taskAllocations.map(allocation => allocation.id)
+        };
+      });
+    const portfolio = this.listPortfolioSchedule({
+      referenceAt: `${range.windowStart}T00:00:00.000Z`,
+      horizonDays: CREW_LOOKAHEAD_DAYS,
+      limit: 500
+    });
+    const allocatedJobIds = new Set(allocations.map(allocation => String(allocation.jobId)));
+    const coveredJobIds = new Set(taskCoverage.map(task => String(task.jobId)));
+    const planningJobs = portfolio.jobs.filter(job => {
+      const plannedStart = String(job.plannedStart || job.scheduledStart || '').slice(0, 10);
+      const plannedEnd = String(job.plannedEnd || job.scheduledEnd || job.targetCompletion || '').slice(0, 10);
+      const intersectsWindow = Boolean(plannedStart && plannedEnd
+        && plannedEnd >= range.windowStart && plannedStart <= range.windowEnd);
+      return job.flags?.inWindow
+        || intersectsWindow
+        || allocatedJobIds.has(String(job.jobId))
+        || coveredJobIds.has(String(job.jobId));
+    });
+    const blockers = [];
+    for (const worker of workers) {
+      if (worker.profileMissing && worker.totals.plannedHours > 0) {
+        blockers.push({ type: 'capacity_profile_missing', severity: 'high', workerId: worker.id, workerName: worker.name, message: `${worker.name} has planned hours but no explicit capacity profile.` });
+      }
+      if (['offline'].includes(normalizeStatus(worker.status, 'available')) && worker.totals.plannedHours > 0) {
+        blockers.push({ type: 'worker_unavailable', severity: 'high', workerId: worker.id, workerName: worker.name, message: `${worker.name} is offline but still has planned hours.` });
+      }
+      for (const day of worker.days) {
+        if (day.overload) blockers.push({ type: 'crew_overload', severity: 'critical', workerId: worker.id, workerName: worker.name, date: day.date, plannedHours: day.plannedHours, availableHours: day.availableHours, allocationIds: day.allocations.map(allocation => allocation.id), message: `${worker.name} is overloaded on ${day.date}.` });
+        if (day.unavailableConflict) blockers.push({ type: 'crew_unavailable_allocation', severity: 'critical', workerId: worker.id, workerName: worker.name, date: day.date, allocationIds: day.allocations.map(allocation => allocation.id), message: `${worker.name} has planned work during retained unavailability on ${day.date}.` });
+      }
+    }
+    for (const task of taskCoverage.filter(item => !item.ready)) {
+      blockers.push({ type: 'task_capacity_gap', severity: 'high', jobId: task.jobId, taskId: task.taskId, message: `${task.jobTitle}: ${task.title} still needs ${task.remainingHours} planned crew hour(s).` });
+    }
+    for (const assignment of assignments.filter(item => item.status === 'pending_approval' || item.requiresApproval)) {
+      if (assignment.scheduledEnd && String(assignment.scheduledEnd).slice(0, 10) < range.windowStart) continue;
+      if (assignment.scheduledStart && String(assignment.scheduledStart).slice(0, 10) > range.windowEnd) continue;
+      blockers.push({ type: 'assignment_pending_approval', severity: 'high', jobId: assignment.jobId, assignmentId: assignment.id, workerId: assignment.workerId, message: `${assignment.workerName || 'Crew assignment'} is still pending approval.` });
+    }
+    for (const job of planningJobs) {
+      if (job.flags?.invalidPlan || job.flags?.unscheduled) blockers.push({ type: 'job_plan_incomplete', severity: 'high', jobId: job.jobId, message: `${job.jobTitle} has no complete source-current schedule for the look-ahead.` });
+      else if (job.flags?.baselinePending) blockers.push({ type: 'job_baseline_pending', severity: 'high', jobId: job.jobId, approvalId: job.baseline?.approvalId || null, message: `${job.jobTitle} has a pending schedule baseline.` });
+      else if (job.flags?.baselineStale) blockers.push({ type: 'job_baseline_stale', severity: 'critical', jobId: job.jobId, message: `${job.jobTitle} changed after its approved schedule baseline.` });
+    }
+    const sourceBasis = {
+      format: CREW_LOOKAHEAD_FORMAT,
+      windowStart: range.windowStart,
+      windowEnd: range.windowEnd,
+      horizonDays: CREW_LOOKAHEAD_DAYS,
+      profiles: profiles.map(profile => ({ id: profile.id, workerId: profile.workerId, versionNumber: profile.versionNumber, sourceHash: profile.sourceHash, snapshotHash: profile.snapshotHash })).sort((left, right) => left.id.localeCompare(right.id)),
+      workers: workers.map(worker => ({ id: worker.id, status: worker.status, updatedAt: worker.updatedAt })).sort((left, right) => left.id.localeCompare(right.id)),
+      assignments: assignments.map(assignment => ({ id: assignment.id, jobId: assignment.jobId, workerId: assignment.workerId, status: assignment.status, scheduledStart: assignment.scheduledStart, scheduledEnd: assignment.scheduledEnd, allocationHours: assignment.allocationHours, updatedAt: assignment.updatedAt })).sort((left, right) => left.id.localeCompare(right.id)),
+      allocations: allocations.map(allocation => ({ id: allocation.id, workerId: allocation.workerId, assignmentId: allocation.assignmentId, jobId: allocation.jobId, taskId: allocation.taskId, workDate: allocation.workDate, plannedHours: allocation.plannedHours, entryFingerprint: allocation.entryFingerprint, status: allocation.status })).sort((left, right) => left.id.localeCompare(right.id)),
+      availability: availability.map(period => ({ id: period.id, workerId: period.workerId, startsAt: period.startsAt, endsAt: period.endsAt, status: period.status, sourceFingerprint: period.sourceFingerprint })).sort((left, right) => left.id.localeCompare(right.id)),
+      tasks: taskCoverage.map(task => ({ taskId: task.taskId, jobId: task.jobId, plannedStart: task.plannedStart, plannedEnd: task.plannedEnd, requiredHours: task.requiredHours })).sort((left, right) => left.taskId.localeCompare(right.taskId)),
+      jobBaselines: planningJobs.map(job => ({ jobId: job.jobId, scheduleStatus: job.scheduleStatus, baselineId: job.baseline?.id || null, versionNumber: job.baseline?.versionNumber || null, current: job.baseline?.current === true })).sort((left, right) => left.jobId.localeCompare(right.jobId))
+    };
+    const sourceHash = sha256Json(sourceBasis);
+    const approvedRow = this.db.prepare("SELECT * FROM crew_lookahead_plans WHERE status = 'approved' ORDER BY version_number DESC LIMIT 1").get();
+    const pendingRow = this.db.prepare("SELECT * FROM crew_lookahead_plans WHERE status = 'pending_approval' ORDER BY version_number DESC LIMIT 1").get();
+    const approvedPlan = approvedRow ? this.mapCrewLookaheadPlan(approvedRow) : null;
+    const pendingPlan = pendingRow ? this.mapCrewLookaheadPlan(pendingRow) : null;
+    const totalAvailableHours = roundScheduleHours(workers.reduce((sum, worker) => sum + worker.totals.availableHours, 0));
+    const totalPlannedHours = roundScheduleHours(workers.reduce((sum, worker) => sum + worker.totals.plannedHours, 0));
+    return {
+      generatedAt: nowIso(),
+      format: CREW_LOOKAHEAD_FORMAT,
+      window: range,
+      sourceHash,
+      ready: allocations.length > 0 && blockers.length === 0,
+      blockers,
+      summary: {
+        workers: workers.length,
+        profiledWorkers: workers.filter(worker => !worker.profileMissing).length,
+        totalAvailableHours,
+        totalPlannedHours,
+        remainingHours: roundScheduleHours(totalAvailableHours - totalPlannedHours),
+        utilizationPercent: totalAvailableHours > 0 ? Math.round((totalPlannedHours / totalAvailableHours) * 1000) / 10 : 0,
+        allocations: allocations.length,
+        overloadDays: workers.reduce((sum, worker) => sum + worker.totals.overloadDays, 0),
+        unavailableConflicts: workers.reduce((sum, worker) => sum + worker.totals.unavailableConflicts, 0),
+        taskCapacityGaps: taskCoverage.filter(task => !task.ready).length,
+        planningBlockers: blockers.length
+      },
+      workers,
+      allocations,
+      assignments,
+      taskCoverage,
+      jobs: planningJobs,
+      plans: {
+        approved: approvedPlan,
+        pending: pendingPlan,
+        current: Boolean(approvedPlan?.integrityValid && approvedPlan.sourceHash === sourceHash),
+        stale: Boolean(approvedPlan && (!approvedPlan.integrityValid || approvedPlan.sourceHash !== sourceHash))
+      },
+      safeguards: {
+        approvalRequired: true,
+        externalCommitments: 0,
+        crewNotifications: 0,
+        clientCommitments: 0,
+        supplierCommitments: 0
+      }
+    };
+  }
+
+  requestCrewLookaheadPlan(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const board = this.listCrewCapacityBoard({
+        referenceDate: payload.referenceDate || payload.reference_date,
+        horizonDays: CREW_LOOKAHEAD_DAYS
+      });
+      if (!board.allocations.length) {
+        throw ledgerInputError('crew_lookahead_allocations_required', 'Retain at least one day-level crew allocation before requesting the two-week plan.', null, 409);
+      }
+      if (!board.ready) {
+        throw ledgerInputError('crew_lookahead_not_ready', 'Resolve every capacity, availability, task, assignment, and schedule blocker before requesting approval.', { blockers: board.blockers }, 409);
+      }
+      const pending = this.db.prepare("SELECT * FROM crew_lookahead_plans WHERE status = 'pending_approval' ORDER BY version_number DESC LIMIT 1").get();
+      if (pending) {
+        if (pending.source_hash === board.sourceHash && pending.window_start === board.window.windowStart) {
+          return {
+            plan: this.mapCrewLookaheadPlan(pending),
+            approval: pending.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(pending.approval_id)) : null,
+            board,
+            replayed: true
+          };
+        }
+        throw ledgerInputError('crew_lookahead_pending', 'Resolve the pending two-week crew plan before requesting a revised version.', { planId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const versionNumber = normalizeNumber(this.db.prepare('SELECT MAX(version_number) AS version_number FROM crew_lookahead_plans').get()?.version_number, 0) + 1;
+      const id = makeId('crew_lookahead');
+      const timestamp = nowIso();
+      const snapshot = {
+        format: CREW_LOOKAHEAD_FORMAT,
+        planId: id,
+        versionNumber,
+        window: board.window,
+        sourceHash: board.sourceHash,
+        summary: board.summary,
+        workers: board.workers.map(worker => ({
+          id: worker.id,
+          name: worker.name,
+          role: worker.role,
+          profileId: worker.profile?.id || null,
+          profileVersion: worker.profile?.versionNumber || null,
+          totals: worker.totals,
+          days: worker.days.map(day => ({
+            date: day.date,
+            availableHours: day.availableHours,
+            plannedHours: day.plannedHours,
+            remainingHours: day.remainingHours,
+            allocationIds: day.allocations.map(allocation => allocation.id)
+          }))
+        })),
+        taskCoverage: board.taskCoverage,
+        jobs: board.jobs.map(job => ({
+          jobId: job.jobId,
+          jobTitle: job.jobTitle,
+          baseline: job.baseline,
+          plannedStart: job.plannedStart,
+          plannedEnd: job.plannedEnd
+        })),
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          internalPlanningOnly: true,
+          externalCommitments: 0,
+          crewNotifications: 0,
+          clientCommitments: 0,
+          supplierCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO crew_lookahead_plans (
+          id, version_number, status, window_start, window_end, horizon_days,
+          source_hash, snapshot_hash, snapshot_json, approval_id, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        id,
+        versionNumber,
+        board.window.windowStart,
+        board.window.windowEnd,
+        CREW_LOOKAHEAD_DAYS,
+        board.sourceHash,
+        snapshotHash,
+        snapshotJson,
+        toJson({ reason: normalizeText(payload.reason || payload.notes, '') || null, requestedBy: actor, externalCommitments: 0 }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'crew_lookahead_plan',
+        targetId: id,
+        jobId: null,
+        approvalType: 'internal_two_week_lookahead',
+        summary: `Approve crew look-ahead v${versionNumber} for ${board.window.windowStart} through ${board.window.windowEnd}`,
+        reason: 'Verify exact worker capacity, availability, assignment, schedule baseline, task coverage, and day-level allocation evidence before internal reliance.',
+        data: {
+          versionNumber,
+          windowStart: board.window.windowStart,
+          windowEnd: board.window.windowEnd,
+          sourceHash: board.sourceHash,
+          snapshotHash,
+          summary: board.summary,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE crew_lookahead_plans SET approval_id = ?, updated_at = ? WHERE id = ?')
+        .run(approval.id, nowIso(), id);
+      const plan = this.mapCrewLookaheadPlan(this.db.prepare('SELECT * FROM crew_lookahead_plans WHERE id = ?').get(id));
+      this.audit({
+        entityType: 'crew_lookahead_plan',
+        entityId: id,
+        action: 'request_crew_lookahead_approval',
+        actor,
+        after: plan,
+        metadata: { approvalId: approval.id, versionNumber, sourceHash: board.sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { plan, approval, board, replayed: false };
+    });
+  }
+
+  listCrewLookaheadPlans(options = {}) {
+    const status = normalizeStatus(options.status, 'all');
+    const limit = Math.max(1, Math.min(5_000, Math.round(normalizeNumber(options.limit, 500))));
+    return this.db.prepare(`
+      SELECT * FROM crew_lookahead_plans
+      ${status === 'all' ? '' : 'WHERE status = ?'}
+      ORDER BY version_number DESC
+      LIMIT ?
+    `).all(...(status === 'all' ? [limit] : [status, limit])).map(row => this.mapCrewLookaheadPlan(row));
+  }
+
+  applyCrewLookaheadApproval(planId) {
+    const row = this.db.prepare('SELECT * FROM crew_lookahead_plans WHERE id = ?').get(planId);
+    if (!row) throw ledgerInputError('crew_lookahead_not_found', 'Two-week crew plan not found.', { planId }, 404);
+    if (row.status === 'approved') return this.mapCrewLookaheadPlan(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('crew_lookahead_state_conflict', `Two-week crew plan cannot be approved from ${row.status}.`, { planId, status: row.status }, 409);
+    }
+    const plan = this.mapCrewLookaheadPlan(row);
+    if (!plan.integrityValid) {
+      throw ledgerInputError('crew_lookahead_snapshot_tampered', 'The retained two-week crew plan failed snapshot verification.', { planId }, 409);
+    }
+    const board = this.listCrewCapacityBoard({ referenceDate: row.window_start, horizonDays: row.horizon_days });
+    if (!board.ready || board.sourceHash !== row.source_hash) {
+      throw ledgerInputError('crew_lookahead_stale', 'Crew capacity, availability, assignments, task coverage, or schedule evidence changed after this plan was requested.', { planId, blockers: board.blockers, currentSourceHash: board.sourceHash }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare("UPDATE crew_lookahead_plans SET status = 'superseded', updated_at = ? WHERE status = 'approved' AND id <> ?")
+      .run(timestamp, planId);
+    this.db.prepare(`
+      UPDATE crew_lookahead_plans
+      SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor },
+      externalCommitments: 0
+    }), timestamp, planId);
+    const approved = this.mapCrewLookaheadPlan(this.db.prepare('SELECT * FROM crew_lookahead_plans WHERE id = ?').get(planId));
+    this.audit({
+      entityType: 'crew_lookahead_plan',
+      entityId: planId,
+      action: 'approve_crew_lookahead_plan',
+      actor,
+      before: plan,
+      after: approved,
+      metadata: { approvalId: row.approval_id || null, versionNumber: row.version_number, sourceHash: row.source_hash, externalCommitments: 0 }
+    });
+    return approved;
   }
 
   addAssignment(jobId, payload = {}, options = {}) {
@@ -39926,6 +40781,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'crew_lookahead_plan') {
+        this.db.prepare(`
+          UPDATE crew_lookahead_plans
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM crew_lookahead_plans WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            },
+            externalCommitments: 0
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'cost_forecast') {
         this.db.prepare(`
           UPDATE cost_forecast_snapshots
@@ -40503,6 +41379,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
     } else if (targetType === 'schedule_baseline') {
       this.applyScheduleBaselineApproval(targetId);
+    } else if (targetType === 'crew_lookahead_plan') {
+      this.applyCrewLookaheadApproval(targetId);
     } else if (targetType === 'cost_forecast') {
       this.applyCostForecastApproval(targetId);
     } else if (targetType === 'cash_flow_forecast') {
@@ -46833,7 +47711,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
-  nextActions() {
+  nextActions(options = {}) {
     const actions = [];
     const actionableJobIds = new Set(this.db.prepare(`
       SELECT id FROM jobs
@@ -48142,6 +49020,53 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    if (options.includeCrewCapacity === true) {
+      try {
+        const crewBoard = this.listCrewCapacityBoard({ referenceDate: nowIso().slice(0, 10), horizonDays: CREW_LOOKAHEAD_DAYS });
+        const allocationById = new Map(crewBoard.allocations.map(allocation => [String(allocation.id), allocation]));
+        for (const blocker of crewBoard.blockers) {
+          const relatedJobIds = new Set();
+          if (blocker.jobId) relatedJobIds.add(String(blocker.jobId));
+          for (const allocationId of blocker.allocationIds || []) {
+            const allocation = allocationById.get(String(allocationId));
+            if (allocation?.jobId) relatedJobIds.add(String(allocation.jobId));
+          }
+          if (!relatedJobIds.size && blocker.workerId) {
+            for (const allocation of crewBoard.allocations) {
+              if (String(allocation.workerId) === String(blocker.workerId)
+                && (!blocker.date || allocation.workDate === blocker.date)) {
+                relatedJobIds.add(String(allocation.jobId));
+              }
+            }
+          }
+          for (const jobId of relatedJobIds) {
+            const blockerIdentity = {
+              jobId,
+              type: blocker.type,
+              workerId: blocker.workerId || null,
+              date: blocker.date || null,
+              taskId: blocker.taskId || null,
+              assignmentId: blocker.assignmentId || null,
+              allocationIds: [...(blocker.allocationIds || [])].map(String).sort()
+            };
+            const taskId = `task_crew_capacity_${sha256Json(blockerIdentity).slice(0, 28)}`;
+            if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+            actions.push({
+              type: 'review_crew_capacity',
+              jobId,
+              taskId,
+              blockerType: blocker.type,
+              sourceHash: crewBoard.sourceHash,
+              severity: blocker.severity || 'high',
+              message: `${blocker.message} Review the retained two-week crew plan internally; no assignment or commitment will be made.`
+            });
+          }
+        }
+      } catch {
+        // Ledger diagnostics reports malformed retained planning evidence; autonomy remains fail-closed.
+      }
+    }
+
     const procurementWithoutPurchaseOrders = this.db.prepare(`
       SELECT procurement_orders.id, procurement_orders.job_id, procurement_orders.supplier, procurement_orders.amount, jobs.title
       FROM procurement_orders
@@ -48711,7 +49636,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
     if (type.includes('safety') || type.includes('permit') || type.includes('pre_task') || type.includes('inspection') || type.includes('nonconformance') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
-    if (type.includes('worker') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
+    if (type.includes('worker') || type.includes('crew') || type.includes('capacity') || type.includes('assignment') || type.includes('orientation') || type.includes('instruction')) return 'workforce';
     if (type.includes('tool') || type.includes('material') || type.includes('loading') || type.includes('procurement')) return 'inventory';
     if (type.includes('route') || type.includes('dispatch') || type.includes('weather') || type.includes('schedule') || type.includes('site_visit')) return 'dispatch';
     if (type.includes('learning')) return 'learning';
@@ -48745,6 +49670,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'prepare_cost_forecast',
       'create_billing_milestone',
       'prepare_schedule_baseline',
+      'review_crew_capacity',
       'draft_invoice',
       'create_finance_handoff',
       'create_procurement_order',
@@ -49122,7 +50048,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const maxActions = Number.isFinite(Number(options.maxActions ?? options.max_actions))
       ? Math.max(1, Math.min(25, Number(options.maxActions ?? options.max_actions)))
       : null;
-    const preview = this.nextActions().filter(action => {
+    const preview = this.nextActions({
+      includeCrewCapacity: !actionTypeFilter.size || actionTypeFilter.has('review_crew_capacity')
+    }).filter(action => {
       if (actionTypeFilter.size && !actionTypeFilter.has(normalizeStatus(action.type, ''))) return false;
       if (jobFilter.size && action.jobId && !jobFilter.has(action.jobId)) return false;
       return true;
@@ -49612,6 +50540,52 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             });
           } catch (error) {
             blocked.push({ ...action, status: 'blocked', reason: error.message, code: error.code || null });
+          }
+        }
+
+        const crewCapacityReviews = preview.filter(action => action.type === 'review_crew_capacity').slice(0, 10);
+        for (const action of crewCapacityReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0 });
+            continue;
+          }
+          try {
+            const task = this.addTask(action.jobId, {
+              title: 'Review two-week crew capacity blocker',
+              description: `${action.message} Verify the source-current capacity profile, retained absence, assignment, task schedule, and allocation evidence before requesting plan approval.`,
+              status: 'open',
+              priority: action.severity,
+              source: 'autonomous_cycle',
+              data: {
+                internalOnly: true,
+                excludeFromWorkPlan: true,
+                blockerType: action.blockerType,
+                crewLookaheadSourceHash: action.sourceHash,
+                assignmentsCreated: 0,
+                notificationsSent: 0,
+                externalCommitments: 0
+              }
+            }, { id: action.taskId, actor, audit: false });
+            applied.push({
+              ...action,
+              taskId: task.id,
+              status: 'task_created',
+              assignmentsCreated: 0,
+              notificationsSent: 0,
+              externalCommitments: 0
+            });
+            this.audit({
+              entityType: 'task',
+              entityId: task.id,
+              jobId: action.jobId,
+              action: 'autonomous_create_crew_capacity_review_task',
+              actor,
+              after: task,
+              metadata: { blockerType: action.blockerType, sourceHash: action.sourceHash, externalCommitments: 0 }
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
           }
         }
 
@@ -50815,6 +51789,54 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
       } catch (error) {
         issues.push({ severity: 'error', message: `Job ${baselineJob.job_id} schedule baseline cannot be recalculated: ${error.message}` });
+      }
+    }
+    const crewCapacityProfileRows = this.db.prepare('SELECT * FROM crew_capacity_profiles ORDER BY worker_id, version_number').all();
+    for (const profileRow of crewCapacityProfileRows) {
+      const profile = this.mapCrewCapacityProfile(profileRow);
+      if (!profile.integrityValid) {
+        issues.push({ severity: 'error', message: `Crew capacity profile ${profile.id} failed retained source or snapshot integrity verification.` });
+      }
+    }
+    const crewAllocationRows = this.db.prepare(`
+      SELECT allocations.*, assignments.status AS assignment_status
+      FROM crew_capacity_allocations allocations
+      LEFT JOIN assignments ON assignments.id = allocations.assignment_id
+      LEFT JOIN workers ON workers.id = allocations.worker_id
+      LEFT JOIN jobs ON jobs.id = allocations.job_id
+      WHERE assignments.id IS NULL OR workers.id IS NULL OR jobs.id IS NULL
+        OR assignments.worker_id <> allocations.worker_id OR assignments.job_id <> allocations.job_id
+    `).all();
+    for (const allocationRow of crewAllocationRows) {
+      issues.push({ severity: 'error', message: `Crew capacity allocation ${allocationRow.id} crosses a missing or mismatched worker, assignment, or job boundary.` });
+    }
+    const allCrewAllocationRows = this.db.prepare('SELECT * FROM crew_capacity_allocations ORDER BY created_at').all();
+    for (const allocationRow of allCrewAllocationRows) {
+      if (!this.mapCrewCapacityAllocation(allocationRow).integrityValid) {
+        issues.push({ severity: 'error', message: `Crew capacity allocation ${allocationRow.id} failed retained entry fingerprint verification.` });
+      }
+    }
+    const crewLookaheadRows = this.db.prepare('SELECT * FROM crew_lookahead_plans ORDER BY version_number').all();
+    for (const planRow of crewLookaheadRows) {
+      const plan = this.mapCrewLookaheadPlan(planRow);
+      if (!plan.integrityValid) {
+        issues.push({ severity: 'error', message: `Crew look-ahead plan v${plan.versionNumber} failed retained snapshot integrity verification.` });
+      }
+      if (plan.status === 'approved') {
+        const approval = plan.approvalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'crew_lookahead_plan' AND target_id = ? AND status = 'approved'").get(plan.approvalId, plan.id)
+          : null;
+        if (!approval) issues.push({ severity: 'error', message: `Approved crew look-ahead plan v${plan.versionNumber} lacks its matching approval decision.` });
+      }
+      if (['pending_approval', 'approved'].includes(plan.status)) {
+        try {
+          const board = this.listCrewCapacityBoard({ referenceDate: plan.windowStart, horizonDays: plan.horizonDays });
+          if (!board.ready || board.sourceHash !== plan.sourceHash) {
+            issues.push({ severity: 'warning', message: `Crew look-ahead plan v${plan.versionNumber} is stale because retained capacity or planning evidence changed.` });
+          }
+        } catch (error) {
+          issues.push({ severity: 'error', message: `Crew look-ahead plan v${plan.versionNumber} cannot be recalculated: ${error.message}` });
+        }
       }
     }
     const approvedForecastsWithoutApproval = Number(this.db.prepare(`
@@ -52484,6 +53506,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         billingMilestones: this.count('billing_milestones'),
         taskDependencies: this.count('task_dependencies'),
         scheduleBaselines: this.count('schedule_baselines'),
+        crewCapacityProfiles: this.count('crew_capacity_profiles'),
+        crewCapacityAllocations: this.count('crew_capacity_allocations'),
+        crewLookaheadPlans: this.count('crew_lookahead_plans'),
         costForecastSnapshots: this.count('cost_forecast_snapshots'),
         cashFlowItems: this.count('cash_flow_items'),
         cashFlowForecastSnapshots: this.count('cash_flow_forecast_snapshots'),
@@ -53130,6 +54155,123 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       snapshotHash: row.snapshot_hash,
       snapshot,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapCrewCapacityProfile(row) {
+    if (!row) return null;
+    const dailyHours = fromJson(row.daily_hours_json, {});
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const weeklyHours = roundScheduleHours(row.weekly_hours);
+    const sourceHash = sha256Json({
+      format: CREW_CAPACITY_PROFILE_FORMAT,
+      workerId: row.worker_id,
+      effectiveFrom: row.effective_from,
+      timezone: row.timezone,
+      dailyHours,
+      weeklyHours
+    });
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === CREW_CAPACITY_PROFILE_FORMAT
+      && snapshot.profileId === row.id
+      && snapshot.workerId === row.worker_id
+      && normalizeNumber(snapshot.versionNumber, 0) === normalizeNumber(row.version_number, 0)
+      && snapshot.effectiveFrom === row.effective_from
+      && snapshot.timezone === row.timezone
+      && sha256Json(snapshot.dailyHours || {}) === sha256Json(dailyHours)
+      && roundScheduleHours(snapshot.weeklyHours) === weeklyHours
+      && sourceHash === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    return {
+      id: row.id,
+      workerId: row.worker_id,
+      workerName: row.worker_name || snapshot?.workerName || null,
+      versionNumber: normalizeNumber(row.version_number, 0),
+      status: normalizeStatus(row.status, 'active'),
+      effectiveFrom: row.effective_from,
+      timezone: row.timezone,
+      weeklyHours,
+      dailyHours,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapCrewCapacityAllocation(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const plannedHours = roundScheduleHours(row.planned_hours);
+    const entryFingerprint = sha256Json({
+      assignmentId: row.assignment_id,
+      workerId: row.worker_id,
+      jobId: row.job_id,
+      taskId: row.task_id || null,
+      workDate: row.work_date,
+      plannedHours,
+      notes: data.notes || null
+    });
+    return {
+      id: row.id,
+      workerId: row.worker_id,
+      workerName: row.worker_name || null,
+      assignmentId: row.assignment_id,
+      assignmentStatus: row.assignment_status || null,
+      jobId: row.job_id,
+      jobTitle: row.job_title || null,
+      taskId: row.task_id || null,
+      taskTitle: row.task_title || null,
+      workDate: row.work_date,
+      plannedHours,
+      status: normalizeStatus(row.status, 'active'),
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid: entryFingerprint === row.entry_fingerprint,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapCrewLookaheadPlan(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === CREW_LOOKAHEAD_FORMAT
+      && snapshot.planId === row.id
+      && normalizeNumber(snapshot.versionNumber, 0) === normalizeNumber(row.version_number, 0)
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.window?.windowStart === row.window_start
+      && snapshot.window?.windowEnd === row.window_end
+      && normalizeNumber(snapshot.window?.horizonDays, 0) === normalizeNumber(row.horizon_days, 0)
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    return {
+      id: row.id,
+      versionNumber: normalizeNumber(row.version_number, 0),
+      status: normalizeStatus(row.status, 'pending_approval'),
+      windowStart: row.window_start,
+      windowEnd: row.window_end,
+      horizonDays: normalizeNumber(row.horizon_days, CREW_LOOKAHEAD_DAYS),
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid,
+      approvalId: row.approval_id || null,
+      data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -55477,7 +56619,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (value) safeguards.push(value);
     };
 
-    if (targetType === 'schedule_commitment') {
+    if (targetType === 'crew_lookahead_plan') {
+      const row = this.db.prepare('SELECT * FROM crew_lookahead_plans WHERE id = ?').get(approval.targetId || approval.target_id);
+      const plan = row ? this.mapCrewLookaheadPlan(row) : null;
+      primaryEffect = `Approve internal two-week crew plan v${plan?.versionNumber || data.versionNumber || ''}.`;
+      addEffect(`Freeze the internal capacity plan for ${plan?.windowStart || data.windowStart || 'the retained start'} through ${plan?.windowEnd || data.windowEnd || 'the retained end'}.`);
+      addEffect(`Retain ${plan?.snapshot?.summary?.allocations ?? data.summary?.allocations ?? 0} day-level allocation(s) against explicit crew capacity and approved assignments.`);
+      addSafeguard('Approval is blocked if capacity, availability, assignments, tasks, or schedule baselines changed after the request.');
+      addSafeguard('Does not notify crew or clients, place supplier orders, authorize spend, or make an external schedule commitment.');
+      riskLevel = 'high';
+      preview.windowStart = plan?.windowStart || data.windowStart || null;
+      preview.windowEnd = plan?.windowEnd || data.windowEnd || null;
+      preview.summary = plan?.snapshot?.summary || data.summary || null;
+      preview.integrityValid = plan?.integrityValid === true;
+      preview.sourceHash = plan?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = plan?.snapshotHash || data.snapshotHash || null;
+      preview.externalCommitments = 0;
+    } else if (targetType === 'schedule_commitment') {
       const patch = data.patch || {};
       const assignment = data.proposedAssignment || null;
       primaryEffect = `Approve internal schedule ${patch.scheduledStart || 'start'} to ${patch.scheduledEnd || 'end'}.`;

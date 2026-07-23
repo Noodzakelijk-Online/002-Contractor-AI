@@ -149,5 +149,5 @@ test('field expense API enforces worker scope, exact replay, approval, and offic
   assert.equal(capabilities.body.capabilities.requestSafety.expenseReceiptReversal, 'approval_gated_compensating_record');
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '058_formal_variation_control');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '059_crew_capacity_lookahead');
 });
