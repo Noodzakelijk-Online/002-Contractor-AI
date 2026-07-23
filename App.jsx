@@ -206,8 +206,13 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const safetyMeetingId = type === 'safety_briefing_acknowledgement' ? String(payload?.meetingId || '') : ''
   const workPermitId = type === 'work_permit_acknowledgement' ? String(payload?.permitId || '') : ''
   const preTaskPlanId = ['pre_task_plan_acknowledgement', 'pre_task_plan_suspension'].includes(type) ? String(payload?.planId || '') : ''
+  const dailyCycleId = type === 'daily_cycle_close' ? String(payload?.cycleId || '') : ''
   const route =
-    type === 'daily_log'
+    type === 'daily_huddle'
+      ? 'daily-cycles'
+      : type === 'daily_cycle_close' && dailyCycleId
+        ? `daily-cycles/${encodeURIComponent(dailyCycleId)}/end-of-day`
+      : type === 'daily_log'
       ? 'daily-logs'
       : type === 'attendance_check_in'
         ? 'attendance/check-in'
@@ -256,6 +261,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   delete requestPayload.meetingId
   delete requestPayload.permitId
   delete requestPayload.planId
+  delete requestPayload.cycleId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
     body: JSON.stringify(requestPayload),
@@ -272,6 +278,7 @@ function emptyFieldDailyLog() {
   return {
     entryKey: createFieldEvidenceDraftId(),
     jobId: '',
+    cycleId: '',
     workerId: '',
     workDate: futureDateInput(0),
     hours: '',
@@ -279,6 +286,11 @@ function emptyFieldDailyLog() {
     weather: 'clear',
     workCompleted: '',
     blockers: '',
+    planAchieved: true,
+    varianceReasons: '',
+    unresolvedActions: '',
+    tomorrowPlan: '',
+    evidenceReferences: '',
     safetyConcern: false,
     safetyRiskLevel: 'high',
     safetyNotes: '',
@@ -292,6 +304,28 @@ function emptyFieldProgress() {
     progressPercent: '',
     status: 'in_progress',
     note: '',
+  }
+}
+
+function emptyDailyHuddle() {
+  return {
+    entryKey: createFieldEvidenceDraftId(),
+    jobId: '',
+    workDate: futureDateInput(0),
+    shiftLabel: 'day',
+    facilitator: '',
+    leadWorkerId: '',
+    workerIds: [],
+    plannedWork: '',
+    productionTarget: '',
+    weather: 'clear',
+    siteConditions: '',
+    safetyFocus: '',
+    qualityHoldPoints: '',
+    constraints: '',
+    blockingIssues: '',
+    stopWorkRequired: false,
+    evidenceReference: '',
   }
 }
 
@@ -2798,6 +2832,8 @@ function App() {
   const [intake, setIntake] = useState({ clientName: '', title: '', service: '', address: '', description: '', priority: 'medium' })
   const [evidence, setEvidence] = useState({ jobId: '', notes: '', riskLevel: 'medium' })
   const [fieldProgress, setFieldProgress] = useState(emptyFieldProgress)
+  const [dailyHuddle, setDailyHuddle] = useState(emptyDailyHuddle)
+  const [fieldDailyCycles, setFieldDailyCycles] = useState([])
   const [fieldDailyLog, setFieldDailyLog] = useState(emptyFieldDailyLog)
   const [fieldMaterialReceipt, setFieldMaterialReceipt] = useState(() => emptyMaterialReceiptDraft())
   const [fieldMaterialReceiptPlans, setFieldMaterialReceiptPlans] = useState([])
@@ -2820,6 +2856,7 @@ function App() {
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
   const [outboxSyncing, setOutboxSyncing] = useState(false)
+  const [networkOnline, setNetworkOnline] = useState(() => navigator.onLine !== false)
   const exportInputRef = useRef(null)
   const evidenceInputRef = useRef(null)
   const fieldCaptureRef = useRef(null)
@@ -2840,6 +2877,16 @@ function App() {
 
   useEffect(() => () => {
     if (resourceViewLoadTimerRef.current) clearTimeout(resourceViewLoadTimerRef.current)
+  }, [])
+
+  useEffect(() => {
+    const updateNetworkState = () => setNetworkOnline(navigator.onLine !== false)
+    window.addEventListener('online', updateNetworkState)
+    window.addEventListener('offline', updateNetworkState)
+    return () => {
+      window.removeEventListener('online', updateNetworkState)
+      window.removeEventListener('offline', updateNetworkState)
+    }
   }, [])
 
   const refresh = useCallback(async () => {
@@ -2982,7 +3029,8 @@ function App() {
         setAuthError('Your operator session has expired. Sign in again.')
       } else {
         setAuthState('active')
-        setError(requestError.message)
+        if (navigator.onLine === false && hasLoadedDataRef.current) setError('')
+        else setError(requestError.message)
       }
     } finally {
       setLoading(false)
@@ -3053,6 +3101,7 @@ function App() {
     [jobs],
   )
   const selectedFieldMaterialReceiptPlan = fieldMaterialReceiptPlans.find(plan => plan.purchaseOrder?.id === fieldMaterialReceipt.purchaseOrderId) || null
+  const selectedDailyCycle = fieldDailyCycles.find(cycle => cycle.id === fieldDailyLog.cycleId) || null
   const selectedEquipmentCheckoutPlan = equipmentCheckoutPlans.find(plan => plan.reservation?.id === equipmentCheckoutDraft.reservationId) || null
   const selectedFieldEquipmentPlan = fieldEquipmentPlans.find(plan => plan.reservation?.id === fieldEquipmentCheckout.reservationId) || null
   const attendanceWorkerId = fieldScoped ? operator.worker?.id || null : attendanceDraft.workerId || null
@@ -5434,18 +5483,154 @@ function App() {
     }
   }
 
+  async function selectDailyCycleJob(jobId) {
+    const workerIds = fieldScoped && operator.worker?.id ? [operator.worker.id] : []
+    setDailyHuddle({
+      ...emptyDailyHuddle(),
+      jobId,
+      facilitator: fieldScoped ? operator.worker?.name || '' : '',
+      leadWorkerId: workerIds[0] || '',
+      workerIds,
+    })
+    setFieldDailyLog({ ...emptyFieldDailyLog(), jobId })
+    setFieldDailyCycles([])
+    if (!jobId || navigator.onLine === false) return
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/daily-cycles?limit=30`)
+      const cycles = result.cycles || []
+      const openCycle = cycles.find(cycle => ['released', 'blocked'].includes(cycle.status)) || null
+      setFieldDailyCycles(cycles)
+      if (openCycle) {
+        setFieldDailyLog({
+          ...emptyFieldDailyLog(),
+          jobId,
+          cycleId: openCycle.id,
+          workDate: openCycle.workDate,
+          weather: openCycle.weather || 'clear',
+        })
+      }
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
+  function toggleDailyHuddleWorker(workerId, checked) {
+    setDailyHuddle((current) => {
+      const workerIds = checked
+        ? [...new Set([...current.workerIds, workerId])]
+        : current.workerIds.filter(id => id !== workerId)
+      return {
+        ...current,
+        workerIds,
+        leadWorkerId: workerIds.includes(current.leadWorkerId) ? current.leadWorkerId : workerIds[0] || '',
+      }
+    })
+  }
+
+  async function recordDailyStartHuddle(event) {
+    event.preventDefault()
+    if (
+      !dailyHuddle.jobId || !dailyHuddle.workDate || dailyHuddle.plannedWork.trim().length < 8
+      || dailyHuddle.productionTarget.trim().length < 3 || dailyHuddle.safetyFocus.trim().length < 5
+      || dailyHuddle.evidenceReference.trim().length < 3
+    ) {
+      setError('Choose a job and date, then retain the work plan, production target, safety focus, and huddle evidence reference.')
+      return
+    }
+    if (!fieldScoped && (dailyHuddle.facilitator.trim().length < 2 || !dailyHuddle.workerIds.length || !dailyHuddle.leadWorkerId)) {
+      setError('Record the facilitator, crew, and daily lead before retaining the start huddle.')
+      return
+    }
+    if (dailyHuddle.stopWorkRequired && !dailyHuddle.blockingIssues.trim()) {
+      setError('Record at least one blocking issue before setting the stop-work state.')
+      return
+    }
+    const payload = {
+      workDate: dailyHuddle.workDate,
+      shiftLabel: dailyHuddle.shiftLabel,
+      facilitator: dailyHuddle.facilitator.trim() || undefined,
+      leadWorkerId: dailyHuddle.leadWorkerId || undefined,
+      workerIds: dailyHuddle.workerIds,
+      plannedWork: dailyHuddle.plannedWork.trim(),
+      productionTarget: dailyHuddle.productionTarget.trim(),
+      weather: dailyHuddle.weather,
+      siteConditions: dailyHuddle.siteConditions.trim(),
+      safetyFocus: dailyHuddle.safetyFocus.trim(),
+      qualityHoldPoints: dailyHuddle.qualityHoldPoints,
+      constraints: dailyHuddle.constraints,
+      blockingIssues: dailyHuddle.blockingIssues,
+      stopWorkRequired: dailyHuddle.stopWorkRequired,
+      evidenceReference: dailyHuddle.evidenceReference.trim(),
+    }
+    const draft = {
+      id: dailyHuddle.entryKey,
+      type: 'daily_huddle',
+      jobId: dailyHuddle.jobId,
+      payload,
+      operatorScope: outboxScope,
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      if (navigator.onLine === false) {
+        await enqueueFieldOperationDraft(draft)
+        await refreshOutboxState()
+        setDailyHuddle(emptyDailyHuddle())
+        notify('Start huddle was saved locally with its frozen crew, plan, safety focus, and stop-work state. It will sync after reconnection.')
+        return
+      }
+      const result = await recordFieldOperation(draft)
+      const cycle = result.cycle
+      setFieldDailyCycles((current) => upsertById(current, cycle))
+      setDailyHuddle({ ...emptyDailyHuddle(), jobId: dailyHuddle.jobId })
+      setFieldDailyLog({
+        ...emptyFieldDailyLog(),
+        jobId: cycle.jobId,
+        cycleId: cycle.id,
+        workDate: cycle.workDate,
+        weather: cycle.weather || 'clear',
+      })
+      notify(
+        result.replayed
+          ? 'This start huddle was already retained; the existing daily cycle was returned.'
+          : cycle.status === 'blocked'
+            ? `Start huddle retained with ${cycle.blockingIssues.length} blocking issue${cycle.blockingIssues.length === 1 ? '' : 's'}. Work is not released by this record.`
+            : 'Start huddle retained with frozen crew, plan, safety focus, and hold points. This record does not replace a permit or safety clearance.',
+      )
+      await refresh()
+    } catch (requestError) {
+      if (shouldQueueFieldMutation(requestError)) {
+        try {
+          await enqueueFieldOperationDraft(draft)
+          await refreshOutboxState()
+          setDailyHuddle(emptyDailyHuddle())
+          notify('Connection interrupted. The complete start huddle was saved locally for an exact retry.')
+          return
+        } catch (outboxError) {
+          setError(outboxError.message)
+          return
+        }
+      }
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function recordFieldDailyLog(event) {
     event.preventDefault()
     const hours = Number(fieldDailyLog.hours)
     const manpower = Number(fieldDailyLog.manpower)
     if (
       !fieldDailyLog.jobId ||
+      !fieldDailyLog.cycleId ||
       !fieldDailyLog.workDate ||
       !(hours > 0 && hours <= 24) ||
       !(manpower > 0 && manpower <= 500) ||
       !fieldDailyLog.workCompleted.trim()
     ) {
-      setError('Choose a job and date, record positive hours and manpower, and describe the completed work.')
+      setError('Choose an open daily cycle, record positive hours and manpower, and describe the completed work.')
       return
     }
     if (!fieldScoped && !fieldDailyLog.workerId) {
@@ -5456,7 +5641,16 @@ function App() {
       setError('Describe the safety concern before submitting the daily site log.')
       return
     }
+    if (!fieldDailyLog.planAchieved && !fieldDailyLog.varianceReasons.trim()) {
+      setError('Record at least one reason when the daily production target was not achieved.')
+      return
+    }
+    if (fieldDailyLog.tomorrowPlan.trim().length < 3 || fieldDailyLog.evidenceReferences.trim().length < 3) {
+      setError('Record tomorrow\'s plan and at least one retained EOD evidence reference.')
+      return
+    }
     const payload = {
+      cycleId: fieldDailyLog.cycleId,
       workerId: fieldScoped ? undefined : fieldDailyLog.workerId,
       workDate: fieldDailyLog.workDate,
       hours,
@@ -5464,6 +5658,11 @@ function App() {
       weather: fieldDailyLog.weather,
       workCompleted: fieldDailyLog.workCompleted.trim(),
       blockers: fieldDailyLog.blockers,
+      planAchieved: fieldDailyLog.planAchieved,
+      varianceReasons: fieldDailyLog.varianceReasons,
+      unresolvedActions: fieldDailyLog.unresolvedActions,
+      tomorrowPlan: fieldDailyLog.tomorrowPlan.trim(),
+      evidenceReferences: fieldDailyLog.evidenceReferences,
       safetyConcern: fieldDailyLog.safetyConcern,
       safetyRiskLevel: fieldDailyLog.safetyRiskLevel,
       safetyNotes: fieldDailyLog.safetyNotes.trim(),
@@ -5471,7 +5670,7 @@ function App() {
     }
     const draft = {
       id: fieldDailyLog.entryKey,
-      type: 'daily_log',
+      type: 'daily_cycle_close',
       jobId: fieldDailyLog.jobId,
       payload,
       operatorScope: outboxScope,
@@ -5482,18 +5681,19 @@ function App() {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
         setFieldDailyLog(emptyFieldDailyLog())
-        notify('Daily site log was saved locally with its time and safety data. It will sync for this operator after reconnection.')
+        notify('End-of-day report was saved locally with its time, safety, variance, and handoff evidence. It will sync after reconnection.')
         return
       }
       const result = await recordFieldOperation(draft)
       const approvalCount = Array.isArray(result.dailyLog?.approvals)
         ? result.dailyLog.approvals.length
         : Number(result.dailyLog?.approvals || 0)
-      setFieldDailyLog(emptyFieldDailyLog())
+      setFieldDailyCycles((current) => upsertById(current, result.cycle))
+      setFieldDailyLog({ ...emptyFieldDailyLog(), jobId: fieldDailyLog.jobId })
       notify(
-        result.dailyLog?.replayed
-          ? 'This daily site log was already retained; the existing ledger entry was returned without duplication.'
-          : `Daily site log recorded with its time card and safety state. ${approvalCount} review${approvalCount === 1 ? '' : 's'} added to the ledger.`,
+        result.replayed || result.dailyLog?.replayed
+          ? 'This end-of-day report was already retained; the existing daily cycle was returned without duplication.'
+          : `End-of-day report retained with plan variance, time card, safety state, and tomorrow handoff. ${approvalCount} review${approvalCount === 1 ? '' : 's'} added to the ledger.`,
       )
       await refresh()
     } catch (requestError) {
@@ -5502,7 +5702,7 @@ function App() {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
           setFieldDailyLog(emptyFieldDailyLog())
-          notify('Connection interrupted. The complete daily site log was saved locally for an exact retry.')
+          notify('Connection interrupted. The complete end-of-day report was saved locally for an exact retry.')
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -9880,7 +10080,7 @@ function App() {
         </div>
         <div className="nav-footer">
           <CloudOff size={16} />
-          <span>Local-first ledger</span>
+          <span>{networkOnline ? 'Local-first ledger' : 'Offline ledger'}</span>
           <small>External actions require approval</small>
         </div>
       </aside>
@@ -9901,7 +10101,7 @@ function App() {
           <div className="topbar-actions">
             <span className="sync-state">
               <CloudOff size={15} />
-              {fieldScoped ? 'Field scope' : 'Local-first'}
+              {networkOnline ? (fieldScoped ? 'Field scope' : 'Local-first') : 'Offline queue'}
             </span>
             {operator.authenticated ? (
               <span className="operator-session" title={formatStatus(operator.role)}>
@@ -11573,11 +11773,127 @@ function App() {
                     </button>
                   </div>
                 </form>
+                <form className="evidence-form daily-cycle-form" data-testid="daily-start-huddle-form" onSubmit={recordDailyStartHuddle}>
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Daily start huddle</h2>
+                      <p>Freeze today&apos;s crew, production target, safety focus, hold points, constraints, and stop-work state before the shift.</p>
+                    </div>
+                    <span className="tag">Internal control</span>
+                  </div>
+                  <div className="form-grid">
+                    <label>
+                      Job
+                      <select required value={dailyHuddle.jobId} onChange={(event) => void selectDailyCycleJob(event.target.value)}>
+                        <option value="">Select an active job</option>
+                        {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      Work date
+                      <input required type="date" value={dailyHuddle.workDate} onChange={(event) => setDailyHuddle({ ...dailyHuddle, workDate: event.target.value })} />
+                    </label>
+                    <label>
+                      Shift
+                      <select value={dailyHuddle.shiftLabel} onChange={(event) => setDailyHuddle({ ...dailyHuddle, shiftLabel: event.target.value })}>
+                        <option value="day">Day</option>
+                        <option value="early">Early</option>
+                        <option value="late">Late</option>
+                        <option value="night">Night</option>
+                      </select>
+                    </label>
+                    <label>
+                      Weather
+                      <select value={dailyHuddle.weather} onChange={(event) => setDailyHuddle({ ...dailyHuddle, weather: event.target.value })}>
+                        <option value="clear">Clear</option>
+                        <option value="cloudy">Cloudy</option>
+                        <option value="rain">Rain</option>
+                        <option value="wind">High wind</option>
+                        <option value="heat">Heat</option>
+                        <option value="cold">Cold</option>
+                      </select>
+                    </label>
+                    {!fieldScoped ? (
+                      <>
+                        <label>
+                          Facilitator
+                          <input required minLength="2" maxLength="160" value={dailyHuddle.facilitator} onChange={(event) => setDailyHuddle({ ...dailyHuddle, facilitator: event.target.value })} placeholder="Crew lead or supervisor" />
+                        </label>
+                        <label>
+                          Daily lead
+                          <select required value={dailyHuddle.leadWorkerId} onChange={(event) => setDailyHuddle({ ...dailyHuddle, leadWorkerId: event.target.value })}>
+                            <option value="">Select retained crew first</option>
+                            {workers.filter(worker => dailyHuddle.workerIds.includes(worker.id)).map(worker => <option key={worker.id} value={worker.id}>{worker.name}</option>)}
+                          </select>
+                        </label>
+                        <fieldset className="daily-crew-picker form-span">
+                          <legend>Huddle crew</legend>
+                          <div>
+                            {workers.filter(worker => !['retired', 'inactive'].includes(worker.status)).map(worker => (
+                              <label className="checkbox-label" key={worker.id}>
+                                <input type="checkbox" checked={dailyHuddle.workerIds.includes(worker.id)} onChange={(event) => toggleDailyHuddleWorker(worker.id, event.target.checked)} />
+                                <span>{worker.name}<small>{worker.role || 'Crew'}</small></span>
+                              </label>
+                            ))}
+                          </div>
+                        </fieldset>
+                      </>
+                    ) : (
+                      <div className="daily-field-identity form-span">
+                        <Users size={18} />
+                        <span><strong>{operator.worker?.name || 'Field worker'}</strong><small>Your authenticated field identity is the retained huddle lead and attendee.</small></span>
+                      </div>
+                    )}
+                    <label className="form-span">
+                      Planned work
+                      <textarea required minLength="8" maxLength="4000" value={dailyHuddle.plannedWork} onChange={(event) => setDailyHuddle({ ...dailyHuddle, plannedWork: event.target.value })} placeholder="Specific work areas, sequence, and handoffs for this shift." />
+                    </label>
+                    <label className="form-span">
+                      Production target
+                      <textarea required minLength="3" maxLength="1000" value={dailyHuddle.productionTarget} onChange={(event) => setDailyHuddle({ ...dailyHuddle, productionTarget: event.target.value })} placeholder="A measurable quantity, milestone, or completion state." />
+                    </label>
+                    <label className="form-span">
+                      Site conditions
+                      <textarea maxLength="2000" value={dailyHuddle.siteConditions} onChange={(event) => setDailyHuddle({ ...dailyHuddle, siteConditions: event.target.value })} placeholder="Access, occupants, logistics, weather exposure, or changed conditions." />
+                    </label>
+                    <label className="form-span">
+                      Safety focus
+                      <textarea required minLength="5" maxLength="2000" value={dailyHuddle.safetyFocus} onChange={(event) => setDailyHuddle({ ...dailyHuddle, safetyFocus: event.target.value })} placeholder="Today&apos;s hazards, controls, LMRA trigger, and stop-work condition." />
+                    </label>
+                    <label className="form-span">
+                      Quality hold points
+                      <textarea value={dailyHuddle.qualityHoldPoints} onChange={(event) => setDailyHuddle({ ...dailyHuddle, qualityHoldPoints: event.target.value })} placeholder="One inspection, witness, or approval hold point per line." />
+                    </label>
+                    <label className="form-span">
+                      Constraints
+                      <textarea value={dailyHuddle.constraints} onChange={(event) => setDailyHuddle({ ...dailyHuddle, constraints: event.target.value })} placeholder="Materials, information, access, equipment, or third-party dependencies." />
+                    </label>
+                    <label className="form-span">
+                      Blocking issues
+                      <textarea value={dailyHuddle.blockingIssues} onChange={(event) => setDailyHuddle({ ...dailyHuddle, blockingIssues: event.target.value })} placeholder="Only conditions that prevent planned work; one per line." />
+                    </label>
+                    <label className="checkbox-label form-span daily-stop-work">
+                      <input type="checkbox" checked={dailyHuddle.stopWorkRequired} onChange={(event) => setDailyHuddle({ ...dailyHuddle, stopWorkRequired: event.target.checked })} />
+                      Stop work until the retained blocking issues are resolved
+                    </label>
+                    <label className="form-span">
+                      Huddle evidence reference
+                      <input required minLength="3" maxLength="500" value={dailyHuddle.evidenceReference} onChange={(event) => setDailyHuddle({ ...dailyHuddle, evidenceReference: event.target.value })} placeholder="Signed sheet, attendance photo, or retained document reference" />
+                    </label>
+                  </div>
+                  <div className="modal-actions">
+                    <button className="primary-button" disabled={submitting}>
+                      <ClipboardCheck size={16} />
+                      {submitting ? 'Retaining...' : navigator.onLine === false ? 'Save huddle offline' : 'Retain start huddle'}
+                    </button>
+                  </div>
+                  <p className="attendance-policy">A released huddle is an internal coordination record. It does not create a permit, certify compliance, notify the crew, or authorize hazardous work.</p>
+                </form>
                 <form className="evidence-form daily-site-log" data-testid="daily-site-log-form" onSubmit={recordFieldDailyLog}>
                   <div className="panel-heading">
                     <div>
-                      <h2>Daily site log</h2>
-                      <p>Submit the site report, crew time card, and safety state as one retained ledger entry.</p>
+                      <h2>End-of-day report</h2>
+                      <p>Close an open huddle with plan-versus-actual evidence, time, safety state, unresolved actions, and tomorrow&apos;s handoff.</p>
                     </div>
                     {fieldScoped && operator.worker?.name ? <span className="tag tag-green">{operator.worker.name}</span> : null}
                   </div>
@@ -11587,7 +11903,7 @@ function App() {
                       <select
                         required
                         value={fieldDailyLog.jobId}
-                        onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, jobId: event.target.value })}
+                        onChange={(event) => void selectDailyCycleJob(event.target.value)}
                       >
                         <option value="">Select an active job</option>
                         {activeJobs.map((job) => (
@@ -11597,6 +11913,34 @@ function App() {
                         ))}
                       </select>
                     </label>
+                    <label>
+                      Open daily cycle
+                      <select
+                        required
+                        value={fieldDailyLog.cycleId}
+                        onChange={(event) => {
+                          const cycle = fieldDailyCycles.find(item => item.id === event.target.value)
+                          setFieldDailyLog({
+                            ...fieldDailyLog,
+                            cycleId: event.target.value,
+                            workDate: cycle?.workDate || fieldDailyLog.workDate,
+                            weather: cycle?.weather || fieldDailyLog.weather,
+                          })
+                        }}
+                      >
+                        <option value="">Select a released or blocked huddle</option>
+                        {fieldDailyCycles.filter(cycle => ['released', 'blocked'].includes(cycle.status)).map(cycle => (
+                          <option key={cycle.id} value={cycle.id}>{formatDate(cycle.workDate)} / {formatStatus(cycle.shiftLabel)} / {formatStatus(cycle.status)}</option>
+                        ))}
+                      </select>
+                    </label>
+                    {selectedDailyCycle ? (
+                      <div className={`daily-cycle-source form-span daily-cycle-source-${selectedDailyCycle.status}`}>
+                        <div><span>Production target</span><strong>{selectedDailyCycle.productionTarget}</strong></div>
+                        <div><span>Safety focus</span><strong>{selectedDailyCycle.safetyFocus}</strong></div>
+                        <div><span>Start state</span><strong>{formatStatus(selectedDailyCycle.status)}</strong></div>
+                      </div>
+                    ) : null}
                     {!fieldScoped ? (
                       <label>
                         Crew member
@@ -11683,6 +12027,54 @@ function App() {
                         placeholder="One blocker or follow-up per line."
                       />
                     </label>
+                    <label className="form-span checkbox-label daily-target-check">
+                      <input
+                        type="checkbox"
+                        checked={fieldDailyLog.planAchieved}
+                        onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, planAchieved: event.target.checked })}
+                      />
+                      The retained production target was achieved
+                    </label>
+                    {!fieldDailyLog.planAchieved ? (
+                      <label className="form-span">
+                        Reasons for variance
+                        <textarea
+                          required
+                          value={fieldDailyLog.varianceReasons}
+                          onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, varianceReasons: event.target.value })}
+                          placeholder="One source-grounded reason per line; do not infer causes."
+                        />
+                      </label>
+                    ) : null}
+                    <label className="form-span">
+                      Unresolved actions
+                      <textarea
+                        value={fieldDailyLog.unresolvedActions}
+                        onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, unresolvedActions: event.target.value })}
+                        placeholder="Owner, decision, material, access, quality, or safety action still open."
+                      />
+                    </label>
+                    <label className="form-span">
+                      Tomorrow&apos;s plan
+                      <textarea
+                        required
+                        minLength="3"
+                        maxLength="4000"
+                        value={fieldDailyLog.tomorrowPlan}
+                        onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, tomorrowPlan: event.target.value })}
+                        placeholder="Next work sequence, first handoff, and constraint-removal priority."
+                      />
+                    </label>
+                    <label className="form-span">
+                      EOD evidence references
+                      <textarea
+                        required
+                        minLength="3"
+                        value={fieldDailyLog.evidenceReferences}
+                        onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, evidenceReferences: event.target.value })}
+                        placeholder="Photo set, delivery ticket, inspection, measurement, or retained document reference; one per line."
+                      />
+                    </label>
                     <label className="form-span checkbox-label">
                       <input
                         type="checkbox"
@@ -11720,9 +12112,10 @@ function App() {
                   <div className="modal-actions">
                     <button className="primary-button" disabled={submitting}>
                       <ClipboardList size={16} />
-                      {submitting ? 'Submitting...' : navigator.onLine === false ? 'Save daily log offline' : 'Submit daily log'}
+                      {submitting ? 'Submitting...' : navigator.onLine === false ? 'Save EOD report offline' : 'Submit EOD report'}
                     </button>
                   </div>
+                  <p className="attendance-policy">Approval recognizes the retained daily evidence. It does not send a client update, change the schedule, order materials, or certify safety compliance.</p>
                 </form>
                 <form ref={fieldCaptureRef} className="evidence-form" data-testid="field-evidence-form" onSubmit={uploadEvidence}>
                   <div className="panel-heading">

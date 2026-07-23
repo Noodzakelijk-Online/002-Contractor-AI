@@ -1537,7 +1537,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(migrations.currentVersion, '060_daily_operating_cycles');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1618,12 +1618,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('059_crew_capacity_lookahead'));
+  assert.deepEqual(versions, Array(4).fill('060_daily_operating_cycles'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 59);
+    assert.equal(Number(migrationCount.count), 60);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -2268,7 +2268,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2671,7 +2671,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2779,7 +2779,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2878,7 +2878,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2965,7 +2965,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
   } finally {
     ledger?.close();
   }
@@ -3070,7 +3070,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -3136,7 +3136,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
   } finally {
     ledger.close();
   }
@@ -3191,7 +3191,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
   } finally {
     ledger.close();
   }
@@ -3283,7 +3283,7 @@ test('PostgreSQL crew capacity preserves source-current two-week approval and re
       reason: 'Hosted source-current two-week capacity plan verified.'
     });
     assert.equal(ledger.listCrewCapacityBoard({ referenceDate: windowStart }).plans.current, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
   } finally {
     ledger.close();
   }
@@ -3295,6 +3295,94 @@ test('PostgreSQL crew capacity preserves source-current two-week approval and re
     assert.equal(retained.status, 'approved');
     assert.equal(retained.integrityValid, true);
     assert.equal(ledger.listCrewCapacityBoard({ referenceDate: windowStart }).plans.current, true);
+    assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL daily operating cycle preserves approval-linked huddle and EOD integrity across restart', { skip: !connectionString }, () => {
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const workDate = new Date().toISOString().slice(0, 10);
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  let cycleId;
+  let jobId;
+  try {
+    const worker = ledger.upsertWorker({
+      name: `Hosted daily lead ${marker}`,
+      role: 'Site lead',
+      status: 'available',
+      hourlyRate: 68
+    }, { actor: 'postgres_daily_operator' });
+    const job = ledger.createIntake({
+      title: `Hosted daily operating cycle ${marker}`,
+      client: { name: `Hosted daily client ${marker}`, country: 'NL' },
+      status: 'scheduled',
+      assignAutomatically: false
+    }, { actor: 'postgres_daily_operator' });
+    jobId = job.id;
+    ledger.addAssignment(job.id, {
+      workerId: worker.id,
+      role: 'Site lead',
+      status: 'assigned'
+    });
+    const started = ledger.createDailyStartHuddle(job.id, {
+      entryKey: `postgres-daily-huddle-${marker}`,
+      workDate,
+      shiftLabel: 'day',
+      facilitator: worker.name,
+      leadWorkerId: worker.id,
+      workerIds: [worker.id],
+      plannedWork: 'Install and inspect the retained hosted service wall.',
+      productionTarget: 'Complete twelve linear metres.',
+      weather: 'clear',
+      siteConditions: 'Hosted contract test work zone.',
+      safetyFocus: 'Keep the access route separated from the work zone.',
+      qualityHoldPoints: ['Verify services before closing the wall'],
+      constraints: [],
+      blockingIssues: [],
+      evidenceReference: `postgres-huddle-evidence-${marker}`
+    }, { actor: 'postgres_daily_operator' });
+    cycleId = started.cycle.id;
+    assert.equal(started.cycle.status, 'released');
+    assert.equal(started.cycle.huddleIntegrityValid, true);
+
+    const ended = ledger.closeDailyOperatingCycle(job.id, cycleId, {
+      entryKey: `postgres-daily-eod-${marker}`,
+      workerId: worker.id,
+      hours: 8,
+      manpower: 2,
+      weather: 'clear',
+      workCompleted: 'Completed and checked the retained hosted service wall.',
+      blockers: [],
+      safetyConcern: false,
+      planAchieved: true,
+      varianceReasons: [],
+      unresolvedActions: [],
+      tomorrowPlan: 'Start the next retained work package after the opening huddle.',
+      evidenceReferences: [`postgres-progress-evidence-${marker}`]
+    }, { actor: 'postgres_daily_operator' });
+    assert.equal(ended.cycle.status, 'pending_approval');
+    assert.equal(ended.cycle.integrityValid, true);
+    ledger.resolveApproval(ended.dailyLog.fieldReport.approvalId, {
+      status: 'approved',
+      resolvedBy: 'postgres_daily_approver',
+      reason: 'Hosted plan-versus-actual evidence verified.'
+    });
+    assert.equal(ledger.getDailyOperatingCycle(cycleId).status, 'closed');
+    assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
+  } finally {
+    ledger.close();
+  }
+
+  ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const retained = ledger.getDailyOperatingCycle(cycleId, { jobId });
+    assert.equal(retained.status, 'closed');
+    assert.equal(retained.approvalStatus, 'approved');
+    assert.equal(retained.huddleIntegrityValid, true);
+    assert.equal(retained.endOfDayIntegrityValid, true);
+    assert.equal(retained.integrityValid, true);
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();

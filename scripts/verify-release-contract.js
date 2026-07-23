@@ -207,6 +207,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '059_crew_capacity_lookahead'")) {
     failures.push('Canonical crew-capacity and two-week look-ahead migration is missing.');
   }
+  if (!ledgerSource.includes("version: '060_daily_operating_cycles'")) {
+    failures.push('Canonical daily start-huddle and end-of-day operating-cycle migration is missing.');
+  }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
   }

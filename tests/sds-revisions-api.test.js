@@ -205,5 +205,5 @@ test('SDS revision API enforces source upload, approval, role scope, and field-s
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '059_crew_capacity_lookahead');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '060_daily_operating_cycles');
 });

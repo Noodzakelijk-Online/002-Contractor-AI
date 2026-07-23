@@ -156,7 +156,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -170,7 +170,11 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(dashboardSource, /'Idempotency-Key': id \|\| createFieldEvidenceDraftId\(\)/);
   assert.match(dashboardSource, /shouldQueueFieldMutation\(requestError\)/);
   assert.match(dashboardSource, /window\.addEventListener\('online', handleOnline\)/);
-  assert.match(dashboardSource, /Save daily log offline/);
+  assert.match(dashboardSource, /window\.addEventListener\('offline', updateNetworkState\)/);
+  assert.match(dashboardSource, /networkOnline \? \(fieldScoped \? 'Field scope' : 'Local-first'\) : 'Offline queue'/);
+  assert.match(dashboardSource, /navigator\.onLine === false && hasLoadedDataRef\.current/);
+  assert.match(dashboardSource, /Save huddle offline/);
+  assert.match(dashboardSource, /Save EOD report offline/);
   assert.match(dashboardSource, /Save progress offline/);
   assert.match(dashboardSource, /Save checklist offline/);
   assert.match(dashboardSource, /Save observation offline/);

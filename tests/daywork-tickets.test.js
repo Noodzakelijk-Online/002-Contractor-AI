@@ -165,7 +165,7 @@ test('daywork quantities flow through source-bound approval, receipt acknowledge
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
   const diagnostics = ledger.diagnose();
   assert.equal(diagnostics.valid, true, JSON.stringify(diagnostics.issues));
-  assert.equal(diagnostics.migrations.currentVersion, '059_crew_capacity_lookahead');
+  assert.equal(diagnostics.migrations.currentVersion, '060_daily_operating_cycles');
   assert.equal(diagnostics.counts.dayworkTickets, 1);
   assert.equal(ledger.dashboardSummary().metrics.dayworkTickets, 1);
 });

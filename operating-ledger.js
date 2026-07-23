@@ -1108,6 +1108,7 @@ const AUDIT_CHAIN_GENESIS_HASH = '0'.repeat(64);
 const SCHEDULE_BASELINE_FORMAT = 'contractor-ai-schedule-baseline/v1';
 const CREW_CAPACITY_PROFILE_FORMAT = 'contractor-ai-crew-capacity-profile/v1';
 const CREW_LOOKAHEAD_FORMAT = 'contractor-ai-crew-lookahead/v1';
+const DAILY_OPERATING_CYCLE_FORMAT = 'contractor-ai-daily-operating-cycle/v1';
 const CREW_LOOKAHEAD_DAYS = 14;
 const CREW_CAPACITY_DAY_KEYS = Object.freeze(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
 const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
@@ -1563,6 +1564,12 @@ function canonicalJson(value) {
 
 function sha256Json(value) {
   return crypto.createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+}
+
+function retainedSnapshotSourceHash(snapshot, excludedKeys = []) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  const excluded = new Set(excludedKeys);
+  return sha256Json(Object.fromEntries(Object.entries(snapshot).filter(([key]) => !excluded.has(key))));
 }
 
 function escapeHtml(value) {
@@ -5135,6 +5142,66 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           WHERE status = 'pending_approval';
         CREATE INDEX IF NOT EXISTS idx_crew_lookahead_history
           ON crew_lookahead_plans(version_number DESC, updated_at DESC);
+      `);
+    }
+  },
+  {
+    version: '060_daily_operating_cycles',
+    description: 'Retain source-bound daily start huddles and approval-linked end-of-day operating reports.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS daily_operating_cycles (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          work_date TEXT NOT NULL,
+          shift_label TEXT NOT NULL DEFAULT 'day',
+          status TEXT NOT NULL,
+          facilitator TEXT NOT NULL,
+          lead_worker_id TEXT REFERENCES workers(id) ON DELETE SET NULL,
+          crew_json TEXT NOT NULL DEFAULT '[]',
+          planned_work TEXT NOT NULL,
+          production_target TEXT NOT NULL,
+          weather TEXT,
+          site_conditions TEXT,
+          safety_focus TEXT NOT NULL,
+          quality_hold_points_json TEXT NOT NULL DEFAULT '[]',
+          constraints_json TEXT NOT NULL DEFAULT '[]',
+          blocking_issues_json TEXT NOT NULL DEFAULT '[]',
+          stop_work_required INTEGER NOT NULL DEFAULT 0,
+          evidence_reference TEXT NOT NULL,
+          planning_source_json TEXT NOT NULL DEFAULT '{}',
+          huddle_source_hash TEXT NOT NULL,
+          huddle_snapshot_hash TEXT NOT NULL,
+          huddle_snapshot_json TEXT NOT NULL,
+          huddle_entry_key TEXT NOT NULL UNIQUE,
+          huddle_entry_fingerprint TEXT NOT NULL,
+          field_report_id TEXT REFERENCES field_reports(id) ON DELETE SET NULL,
+          time_log_id TEXT REFERENCES time_logs(id) ON DELETE SET NULL,
+          safety_check_id TEXT REFERENCES safety_checks(id) ON DELETE SET NULL,
+          plan_achieved INTEGER,
+          variance_reasons_json TEXT NOT NULL DEFAULT '[]',
+          unresolved_actions_json TEXT NOT NULL DEFAULT '[]',
+          tomorrow_plan TEXT,
+          end_evidence_references_json TEXT NOT NULL DEFAULT '[]',
+          eod_source_hash TEXT,
+          eod_snapshot_hash TEXT,
+          eod_snapshot_json TEXT,
+          eod_entry_key TEXT UNIQUE,
+          eod_entry_fingerprint TEXT,
+          closed_at TEXT,
+          closed_by TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(job_id, work_date, shift_label)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_operating_cycles_job_date
+          ON daily_operating_cycles(job_id, work_date DESC, shift_label);
+        CREATE INDEX IF NOT EXISTS idx_daily_operating_cycles_status_date
+          ON daily_operating_cycles(status, work_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_daily_operating_cycles_field_report
+          ON daily_operating_cycles(field_report_id)
+          WHERE field_report_id IS NOT NULL;
       `);
     }
   }
@@ -19890,6 +19957,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           workerId: payload.workerId || payload.worker_id || null,
           workerName: payload.workerName || payload.worker_name || null,
           safetyStatus: payload.safetyStatus || payload.safety_status || null,
+          dailyCycleId: payload.dailyCycleId || payload.daily_cycle_id || null,
+          planAchieved: payload.planAchieved === undefined && payload.plan_achieved === undefined
+            ? null
+            : normalizeBoolean(payload.planAchieved ?? payload.plan_achieved, false),
+          varianceReasons: normalizeList(payload.varianceReasons || payload.variance_reasons),
+          unresolvedActions: normalizeList(payload.unresolvedActions || payload.unresolved_actions),
+          tomorrowPlan: normalizeText(payload.tomorrowPlan || payload.tomorrow_plan, '') || null,
+          evidenceReferences: normalizeList(payload.evidenceReferences || payload.evidence_references),
           requestedStatus,
           requiresApproval,
           clientVisible: normalizeBoolean(payload.clientVisible, false),
@@ -27318,7 +27393,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         blockers,
         safetyConcern,
         safetyRiskLevel,
-        safetyNotes
+        safetyNotes,
+        dailyCycleId: normalizeText(payload.dailyCycleId || payload.daily_cycle_id, '') || null,
+        planAchieved: payload.planAchieved === undefined && payload.plan_achieved === undefined
+          ? null
+          : normalizeBoolean(payload.planAchieved ?? payload.plan_achieved, false),
+        varianceReasons: normalizeList(payload.varianceReasons || payload.variance_reasons),
+        unresolvedActions: normalizeList(payload.unresolvedActions || payload.unresolved_actions),
+        tomorrowPlan: normalizeText(payload.tomorrowPlan || payload.tomorrow_plan, '') || null,
+        evidenceReferences: normalizeList(payload.evidenceReferences || payload.evidence_references)
       })).digest('hex');
 
       const existingDetail = this.getJobDetail(jobId);
@@ -27364,7 +27447,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         workCompleted,
         blockers,
         notes: safetyConcern ? `Safety concern recorded: ${safetyNotes}` : 'Daily field safety state recorded as clear.',
-        safetyStatus: safetyConcern ? 'concern' : 'clear'
+        safetyStatus: safetyConcern ? 'concern' : 'clear',
+        dailyCycleId: payload.dailyCycleId || payload.daily_cycle_id || null,
+        planAchieved: payload.planAchieved ?? payload.plan_achieved,
+        varianceReasons: payload.varianceReasons || payload.variance_reasons,
+        unresolvedActions: payload.unresolvedActions || payload.unresolved_actions,
+        tomorrowPlan: payload.tomorrowPlan || payload.tomorrow_plan,
+        evidenceReferences: payload.evidenceReferences || payload.evidence_references
       }, { actor, audit: false });
       const timeLog = this.addTimeLog(jobId, {
         workerId,
@@ -27426,6 +27515,407 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         externalCommitments: 0,
         replayed: false
       };
+    });
+  }
+
+  dailyPlanningSource(jobId, workDate) {
+    const planRow = this.db.prepare(`
+      SELECT * FROM crew_lookahead_plans
+      WHERE status = 'approved' AND window_start <= ? AND window_end >= ?
+      ORDER BY version_number DESC LIMIT 1
+    `).get(workDate, workDate);
+    const plan = planRow ? this.mapCrewLookaheadPlan(planRow) : null;
+    const allocations = this.db.prepare(`
+      SELECT allocations.*, workers.name AS worker_name, job_tasks.title AS task_title
+      FROM crew_capacity_allocations allocations
+      JOIN workers ON workers.id = allocations.worker_id
+      LEFT JOIN job_tasks ON job_tasks.id = allocations.task_id
+      WHERE allocations.job_id = ? AND allocations.work_date = ? AND allocations.status = 'active'
+      ORDER BY workers.name, allocations.created_at
+    `).all(jobId, workDate).map(row => ({
+      id: row.id,
+      workerId: row.worker_id,
+      workerName: row.worker_name,
+      assignmentId: row.assignment_id,
+      taskId: row.task_id || null,
+      taskTitle: row.task_title || null,
+      plannedHours: normalizeNumber(row.planned_hours, 0),
+      entryFingerprint: row.entry_fingerprint
+    }));
+    const activePermits = this.db.prepare(`
+      SELECT id, source_hash, snapshot_hash FROM permit_records
+      WHERE job_id = ? AND status = 'active' AND source_hash IS NOT NULL
+      ORDER BY created_at
+    `).all(jobId).map(row => ({ id: row.id, sourceHash: row.source_hash, snapshotHash: row.snapshot_hash }));
+    const preTaskPlans = this.db.prepare(`
+      SELECT id, source_hash, snapshot_hash FROM pre_task_plans
+      WHERE job_id = ? AND work_date = ? AND status = 'active'
+      ORDER BY created_at
+    `).all(jobId, workDate).map(row => ({ id: row.id, sourceHash: row.source_hash, snapshotHash: row.snapshot_hash }));
+    return {
+      lookaheadPlan: plan ? {
+        id: plan.id,
+        versionNumber: plan.versionNumber,
+        sourceHash: plan.sourceHash,
+        snapshotHash: plan.snapshotHash,
+        integrityValid: plan.integrityValid
+      } : null,
+      allocations,
+      activePermits,
+      preTaskPlans
+    };
+  }
+
+  listDailyOperatingCycles(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.jobId || filters.job_id) {
+      conditions.push('cycles.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    if (filters.workDate || filters.work_date) {
+      conditions.push('cycles.work_date = ?');
+      values.push(normalizeRetainedDate(filters.workDate || filters.work_date, {
+        required: true,
+        label: 'Daily cycle work date',
+        code: 'daily_cycle_work_date_invalid'
+      }));
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('cycles.status = ?');
+      values.push(status);
+    }
+    const limit = Math.max(1, Math.min(5_000, Math.round(normalizeNumber(filters.limit, 500))));
+    return this.db.prepare(`
+      SELECT cycles.*, field_reports.status AS field_report_status,
+        field_reports.approval_id AS field_report_approval_id,
+        approvals.status AS field_report_approval_status
+      FROM daily_operating_cycles cycles
+      LEFT JOIN field_reports ON field_reports.id = cycles.field_report_id
+      LEFT JOIN approvals ON approvals.id = field_reports.approval_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY cycles.work_date DESC, cycles.shift_label, cycles.created_at DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapDailyOperatingCycle(row));
+  }
+
+  getDailyOperatingCycle(cycleId, options = {}) {
+    const row = this.db.prepare(`
+      SELECT cycles.*, field_reports.status AS field_report_status,
+        field_reports.approval_id AS field_report_approval_id,
+        approvals.status AS field_report_approval_status
+      FROM daily_operating_cycles cycles
+      LEFT JOIN field_reports ON field_reports.id = cycles.field_report_id
+      LEFT JOIN approvals ON approvals.id = field_reports.approval_id
+      WHERE cycles.id = ? ${options.jobId ? 'AND cycles.job_id = ?' : ''}
+    `).get(...(options.jobId ? [cycleId, options.jobId] : [cycleId]));
+    if (!row) throw ledgerInputError('daily_cycle_not_found', 'Daily operating cycle not found for this job.', { cycleId }, 404);
+    return this.mapDailyOperatingCycle(row);
+  }
+
+  createDailyStartHuddle(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const workDate = normalizeRetainedDate(payload.workDate || payload.work_date, {
+        required: true,
+        label: 'Start huddle work date',
+        code: 'daily_huddle_work_date_invalid'
+      });
+      const shiftLabel = normalizeText(payload.shiftLabel || payload.shift_label, 'day');
+      if (shiftLabel.length > 80) throw ledgerInputError('daily_huddle_shift_invalid', 'Shift label must contain 80 characters or fewer.');
+      const facilitator = normalizeText(payload.facilitator, '');
+      if (facilitator.length < 2 || facilitator.length > 160) {
+        throw ledgerInputError('daily_huddle_facilitator_invalid', 'Start huddle facilitator must contain 2 to 160 characters.');
+      }
+      const plannedWork = normalizeText(payload.plannedWork || payload.planned_work, '');
+      const productionTarget = normalizeText(payload.productionTarget || payload.production_target, '');
+      const safetyFocus = normalizeText(payload.safetyFocus || payload.safety_focus, '');
+      if (plannedWork.length < 8 || plannedWork.length > 4_000) {
+        throw ledgerInputError('daily_huddle_plan_invalid', 'Planned work must contain 8 to 4,000 characters.');
+      }
+      if (productionTarget.length < 3 || productionTarget.length > 1_000) {
+        throw ledgerInputError('daily_huddle_target_invalid', 'Production target must contain 3 to 1,000 characters.');
+      }
+      if (safetyFocus.length < 5 || safetyFocus.length > 2_000) {
+        throw ledgerInputError('daily_huddle_safety_focus_invalid', 'Safety focus must contain 5 to 2,000 characters.');
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('daily_huddle_evidence_required', 'Start huddle evidence reference must contain 3 to 500 characters.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('daily_huddle_entry_key_invalid', 'Start huddle replay key must contain 8 to 200 safe characters.');
+      }
+      const workerIds = [...new Set(normalizeList(payload.workerIds || payload.worker_ids || payload.crewWorkerIds || payload.crew_worker_ids)
+        .map(value => normalizeText(value, '')).filter(Boolean))];
+      if (!workerIds.length || workerIds.length > 100) {
+        throw ledgerInputError('daily_huddle_crew_required', 'Start huddle must retain between 1 and 100 crew members.');
+      }
+      const inactiveAssignmentStatuses = new Set(['released', 'cancelled', 'completed', 'closed', 'rejected', 'declined', 'offline']);
+      const crew = workerIds.map(workerId => {
+        const worker = this.getWorker(workerId);
+        if (['retired', 'inactive'].includes(worker.status)) {
+          throw ledgerInputError('daily_huddle_worker_inactive', `${worker.name} is not active and cannot be retained in a start huddle.`, { workerId }, 409);
+        }
+        const assignmentRows = this.db.prepare(`
+          SELECT * FROM assignments WHERE job_id = ? AND worker_id = ? ORDER BY updated_at DESC
+        `).all(jobId, workerId);
+        const assignment = assignmentRows.find(row => !inactiveAssignmentStatuses.has(normalizeStatus(row.status, 'assigned'))) || null;
+        return {
+          workerId: worker.id,
+          workerName: worker.name,
+          role: worker.role,
+          assignmentId: assignment?.id || null,
+          assignmentStatus: assignment?.status || null
+        };
+      });
+      const explicitBlockingIssues = normalizeList(payload.blockingIssues || payload.blocking_issues).map(item => normalizeText(item, '')).filter(Boolean);
+      const assignmentBlockingIssues = crew.filter(member => !member.assignmentId)
+        .map(member => `${member.workerName} has no active retained assignment for this job.`);
+      const blockingIssues = [...new Set([...explicitBlockingIssues, ...assignmentBlockingIssues])];
+      const stopWorkRequired = normalizeBoolean(payload.stopWorkRequired ?? payload.stop_work_required, false);
+      if (stopWorkRequired && !blockingIssues.length) {
+        throw ledgerInputError('daily_huddle_stop_work_reason_required', 'A stop-work huddle must retain at least one blocking issue.');
+      }
+      const qualityHoldPoints = normalizeList(payload.qualityHoldPoints || payload.quality_hold_points);
+      const constraints = normalizeList(payload.constraints);
+      const planningSource = this.dailyPlanningSource(jobId, workDate);
+      const normalized = {
+        jobId,
+        workDate,
+        shiftLabel,
+        facilitator,
+        leadWorkerId: normalizeText(payload.leadWorkerId || payload.lead_worker_id, '') || crew[0].workerId,
+        crew,
+        plannedWork,
+        productionTarget,
+        weather: normalizeText(payload.weather, '') || null,
+        siteConditions: normalizeText(payload.siteConditions || payload.site_conditions, '') || null,
+        safetyFocus,
+        qualityHoldPoints,
+        constraints,
+        blockingIssues,
+        stopWorkRequired,
+        evidenceReference,
+        planningSource
+      };
+      if (!crew.some(member => member.workerId === normalized.leadWorkerId)) {
+        throw ledgerInputError('daily_huddle_lead_not_in_crew', 'The retained huddle lead must be included in the huddle crew.');
+      }
+      const entryFingerprint = sha256Json(normalized);
+      const replayRow = this.db.prepare('SELECT * FROM daily_operating_cycles WHERE huddle_entry_key = ?').get(entryKey);
+      if (replayRow) {
+        if (replayRow.job_id !== jobId || replayRow.huddle_entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('daily_huddle_entry_key_reused', 'Start huddle replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { cycle: this.getDailyOperatingCycle(replayRow.id, { jobId }), replayed: true, externalCommitments: 0 };
+      }
+      const existing = this.db.prepare('SELECT id FROM daily_operating_cycles WHERE job_id = ? AND work_date = ? AND shift_label = ?')
+        .get(jobId, workDate, shiftLabel);
+      if (existing) {
+        throw ledgerInputError('daily_huddle_shift_exists', 'A start huddle is already retained for this job, date, and shift.', { cycleId: existing.id }, 409);
+      }
+      const id = makeId('daily_cycle');
+      const timestamp = nowIso();
+      const status = stopWorkRequired || blockingIssues.length ? 'blocked' : 'released';
+      const sourceBasis = { format: DAILY_OPERATING_CYCLE_FORMAT, cycleId: id, ...normalized };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis,
+        sourceHash,
+        status,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          internalDailyControlOnly: true,
+          workPermitCreated: false,
+          complianceCertified: false,
+          crewNotifications: 0,
+          clientCommitments: 0,
+          supplierCommitments: 0,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO daily_operating_cycles (
+          id, job_id, work_date, shift_label, status, facilitator, lead_worker_id, crew_json,
+          planned_work, production_target, weather, site_conditions, safety_focus,
+          quality_hold_points_json, constraints_json, blocking_issues_json, stop_work_required,
+          evidence_reference, planning_source_json, huddle_source_hash, huddle_snapshot_hash,
+          huddle_snapshot_json, huddle_entry_key, huddle_entry_fingerprint, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, workDate, shiftLabel, status, facilitator, normalized.leadWorkerId, toJson(crew, []),
+        plannedWork, productionTarget, normalized.weather, normalized.siteConditions, safetyFocus,
+        toJson(qualityHoldPoints, []), toJson(constraints, []), toJson(blockingIssues, []), stopWorkRequired ? 1 : 0,
+        evidenceReference, toJson(planningSource, {}), sourceHash, snapshotHash, snapshotJson,
+        entryKey, entryFingerprint, toJson({ jobTitle: job.title, externalCommitments: 0 }), timestamp, timestamp
+      );
+      const cycle = this.getDailyOperatingCycle(id, { jobId });
+      this.audit({
+        entityType: 'daily_operating_cycle',
+        entityId: id,
+        jobId,
+        action: 'retain_daily_start_huddle',
+        actor,
+        after: cycle,
+        metadata: { status, crewCount: crew.length, sourceHash, snapshotHash, entryKey, externalCommitments: 0 }
+      });
+      return { cycle, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  closeDailyOperatingCycle(jobId, cycleId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM daily_operating_cycles WHERE id = ? AND job_id = ?').get(cycleId, jobId);
+      if (!row) throw ledgerInputError('daily_cycle_not_found', 'Daily operating cycle not found for this job.', { cycleId }, 404);
+      const before = this.getDailyOperatingCycle(cycleId, { jobId });
+      if (!before.huddleIntegrityValid) {
+        throw ledgerInputError('daily_huddle_integrity_failed', 'The retained start huddle failed integrity verification.', { cycleId }, 409);
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('daily_eod_entry_key_invalid', 'End-of-day replay key must contain 8 to 200 safe characters.');
+      }
+      const planAchieved = normalizeBoolean(payload.planAchieved ?? payload.plan_achieved, false);
+      const varianceReasons = normalizeList(payload.varianceReasons || payload.variance_reasons);
+      if (!planAchieved && !varianceReasons.length) {
+        throw ledgerInputError('daily_eod_variance_required', 'Record at least one reason when the daily production plan was not achieved.');
+      }
+      const unresolvedActions = normalizeList(payload.unresolvedActions || payload.unresolved_actions);
+      const tomorrowPlan = normalizeText(payload.tomorrowPlan || payload.tomorrow_plan, '');
+      if (tomorrowPlan.length < 3 || tomorrowPlan.length > 4_000) {
+        throw ledgerInputError('daily_eod_tomorrow_plan_invalid', 'Tomorrow plan must contain 3 to 4,000 characters.');
+      }
+      const evidenceReferences = normalizeList(payload.evidenceReferences || payload.evidence_references || payload.evidenceReference || payload.evidence_reference);
+      if (!evidenceReferences.length || evidenceReferences.some(reference => normalizeText(reference, '').length < 3)) {
+        throw ledgerInputError('daily_eod_evidence_required', 'End-of-day report requires at least one retained evidence reference.');
+      }
+      const dailyPayload = {
+        ...payload,
+        entryKey,
+        workDate: before.workDate,
+        dailyCycleId: cycleId,
+        planAchieved,
+        varianceReasons,
+        unresolvedActions,
+        tomorrowPlan,
+        evidenceReferences
+      };
+      const entryFingerprint = sha256Json({
+        cycleId,
+        huddleSnapshotHash: before.huddleSnapshotHash,
+        workerId: normalizeText(dailyPayload.workerId || dailyPayload.worker_id, '') || null,
+        workDate: before.workDate,
+        hours: normalizeNumber(dailyPayload.hours, 0),
+        manpower: Math.round(normalizeNumber(dailyPayload.manpower, 1)),
+        weather: normalizeText(dailyPayload.weather, 'clear'),
+        workCompleted: normalizeText(dailyPayload.workCompleted || dailyPayload.work_completed || dailyPayload.notes, ''),
+        blockers: normalizeList(dailyPayload.blockers),
+        safetyConcern: normalizeBoolean(dailyPayload.safetyConcern ?? dailyPayload.safety_concern, false),
+        safetyRiskLevel: normalizePriority(dailyPayload.safetyRiskLevel || dailyPayload.safety_risk_level || 'high'),
+        safetyNotes: normalizeText(dailyPayload.safetyNotes || dailyPayload.safety_notes, ''),
+        planAchieved,
+        varianceReasons,
+        unresolvedActions,
+        tomorrowPlan,
+        evidenceReferences
+      });
+      const replay = this.db.prepare('SELECT * FROM daily_operating_cycles WHERE eod_entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.id !== cycleId || replay.eod_entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('daily_eod_entry_key_reused', 'End-of-day replay key was already used for different content.', { entryKey }, 409);
+        }
+        const cycle = this.getDailyOperatingCycle(cycleId, { jobId });
+        const detail = this.getJobDetail(jobId);
+        return {
+          cycle,
+          dailyLog: {
+            entryKey,
+            jobId,
+            fieldReport: detail.fieldReports.find(record => record.id === cycle.fieldReportId) || null,
+            timeLog: detail.timeLogs.find(record => record.id === cycle.timeLogId) || null,
+            safetyCheck: detail.safetyChecks.find(record => record.id === cycle.safetyCheckId) || null,
+            approvals: [cycle.approvalId].filter(Boolean),
+            externalCommitments: 0,
+            replayed: true
+          },
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      if (row.eod_entry_key || !['released', 'blocked'].includes(row.status)) {
+        throw ledgerInputError('daily_eod_state_conflict', `End-of-day report cannot be retained from ${row.status}.`, { cycleId, status: row.status }, 409);
+      }
+      const dailyLog = this.recordFieldDailyLog(jobId, dailyPayload, { actor });
+      const timestamp = nowIso();
+      const sourceBasis = {
+        format: DAILY_OPERATING_CYCLE_FORMAT,
+        cycleId,
+        jobId,
+        workDate: before.workDate,
+        huddleSourceHash: before.huddleSourceHash,
+        huddleSnapshotHash: before.huddleSnapshotHash,
+        fieldReportId: dailyLog.fieldReport.id,
+        timeLogId: dailyLog.timeLog.id,
+        safetyCheckId: dailyLog.safetyCheck.id,
+        planAchieved,
+        varianceReasons,
+        unresolvedActions,
+        tomorrowPlan,
+        evidenceReferences
+      };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis,
+        sourceHash,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        fieldReportApprovalId: dailyLog.fieldReport.approvalId || null,
+        safetyApprovalId: dailyLog.safetyCheck.approval?.id || null,
+        safeguards: {
+          approvalRequired: true,
+          clientUpdateSent: false,
+          scheduleCommitmentCreated: false,
+          supplierCommitmentCreated: false,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        UPDATE daily_operating_cycles
+        SET status = 'pending_approval', field_report_id = ?, time_log_id = ?, safety_check_id = ?,
+          plan_achieved = ?, variance_reasons_json = ?, unresolved_actions_json = ?, tomorrow_plan = ?,
+          end_evidence_references_json = ?, eod_source_hash = ?, eod_snapshot_hash = ?, eod_snapshot_json = ?,
+          eod_entry_key = ?, eod_entry_fingerprint = ?, closed_by = ?, data_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        dailyLog.fieldReport.id, dailyLog.timeLog.id, dailyLog.safetyCheck.id, planAchieved ? 1 : 0,
+        toJson(varianceReasons, []), toJson(unresolvedActions, []), tomorrowPlan,
+        toJson(evidenceReferences, []), sourceHash, snapshotHash, snapshotJson, entryKey, entryFingerprint,
+        actor, toJson({ ...fromJson(row.data_json, {}), approvals: dailyLog.approvals, externalCommitments: 0 }), timestamp, cycleId
+      );
+      const cycle = this.getDailyOperatingCycle(cycleId, { jobId });
+      this.audit({
+        entityType: 'daily_operating_cycle',
+        entityId: cycleId,
+        jobId,
+        action: 'retain_daily_end_of_day_report',
+        actor,
+        before,
+        after: cycle,
+        metadata: { fieldReportId: dailyLog.fieldReport.id, approvalIds: dailyLog.approvals, sourceHash, snapshotHash, entryKey, externalCommitments: 0 }
+      });
+      return { cycle, dailyLog, replayed: false, externalCommitments: 0 };
     });
   }
 
@@ -40397,6 +40887,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             before.target_id
           );
         }
+      } else if (before.target_type === 'field_report') {
+        this.db.prepare('UPDATE field_reports SET status = ?, updated_at = ? WHERE id = ? AND status = ?')
+          .run(status, timestamp, before.target_id, 'pending_approval');
+        this.db.prepare(`
+          UPDATE daily_operating_cycles
+          SET status = 'eod_rejected', data_json = ?, updated_at = ?
+          WHERE field_report_id = ? AND status IN ('pending_approval', 'pending_safety_review')
+        `).run(toJson({
+          approvalResolution: {
+            approvalId,
+            status,
+            resolvedAt: timestamp,
+            resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+            reason: payload.reason || payload.notes || null
+          },
+          externalCommitments: 0
+        }), timestamp, before.target_id);
       } else if (before.target_type === 'client_portal_access') {
         this.db.prepare(`
           UPDATE client_portal_access
@@ -41846,6 +42353,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ? requestedStatus
         : 'submitted';
       this.db.prepare('UPDATE field_reports SET status = ?, updated_at = ? WHERE id = ?').run(approvedStatus, timestamp, targetId);
+      const dailyCycle = this.db.prepare('SELECT * FROM daily_operating_cycles WHERE field_report_id = ?').get(targetId);
+      if (dailyCycle) {
+        const safetyCheck = dailyCycle.safety_check_id
+          ? this.db.prepare('SELECT status FROM safety_checks WHERE id = ?').get(dailyCycle.safety_check_id)
+          : null;
+        const cycleStatus = safetyCheck?.status === 'pending_review' ? 'pending_safety_review' : 'closed';
+        this.db.prepare(`
+          UPDATE daily_operating_cycles
+          SET status = ?, closed_at = CASE WHEN ? = 'closed' THEN COALESCE(closed_at, ?) ELSE closed_at END,
+            updated_at = ? WHERE id = ?
+        `).run(cycleStatus, cycleStatus, timestamp, timestamp, dailyCycle.id);
+      }
     } else if (targetType === 'rfi_record') {
       const rfi = this.db.prepare('SELECT response, data_json FROM rfi_records WHERE id = ?').get(targetId);
       const requestedStatus = normalizeStatus(fromJson(rfi?.data_json, {}).requestedStatus, 'closed');
@@ -42444,6 +42963,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     } else if (targetType === 'safety_check') {
       this.db.prepare("UPDATE safety_checks SET status = 'approved', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?")
         .run(timestamp, timestamp, targetId);
+      const dailyCycle = this.db.prepare('SELECT * FROM daily_operating_cycles WHERE safety_check_id = ?').get(targetId);
+      if (dailyCycle?.field_report_id) {
+        const fieldReport = this.db.prepare('SELECT status FROM field_reports WHERE id = ?').get(dailyCycle.field_report_id);
+        if (fieldReport && fieldReport.status !== 'pending_approval') {
+          this.db.prepare("UPDATE daily_operating_cycles SET status = 'closed', closed_at = COALESCE(closed_at, ?), updated_at = ? WHERE id = ?")
+            .run(timestamp, timestamp, dailyCycle.id);
+        }
+      }
     } else if (targetType === 'inspection_record') {
       const inspection = this.db.prepare('SELECT approval_id, data_json FROM inspection_records WHERE id = ?').get(targetId);
       const inspectionData = fromJson(inspection?.data_json, {});
@@ -46264,6 +46791,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       dayworkTickets: this.listDayworkTickets({ jobId, limit: 500 }),
       changeOrders: this.db.prepare('SELECT * FROM change_orders WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapChangeOrder(row)),
       fieldReports: this.db.prepare('SELECT * FROM field_reports WHERE job_id = ? ORDER BY report_date DESC, created_at DESC').all(jobId).map(row => this.mapFieldReport(row)),
+      dailyOperatingCycles: this.listDailyOperatingCycles({ jobId, limit: 500 }),
       rfis: this.db.prepare('SELECT * FROM rfi_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRfi(row)),
       submittals: this.db.prepare('SELECT * FROM submittal_records WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapSubmittal(row)),
       transmittals: this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC').all(jobId)
@@ -48023,6 +48551,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     const today = nowIso().slice(0, 10);
+    const dailyCycleJobs = this.db.prepare(`
+      SELECT jobs.id, jobs.title, cycles.id AS cycle_id, cycles.status AS cycle_status,
+        cycles.huddle_snapshot_hash, cycles.updated_at AS cycle_updated_at
+      FROM jobs
+      LEFT JOIN daily_operating_cycles cycles
+        ON cycles.job_id = jobs.id AND cycles.work_date = ? AND cycles.shift_label = 'day'
+      WHERE jobs.status IN ('scheduled', 'in_progress')
+      ORDER BY jobs.updated_at DESC
+      LIMIT 10
+    `).all(today);
+    for (const job of dailyCycleJobs) {
+      const actionKind = job.cycle_id ? 'end_of_day_missing' : 'start_huddle_missing';
+      if (job.cycle_id && !['released', 'blocked'].includes(job.cycle_status)) continue;
+      const taskId = `task_daily_cycle_${sha256Json({ jobId: job.id, today, actionKind, cycleId: job.cycle_id || null, source: job.huddle_snapshot_hash || null }).slice(0, 28)}`;
+      if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+      actions.push({
+        type: 'review_daily_cycle',
+        actionKind,
+        jobId: job.id,
+        cycleId: job.cycle_id || null,
+        taskId,
+        sourceHash: job.huddle_snapshot_hash || sha256Json({ jobId: job.id, today, actionKind }),
+        severity: job.cycle_status === 'blocked' ? 'high' : 'medium',
+        message: job.cycle_id
+          ? `${job.title} has an open ${job.cycle_status} daily cycle and needs a retained end-of-day plan-versus-actual report.`
+          : `${job.title} needs today's crew start huddle before the daily operating cycle is complete.`
+      });
+    }
     const jobsWithoutFieldReports = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.status
       FROM jobs
@@ -49671,6 +50227,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'create_billing_milestone',
       'prepare_schedule_baseline',
       'review_crew_capacity',
+      'review_daily_cycle',
       'draft_invoice',
       'create_finance_handoff',
       'create_procurement_order',
@@ -50583,6 +51140,41 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               actor,
               after: task,
               metadata: { blockerType: action.blockerType, sourceHash: action.sourceHash, externalCommitments: 0 }
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
+        const dailyCycleReviews = preview.filter(action => action.type === 'review_daily_cycle').slice(0, 10);
+        for (const action of dailyCycleReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0 });
+            continue;
+          }
+          try {
+            const task = this.addTask(action.jobId, {
+              title: action.actionKind === 'start_huddle_missing' ? 'Retain daily start huddle' : 'Complete end-of-day report',
+              description: `${action.message} Verify the source, crew identity, actual field evidence, and unresolved blockers in the ledger. Do not infer attendance, safety clearance, production, or client commitments.`,
+              status: 'open',
+              priority: action.severity,
+              source: 'autonomous_cycle',
+              data: {
+                internalOnly: true,
+                excludeFromWorkPlan: true,
+                dailyCycleAction: action.actionKind,
+                dailyCycleId: action.cycleId || null,
+                dailyCycleSourceHash: action.sourceHash,
+                notificationsSent: 0,
+                externalCommitments: 0
+              }
+            }, { id: action.taskId, actor, audit: false });
+            applied.push({ ...action, taskId: task.id, status: 'task_created', notificationsSent: 0, externalCommitments: 0 });
+            this.audit({
+              entityType: 'task', entityId: task.id, jobId: action.jobId,
+              action: 'autonomous_create_daily_cycle_review_task', actor, after: task,
+              metadata: { actionKind: action.actionKind, sourceHash: action.sourceHash, externalCommitments: 0 }
             });
           } catch (error) {
             blocked.push({ ...action, status: 'blocked', reason: error.message });
@@ -53436,6 +54028,23 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
       }
     }
+    for (const cycle of this.listDailyOperatingCycles({ limit: 5_000 })) {
+      if (!cycle.integrityValid) {
+        issues.push({ severity: 'error', message: `Daily operating cycle ${cycle.id} failed retained huddle or end-of-day snapshot verification.` });
+      }
+      if (['pending_approval', 'pending_safety_review', 'closed'].includes(cycle.status)) {
+        const fieldReport = cycle.fieldReportId
+          ? this.db.prepare('SELECT status, approval_id FROM field_reports WHERE id = ?').get(cycle.fieldReportId)
+          : null;
+        const approval = fieldReport?.approval_id
+          ? this.db.prepare("SELECT status FROM approvals WHERE id = ? AND target_type = 'field_report' AND target_id = ?").get(fieldReport.approval_id, cycle.fieldReportId)
+          : null;
+        const expectedApprovalStatus = cycle.status === 'pending_approval' ? 'pending' : 'approved';
+        if (!fieldReport || !approval || approval.status !== expectedApprovalStatus) {
+          issues.push({ severity: 'error', message: `Daily operating cycle ${cycle.id} lacks its matching ${expectedApprovalStatus} field-report decision.` });
+        }
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -53476,6 +54085,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         formalVariationClientResponses: Number(this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE target_type = 'change_order_client_response'").get().count || 0),
         dayworkTickets: this.count('daywork_tickets'),
         fieldReports: this.count('field_reports'),
+        dailyOperatingCycles: this.count('daily_operating_cycles'),
         rfiRecords: this.count('rfi_records'),
         submittals: this.count('submittal_records'),
         governedDrawingRevisions: Number(this.db.prepare("SELECT COUNT(*) AS count FROM documents WHERE type = 'drawing_revision'").get().count || 0),
@@ -54820,6 +55430,94 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       photos: fromJson(row.photos_json, []),
       approvalId: row.approval_id,
       data: fromJson(row.data_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapDailyOperatingCycle(row) {
+    if (!row) return null;
+    const huddleSnapshotJson = normalizeText(row.huddle_snapshot_json, '');
+    const huddleSnapshot = fromJson(huddleSnapshotJson, null);
+    const huddleIntegrityValid = Boolean(
+      huddleSnapshot
+      && huddleSnapshot.format === DAILY_OPERATING_CYCLE_FORMAT
+      && huddleSnapshot.cycleId === row.id
+      && huddleSnapshot.jobId === row.job_id
+      && huddleSnapshot.workDate === row.work_date
+      && huddleSnapshot.sourceHash === row.huddle_source_hash
+      && retainedSnapshotSourceHash(huddleSnapshot, ['sourceHash', 'status', 'retainedAt', 'retainedBy', 'safeguards']) === row.huddle_source_hash
+      && sha256Text(huddleSnapshotJson) === row.huddle_snapshot_hash
+    );
+    const eodSnapshotJson = normalizeText(row.eod_snapshot_json, '');
+    const eodSnapshot = fromJson(eodSnapshotJson, null);
+    const endOfDayIntegrityValid = !row.eod_snapshot_hash || Boolean(
+      eodSnapshot
+      && eodSnapshot.format === DAILY_OPERATING_CYCLE_FORMAT
+      && eodSnapshot.cycleId === row.id
+      && eodSnapshot.jobId === row.job_id
+      && eodSnapshot.huddleSnapshotHash === row.huddle_snapshot_hash
+      && eodSnapshot.sourceHash === row.eod_source_hash
+      && retainedSnapshotSourceHash(eodSnapshot, [
+        'sourceHash',
+        'retainedAt',
+        'retainedBy',
+        'fieldReportApprovalId',
+        'safetyApprovalId',
+        'safeguards'
+      ]) === row.eod_source_hash
+      && sha256Text(eodSnapshotJson) === row.eod_snapshot_hash
+    );
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      workDate: row.work_date,
+      shiftLabel: row.shift_label,
+      status: row.status,
+      facilitator: row.facilitator,
+      leadWorkerId: row.lead_worker_id || null,
+      crew: fromJson(row.crew_json, []),
+      plannedWork: row.planned_work,
+      productionTarget: row.production_target,
+      weather: row.weather || null,
+      siteConditions: row.site_conditions || null,
+      safetyFocus: row.safety_focus,
+      qualityHoldPoints: fromJson(row.quality_hold_points_json, []),
+      constraints: fromJson(row.constraints_json, []),
+      blockingIssues: fromJson(row.blocking_issues_json, []),
+      stopWorkRequired: Boolean(row.stop_work_required),
+      evidenceReference: row.evidence_reference,
+      planningSource: fromJson(row.planning_source_json, {}),
+      huddleSourceHash: row.huddle_source_hash,
+      huddleSnapshotHash: row.huddle_snapshot_hash,
+      huddleSnapshot,
+      huddleIntegrityValid,
+      fieldReportId: row.field_report_id || null,
+      timeLogId: row.time_log_id || null,
+      safetyCheckId: row.safety_check_id || null,
+      approvalId: row.field_report_approval_id || null,
+      approvalStatus: row.field_report_approval_status || null,
+      fieldReportStatus: row.field_report_status || null,
+      planAchieved: row.plan_achieved === null || row.plan_achieved === undefined ? null : Boolean(row.plan_achieved),
+      varianceReasons: fromJson(row.variance_reasons_json, []),
+      unresolvedActions: fromJson(row.unresolved_actions_json, []),
+      tomorrowPlan: row.tomorrow_plan || null,
+      endEvidenceReferences: fromJson(row.end_evidence_references_json, []),
+      eodSourceHash: row.eod_source_hash || null,
+      eodSnapshotHash: row.eod_snapshot_hash || null,
+      eodSnapshot,
+      endOfDayIntegrityValid,
+      integrityValid: huddleIntegrityValid && endOfDayIntegrityValid,
+      huddleEntryKey: row.huddle_entry_key,
+      eodEntryKey: row.eod_entry_key || null,
+      closedAt: row.closed_at || null,
+      closedBy: row.closed_by || null,
+      data: fromJson(row.data_json, {}),
+      safeguards: {
+        internalDailyControlOnly: true,
+        approvalRequiredForClose: true,
+        externalCommitments: 0
+      },
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

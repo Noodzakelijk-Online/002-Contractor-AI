@@ -186,6 +186,48 @@ test('backup verification rejects a migration 058 ledger with missing formal-var
   );
 });
 
+test('backup verification rejects a migration 059 ledger with missing crew-planning constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-crew-planning-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Crew planning schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_crew_capacity_allocation_job_day');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /crew-planning constraints are incomplete: idx_crew_capacity_allocation_job_day/i
+  );
+});
+
+test('backup verification accepts a complete migration 059 ledger without migration 060', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-crew-planning-compatibility-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Crew planning compatibility fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP TABLE daily_operating_cycles;
+    DELETE FROM ledger_schema_migrations WHERE version = '060_daily_operating_cycles';
+  `);
+  database.close();
+  assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
+});
+
+test('backup verification rejects a migration 060 ledger with missing daily operating-cycle constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-daily-cycle-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Daily cycle schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_daily_operating_cycles_status_date');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /daily operating-cycle constraints are incomplete: idx_daily_operating_cycles_status_date/i
+  );
+});
+
 test('backup verification rejects a migration 028 ledger with missing bid-commitment constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-commitment-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');

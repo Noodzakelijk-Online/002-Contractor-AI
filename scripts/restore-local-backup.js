@@ -1093,6 +1093,42 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup crew-planning constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('060_daily_operating_cycles')) {
+        if (!retainedTables.has('daily_operating_cycles')) {
+          throw new Error('Backup daily operating-cycle schema is incomplete: daily_operating_cycles.');
+        }
+        const dailyCycleColumns = new Set(database.prepare('PRAGMA table_info(daily_operating_cycles)').all().map(row => row.name));
+        for (const column of [
+          'job_id',
+          'work_date',
+          'shift_label',
+          'status',
+          'crew_json',
+          'huddle_source_hash',
+          'huddle_snapshot_hash',
+          'huddle_snapshot_json',
+          'huddle_entry_key',
+          'huddle_entry_fingerprint',
+          'field_report_id',
+          'time_log_id',
+          'safety_check_id',
+          'eod_source_hash',
+          'eod_snapshot_hash',
+          'eod_snapshot_json',
+          'eod_entry_key',
+          'eod_entry_fingerprint'
+        ]) {
+          if (!dailyCycleColumns.has(column)) throw new Error(`Backup daily operating-cycle schema is incomplete: daily_operating_cycles.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_daily_operating_cycles_job_date',
+          'idx_daily_operating_cycles_status_date',
+          'idx_daily_operating_cycles_field_report'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup daily operating-cycle constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

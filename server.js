@@ -1206,6 +1206,7 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/nonconformances$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/material-receiving-plan$/.test(pathName)
+        || /^\/api\/ledger\/jobs\/[^/]+\/daily-cycles$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
@@ -1238,6 +1239,8 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/work-permits\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans\/[^/]+\/(acknowledgments|suspend)$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daily-cycles$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daily-cycles\/[^/]+\/end-of-day$/.test(pathName)) return true;
     return req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/(progress|production-entries|field-reports|observations|incidents|punch-items|safety-checks|time-logs|daily-logs|material-receipts)$/.test(pathName);
   }
 
@@ -1273,7 +1276,9 @@ const FIELD_RECORD_PRIVATE_KEYS = new Set([
   'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'closureApprovalId', 'closureHash', 'conflicts', 'correctionApprovalId', 'correctiveActionHash', 'cost', 'currency',
   'checkoutEntryKey', 'checkoutFingerprint', 'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
   'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
-  'returnEntryKey', 'returnFingerprint', 'snapshot', 'snapshotHash', 'sourceCurrentHash', 'sourceHash', 'taxAmount', 'taxRate', 'token', 'total'
+  'returnEntryKey', 'returnFingerprint', 'snapshot', 'snapshotHash', 'sourceCurrentHash', 'sourceHash',
+  'huddleEntryKey', 'huddleSnapshot', 'huddleSnapshotHash', 'huddleSourceHash', 'eodEntryKey', 'eodSnapshot', 'eodSnapshotHash', 'eodSourceHash',
+  'taxAmount', 'taxRate', 'token', 'total'
 ]);
 
 function projectFieldRecord(record) {
@@ -1418,6 +1423,7 @@ function projectFieldJobDetail(req, detail) {
     ...projectFieldJobSummary(detail),
     tasks: projectFieldRecords(detail.tasks),
     fieldReports: projectFieldRecords(detail.fieldReports),
+    dailyOperatingCycles: projectFieldRecords(detail.dailyOperatingCycles),
     rfis: projectFieldRecords(detail.rfis),
     submittals: projectFieldRecords(detail.submittals),
     permits: projectFieldRecords(detail.permits),
@@ -4668,6 +4674,82 @@ app.post('/api/ledger/jobs/:id/time-logs', (req, res) => {
   }, 201);
 });
 
+app.get('/api/ledger/jobs/:id/daily-cycles', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const cycles = operatingLedger.listDailyOperatingCycles({
+      jobId: req.params.id,
+      workDate: req.query.workDate,
+      status: req.query.status,
+      limit: req.query.limit
+    });
+    return {
+      success: true,
+      cycles: req.operator?.role === 'field_worker' ? cycles.map(projectFieldRecord) : cycles,
+      safeguards: {
+        internalDailyControlOnly: true,
+        approvalRequiredForClose: true,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/daily-cycles', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    let payload = req.body || {};
+    if (req.operator?.role === 'field_worker') {
+      const identity = fieldWorkerIdentity(req);
+      if (!identity.workerId) {
+        const error = new Error('A field start huddle requires an operator token linked to one worker identity.');
+        error.statusCode = 403;
+        error.code = 'field_worker_identity_required';
+        throw error;
+      }
+      payload = {
+        ...payload,
+        facilitator: identity.workerName,
+        leadWorkerId: identity.workerId,
+        workerIds: [identity.workerId]
+      };
+    }
+    const result = operatingLedger.createDailyStartHuddle(req.params.id, payload, {
+      actor: actorFromRequest(req, 'field_dashboard')
+    });
+    return {
+      success: true,
+      ...result,
+      cycle: req.operator?.role === 'field_worker' ? projectFieldRecord(result.cycle) : result.cycle,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/daily-cycles/:cycleId/end-of-day', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const payload = timeLogPayloadForOperator(req, req.body || {});
+    const result = operatingLedger.closeDailyOperatingCycle(req.params.id, req.params.cycleId, payload, {
+      actor: actorFromRequest(req, 'field_dashboard')
+    });
+    return {
+      success: true,
+      ...result,
+      cycle: req.operator?.role === 'field_worker' ? projectFieldRecord(result.cycle) : result.cycle,
+      dailyLog: req.operator?.role === 'field_worker'
+        ? {
+            ...result.dailyLog,
+            fieldReport: projectFieldRecord(result.dailyLog.fieldReport),
+            timeLog: projectFieldRecord(result.dailyLog.timeLog),
+            safetyCheck: projectFieldRecord(result.dailyLog.safetyCheck),
+            approvals: result.dailyLog.approvals.length
+          }
+        : result.dailyLog,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req)
+    };
+  }, 201);
+});
+
 app.post('/api/ledger/jobs/:id/daily-logs', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
@@ -6292,6 +6374,7 @@ function operationalExport() {
     crewCapacityProfiles: operatingLedger.listCrewCapacityProfiles({ includeHistory: true, limit: 5_000 }),
     crewCapacityAllocations: operatingLedger.listCrewCapacityAllocations({ status: 'all', limit: 20_000 }),
     crewLookaheadPlans: operatingLedger.listCrewLookaheadPlans({ status: 'all', limit: 5_000 }),
+    dailyOperatingCycles: operatingLedger.listDailyOperatingCycles({ limit: 10_000 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
@@ -6370,6 +6453,7 @@ function validateOperationalExport(snapshot) {
     'crewCapacityProfiles',
     'crewCapacityAllocations',
     'crewLookaheadPlans',
+    'dailyOperatingCycles',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
     'dayworkTickets',
@@ -6458,6 +6542,7 @@ function validateOperationalExport(snapshot) {
       crewCapacityProfiles: Array.isArray(snapshot.crewCapacityProfiles) ? snapshot.crewCapacityProfiles.length : 0,
       crewCapacityAllocations: Array.isArray(snapshot.crewCapacityAllocations) ? snapshot.crewCapacityAllocations.length : 0,
       crewLookaheadPlans: Array.isArray(snapshot.crewLookaheadPlans) ? snapshot.crewLookaheadPlans.length : 0,
+      dailyOperatingCycles: Array.isArray(snapshot.dailyOperatingCycles) ? snapshot.dailyOperatingCycles.length : 0,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
@@ -7080,6 +7165,22 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         taskCoverage: 'scheduled_duration_hours',
         planApproval: 'immutable_source_current_snapshot',
         autonomy: 'internal_review_task_only',
+        crewNotifications: 0,
+        clientCommitments: 0,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      },
+      dailyOperatingCycles: {
+        available: true,
+        startHuddle: 'immutable_assignment_aware_snapshot',
+        releaseStates: ['released', 'blocked'],
+        endOfDay: 'atomic_field_report_time_and_safety_evidence',
+        varianceRequiredWhenPlanMissed: true,
+        approvalLinkedClose: true,
+        exactReplay: true,
+        autonomy: 'internal_review_task_only',
+        workPermitCreated: false,
+        complianceCertified: false,
         crewNotifications: 0,
         clientCommitments: 0,
         supplierCommitments: 0,

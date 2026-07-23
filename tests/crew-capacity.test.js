@@ -118,7 +118,7 @@ test('explicit capacity and day allocations produce an approval-backed source-cu
   assert.equal(approvedBoard.plans.current, true);
   assert.equal(approvedBoard.safeguards.externalCommitments, 0);
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '059_crew_capacity_lookahead');
+  assert.equal(ledger.migrationStatus().currentVersion, '060_daily_operating_cycles');
 });
 
 test('overload, retained absence, stale source, and malformed hours fail closed', t => {

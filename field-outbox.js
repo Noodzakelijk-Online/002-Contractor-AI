@@ -6,7 +6,7 @@ const MAX_EVIDENCE_DRAFTS = 20;
 const MAX_TOTAL_EVIDENCE_BYTES = 50 * 1024 * 1024;
 const MAX_OPERATION_DRAFTS = 100;
 const MAX_TOTAL_OPERATION_BYTES = 1024 * 1024;
-const FIELD_OPERATION_TYPES = new Set(['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return']);
+const FIELD_OPERATION_TYPES = new Set(['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return']);
 
 function onlineState() {
   return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
