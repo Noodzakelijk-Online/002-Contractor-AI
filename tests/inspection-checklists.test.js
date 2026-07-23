@@ -64,7 +64,7 @@ function answersFor(inspection, failedKey = null) {
 test('inspection templates are versioned while scheduled checklists retain an immutable snapshot', t => {
   const { ledger, job } = fixture(t);
   const builtIns = ledger.listInspectionTemplates().filter(template => template.builtIn);
-  assert.equal(builtIns.length, 3);
+  assert.equal(builtIns.length, 4);
   assert.ok(builtIns.every(template => template.versionNumber === 1 && template.items.length >= 2));
   assert.throws(
     () => customTemplate(ledger, { sourceTemplateId: builtIns[0].id }),
@@ -255,9 +255,9 @@ test('migration 025 restores checklist schema and diagnostics detect retained sn
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '063_governed_lmra');
+    assert.equal(upgraded.migrationStatus().currentVersion, '064_governed_installation_qc');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
-    assert.equal(upgraded.listInspectionTemplates().filter(candidate => candidate.builtIn).length, 3);
+    assert.equal(upgraded.listInspectionTemplates().filter(candidate => candidate.builtIn).length, 4);
     for (const table of ['inspection_templates', 'inspection_checklist_submissions']) {
       assert.ok(upgraded.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
     }

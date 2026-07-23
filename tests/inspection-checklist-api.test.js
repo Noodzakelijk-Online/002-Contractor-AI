@@ -71,7 +71,7 @@ test('inspection checklist API enforces office, field, and approval role boundar
 
   const templates = await request(baseUrl, '/api/ledger/inspection-templates', tokens.office_operator);
   assert.equal(templates.response.status, 200);
-  assert.equal(templates.body.templates.filter(template => template.builtIn).length, 3);
+  assert.equal(templates.body.templates.filter(template => template.builtIn).length, 4);
 
   const fieldTemplateRead = await request(baseUrl, '/api/ledger/inspection-templates', tokens.field_worker);
   assert.equal(fieldTemplateRead.response.status, 403);

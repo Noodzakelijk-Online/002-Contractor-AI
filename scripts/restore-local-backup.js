@@ -1234,6 +1234,49 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup LMRA constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('064_governed_installation_qc')) {
+        if (!retainedTables.has('installation_qc_controls')) {
+          throw new Error('Backup installation-QC schema is incomplete: installation_qc_controls.');
+        }
+        const installationQcColumns = new Set(
+          database.prepare('PRAGMA table_info(installation_qc_controls)').all().map(row => row.name)
+        );
+        for (const column of [
+          'inspection_id',
+          'job_id',
+          'task_id',
+          'assignment_id',
+          'assigned_worker_id',
+          'installation_stage',
+          'control_point',
+          'work_location',
+          'reference_basis',
+          'reference_document_ids_json',
+          'status',
+          'latest_submission_id',
+          'source_hash',
+          'snapshot_json',
+          'snapshot_hash',
+          'released_at',
+          'released_by'
+        ]) {
+          if (!installationQcColumns.has(column)) {
+            throw new Error(`Backup installation-QC schema is incomplete: installation_qc_controls.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name)
+        );
+        for (const index of [
+          'idx_installation_qc_job_status',
+          'idx_installation_qc_task_status',
+          'idx_installation_qc_worker_status'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup installation-QC constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

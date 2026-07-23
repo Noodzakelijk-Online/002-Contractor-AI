@@ -301,17 +301,19 @@ test('LMRA control binds exact plan sources, stop-work, reassessment, and offlin
   assert.match(lmraControlSource, /no_changed_conditions/);
 });
 
-test('job workspace schedules and completes immutable approval-backed inspection checklists', () => {
+test('job workspace schedules governed installation QC and immutable approval-backed inspection checklists', () => {
   assert.match(dashboardSource, /data-testid="inspection-checklist-control"/);
   assert.match(dashboardSource, /data-testid="inspection-template-form"/);
   assert.match(dashboardSource, /data-testid="inspection-schedule-form"/);
   assert.match(dashboardSource, /data-testid="inspection-checklist-form"/);
+  assert.match(dashboardSource, /data-testid="installation-qc-context"/);
   assert.match(dashboardSource, /api\('\/api\/ledger\/inspection-templates'/);
   assert.match(dashboardSource, /\/inspection-checklists`/);
   assert.match(dashboardSource, /\/checklist-submissions`/);
   assert.match(dashboardSource, /type: 'inspection_checklist'/);
-  assert.match(dashboardSource, /creates corrective observations for failed items/);
-  assert.match(dashboardSource, /does not certify statutory compliance or notify an external party/);
+  assert.match(dashboardSource, /Govern task completion as installation QC/);
+  assert.match(dashboardSource, /Evidence required to pass/);
+  assert.match(dashboardSource, /Offline capture may queue evidence, but never releases a hold point or completes the task/);
 });
 
 test('dashboard loads a field worker only through scoped ledger calls and hides owner workflow navigation', () => {

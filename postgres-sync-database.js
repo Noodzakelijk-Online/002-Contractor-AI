@@ -78,6 +78,8 @@ class PostgresSyncDatabase {
     this.worker = new Worker(path.join(__dirname, 'postgres-sync-worker.js'), {
       workerData: connectionOptions
     });
+    this.responseBuffer = new SharedArrayBuffer(RESPONSE_BYTES + 8);
+    this.responseSignal = new Int32Array(this.responseBuffer, 0, 2);
     this.worker.unref();
     this.worker.on('error', () => {});
     this.query('SELECT 1 AS connected');
@@ -85,11 +87,15 @@ class PostgresSyncDatabase {
 
   request(request) {
     if (this.closed) throw new Error('PostgreSQL database is closed.');
-    const shared = new SharedArrayBuffer(RESPONSE_BYTES + 8);
-    const signal = new Int32Array(shared, 0, 2);
+    const shared = this.responseBuffer;
+    const signal = this.responseSignal;
+    Atomics.store(signal, 0, 0);
+    Atomics.store(signal, 1, 0);
     this.worker.postMessage({ request, shared });
     const waitResult = Atomics.wait(signal, 0, 0, this.timeoutMs);
     if (waitResult === 'timed-out') {
+      this.closed = true;
+      this.worker.terminate();
       throw new Error(`PostgreSQL request timed out after ${this.timeoutMs}ms.`);
     }
     const length = Atomics.load(signal, 1);

@@ -1913,13 +1913,18 @@
 .inspection-template-editor > .form-grid, .inspection-schedule-form { padding: 0; }
 .inspection-template-items { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 12px; border: 1px solid #d4e0db; }
 .inspection-template-items legend { padding: 0 5px; color: #40564e; font-size: 10px; font-weight: 750; }
-.inspection-template-item { display: grid; grid-template-columns: minmax(240px, 1.5fr) minmax(130px, .7fr) minmax(92px, auto) 34px; align-items: end; gap: 8px; min-width: 0; padding: 9px; background: #fff; border: 1px solid #e0e8e4; }
+.inspection-template-item { display: grid; grid-template-columns: minmax(220px, 1.5fr) minmax(150px, 1fr) minmax(120px, .7fr) minmax(92px, auto) 34px; align-items: end; gap: 8px; min-width: 0; padding: 9px; background: #fff; border: 1px solid #e0e8e4; }
+.inspection-template-item .inspection-template-criteria { grid-column: span 2; }
 .inspection-template-item label, .inspection-checklist-item > label, .inspection-run-notes { display: grid; gap: 5px; min-width: 0; color: #40564e; font-size: 10px; font-weight: 750; }
-.inspection-template-item input, .inspection-template-item select, .inspection-checklist-item textarea, .inspection-checklist-item select, .inspection-run-notes textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 9px; color: #263a32; background: #fff; border: 1px solid #cbd9d3; border-radius: 5px; }
+.inspection-template-item input, .inspection-template-item select, .inspection-checklist-item input, .inspection-checklist-item textarea, .inspection-checklist-item select, .inspection-run-notes textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 9px; color: #263a32; background: #fff; border: 1px solid #cbd9d3; border-radius: 5px; }
 .inspection-template-item textarea, .inspection-checklist-item textarea, .inspection-run-notes textarea { min-height: 64px; resize: vertical; }
 .inspection-template-summary { display: grid; align-self: end; gap: 3px; min-height: 38px; padding: 6px 9px; color: #61756d; background: #edf4f1; border-left: 3px solid #3a806d; }
 .inspection-template-summary strong { color: #2d4b40; font-size: 11px; }
 .inspection-template-summary span { font-size: 9px; }
+.installation-qc-reference-documents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 12px; min-width: 0; margin: 0; padding: 11px; border: 1px solid #d2ded9; }
+.installation-qc-reference-documents legend { padding: 0 5px; color: #40564e; font-size: 10px; font-weight: 750; }
+.installation-qc-reference-documents label { overflow-wrap: anywhere; }
+.installation-qc-reference-documents > span { grid-column: 1 / -1; color: #6c7c75; font-size: 10px; }
 .inspection-checklist-register { display: grid; border-top: 1px solid #dde6e2; }
 .inspection-checklist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-width: 0; padding: 11px 0; border-bottom: 1px solid #e4ebe8; }
 .inspection-checklist-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
@@ -1931,9 +1936,17 @@
 .inspection-checklist-run-heading > div { display: grid; gap: 3px; min-width: 0; }
 .inspection-checklist-run-heading strong { overflow-wrap: anywhere; color: #294138; font-size: 13px; }
 .inspection-checklist-run-heading small { color: #6b7c75; font-size: 10px; }
+.installation-qc-context { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #d8e2de; background: #fff; }
+.installation-qc-context > div { display: grid; gap: 3px; min-width: 0; padding: 9px 10px; border-right: 1px solid #e0e8e4; }
+.installation-qc-context > div:last-of-type { border-right: 0; }
+.installation-qc-context span { color: #6b7c75; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+.installation-qc-context strong { overflow-wrap: anywhere; color: #294138; font-size: 11px; }
+.installation-qc-context > p { grid-column: 1 / -1; margin: 0; padding: 9px 10px; color: #54675f; font-size: 10px; border-top: 1px solid #e0e8e4; }
+.installation-qc-context .installation-qc-blocked { display: flex; align-items: center; gap: 7px; color: #9e3e35; background: #fff5f3; }
 .inspection-checklist-items { display: grid; gap: 10px; }
 .inspection-checklist-item { display: grid; grid-template-columns: minmax(240px, 1.2fr) minmax(180px, .9fr); gap: 10px 12px; min-width: 0; margin: 0; padding: 12px; background: #fff; border: 1px solid #dce5e1; border-left: 3px solid #9aaca5; }
 .inspection-checklist-item legend { max-width: calc(100% - 16px); padding: 0 6px; overflow-wrap: anywhere; color: #2e473d; font-size: 11px; font-weight: 750; line-height: 1.4; }
+.inspection-acceptance-criteria { grid-column: 1 / -1; margin: 0; padding: 8px 9px; color: #4f655c; font-size: 10px; line-height: 1.45; background: #f2f7f5; border-left: 3px solid #528f7e; }
 .inspection-checklist-item > small { grid-column: 1 / -1; color: #708079; font-size: 9px; }
 .inspection-result-pass { border-left-color: #3c8a69; }
 .inspection-result-fail { background: #fff9f7; border-left-color: #bd4a3f; }
@@ -1950,15 +1963,20 @@
 .status-passed, .status-approved, .status-completed { color: #147049; background: #e0f4e7; }
 .status-failed { color: #a63a31; background: #fae8e6; }
 .status-pending_approval, .status-scheduled { color: #8b5d0c; background: #fff0d4; }
+.status-stale, .status-invalid { color: #a63a31; background: #fae8e6; }
+.installation-qc-stale { color: #a13f37 !important; font-weight: 750; }
 
 @media (max-width: 760px) {
   .inspection-checklist-heading { align-items: flex-start; flex-wrap: wrap; }
   .inspection-checklist-heading-actions { width: calc(100% - 28px); margin-left: 28px; }
   .inspection-checklist-heading-actions .secondary-button { flex: 1; }
   .inspection-template-item, .inspection-checklist-item, .inspection-checklist-row { grid-template-columns: minmax(0, 1fr); }
-  .inspection-template-item .inspection-template-prompt { grid-column: auto; }
+  .inspection-template-item .inspection-template-prompt, .inspection-template-item .inspection-template-criteria { grid-column: auto; }
   .inspection-template-item .checkbox-label { min-height: 32px; }
   .inspection-template-item .icon-button { justify-self: end; }
+  .installation-qc-reference-documents, .installation-qc-context { grid-template-columns: minmax(0, 1fr); }
+  .installation-qc-context > div { border-right: 0; border-bottom: 1px solid #e0e8e4; }
+  .installation-qc-context > p { grid-column: auto; }
   .inspection-checklist-row-actions { justify-content: flex-start; }
   .inspection-checklist-row-actions .secondary-button { flex: 1 1 120px; }
   .inspection-result-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }

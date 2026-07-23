@@ -207,6 +207,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
   createBackupLedger(ledgerFile, 'Crew planning compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE installation_qc_controls;
     DROP TABLE lmra_assessments;
     DROP TABLE five_s_actions;
     DROP TABLE five_s_audits;
@@ -216,7 +217,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
     DROP TABLE daily_operating_cycles;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -229,6 +230,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
   createBackupLedger(ledgerFile, 'Daily cycle compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE installation_qc_controls;
     DROP TABLE lmra_assessments;
     DROP TABLE five_s_actions;
     DROP TABLE five_s_audits;
@@ -237,7 +239,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
     DROP TABLE last_planner_outcomes;
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -278,12 +280,13 @@ test('backup verification accepts a complete migration 061 ledger without migrat
   createBackupLedger(ledgerFile, 'Last Planner compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE installation_qc_controls;
     DROP TABLE lmra_assessments;
     DROP TABLE five_s_actions;
     DROP TABLE five_s_audits;
     DROP TABLE five_s_standards;
     DROP TABLE five_s_locations;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -310,8 +313,9 @@ test('backup verification accepts a complete migration 062 ledger without migrat
   createBackupLedger(ledgerFile, '5S compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE installation_qc_controls;
     DROP TABLE lmra_assessments;
-    DELETE FROM ledger_schema_migrations WHERE version = '063_governed_lmra';
+    DELETE FROM ledger_schema_migrations WHERE version IN ('063_governed_lmra', '064_governed_installation_qc');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -328,6 +332,34 @@ test('backup verification rejects a migration 063 ledger with missing LMRA const
   assert.throws(
     () => verifySqliteBackupDatabase(ledgerFile),
     /LMRA constraints are incomplete: idx_lmra_outcome_validity/i
+  );
+});
+
+test('backup verification accepts a complete migration 063 ledger without migration 064', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-lmra-compatibility-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'LMRA compatibility fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP TABLE installation_qc_controls;
+    DELETE FROM ledger_schema_migrations WHERE version = '064_governed_installation_qc';
+  `);
+  database.close();
+  assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
+});
+
+test('backup verification rejects a migration 064 ledger with missing installation-QC constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-installation-qc-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Installation QC schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_installation_qc_task_status');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /installation-QC constraints are incomplete: idx_installation_qc_task_status/i
   );
 });
 

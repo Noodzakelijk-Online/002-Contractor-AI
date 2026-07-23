@@ -1109,7 +1109,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '063_governed_lmra');
+  assert.equal(migration.migrationVersion, '064_governed_installation_qc');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);

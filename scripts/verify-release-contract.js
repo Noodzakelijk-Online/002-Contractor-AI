@@ -219,6 +219,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '063_governed_lmra'")) {
     failures.push('Canonical governed LMRA migration is missing.');
   }
+  if (!ledgerSource.includes("version: '064_governed_installation_qc'")) {
+    failures.push('Canonical governed installation-QC migration is missing.');
+  }
   if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
     failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
   }
@@ -230,6 +233,18 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes('lmraOfflineAuthorization: false')) {
     failures.push('LMRA capability does not explicitly block offline authorization.');
+  }
+  if (!serverSource.includes("installationQcSourceValidation: 'server_current_at_receipt_and_release'")) {
+    failures.push('Installation-QC capability does not require current source checks at receipt and release.');
+  }
+  if (!serverSource.includes('installationQcTaskCompletionGate: true')) {
+    failures.push('Installation-QC capability does not gate task completion.');
+  }
+  if (!serverSource.includes('installationQcOfflineRelease: false')) {
+    failures.push('Installation-QC capability does not explicitly block offline release.');
+  }
+  if (!serverSource.includes("installationQcAutonomy: 'internal_review_task_only'")) {
+    failures.push('Installation-QC capability does not constrain autonomous behavior to internal review tasks.');
   }
   if (!serverSource.includes("fiveSVehicleDispatch: false")) {
     failures.push('5S capability does not explicitly prohibit inferred vehicle dispatch.');

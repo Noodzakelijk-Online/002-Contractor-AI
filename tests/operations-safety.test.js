@@ -135,7 +135,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(Array.isArray(exported.body.scheduleBaselines));
   assert.ok(Array.isArray(exported.body.inspectionTemplates));
   assert.ok(Array.isArray(exported.body.inspectionChecklistSubmissions));
-  assert.equal(exported.body.inspectionTemplates.filter(template => template.builtIn).length, 3);
+  assert.equal(exported.body.inspectionTemplates.filter(template => template.builtIn).length, 4);
   assert.ok(exported.body.projectControls.rfis.some(record => record.id === exportedRfi.body.rfi.id));
   assert.ok(exported.body.projectControls.submittals.some(record => record.id === exportedSubmittal.body.submittal.id));
   assert.ok(exported.body.projectControls.controlledDocuments.some(record => record.id === exportedDocument.body.document.id));
@@ -297,7 +297,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '063_governed_lmra');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '064_governed_installation_qc');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 

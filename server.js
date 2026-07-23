@@ -1218,6 +1218,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans$/.test(pathName)
         || pathName === '/api/ledger/lmra'
         || /^\/api\/ledger\/jobs\/[^/]+\/lmra$/.test(pathName)
+        || pathName === '/api/ledger/installation-qc'
+        || /^\/api\/ledger\/jobs\/[^/]+\/installation-qc$/.test(pathName)
         || pathName === '/api/ledger/sds-sheets'
         || /^\/api\/ledger\/jobs\/[^/]+\/sds-sheets$/.test(pathName)
         || pathName === '/api/ledger/drawings'
@@ -1436,7 +1438,13 @@ function projectFieldJobDetail(req, detail) {
     lmraAssessments: (detail.lmraAssessments || [])
       .filter(assessment => scopeWorkerId && String(assessment.workerId || '') === String(scopeWorkerId))
       .map(projectFieldRecord),
-    inspections: projectFieldRecords(detail.inspections),
+    inspections: projectFieldRecords((detail.inspections || []).filter(inspection => (
+      !inspection.installationQc
+      || (scopeWorkerId && String(inspection.installationQc.assignedWorkerId || '') === String(scopeWorkerId))
+    ))),
+    installationQcControls: projectFieldRecords((detail.installationQcControls || []).filter(control => (
+      scopeWorkerId && String(control.assignedWorkerId || '') === String(scopeWorkerId)
+    ))),
     nonconformances: projectFieldRecords(detail.nonconformances),
     observations: projectFieldRecords(detail.observations),
     incidents: projectFieldRecords(detail.incidents),
@@ -1775,6 +1783,22 @@ function attendancePayloadForOperator(req, payload = {}) {
     worker_id: identity.workerId,
     workerName: identity.workerName,
     worker_name: identity.workerName
+  };
+}
+
+function inspectionChecklistPayloadForOperator(req, payload = {}, options = {}) {
+  if (req.operator?.role !== 'field_worker' || options.requireWorkerIdentity !== true) return payload;
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Installation and inspection checklist capture requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId
   };
 }
 
@@ -3608,6 +3632,40 @@ app.get('/api/ledger/inspection-templates', (req, res) => {
   }));
 });
 
+app.get('/api/ledger/installation-qc', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const workerId = req.operator?.role === 'field_worker'
+      ? req.operator.scope?.workerId
+      : (req.query.workerId || req.query.worker_id);
+    return {
+      success: true,
+      controls: operatingLedger.listInstallationQcControls({
+        jobId: req.query.jobId || req.query.job_id,
+        taskId: req.query.taskId || req.query.task_id,
+        workerId,
+        limit: req.query.limit
+      }).map(control => recordForOperator(req, control))
+    };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/installation-qc', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const workerId = req.operator?.role === 'field_worker'
+      ? req.operator.scope?.workerId
+      : (req.query.workerId || req.query.worker_id);
+    return {
+      success: true,
+      controls: operatingLedger.listInstallationQcControls({
+        jobId: req.params.id,
+        taskId: req.query.taskId || req.query.task_id,
+        workerId,
+        limit: req.query.limit
+      }).map(control => recordForOperator(req, control))
+    };
+  });
+});
+
 app.post('/api/ledger/inspection-templates', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -3631,16 +3689,26 @@ app.post('/api/ledger/jobs/:id/inspection-checklists', (req, res) => {
 app.post('/api/ledger/jobs/:id/inspections', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    inspection: operatingLedger.createInspectionRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
+    inspection: operatingLedger.createInspectionRecord(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
   }), 201);
 });
 
 app.post('/api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions', (req, res) => {
   return handleLedgerRequest(req, res, () => {
-    const result = operatingLedger.submitInspectionChecklist(req.params.id, req.params.inspectionId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    const installationQc = operatingLedger.getInstallationQcControl(req.params.inspectionId, {
+      jobId: req.params.id
+    });
+    const payload = inspectionChecklistPayloadForOperator(req, req.body || {}, {
+      requireWorkerIdentity: Boolean(installationQc)
+    });
+    const result = operatingLedger.submitInspectionChecklist(req.params.id, req.params.inspectionId, payload, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard'),
+      workerId: installationQc && req.operator?.role === 'field_worker' ? req.operator.scope?.workerId : null,
+      enforceWorkerScope: Boolean(installationQc && req.operator?.authenticated === true)
     });
     return {
       success: true,
@@ -5431,7 +5499,14 @@ app.get('/api/ledger/approvals', (req, res) => {
 
 app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
-    const approval = operatingLedger.resolveApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' });
+    const actor = actorFromRequest(req, req.body?.actor || 'dashboard');
+    const payload = req.operator?.authenticated
+      ? { ...(req.body || {}), actor, resolvedBy: actor }
+      : (req.body || {});
+    const approval = operatingLedger.resolveApproval(req.params.id, payload, {
+      actor,
+      enforceSeparation: req.operator?.authenticated === true
+    });
     let bidPackage = null;
     let bidDecision = null;
     if (approval.targetType === 'bid_package_selection') {
@@ -6651,6 +6726,7 @@ function operationalExport() {
     lmraAssessments: operatingLedger.listLmraAssessments({ limit: 20_000 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
+    installationQcControls: operatingLedger.listInstallationQcControls({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
     handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
@@ -6738,6 +6814,7 @@ function validateOperationalExport(snapshot) {
     'lmraAssessments',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
+    'installationQcControls',
     'dayworkTickets',
     'nonconformances'
   ]) {
@@ -6835,6 +6912,7 @@ function validateOperationalExport(snapshot) {
       lmraAssessments: Array.isArray(snapshot.lmraAssessments) ? snapshot.lmraAssessments.length : 0,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
+      installationQcControls: Array.isArray(snapshot.installationQcControls) ? snapshot.installationQcControls.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
       submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
       transmittals: Array.isArray(snapshot.projectControls?.transmittals) ? snapshot.projectControls.transmittals.length : 0,
@@ -7526,6 +7604,24 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         supplierCommitments: 0,
         externalCommitments: 0
       },
+      installationQualityControl: {
+        available: true,
+        stages: ['pre_installation', 'first_work', 'in_process', 'pre_concealment', 'testing', 'final_acceptance'],
+        controlPoints: ['check', 'witness', 'hold'],
+        sourceBinding: ['active_task', 'approved_assignment', 'assigned_worker', 'current_reference_basis', 'immutable_template'],
+        workerEvidence: 'authenticated_assigned_worker_scoped',
+        passEvidence: 'template_required_documents_measurements_and_witness_identity',
+        correctiveClosure: 'independently_approved_before_corrected_release',
+        taskCompletion: 'all_controls_source_current_passed_and_independently_released',
+        offlineCapture: 'queued_evidence_does_not_release_hold_or_complete_task',
+        exactReplay: true,
+        autonomy: 'internal_review_task_only',
+        releaseInferred: false,
+        scheduleChanged: false,
+        clientCommitments: 0,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
@@ -7634,6 +7730,13 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         lmraStopWork: 'explicit_reassessment_required',
         lmraAutonomy: 'internal_review_task_only',
         lmraAuthorizationInference: false,
+        installationQcEntryKey: 'durable_exact_replay',
+        installationQcWorkerEvidence: 'authenticated_assigned_worker_scoped',
+        installationQcSourceValidation: 'server_current_at_receipt_and_release',
+        installationQcTaskCompletionGate: true,
+        installationQcOfflineRelease: false,
+        installationQcAutonomy: 'internal_review_task_only',
+        installationQcReleaseInference: false,
         sdsRevisionEntryKey: 'durable',
         sdsRevisionSourceIntegrity: 'product_document_snapshot_sha256',
         sdsRevisionApproval: 'source_current_approval_gated',

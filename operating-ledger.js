@@ -52,14 +52,14 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'safety-quality',
     label: 'Safety, quality, and site access',
     vendors: ['HammerTech', 'Raken', 'Contractor Foreman', 'Procore'],
-    capabilities: ['orientations', 'JHAs', 'SDS', 'pre-task plans', 'permits', 'inspections', 'nonconformances', 'incidents', 'site access'],
+    capabilities: ['orientations', 'JHAs', 'SDS', 'pre-task plans', 'permits', 'installation quality control', 'inspections', 'nonconformances', 'incidents', 'site access'],
     sourceEvidence: [
       'HammerTech centers on safety platform operations: orientations, JHAs, SDS, pre-task plans, permits, safety meetings, incidents, inspections and site access.',
       'Raken and Contractor Foreman add managed checklists, observations, incidents, toolbox talks, quality management and compliance proof.'
     ],
     serviceGroups: [
       { name: 'Mobilization safety', services: ['Orientation', 'JHA', 'SDS register', 'site access gate'] },
-      { name: 'Quality assurance', services: ['Permit', 'inspection', 'nonconformance and corrective action', 'observation', 'incident', 'safety talk'] }
+      { name: 'Quality assurance', services: ['Permit', 'installation check/witness/hold point', 'inspection', 'nonconformance and corrective action', 'observation', 'incident', 'safety talk'] }
     ]
   },
   {
@@ -173,7 +173,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'jha', label: 'JHA / risk assessment', table: 'jha_records', detailKey: 'jhas' },
     { key: 'sds', label: 'SDS register', table: 'sds_sheets', detailKey: 'sdsSheets' },
     { key: 'permit', label: 'Permits', table: 'permit_records', detailKey: 'permits' },
-    { key: 'inspection', label: 'Inspections', table: 'inspection_records', detailKey: 'inspections' },
+    { key: 'inspection', label: 'Inspections and installation QC', table: 'inspection_records', detailKey: 'inspections' },
     { key: 'nonconformance', label: 'Nonconformance and corrective action', table: 'nonconformance_records', detailKey: 'nonconformances' },
     { key: 'observation', label: 'Observations', table: 'observation_records', detailKey: 'observations' },
     { key: 'incident', label: 'Incidents', table: 'incident_records', detailKey: 'incidents' },
@@ -222,6 +222,11 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ]
 };
 
+const INSTALLATION_QC_CONTROL_FORMAT = 'contractor.ai/installation-qc-control/v1';
+const INSTALLATION_QC_SOURCE_FORMAT = 'contractor.ai/installation-qc-source/v1';
+const INSTALLATION_QC_STAGES = new Set(['pre_installation', 'first_work', 'in_process', 'pre_concealment', 'testing', 'final_acceptance']);
+const INSPECTION_CONTROL_POINTS = new Set(['check', 'witness', 'hold']);
+
 const BUILT_IN_INSPECTION_TEMPLATES = [
   {
     id: 'inspection_template_prestart_v1',
@@ -267,6 +272,96 @@ const BUILT_IN_INSPECTION_TEMPLATES = [
       { key: 'wkb_evidence', prompt: 'Required Wkb-style quality evidence is linked to the job dossier', required: true, allowNotApplicable: true, failureSeverity: 'high' },
       { key: 'client_area', prompt: 'Client areas are clean, protected, and ready for controlled handover', required: true, allowNotApplicable: false, failureSeverity: 'medium' }
     ]
+  },
+  {
+    id: 'inspection_template_installation_qc_v1',
+    templateKey: 'installation_qc',
+    name: 'Installation quality control',
+    inspectionType: 'installation_qc',
+    discipline: 'quality',
+    version: 1,
+    data: {
+      installationQc: true,
+      defaultInstallationStage: 'in_process',
+      defaultControlPoint: 'hold',
+      requiresTaskBinding: true,
+      requiresAssignedWorker: true,
+      requiresReferenceBasis: true
+    },
+    items: [
+      {
+        key: 'current_requirements',
+        prompt: 'Current drawings, scope, manufacturer instructions, and approved samples are available',
+        acceptanceCriteria: 'The retained reference basis and linked current revisions match the installation being inspected.',
+        controlPoint: 'hold',
+        required: true,
+        allowNotApplicable: false,
+        evidenceRequired: true,
+        failureSeverity: 'high'
+      },
+      {
+        key: 'substrate_prerequisites',
+        prompt: 'Substrate, preceding work, access, and environmental conditions are suitable',
+        acceptanceCriteria: 'Prerequisites meet the retained tolerances and no unresolved defect or obstruction prevents compliant installation.',
+        controlPoint: 'hold',
+        required: true,
+        allowNotApplicable: true,
+        evidenceRequired: true,
+        failureSeverity: 'high'
+      },
+      {
+        key: 'materials_identity',
+        prompt: 'Installed products, batches, fixings, and components match the approved requirement',
+        acceptanceCriteria: 'Product identity, quantity, condition, batch or serial evidence, and approved substitutions are traceable.',
+        controlPoint: 'check',
+        required: true,
+        allowNotApplicable: false,
+        evidenceRequired: true,
+        failureSeverity: 'high'
+      },
+      {
+        key: 'setout_tolerances',
+        prompt: 'Set-out, dimensions, levels, alignment, and specified tolerances are verified',
+        acceptanceCriteria: 'Observed measurements fall within the retained design or manufacturer tolerance.',
+        controlPoint: 'check',
+        required: true,
+        allowNotApplicable: true,
+        evidenceRequired: false,
+        measurementRequired: true,
+        failureSeverity: 'high'
+      },
+      {
+        key: 'workmanship',
+        prompt: 'Installation method, interfaces, protection, and workmanship meet the retained requirement',
+        acceptanceCriteria: 'Work is complete for this stage, interfaces are controlled, and visible or functional defects are absent.',
+        controlPoint: 'check',
+        required: true,
+        allowNotApplicable: false,
+        evidenceRequired: true,
+        failureSeverity: 'high'
+      },
+      {
+        key: 'concealed_work',
+        prompt: 'Required concealed-work evidence is witnessed before covering or closing',
+        acceptanceCriteria: 'The complete concealed condition is visible in retained evidence and the named witness has reviewed it before closure.',
+        controlPoint: 'witness',
+        required: true,
+        allowNotApplicable: true,
+        evidenceRequired: true,
+        failureSeverity: 'high'
+      },
+      {
+        key: 'test_function',
+        prompt: 'Required testing, commissioning, or functional verification has passed',
+        acceptanceCriteria: 'Observed test results meet the retained acceptance threshold and are traceable to the installed work.',
+        controlPoint: 'witness',
+        required: true,
+        allowNotApplicable: true,
+        evidenceRequired: true,
+        measurementRequired: true,
+        failureSeverity: 'high'
+      }
+    ]
   }
 ];
 
@@ -280,7 +375,7 @@ function builtInInspectionTemplateRows(timestamp = null) {
     version_number: template.version,
     status: 'active',
     items_json: toJson(normalizeInspectionTemplateItems(template.items), []),
-    data_json: toJson({ builtIn: true, immutable: true }),
+    data_json: toJson({ builtIn: true, immutable: true, ...(template.data || {}) }),
     created_at: timestamp,
     updated_at: timestamp
   }));
@@ -2495,11 +2590,40 @@ function normalizeInspectionTemplateItems(value) {
       throw ledgerInputError('inspection_template_item_duplicate', `Checklist item key ${key} is repeated.`);
     }
     keys.add(key);
+    const acceptanceCriteria = normalizeText(
+      item.acceptanceCriteria || item.acceptance_criteria || item.criteria || prompt,
+      prompt
+    );
+    if (acceptanceCriteria.length < 3 || acceptanceCriteria.length > 600) {
+      throw ledgerInputError(
+        'inspection_template_acceptance_criteria_invalid',
+        `Checklist item ${index + 1} requires acceptance criteria between 3 and 600 characters.`
+      );
+    }
+    const controlPoint = normalizeStatus(item.controlPoint || item.control_point, 'check');
+    if (!INSPECTION_CONTROL_POINTS.has(controlPoint)) {
+      throw ledgerInputError(
+        'inspection_template_control_point_invalid',
+        `Checklist item ${index + 1} control point must be check, witness, or hold.`
+      );
+    }
+    const measurementUnit = normalizeText(item.measurementUnit || item.measurement_unit, '');
+    if (measurementUnit.length > 40) {
+      throw ledgerInputError(
+        'inspection_template_measurement_unit_invalid',
+        `Checklist item ${index + 1} measurement unit must be 40 characters or fewer.`
+      );
+    }
     return {
       key,
       prompt,
+      acceptanceCriteria,
+      controlPoint,
       required: item.required !== false,
       allowNotApplicable: item.allowNotApplicable === true || item.allow_not_applicable === true,
+      evidenceRequired: item.evidenceRequired === true || item.evidence_required === true,
+      measurementRequired: item.measurementRequired === true || item.measurement_required === true,
+      measurementUnit: measurementUnit || null,
       failureSeverity: normalizePriority(item.failureSeverity || item.failure_severity || item.severity || 'medium'),
       category: normalizeStatus(item.category || 'general')
     };
@@ -2541,10 +2665,36 @@ function normalizeInspectionChecklistResponses(value, checklistItems) {
     if (evidenceDocumentIds.length > 20) {
       throw ledgerInputError('inspection_checklist_evidence_invalid', `Checklist item ${itemKey} supports at most 20 evidence links.`);
     }
+    const observedValue = normalizeText(response.observedValue || response.observed_value || response.measurement, '');
+    if (observedValue.length > 500) {
+      throw ledgerInputError('inspection_checklist_observed_value_invalid', `Checklist item ${itemKey} observed value must be 500 characters or fewer.`);
+    }
+    const witnessName = normalizeText(response.witnessName || response.witness_name, '');
+    const witnessRole = normalizeText(response.witnessRole || response.witness_role, '');
+    if (witnessName.length > 160 || witnessRole.length > 160) {
+      throw ledgerInputError('inspection_checklist_witness_invalid', `Checklist item ${itemKey} witness identity must be 160 characters or fewer.`);
+    }
     if (result === 'fail' && notes.length < 3 && evidenceDocumentIds.length === 0) {
       throw ledgerInputError('inspection_checklist_failure_evidence_required', `Failed checklist item ${itemKey} requires notes or retained evidence.`);
     }
-    byKey.set(itemKey, { itemKey, result, notes: notes || null, evidenceDocumentIds });
+    if (result === 'pass' && item.evidenceRequired === true && evidenceDocumentIds.length === 0) {
+      throw ledgerInputError('inspection_checklist_pass_evidence_required', `Checklist item ${itemKey} requires retained evidence before it can pass.`);
+    }
+    if (result === 'pass' && item.measurementRequired === true && observedValue.length < 1) {
+      throw ledgerInputError('inspection_checklist_measurement_required', `Checklist item ${itemKey} requires an observed value before it can pass.`);
+    }
+    if (result === 'pass' && item.controlPoint === 'witness' && (witnessName.length < 2 || witnessRole.length < 2)) {
+      throw ledgerInputError('inspection_checklist_witness_required', `Witness point ${itemKey} requires the witness name and role before it can pass.`);
+    }
+    byKey.set(itemKey, {
+      itemKey,
+      result,
+      notes: notes || null,
+      observedValue: observedValue || null,
+      witnessName: witnessName || null,
+      witnessRole: witnessRole || null,
+      evidenceDocumentIds
+    });
   }
   const missing = checklistItems.filter(item => item.required && !byKey.has(item.key)).map(item => item.key);
   if (missing.length) {
@@ -2555,6 +2705,25 @@ function normalizeInspectionChecklistResponses(value, checklistItems) {
     );
   }
   return checklistItems.filter(item => byKey.has(item.key)).map(item => ({ ...byKey.get(item.key) }));
+}
+
+function normalizeInstallationQcStage(value, fallback = 'in_process') {
+  const stage = normalizeStatus(value, fallback);
+  if (!INSTALLATION_QC_STAGES.has(stage)) {
+    throw ledgerInputError(
+      'installation_qc_stage_invalid',
+      `Installation stage must be one of: ${[...INSTALLATION_QC_STAGES].join(', ')}.`
+    );
+  }
+  return stage;
+}
+
+function normalizeInspectionControlPoint(value, fallback = 'check') {
+  const controlPoint = normalizeStatus(value, fallback);
+  if (!INSPECTION_CONTROL_POINTS.has(controlPoint)) {
+    throw ledgerInputError('installation_qc_control_point_invalid', 'Control point must be check, witness, or hold.');
+  }
+  return controlPoint;
 }
 
 function siteSurveyTemplateSnapshot() {
@@ -5514,6 +5683,66 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON lmra_assessments(reassessment_of_id)
           WHERE reassessment_of_id IS NOT NULL AND outcome = 'ready';
       `);
+    }
+  },
+  {
+    version: '064_governed_installation_qc',
+    description: 'Bind installation quality controls to retained tasks, assigned workers, current references, check/witness/hold points, exact field evidence, independent approval, and task completion gates.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS installation_qc_controls (
+          inspection_id TEXT PRIMARY KEY REFERENCES inspection_records(id) ON DELETE CASCADE,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES job_tasks(id) ON DELETE RESTRICT,
+          assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
+          assigned_worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+          installation_stage TEXT NOT NULL,
+          control_point TEXT NOT NULL,
+          work_location TEXT NOT NULL,
+          reference_basis TEXT NOT NULL,
+          reference_document_ids_json TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'scheduled',
+          latest_submission_id TEXT REFERENCES inspection_checklist_submissions(id) ON DELETE SET NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          released_at TEXT,
+          released_by TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_installation_qc_job_status
+          ON installation_qc_controls(job_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_installation_qc_task_status
+          ON installation_qc_controls(task_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_installation_qc_worker_status
+          ON installation_qc_controls(assigned_worker_id, status, updated_at DESC);
+      `);
+
+      const installationTemplate = builtInInspectionTemplateRows(nowIso())
+        .find(template => template.template_key === 'installation_qc');
+      const existing = db.prepare('SELECT id FROM inspection_templates WHERE template_key = ? LIMIT 1')
+        .get('installation_qc');
+      if (installationTemplate && !existing) {
+        db.prepare(`
+          INSERT INTO inspection_templates (
+            id, template_key, name, inspection_type, discipline, version_number, status,
+            items_json, data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        `).run(
+          installationTemplate.id,
+          installationTemplate.template_key,
+          installationTemplate.name,
+          installationTemplate.inspection_type,
+          installationTemplate.discipline,
+          installationTemplate.version_number,
+          installationTemplate.items_json,
+          installationTemplate.data_json,
+          installationTemplate.created_at,
+          installationTemplate.updated_at
+        );
+      }
     }
   }
 ];
@@ -16940,7 +17169,10 @@ class ContractorOperatingLedger {
     if (openNonconformances.length) blockers.push({ code: 'open_nonconformances', label: `${openNonconformances.length} NCR(s) remain unresolved`, recordIds: openNonconformances.map(item => item.id) });
     const openPunch = (detail.punchItems || []).filter(item => !closed(item, ['resolved', 'verified', 'closed', 'completed', 'cancelled', 'canceled', 'rejected', 'void']));
     if (openPunch.length) blockers.push({ code: 'open_punch_items', label: `${openPunch.length} punch item(s) remain unresolved`, recordIds: openPunch.map(item => item.id) });
-    const openInspections = (detail.inspections || []).filter(item => !closed(item, ['approved', 'passed', 'completed', 'closed', 'verified', 'cancelled', 'canceled', 'rejected', 'void']));
+    const openInspections = (detail.inspections || []).filter(item => (
+      !closed(item, ['approved', 'passed', 'completed', 'closed', 'verified', 'cancelled', 'canceled', 'rejected', 'void'])
+      || (item.installationQc && item.installationQc.readyForTaskCompletion !== true)
+    ));
     if (openInspections.length) blockers.push({ code: 'open_inspections', label: `${openInspections.length} inspection(s) remain open`, recordIds: openInspections.map(item => item.id) });
     const currentPermits = (detail.permits || []).filter(item => {
       if (closed(item, ['cancelled', 'canceled', 'rejected', 'void'])) return false;
@@ -27441,6 +27673,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           throw error;
         }
         if (!['completed', 'cancelled'].includes(taskRow.status)) {
+          this.assertTaskInstallationQcReady(jobId, row.linked_task_id);
           const beforeTask = this.mapTask(taskRow);
           this.db.prepare(`
             UPDATE job_tasks
@@ -35510,6 +35743,219 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  installationQcDocumentSource(jobId, documentId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+    if (!row) {
+      throw ledgerInputError(
+        'installation_qc_reference_document_not_found',
+        `Installation QC reference ${documentId} does not belong to this job.`,
+        { jobId, documentId },
+        409
+      );
+    }
+    const document = this.mapDocument(row);
+    const data = document.data || {};
+    const status = normalizeStatus(document.status, 'stored');
+    const controlledCurrent = document.type === 'controlled_document'
+      ? status === 'approved' && data.isCurrent === true
+      : null;
+    const drawingCurrent = document.type === 'drawing_revision' ? document.current === true : null;
+    const relianceCurrent = document.type === 'drawing_revision'
+      ? drawingCurrent
+      : document.type === 'controlled_document'
+        ? controlledCurrent
+        : ['stored', 'approved', 'current'].includes(status);
+    if (options.requireCurrent !== false && !relianceCurrent) {
+      throw ledgerInputError(
+        'installation_qc_reference_document_not_current',
+        `${document.documentNumber || document.title || document.id} is not a current retained reference.`,
+        { jobId, documentId, status, type: document.type },
+        409
+      );
+    }
+    return {
+      basis: {
+        id: document.id,
+        type: document.type,
+        title: document.title,
+        documentNumber: document.documentNumber || null,
+        revision: document.revision || null,
+        checksum: data.analysis?.upload?.sha256 || data.contentHash || null,
+        sourceHash: document.sourceHash || null,
+        snapshotHash: document.snapshotHash || null
+      },
+      relianceCurrent,
+      integrityValid: document.type !== 'drawing_revision' || document.integrityValid === true
+    };
+  }
+
+  buildInstallationQcSource(jobId, payload = {}, options = {}) {
+    const taskId = normalizeText(payload.taskId || payload.task_id, '');
+    const assignmentId = normalizeText(payload.assignmentId || payload.assignment_id, '');
+    const workerId = normalizeText(payload.assignedWorkerId || payload.assigned_worker_id || payload.workerId || payload.worker_id, '');
+    const task = this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, jobId);
+    if (!task) {
+      throw ledgerInputError('installation_qc_task_required', 'Installation QC requires a retained task on the same job.', { jobId, taskId }, 409);
+    }
+    if (options.requireOperational !== false && ['completed', 'cancelled', 'canceled'].includes(normalizeStatus(task.status, 'open'))) {
+      throw ledgerInputError('installation_qc_task_closed', 'Installation QC cannot be scheduled or submitted against a completed or cancelled task.', { jobId, taskId, status: task.status }, 409);
+    }
+    const assignment = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, workers.status AS worker_status
+      FROM assignments
+      JOIN workers ON workers.id = assignments.worker_id
+      WHERE assignments.id = ? AND assignments.job_id = ? AND assignments.worker_id = ?
+    `).get(assignmentId, jobId, workerId);
+    if (!assignment) {
+      throw ledgerInputError(
+        'installation_qc_assignment_required',
+        'Installation QC requires an assigned worker with a retained assignment to this job.',
+        { jobId, taskId, assignmentId, workerId },
+        409
+      );
+    }
+    if (options.requireOperational !== false && (
+      !this.activeAssignmentStatus(assignment.status)
+      || normalizeStatus(assignment.status, '') === 'pending_approval'
+      || fromJson(assignment.data_json, {}).requiresApproval === true
+    )) {
+      throw ledgerInputError(
+        'installation_qc_assignment_inactive',
+        'Installation QC requires an active approved worker assignment.',
+        { jobId, assignmentId, workerId, status: assignment.status },
+        409
+      );
+    }
+    if (options.requireOperational !== false && ['retired', 'inactive', 'offline'].includes(normalizeStatus(assignment.worker_status, 'available'))) {
+      throw ledgerInputError(
+        'installation_qc_worker_unavailable',
+        'The assigned inspector is no longer available for installation QC.',
+        { jobId, assignmentId, workerId, status: assignment.worker_status },
+        409
+      );
+    }
+    if (task.assignee_id && String(task.assignee_id) !== String(workerId)) {
+      throw ledgerInputError(
+        'installation_qc_task_assignee_mismatch',
+        'The installation QC worker must match the retained task assignee.',
+        { jobId, taskId, taskAssigneeId: task.assignee_id, workerId },
+        409
+      );
+    }
+    const workLocation = normalizeText(payload.workLocation || payload.work_location || payload.location, '');
+    if (workLocation.length < 2 || workLocation.length > 240) {
+      throw ledgerInputError('installation_qc_location_invalid', 'Installation QC work location must be between 2 and 240 characters.');
+    }
+    const installationStage = normalizeInstallationQcStage(payload.installationStage || payload.installation_stage, 'in_process');
+    const controlPoint = normalizeInspectionControlPoint(payload.controlPoint || payload.control_point, 'check');
+    const referenceBasis = normalizeText(payload.referenceBasis || payload.reference_basis, '');
+    if (referenceBasis.length < 3 || referenceBasis.length > 600) {
+      throw ledgerInputError('installation_qc_reference_basis_invalid', 'Installation QC reference basis must be between 3 and 600 characters.');
+    }
+    const referenceDocumentIds = [...new Set(normalizeList(
+      payload.referenceDocumentIds || payload.reference_document_ids
+    ).map(value => normalizeText(value, '')).filter(Boolean))];
+    if (referenceDocumentIds.length > 20) {
+      throw ledgerInputError('installation_qc_reference_documents_invalid', 'Installation QC supports at most 20 retained reference documents.');
+    }
+    const referenceDocuments = referenceDocumentIds.map(documentId =>
+      this.installationQcDocumentSource(jobId, documentId, {
+        requireCurrent: options.requireCurrentReferences !== false
+      })
+    );
+    const source = {
+      format: INSTALLATION_QC_SOURCE_FORMAT,
+      jobId,
+      task: {
+        id: task.id,
+        title: task.title,
+        assigneeId: task.assignee_id || null
+      },
+      assignment: {
+        id: assignment.id,
+        workerId: assignment.worker_id
+      },
+      worker: {
+        id: assignment.worker_id,
+        name: assignment.worker_name
+      },
+      workLocation,
+      installationStage,
+      controlPoint,
+      referenceBasis,
+      referenceDocuments: referenceDocuments.map(document => document.basis),
+      templateSnapshotHash: normalizeText(payload.templateSnapshotHash || payload.template_snapshot_hash, '')
+    };
+    return {
+      source,
+      sourceHash: sha256Json(source),
+      task,
+      assignment,
+      referenceDocumentIds,
+      referencesCurrent: referenceDocuments.every(document => document.relianceCurrent && document.integrityValid)
+    };
+  }
+
+  getInstallationQcControl(inspectionId, options = {}) {
+    const clauses = ['inspection_id = ?'];
+    const parameters = [inspectionId];
+    if (options.jobId || options.job_id) {
+      clauses.push('job_id = ?');
+      parameters.push(options.jobId || options.job_id);
+    }
+    const row = this.db.prepare(`SELECT * FROM installation_qc_controls WHERE ${clauses.join(' AND ')}`).get(...parameters);
+    if (!row) return null;
+    return this.mapInstallationQcControl(row);
+  }
+
+  listInstallationQcControls(filters = {}) {
+    const clauses = [];
+    const parameters = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('job_id = ?');
+      parameters.push(filters.jobId || filters.job_id);
+    }
+    if (filters.taskId || filters.task_id) {
+      clauses.push('task_id = ?');
+      parameters.push(filters.taskId || filters.task_id);
+    }
+    if (filters.workerId || filters.worker_id) {
+      clauses.push('assigned_worker_id = ?');
+      parameters.push(filters.workerId || filters.worker_id);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = Math.min(Math.max(Number(filters.limit || 500), 1), 5000);
+    return this.db.prepare(`
+      SELECT * FROM installation_qc_controls
+      ${where}
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT ?
+    `).all(...parameters, limit).map(row => this.mapInstallationQcControl(row));
+  }
+
+  assertTaskInstallationQcReady(jobId, taskId) {
+    const controls = this.listInstallationQcControls({ jobId, taskId, limit: 500 });
+    const blockers = controls.filter(control => control.readyForTaskCompletion !== true);
+    if (blockers.length) {
+      throw ledgerInputError(
+        'task_installation_qc_hold',
+        'Task completion is blocked until every retained installation QC check, witness point, and hold point is passed, source-current, and independently approved.',
+        {
+          jobId,
+          taskId,
+          blockers: blockers.map(control => ({
+            inspectionId: control.inspectionId,
+            status: control.effectiveStatus,
+            sourceCurrent: control.sourceCurrent,
+            openCorrectiveObservations: control.openCorrectiveObservationIds.length
+          }))
+        },
+        409
+      );
+    }
+    return controls;
+  }
+
   listInspectionTemplates(filters = {}) {
     const includeSuperseded = filters.includeSuperseded === true || filters.include_superseded === true;
     const discipline = normalizeStatus(filters.discipline, '');
@@ -35573,6 +36019,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (source && fromJson(source.data_json, {}).builtIn === true) {
         throw ledgerInputError('inspection_template_builtin_immutable', 'Built-in inspection templates are immutable; create a new custom template instead.');
       }
+      const sourceData = source ? fromJson(source.data_json, {}) : {};
       const templateKey = source
         ? source.template_key
         : inspectionTemplateKey(payload.templateKey || payload.template_key || name);
@@ -35585,6 +36032,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       const inspectionType = normalizeStatus(payload.inspectionType || payload.inspection_type, source?.inspection_type || 'site_inspection');
       const discipline = normalizeStatus(payload.discipline, source?.discipline || 'general');
+      const installationQc = normalizeBoolean(
+        payload.installationQc ?? payload.installation_qc,
+        sourceData.installationQc === true
+      );
+      const defaultInstallationStage = installationQc
+        ? normalizeInstallationQcStage(
+          payload.defaultInstallationStage || payload.default_installation_stage,
+          sourceData.defaultInstallationStage || 'in_process'
+        )
+        : null;
+      const defaultControlPoint = installationQc
+        ? normalizeInspectionControlPoint(
+          payload.defaultControlPoint || payload.default_control_point,
+          sourceData.defaultControlPoint || 'check'
+        )
+        : null;
       const id = makeId('inspection_template');
       const timestamp = nowIso();
       if (source) {
@@ -35605,11 +36068,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         versionNumber,
         toJson(items, []),
         toJson({
-          builtIn: false,
-          immutable: true,
-          notes: normalizeText(payload.notes || payload.note, '') || null,
-          revisedFromTemplateId: source?.id || null
-        }),
+           builtIn: false,
+           immutable: true,
+           notes: normalizeText(payload.notes || payload.note, '') || null,
+           revisedFromTemplateId: source?.id || null,
+           installationQc,
+           defaultInstallationStage,
+           defaultControlPoint,
+           requiresTaskBinding: installationQc && normalizeBoolean(
+             payload.requiresTaskBinding ?? payload.requires_task_binding,
+             sourceData.requiresTaskBinding !== false
+           ),
+           requiresAssignedWorker: installationQc && normalizeBoolean(
+             payload.requiresAssignedWorker ?? payload.requires_assigned_worker,
+             sourceData.requiresAssignedWorker !== false
+           ),
+           requiresReferenceBasis: installationQc && normalizeBoolean(
+             payload.requiresReferenceBasis ?? payload.requires_reference_basis,
+             sourceData.requiresReferenceBasis !== false
+           )
+         }),
         timestamp,
         timestamp
       );
@@ -35640,6 +36118,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         throw error;
       }
       const template = this.mapInspectionTemplate(templateRow);
+      const governedInstallationQc = template.data?.installationQc === true;
       const title = normalizeText(payload.title, template.name);
       if (title.length < 3 || title.length > 240) {
         throw ledgerInputError('inspection_title_invalid', 'Inspection title must be between 3 and 240 characters.');
@@ -35660,11 +36139,61 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const id = entryKey
         ? `inspection_${sha256Text(`${jobId}\0${entryKey}`).slice(0, 24)}`
         : makeId('inspection');
+      const installationStage = governedInstallationQc
+        ? normalizeInstallationQcStage(
+          payload.installationStage || payload.installation_stage,
+          template.data.defaultInstallationStage || 'in_process'
+        )
+        : null;
+      const controlPoint = governedInstallationQc
+        ? normalizeInspectionControlPoint(
+          payload.controlPoint || payload.control_point,
+          template.data.defaultControlPoint || 'check'
+        )
+        : null;
+      const taskId = governedInstallationQc ? normalizeText(payload.taskId || payload.task_id, '') : null;
+      const assignmentId = governedInstallationQc ? normalizeText(payload.assignmentId || payload.assignment_id, '') : null;
+      const assignedWorkerId = governedInstallationQc
+        ? normalizeText(payload.assignedWorkerId || payload.assigned_worker_id || payload.workerId || payload.worker_id, '')
+        : null;
+      const workLocation = governedInstallationQc
+        ? normalizeText(payload.workLocation || payload.work_location || payload.location, '')
+        : null;
+      const referenceBasis = governedInstallationQc
+        ? normalizeText(payload.referenceBasis || payload.reference_basis, '')
+        : null;
+      const referenceDocumentIds = governedInstallationQc
+        ? [...new Set(normalizeList(payload.referenceDocumentIds || payload.reference_document_ids).map(value => normalizeText(value, '')).filter(Boolean))]
+        : [];
+      const installationQcRequestFingerprint = governedInstallationQc
+        ? sha256Json({
+          jobId,
+          templateId,
+          title,
+          scheduledAt,
+          inspector: normalizeText(payload.inspector || payload.owner || actor, actor),
+          notes: normalizeText(payload.notes || payload.note, '') || null,
+          taskId,
+          assignmentId,
+          assignedWorkerId,
+          workLocation,
+          installationStage,
+          controlPoint,
+          referenceBasis,
+          referenceDocumentIds
+        })
+        : null;
       const existing = this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(id);
       if (existing) {
         const existingData = fromJson(existing.data_json, {});
         if (existing.job_id !== jobId || existingData.entryKey !== entryKey || existingData.checklistSnapshot?.templateId !== templateId) {
           throw ledgerInputError('inspection_entry_key_conflict', 'This inspection retry key was already used for another request.');
+        }
+        if (governedInstallationQc) {
+          const existingControl = this.db.prepare('SELECT data_json FROM installation_qc_controls WHERE inspection_id = ?').get(id);
+          if (fromJson(existingControl?.data_json, {}).requestFingerprint !== installationQcRequestFingerprint) {
+            throw ledgerInputError('inspection_entry_key_conflict', 'This installation QC retry key was already used with different task, worker, location, reference, or schedule data.');
+          }
         }
         return { ...this.mapInspection(existing), replayed: true };
       }
@@ -35678,6 +36207,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         items: template.items
       };
       const checklistSnapshotHash = sha256Json(checklistSnapshot);
+      const installationQcSource = governedInstallationQc
+        ? this.buildInstallationQcSource(jobId, {
+          taskId,
+          assignmentId,
+          assignedWorkerId,
+          workLocation,
+          installationStage,
+          controlPoint,
+          referenceBasis,
+          referenceDocumentIds,
+          templateSnapshotHash: checklistSnapshotHash
+        })
+        : null;
       const timestamp = nowIso();
       this.db.prepare(`
         INSERT INTO inspection_records (
@@ -35689,7 +36231,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         jobId,
         template.inspectionType,
         title,
-        payload.inspector || payload.owner || actor,
+        installationQcSource?.assignment?.worker_name || payload.inspector || payload.owner || actor,
         scheduledAt,
         toJson({
           requestedStatus: 'scheduled',
@@ -35698,13 +36240,63 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           clientVisible: false,
           checklistStatus: 'scheduled',
           checklistSnapshot,
-          checklistSnapshotHash,
-          latestChecklistSubmissionId: null,
-          entryKey: entryKey || null
-        }),
+           checklistSnapshotHash,
+           latestChecklistSubmissionId: null,
+           entryKey: entryKey || null,
+           governedInstallationQc
+         }),
         timestamp,
-        timestamp
-      );
+         timestamp
+       );
+      if (installationQcSource) {
+        const source = installationQcSource.source;
+        const controlSnapshot = {
+          format: INSTALLATION_QC_CONTROL_FORMAT,
+          inspectionId: id,
+          jobId,
+          source,
+          sourceHash: installationQcSource.sourceHash,
+          scheduledAt,
+          createdAt: timestamp
+        };
+        const snapshotJson = toJson(controlSnapshot);
+        const snapshotHash = sha256Text(snapshotJson);
+        this.db.prepare(`
+          INSERT INTO installation_qc_controls (
+            inspection_id, job_id, task_id, assignment_id, assigned_worker_id,
+            installation_stage, control_point, work_location, reference_basis,
+            reference_document_ids_json, status, latest_submission_id,
+            source_hash, snapshot_json, snapshot_hash, released_at, released_by,
+            data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, ?, ?, NULL, NULL, ?, ?, ?)
+        `).run(
+          id,
+          jobId,
+          taskId,
+          assignmentId,
+          assignedWorkerId,
+          installationStage,
+          controlPoint,
+          workLocation,
+          referenceBasis,
+          toJson(referenceDocumentIds, []),
+          installationQcSource.sourceHash,
+          snapshotJson,
+          snapshotHash,
+          toJson({
+            requestFingerprint: installationQcRequestFingerprint,
+            externalCommitments: 0
+          }),
+          timestamp,
+          timestamp
+        );
+        const taskData = fromJson(installationQcSource.task.data_json, {});
+        this.db.prepare('UPDATE job_tasks SET data_json = ?, updated_at = ? WHERE id = ? AND job_id = ?')
+          .run(toJson({
+            ...taskData,
+            installationQcRequired: true
+          }), timestamp, taskId, jobId);
+      }
       const inspection = this.mapInspection(this.db.prepare('SELECT * FROM inspection_records WHERE id = ?').get(id));
       this.audit({
         entityType: 'inspection_record',
@@ -35717,9 +36309,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           templateId,
           templateVersion: template.versionNumber,
           checklistSnapshotHash,
-          itemCount: template.items.length,
-          externalCommitments: 0
-        }
+           itemCount: template.items.length,
+           governedInstallationQc,
+           taskId,
+           assignedWorkerId,
+           controlPoint,
+           sourceHash: installationQcSource?.sourceHash || null,
+           externalCommitments: 0
+         }
       });
       return inspection;
     });
@@ -35752,6 +36349,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.code = 'inspection_checklist_snapshot_tampered';
         throw error;
       }
+      const installationQcRow = this.db.prepare('SELECT * FROM installation_qc_controls WHERE inspection_id = ? AND job_id = ?')
+        .get(inspectionId, jobId);
+      const installationQc = installationQcRow ? this.mapInstallationQcControl(installationQcRow) : null;
+      if (installationQc) {
+        if (installationQc.integrityValid !== true || installationQc.sourceCurrent !== true) {
+          throw ledgerInputError(
+            'installation_qc_source_stale',
+            'Installation QC cannot be submitted because its retained task, worker, template, or reference source is no longer current.',
+            {
+              inspectionId,
+              integrityValid: installationQc.integrityValid,
+              sourceCurrent: installationQc.sourceCurrent
+            },
+            409
+          );
+        }
+        if (
+          options.enforceWorkerScope === true
+          && String(options.workerId || '') !== String(installationQc.assignedWorkerId || '')
+        ) {
+          throw ledgerInputError(
+            'installation_qc_worker_scope_forbidden',
+            'Only the retained assigned worker can submit this installation QC checklist.',
+            { inspectionId, assignedWorkerId: installationQc.assignedWorkerId },
+            403
+          );
+        }
+      }
       const responses = normalizeInspectionChecklistResponses(payload.responses, checklistSnapshot.items);
       const notes = normalizeText(payload.notes || payload.note, '');
       if (notes.length > 4000) {
@@ -35762,13 +36387,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         return {
           ...response,
           prompt: item.prompt,
-          category: item.category,
-          failureSeverity: item.failureSeverity,
-          required: item.required,
-          allowNotApplicable: item.allowNotApplicable
-        };
-      });
-      const requestHash = sha256Json({ responses: retainedResponses, notes: notes || null });
+           category: item.category,
+           acceptanceCriteria: item.acceptanceCriteria || item.prompt,
+           controlPoint: item.controlPoint || 'check',
+           evidenceRequired: item.evidenceRequired === true,
+           measurementRequired: item.measurementRequired === true,
+           measurementUnit: item.measurementUnit || null,
+           failureSeverity: item.failureSeverity,
+           required: item.required,
+           allowNotApplicable: item.allowNotApplicable
+         };
+       });
+      const capturedAtInput = normalizeText(payload.capturedAt || payload.captured_at, '');
+      let capturedAt = null;
+      if (capturedAtInput) {
+        const parsed = new Date(capturedAtInput);
+        if (Number.isNaN(parsed.getTime()) || parsed.getTime() > this.clock().getTime() + 5 * 60 * 1000) {
+          throw ledgerInputError('inspection_checklist_capture_time_invalid', 'Inspection capture time is invalid or more than five minutes in the future.');
+        }
+        capturedAt = parsed.toISOString();
+      } else if (installationQc) {
+        throw ledgerInputError('installation_qc_capture_time_required', 'Installation QC requires the retained field capture time.');
+      }
+      const requestHash = sha256Json({ responses: retainedResponses, notes: notes || null, capturedAt });
       const existingSubmissionRow = this.db.prepare('SELECT * FROM inspection_checklist_submissions WHERE id = ?').get(submissionId);
       if (existingSubmissionRow) {
         const existingData = fromJson(existingSubmissionRow.data_json, {});
@@ -35788,7 +36429,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           replayed: true
         };
       }
-      if (!['scheduled', 'in_progress', 'pending_review'].includes(normalizeStatus(inspectionRow.status, ''))) {
+      if (!['scheduled', 'in_progress', 'pending_review', 'failed', 'rejected'].includes(normalizeStatus(inspectionRow.status, ''))) {
         const error = new Error(`Inspection checklist cannot be submitted from ${inspectionRow.status}.`);
         error.statusCode = 409;
         error.code = 'inspection_checklist_state_conflict';
@@ -35850,10 +36491,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         checklistSnapshotHash: inspectionData.checklistSnapshotHash,
         result,
         responses: retainedResponses,
-        notes: notes || null,
-        submittedBy: actor,
-        submittedAt: timestamp
-      };
+         notes: notes || null,
+         submittedBy: actor,
+         capturedAt: capturedAt || timestamp,
+         submittedAt: timestamp,
+         installationQcSourceHash: installationQc?.sourceHash || null
+       };
       const submissionSnapshotJson = toJson(submissionSnapshot);
       const submissionSnapshotHash = sha256Text(submissionSnapshotJson);
       this.db.prepare(`
@@ -35876,7 +36519,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         transition.approval?.id || null,
         actor,
         timestamp,
-        toJson({ entryKey, requestHash, observationIds }),
+        toJson({
+          entryKey,
+          requestHash,
+          observationIds,
+          capturedAt: capturedAt || timestamp,
+          installationQc: Boolean(installationQc),
+          installationQcSourceHash: installationQc?.sourceHash || null
+        }),
         timestamp,
         timestamp
       );
@@ -35894,6 +36544,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       };
       this.db.prepare('UPDATE inspection_records SET data_json = ?, updated_at = ? WHERE id = ?')
         .run(toJson(nextInspectionData), timestamp, inspectionId);
+      if (installationQc) {
+        this.db.prepare(`
+          UPDATE installation_qc_controls
+          SET status = 'pending_review', latest_submission_id = ?, released_at = NULL,
+            released_by = NULL, updated_at = ?
+          WHERE inspection_id = ? AND job_id = ?
+        `).run(submissionId, timestamp, inspectionId, jobId);
+      }
       if (transition.approval?.id) {
         const approvalData = fromJson(this.db.prepare('SELECT data_json FROM approvals WHERE id = ?').get(transition.approval.id)?.data_json, {});
         this.db.prepare('UPDATE approvals SET data_json = ?, updated_at = ? WHERE id = ?').run(toJson({
@@ -35926,9 +36584,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           failedCount: failures.length,
           observationIds,
           approvalId: transition.approval?.id || null,
-          snapshotHash: submissionSnapshotHash,
-          externalCommitments: 0
-        }
+           snapshotHash: submissionSnapshotHash,
+           installationQc: Boolean(installationQc),
+           installationQcSourceHash: installationQc?.sourceHash || null,
+           externalCommitments: 0
+         }
       });
       return {
         inspection,
@@ -40500,13 +41160,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         allowedStatuses: new Set(['open', 'in_progress', 'blocked', 'completed', 'cancelled']),
         approvalStatuses: new Set(),
         terminalStatuses: new Set(['completed', 'cancelled']),
-        validate(row, requestedStatus) {
+        validate: (row, requestedStatus) => {
           if (['blocked', 'completed', 'cancelled'].includes(requestedStatus) && !normalizeText(payload.notes || payload.note, '')) {
             const error = new Error(`Task ${requestedStatus} evidence is required`);
             error.statusCode = 400;
             error.code = 'task_transition_evidence_required';
             throw error;
           }
+          if (requestedStatus === 'completed') this.assertTaskInstallationQcReady(jobId, row.id);
         },
         update(row, next) {
           const completed = next.data.requestedStatus === 'completed';
@@ -42919,6 +43580,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           checklistStatus: resolutionStatus
         }), approvalRow.target_id);
       }
+      this.db.prepare(`
+        UPDATE installation_qc_controls
+        SET status = 'rejected', released_at = NULL, released_by = NULL, updated_at = ?
+        WHERE inspection_id = ?
+      `).run(timestamp, approvalRow.target_id);
     }
     this.audit({
       entityType: approvalRow.target_type,
@@ -43253,6 +43919,56 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return baseline;
   }
 
+  validateInstallationQcApproval(approvalRow, payload = {}, options = {}) {
+    if (approvalRow?.target_type !== 'inspection_record') return null;
+    const controlRow = this.db.prepare('SELECT * FROM installation_qc_controls WHERE inspection_id = ?')
+      .get(approvalRow.target_id);
+    if (!controlRow) return null;
+    const control = this.mapInstallationQcControl(controlRow);
+    const latestSubmission = control.latestSubmission;
+    if (!latestSubmission || latestSubmission.approvalId !== approvalRow.id) {
+      throw ledgerInputError(
+        'installation_qc_latest_submission_required',
+        'Only the approval linked to the latest retained installation QC submission can be resolved.',
+        { inspectionId: control.inspectionId, latestSubmissionId: control.latestSubmissionId },
+        409
+      );
+    }
+    const reason = normalizeText(payload.reason || payload.notes, '');
+    if (reason.length < 4) {
+      throw ledgerInputError('installation_qc_approval_reason_required', 'Installation QC approval requires an explicit review reason.');
+    }
+    const resolver = normalizeText(payload.resolvedBy || payload.actor || options.actor, 'user');
+    if (options.enforceSeparation === true && normalizeText(latestSubmission.submittedBy, '') === resolver) {
+      throw ledgerInputError(
+        'installation_qc_independent_approval_required',
+        'Installation QC must be approved by a different authenticated operator than the field submitter.',
+        { inspectionId: control.inspectionId, submittedBy: latestSubmission.submittedBy },
+        409
+      );
+    }
+    if (latestSubmission.integrityValid !== true || control.integrityValid !== true) {
+      throw ledgerInputError('installation_qc_integrity_invalid', 'Installation QC retained evidence failed integrity verification.', { inspectionId: control.inspectionId }, 409);
+    }
+    if (latestSubmission.result === 'passed') {
+      if (control.sourceCurrent !== true) {
+        throw ledgerInputError('installation_qc_source_stale', 'Installation QC cannot release while its task, assignment, template, or reference source is stale.', { inspectionId: control.inspectionId }, 409);
+      }
+      if (control.openCorrectiveObservationIds.length) {
+        throw ledgerInputError(
+          'installation_qc_open_corrective_observations',
+          'Installation QC cannot release until all corrective observations from earlier failed checks are independently closed.',
+          {
+            inspectionId: control.inspectionId,
+            observationIds: control.openCorrectiveObservationIds
+          },
+          409
+        );
+      }
+    }
+    return control;
+  }
+
   resolveApproval(approvalId, payload = {}, options = {}) {
     return this.transaction(() => {
       const before = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -43267,6 +43983,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 400;
         throw error;
       }
+      if (status === 'approved') this.validateInstallationQcApproval(before, payload, options);
       if (status === 'approved' && before.target_type === 'supplier_invoice') {
         const supplierInvoice = this.db.prepare('SELECT data_json FROM supplier_invoices WHERE id = ?').get(before.target_id);
         const matchExceptions = fromJson(supplierInvoice?.data_json, {}).match?.exceptions || [];
@@ -45480,6 +46197,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           SET status = ?, updated_at = ?
           WHERE inspection_id = ? AND approval_id = ? AND status = 'pending_approval'
         `).run(approvedStatus, timestamp, targetId, inspection.approval_id);
+      }
+      const installationControl = this.db.prepare('SELECT latest_submission_id FROM installation_qc_controls WHERE inspection_id = ?')
+        .get(targetId);
+      if (installationControl?.latest_submission_id) {
+        const latestSubmission = this.db.prepare('SELECT result FROM inspection_checklist_submissions WHERE id = ? AND inspection_id = ?')
+          .get(installationControl.latest_submission_id, targetId);
+        const approval = inspection?.approval_id
+          ? this.db.prepare('SELECT resolved_by FROM approvals WHERE id = ?').get(inspection.approval_id)
+          : null;
+        const controlStatus = latestSubmission?.result === 'passed' ? 'released' : 'failed';
+        this.db.prepare(`
+          UPDATE installation_qc_controls
+          SET status = ?, released_at = ?, released_by = ?, updated_at = ?
+          WHERE inspection_id = ?
+        `).run(
+          controlStatus,
+          controlStatus === 'released' ? timestamp : null,
+          controlStatus === 'released' ? (approval?.resolved_by || 'approval') : null,
+          timestamp,
+          targetId
+        );
       }
     } else if (targetType === 'observation_record') {
       const observation = this.db.prepare('SELECT data_json FROM observation_records WHERE id = ?').get(targetId);
@@ -48811,6 +49549,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       permitReviews: 0,
       expiringPermits: 0,
       inspectionReviews: 0,
+      installationQcControls: 0,
+      openInstallationQcControls: 0,
       openNonconformances: 0,
       openObservations: 0,
       openIncidents: 0,
@@ -48844,6 +49584,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.permitReviews += normalizeNumber(row.counts?.permitReviews, 0);
       summary.expiringPermits += normalizeNumber(row.counts?.expiringPermits, 0);
       summary.inspectionReviews += normalizeNumber(row.counts?.inspectionReviews, 0);
+      summary.installationQcControls += normalizeNumber(row.counts?.installationQcControls, 0);
+      summary.openInstallationQcControls += normalizeNumber(row.counts?.openInstallationQcControls, 0);
       summary.openNonconformances += normalizeNumber(row.counts?.openNonconformances, 0);
       summary.openObservations += normalizeNumber(row.counts?.openObservations, 0);
       summary.openIncidents += normalizeNumber(row.counts?.openIncidents, 0);
@@ -48929,13 +49671,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           !['closed', 'expired', 'cancelled', 'canceled', 'rejected'].includes(statusOfRecord(item, 'draft'))
           && nearDue(item.expiresAt)
         );
+        const installationQcControls = (detail.inspections || [])
+          .map(item => item.installationQc)
+          .filter(Boolean);
+        const openInstallationQcControls = installationQcControls.filter(control => control.readyForTaskCompletion !== true);
+        const openInstallationQcInspection = (detail.inspections || [])
+          .find(item => item.installationQc?.readyForTaskCompletion === false);
         const inspectionReviews = (detail.inspections || []).filter(item => {
           const defects = Array.isArray(item.defects) ? item.defects : [];
           const result = normalizeStatus(item.result, '');
           return recordOpen(item)
             || ['failed', 'rejected'].includes(result)
             || ['scheduled', 'pending_approval', 'failed'].includes(statusOfRecord(item, 'scheduled'))
-            || defects.length > 0;
+            || defects.length > 0
+            || (item.installationQc && item.installationQc.readyForTaskCompletion !== true);
         });
         const openNonconformances = (detail.nonconformances || []).filter(recordOpen);
         const openObservations = (detail.observations || []).filter(recordOpen);
@@ -49127,9 +49876,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           requiresApproval: true
         });
         if (inspectionReviews.length) nextActions.push({
-          type: 'review_inspection',
-          label: 'Review inspection defects and sign-off',
-          inspectionId: inspectionReviews[0].id,
+          type: openInstallationQcControls.length ? 'review_installation_qc' : 'review_inspection',
+          label: openInstallationQcControls.length
+            ? 'Complete or review the installation QC hold point'
+            : 'Review inspection defects and sign-off',
+          inspectionId: openInstallationQcInspection?.id || inspectionReviews[0].id,
+          taskId: openInstallationQcControls[0]?.taskId || null,
           requiresApproval: true
         });
         if (openNonconformances.length) nextActions.push({
@@ -49206,6 +49958,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             expiringPermits: expiringPermits.length,
             inspections: (detail.inspections || []).length,
             inspectionReviews: inspectionReviews.length,
+            installationQcControls: installationQcControls.length,
+            openInstallationQcControls: openInstallationQcControls.length,
             nonconformances: (detail.nonconformances || []).length,
             openNonconformances: openNonconformances.length,
             observations: (detail.observations || []).length,
@@ -49239,6 +49993,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             submittal: submittalReviews[0] || null,
             permit: permitReviews[0] || expiringPermits[0] || null,
             inspection: inspectionReviews[0] || null,
+            installationQc: openInstallationQcControls[0] || installationQcControls[0] || null,
             nonconformance: openNonconformances[0] || null,
             observation: openObservations[0] || null,
             incident: openIncidents[0] || null,
@@ -49355,6 +50110,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preTaskPlans: this.listPreTaskPlans({ jobId, limit: 500 }),
       lmraAssessments: this.listLmraAssessments({ jobId, limit: 500 }),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
+      installationQcControls: this.listInstallationQcControls({ jobId, limit: 500 }),
       nonconformances: this.listNonconformances({ jobId, limit: 500 }),
       observations: this.db.prepare('SELECT * FROM observation_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapObservation(row)),
       incidents: this.db.prepare('SELECT * FROM incident_records WHERE job_id = ? ORDER BY occurred_at DESC, created_at DESC').all(jobId).map(row => this.mapIncident(row)),
@@ -51612,6 +52368,33 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'create_inspection_review', jobId: job.id, severity: 'high', message: `${job.title} needs an inspection record before high-risk field work continues.` });
     }
 
+    const installationQcRows = this.db.prepare(`
+      SELECT controls.*, jobs.title AS job_title, job_tasks.title AS task_title
+      FROM installation_qc_controls controls
+      JOIN jobs ON jobs.id = controls.job_id
+      JOIN job_tasks ON job_tasks.id = controls.task_id
+      WHERE ${this.operationalJobStatusSql('jobs')}
+        AND job_tasks.status NOT IN ('completed', 'cancelled', 'canceled')
+      ORDER BY controls.updated_at ASC
+      LIMIT 25
+    `).all();
+    for (const row of installationQcRows) {
+      const control = this.mapInstallationQcControl(row);
+      if (control.readyForTaskCompletion) continue;
+      const reviewBasis = `${control.inspectionId}:${control.latestSubmissionId || 'missing'}:${control.effectiveStatus}:${control.sourceHash}`;
+      const taskId = `task_${sha256Text(`installation-qc-review:${reviewBasis}`).slice(0, 24)}`;
+      if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+      actions.push({
+        type: 'review_installation_qc',
+        jobId: control.jobId,
+        inspectionId: control.inspectionId,
+        sourceTaskId: control.taskId,
+        taskId,
+        severity: ['invalid', 'stale', 'failed'].includes(control.effectiveStatus) ? 'high' : 'medium',
+        message: `${row.job_title}: ${row.task_title} has an installation ${control.controlPoint} point in ${control.effectiveStatus.replace(/_/g, ' ')} state. Review source currency, field evidence, corrective observations, and independent sign-off without releasing the hold automatically.`
+      });
+    }
+
     const jobsWithoutSafetyMeetings = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.risk_level, jobs.priority
       FROM jobs
@@ -52992,6 +53775,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'draft_change_order',
       'create_permit_review',
       'create_inspection_review',
+      'review_installation_qc',
       'schedule_safety_meeting',
       'review_safety_briefing_attendance',
       'review_work_permit_readiness',
@@ -53658,6 +54442,45 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           }, { actor, audit: false });
           applied.push({ ...action, inspectionId: inspection.id, status: 'scheduled' });
           this.audit({ entityType: 'inspection_record', entityId: inspection.id, jobId: action.jobId, action: 'autonomous_create_inspection_review', actor, after: inspection });
+        }
+
+        const installationQcReviews = preview.filter(action => action.type === 'review_installation_qc').slice(0, 5);
+        for (const action of installationQcReviews) {
+          const task = this.addTask(action.jobId, {
+            title: 'Review installation QC hold point',
+            description: action.message,
+            status: 'open',
+            priority: action.severity,
+            dueAt: futureIsoDate(action.severity === 'high' ? 1 : 2),
+            data: {
+              internalOnly: true,
+              installationQcReview: true,
+              sourceInspectionId: action.inspectionId,
+              sourceTaskId: action.sourceTaskId,
+              holdReleased: false,
+              externalCommitments: 0
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({
+            ...action,
+            taskId: task.id,
+            status: 'review_task_created',
+            holdReleased: false,
+            externalCommitments: 0
+          });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_installation_qc_review_task',
+            actor,
+            after: task,
+            metadata: {
+              sourceInspectionId: action.inspectionId,
+              holdReleased: false,
+              externalCommitments: 0
+            }
+          });
         }
 
         const safetyMeetings = preview.filter(action => action.type === 'schedule_safety_meeting').slice(0, 3);
@@ -56668,6 +57491,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         )
     `).get().count || 0);
     if (checklistSubmissionsWithoutApproval) issues.push({ severity: 'error', message: `${checklistSubmissionsWithoutApproval} inspection checklist submission(s) lack a matching approval decision.` });
+    for (const row of this.db.prepare('SELECT * FROM installation_qc_controls ORDER BY created_at').all()) {
+      const control = this.mapInstallationQcControl(row);
+      if (control.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `Installation QC control ${control.inspectionId} failed retained source or snapshot verification.` });
+      }
+      if (!['scheduled', 'pending_review', 'released', 'failed', 'rejected'].includes(control.status)) {
+        issues.push({ severity: 'error', message: `Installation QC control ${control.inspectionId} has unsupported status ${control.status}.` });
+      }
+      if (['pending_review', 'released', 'failed'].includes(control.status) && !control.latestSubmissionId) {
+        issues.push({ severity: 'error', message: `Installation QC control ${control.inspectionId} has no latest retained checklist submission.` });
+      }
+      if (control.status === 'released' && control.readyForTaskCompletion !== true) {
+        issues.push({
+          severity: control.taskCompleted ? 'warning' : 'error',
+          message: `Released installation QC control ${control.inspectionId} is stale, invalid, or still has open corrective observations.`
+        });
+      } else if (!control.taskCompleted && control.sourceCurrent !== true) {
+        issues.push({ severity: 'warning', message: `Installation QC control ${control.inspectionId} no longer matches its current task, worker assignment, or retained references.` });
+      }
+    }
     const inspectionsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM inspection_records WHERE status IN ('completed', 'passed', 'failed', 'approved', 'closed') AND approval_id IS NULL").get().count || 0);
     if (inspectionsWithoutApproval) issues.push({ severity: 'warning', message: `${inspectionsWithoutApproval} completed inspection record(s) have no approval gate.` });
     const observationsWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM observation_records WHERE (severity IN ('high', 'critical') OR status IN ('closed', 'resolved', 'approved', 'client_visible')) AND approval_id IS NULL").get().count || 0);
@@ -57196,6 +58039,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         lmraStopWorkAssessments: Number(this.db.prepare("SELECT COUNT(*) AS count FROM lmra_assessments WHERE outcome = 'stop_work'").get().count || 0),
         inspectionTemplates: this.count('inspection_templates'),
         inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
+        installationQcControls: this.count('installation_qc_controls'),
         inspectionRecords: this.count('inspection_records'),
         nonconformanceRecords: this.count('nonconformance_records'),
         openNonconformances: Number(this.db.prepare("SELECT COUNT(*) AS count FROM nonconformance_records WHERE status <> 'closed'").get().count || 0),
@@ -59389,6 +60233,109 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapInstallationQcControl(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const snapshotIntegrityValid = Boolean(
+      snapshot
+      && snapshot.format === INSTALLATION_QC_CONTROL_FORMAT
+      && snapshot.inspectionId === row.inspection_id
+      && snapshot.jobId === row.job_id
+      && snapshot.sourceHash === row.source_hash
+      && sha256Json(snapshot.source) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    let sourceCurrent = false;
+    let referencesCurrent = false;
+    let taskCompleted = false;
+    try {
+      const current = this.buildInstallationQcSource(row.job_id, {
+        taskId: row.task_id,
+        assignmentId: row.assignment_id,
+        assignedWorkerId: row.assigned_worker_id,
+        workLocation: row.work_location,
+        installationStage: row.installation_stage,
+        controlPoint: row.control_point,
+        referenceBasis: row.reference_basis,
+        referenceDocumentIds: fromJson(row.reference_document_ids_json, []),
+        templateSnapshotHash: snapshot?.source?.templateSnapshotHash || ''
+      }, {
+        requireOperational: false,
+        requireCurrentReferences: false
+      });
+      taskCompleted = ['completed', 'closed'].includes(normalizeStatus(current.task.status, 'open'));
+      const operationalCurrent = taskCompleted || (
+        this.activeAssignmentStatus(current.assignment.status)
+        && normalizeStatus(current.assignment.status, '') !== 'pending_approval'
+        && fromJson(current.assignment.data_json, {}).requiresApproval !== true
+        && !['retired', 'inactive', 'offline'].includes(normalizeStatus(current.assignment.worker_status, 'available'))
+      );
+      referencesCurrent = current.referencesCurrent;
+      sourceCurrent = snapshotIntegrityValid
+        && current.sourceHash === row.source_hash
+        && operationalCurrent
+        && (taskCompleted && row.status === 'released' ? true : referencesCurrent);
+    } catch {
+      sourceCurrent = false;
+    }
+    const latestSubmissionRow = row.latest_submission_id
+      ? this.db.prepare('SELECT * FROM inspection_checklist_submissions WHERE id = ? AND inspection_id = ?')
+        .get(row.latest_submission_id, row.inspection_id)
+      : null;
+    const latestSubmission = latestSubmissionRow ? this.mapInspectionChecklistSubmission(latestSubmissionRow) : null;
+    const observationIds = this.db.prepare('SELECT data_json FROM inspection_checklist_submissions WHERE inspection_id = ?')
+      .all(row.inspection_id)
+      .flatMap(submission => normalizeList(fromJson(submission.data_json, {}).observationIds));
+    const openCorrectiveObservationIds = [...new Set(observationIds)].filter(observationId => {
+      const observation = this.db.prepare('SELECT status FROM observation_records WHERE id = ? AND job_id = ?').get(observationId, row.job_id);
+      return observation && !['closed', 'resolved', 'approved', 'cancelled', 'canceled', 'rejected', 'void']
+        .includes(normalizeStatus(observation.status, 'open'));
+    });
+    const integrityValid = snapshotIntegrityValid && (!latestSubmission || latestSubmission.integrityValid === true);
+    const effectiveStatus = !integrityValid
+      ? 'invalid'
+      : row.status === 'released' && !sourceCurrent
+        ? 'stale'
+        : row.status;
+    const readyForTaskCompletion = effectiveStatus === 'released'
+      && sourceCurrent
+      && latestSubmission?.result === 'passed'
+      && ['passed', 'completed', 'approved', 'closed'].includes(normalizeStatus(latestSubmission.status, ''))
+      && openCorrectiveObservationIds.length === 0;
+    return {
+      inspectionId: row.inspection_id,
+      jobId: row.job_id,
+      taskId: row.task_id,
+      assignmentId: row.assignment_id,
+      assignedWorkerId: row.assigned_worker_id,
+      assignedWorkerName: snapshot?.source?.worker?.name || null,
+      installationStage: row.installation_stage,
+      controlPoint: row.control_point,
+      workLocation: row.work_location,
+      referenceBasis: row.reference_basis,
+      referenceDocumentIds: fromJson(row.reference_document_ids_json, []),
+      status: row.status,
+      effectiveStatus,
+      latestSubmissionId: row.latest_submission_id,
+      latestSubmission,
+      sourceHash: row.source_hash,
+      snapshot,
+      snapshotHash: row.snapshot_hash,
+      integrityValid,
+      sourceCurrent,
+      referencesCurrent,
+      taskCompleted,
+      openCorrectiveObservationIds,
+      readyForTaskCompletion,
+      releasedAt: row.released_at,
+      releasedBy: row.released_by,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapInspectionTemplate(row) {
     const data = fromJson(row.data_json, {});
     return {
@@ -59444,6 +60391,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           ORDER BY submitted_at DESC, created_at DESC
         `).all(row.id).map(submission => this.mapInspectionChecklistSubmission(submission))
       : [];
+    const installationQcRow = this.db.prepare('SELECT * FROM installation_qc_controls WHERE inspection_id = ?').get(row.id);
+    const installationQc = installationQcRow ? this.mapInstallationQcControl(installationQcRow) : null;
     return {
       id: row.id,
       jobId: row.job_id,
@@ -59466,6 +60415,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         summary: data.latestChecklistSummary || null,
         submissions
       } : { configured: false, status: null, snapshot: null, snapshotHash: null, integrityValid: null, latestSubmissionId: null, summary: null, submissions: [] },
+      installationQc,
       data,
       createdAt: row.created_at,
       updatedAt: row.updated_at
