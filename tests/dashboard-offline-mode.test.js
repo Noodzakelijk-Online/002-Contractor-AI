@@ -123,6 +123,15 @@ test('finance dashboard freezes server-derived cost forecasts through approval-b
   assert.match(dashboardSource, /\/cost-forecast\/snapshots`/);
   assert.match(dashboardSource, /Forecast cost/);
   assert.match(dashboardSource, /Forecast margin/);
+  assert.match(dashboardSource, /Approved actual/);
+  assert.match(dashboardSource, /Unreviewed cost/);
+  assert.match(dashboardSource, /Cost to complete/);
+  assert.match(dashboardSource, /Cost-code review/);
+  assert.match(dashboardSource, /estimateAtCompletion/);
+  assert.match(dashboardSource, /review_cost_evidence/);
+  assert.match(dashboardSource, /financeActionDraft\.workerId/);
+  assert.match(dashboardSource, /workerId: selectedWorker\.id/);
+  assert.match(dashboardSource, /Forecast approval freezes this review only/);
   assert.match(dashboardSource, /costForecast\.snapshotCurrent/);
   assert.match(dashboardSource, /awaiting approval/);
   assert.match(dashboardSource, /Cost forecast .* retained from the current cost-code evidence/);

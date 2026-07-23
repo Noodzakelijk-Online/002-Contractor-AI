@@ -97,13 +97,25 @@ test('cost forecast API enforces role, source, approval, and stale-snapshot cont
   assert.equal(fieldRead.response.status, 403);
   const approverRead = await request(baseUrl, `/api/ledger/jobs/${jobId}/cost-forecast`, tokens.approver);
   assert.equal(approverRead.response.status, 200, JSON.stringify(approverRead.body));
-  assert.equal(approverRead.body.forecast.summary.actual, 300);
+  assert.equal(approverRead.body.forecast.summary.actual, 0);
+  assert.equal(approverRead.body.forecast.summary.unreviewedCost, 300);
+  assert.equal(approverRead.body.forecast.summary.incurredCost, 300);
   assert.equal(approverRead.body.forecast.summary.forecast, 1100);
+  assert.equal(approverRead.body.forecast.summary.reviewRequired, true);
+  assert.ok(approverRead.body.forecast.warnings.some(warning => warning.code === 'labor_awaiting_timesheet_approval'));
+  assert.ok(approverRead.body.forecast.warnings.some(warning => warning.code === 'expense_evidence_unreviewed'));
 
   const deniedPrepare = await request(baseUrl, `/api/ledger/jobs/${jobId}/cost-forecast/snapshots`, tokens.approver, {
     method: 'POST', body: '{}'
   });
   assert.equal(deniedPrepare.response.status, 403);
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const deniedBackdate = await request(baseUrl, `/api/ledger/jobs/${jobId}/cost-forecast/snapshots`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ asOfDate: yesterday })
+  });
+  assert.equal(deniedBackdate.response.status, 409);
+  assert.equal(deniedBackdate.body.error.code, 'cost_forecast_backdating_unsupported');
   const prepared = await request(baseUrl, `/api/ledger/jobs/${jobId}/cost-forecast/snapshots`, tokens.office_operator, {
     method: 'POST', body: '{}'
   });
@@ -111,6 +123,9 @@ test('cost forecast API enforces role, source, approval, and stale-snapshot cont
   assert.match(prepared.body.snapshot.forecastNumber, /^FC-\d{4}-000001$/);
   assert.equal(prepared.body.approval.targetType, 'cost_forecast');
   assert.equal(prepared.body.snapshot.integrityValid, true);
+  assert.equal(prepared.body.snapshot.snapshot.summary.actual, 0);
+  assert.equal(prepared.body.snapshot.snapshot.summary.unreviewedCost, 300);
+  assert.equal(prepared.body.snapshot.snapshot.controls.underlyingCostEvidenceApprovedBySnapshot, false);
   const replay = await request(baseUrl, `/api/ledger/jobs/${jobId}/cost-forecast/snapshots`, tokens.office_operator, {
     method: 'POST', body: '{}'
   });
@@ -126,6 +141,10 @@ test('cost forecast API enforces role, source, approval, and stale-snapshot cont
   const finance = await request(baseUrl, '/api/ledger/finance?mode=all&limit=100', tokens.office_operator);
   const financeJob = finance.body.jobs.find(item => item.jobId === jobId);
   assert.ok(financeJob);
+  assert.equal(financeJob.financeStatus, 'cost_review_required');
+  assert.equal(financeJob.flags.costForecastReviewRequired, true);
+  assert.equal(financeJob.flags.handoffReady, false);
+  assert.equal(financeJob.nextActions[0].type, 'review_cost_evidence');
   assert.equal(financeJob.costForecast.snapshotCurrent, true);
   assert.equal(financeJob.costForecast.activeSnapshot.forecastNumber, prepared.body.snapshot.forecastNumber);
   assert.equal(financeJob.nextActions.some(action => action.type === 'prepare_cost_forecast'), false);
@@ -145,5 +164,10 @@ test('cost forecast API enforces role, source, approval, and stale-snapshot cont
   const capabilities = await request(baseUrl, '/api/operations/capabilities', tokens.owner);
   assert.equal(capabilities.response.status, 200, JSON.stringify(capabilities.body));
   assert.equal(capabilities.body.capabilities.costForecasting.sourceLinked, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.unreviewedIncludedInEstimateAtCompletion, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.unreviewedRecognizedAsActual, false);
+  assert.equal(capabilities.body.capabilities.costForecasting.financeHandoffRequiresReviewedEvidence, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.financeHandoffRequiresApprovedCostBasis, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.financeHandoffSourceCurrentApprovalRequired, true);
   assert.equal(capabilities.body.capabilities.costForecasting.doubleCountControl, 'supplier_invoice_reduces_linked_order_commitment');
 });

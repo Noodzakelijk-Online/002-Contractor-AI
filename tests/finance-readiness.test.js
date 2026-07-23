@@ -22,6 +22,14 @@ async function request(baseUrl, route, options = {}) {
   return { response, body };
 }
 
+function weekStart(value = new Date()) {
+  const date = new Date(value);
+  date.setUTCHours(0, 0, 0, 0);
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() - day + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 test('finance readiness API coordinates invoice, payment, cost and handoff work', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
@@ -68,17 +76,54 @@ test('finance readiness API coordinates invoice, payment, cost and handoff work'
   assert.ok(invoiceReady.nextActions.some(action => action.type === 'draft_invoice'));
   assert.ok(initialFinance.body.summary.invoiceReady >= 1);
 
+  const worker = await request(baseUrl, '/api/ledger/workers', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Finance readiness installer', role: 'Installer', status: 'available', hourlyRate: 45 })
+  });
+  assert.equal(worker.response.status, 201);
   const timeLog = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/time-logs`, {
     method: 'POST',
-    body: JSON.stringify({ workDate: '2026-07-03', hours: 12, rate: 45, notes: 'Closeout labor.' })
+    body: JSON.stringify({
+      workerId: worker.body.worker.id,
+      workerName: worker.body.worker.name,
+      workDate: '2026-07-03',
+      hours: 12,
+      rate: 45,
+      notes: 'Closeout labor.'
+    })
   });
   assert.equal(timeLog.response.status, 201);
-
-  const expense = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/expenses`, {
+  const timesheet = await request(baseUrl, `/api/ledger/workers/${encodeURIComponent(worker.body.worker.id)}/timesheets`, {
     method: 'POST',
-    body: JSON.stringify({ category: 'materials', amount: 420, vendor: 'Bouwmaat', notes: 'Final fixtures.' })
+    body: JSON.stringify({ periodStart: '2026-06-29' })
+  });
+  assert.equal(timesheet.response.status, 201);
+  const timesheetApproval = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(timesheet.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance QA', reason: 'Worker, hours, week, rate, and job allocation checked.' })
+  });
+  assert.equal(timesheetApproval.response.status, 200);
+  const expense = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/expense-receipts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      entryKey: `finance-readiness-expense-${Date.now()}`,
+      expenseDate: '2026-07-03',
+      category: 'materials',
+      totalAmount: 420,
+      taxAmount: 0,
+      taxTreatment: 'exempt',
+      paymentMethod: 'company_card',
+      vendor: 'Bouwmaat',
+      receiptReference: 'FINANCE-READINESS-420',
+      notes: 'Final fixtures.'
+    })
   });
   assert.equal(expense.response.status, 201);
+  const expenseApproval = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(expense.body.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance QA', reason: 'Receipt, amount, tax treatment, and job allocation checked.' })
+  });
+  assert.equal(expenseApproval.response.status, 200);
 
   const invoice = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/invoices`, {
     method: 'POST',
@@ -125,9 +170,14 @@ test('finance readiness API coordinates invoice, payment, cost and handoff work'
 
   const budget = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/budget-lines`, {
     method: 'POST',
-    body: JSON.stringify({ status: 'draft', costCode: 'FIN-100', description: 'Finance readiness baseline', budgetAmount: 3000, forecastAmount: 3000 })
+    body: JSON.stringify({ status: 'baseline', costCode: 'FIN-100', description: 'Finance readiness baseline', budgetAmount: 3000, forecastAmount: 3000 })
   });
   assert.equal(budget.response.status, 201);
+  const budgetApproval = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(budget.body.budgetLine.approval.id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance QA', reason: 'Cost budget and forecast basis checked.' })
+  });
+  assert.equal(budgetApproval.response.status, 200);
 
   const handoff = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/finance-handoffs`, {
     method: 'POST',
@@ -195,11 +245,36 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   });
   assert.equal(invalidCosts.response.status, 400);
 
+  const worker = await request(baseUrl, '/api/ledger/workers', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Finance control installer', role: 'Installer', status: 'available', hourlyRate: 52 })
+  });
+  assert.equal(worker.response.status, 201);
+  const workDate = new Date().toISOString().slice(0, 10);
   const costs = await request(baseUrl, `/api/ledger/jobs/${jobId}/finance-costs`, {
     method: 'POST',
     body: JSON.stringify({
-      timeLog: { workDate: new Date().toISOString().slice(0, 10), hours: 5, rate: 52, notes: 'Verified closeout labor.' },
-      expense: { category: 'materials', amount: 185, vendor: 'Bouwmaat', receiptRef: 'COST-185', notes: 'Verified retained receipt.' }
+      timeLog: {
+        workerId: worker.body.worker.id,
+        workerName: worker.body.worker.name,
+        workDate,
+        hours: 5,
+        rate: 52,
+        notes: 'Verified closeout labor.'
+      },
+      expense: {
+        entryKey: `finance-control-expense-${Date.now()}`,
+        expenseDate: workDate,
+        category: 'materials',
+        amount: 185,
+        totalAmount: 185,
+        taxAmount: 0,
+        taxTreatment: 'exempt',
+        paymentMethod: 'company_card',
+        vendor: 'Bouwmaat',
+        receiptReference: 'COST-185',
+        notes: 'Verified retained receipt.'
+      }
     })
   });
   assert.equal(costs.response.status, 201);
@@ -207,6 +282,39 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   assert.equal(costs.body.costs.expense.amount, 185);
   assert.equal(costs.body.job.timeLogs.length, 1);
   assert.equal(costs.body.job.expenses.length, 1);
+
+  const blockedHandoff = await request(baseUrl, `/api/ledger/jobs/${jobId}/finance-handoffs/prepare`, {
+    method: 'POST',
+    body: JSON.stringify({ targetSystem: 'FAB' })
+  });
+  assert.equal(blockedHandoff.response.status, 409);
+  assert.equal(blockedHandoff.body.error.code, 'finance_handoff_cost_review_required');
+
+  const expenseApproval = await request(baseUrl, `/api/ledger/approvals/${costs.body.costs.expense.approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Receipt, tax treatment, and job allocation checked.' })
+  });
+  assert.equal(expenseApproval.response.status, 200);
+  const timesheet = await request(baseUrl, `/api/ledger/workers/${worker.body.worker.id}/timesheets`, {
+    method: 'POST',
+    body: JSON.stringify({ periodStart: weekStart(workDate) })
+  });
+  assert.equal(timesheet.response.status, 201);
+  const timesheetApproval = await request(baseUrl, `/api/ledger/approvals/${timesheet.body.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Worker, hours, rate, and job allocation checked.' })
+  });
+  assert.equal(timesheetApproval.response.status, 200);
+  const costBudget = await request(baseUrl, `/api/ledger/jobs/${jobId}/budget-lines`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'baseline', costCode: 'FIN-CONTROL-100', description: 'Finance control cost basis', budgetAmount: 2400, forecastAmount: 2400 })
+  });
+  assert.equal(costBudget.response.status, 201);
+  const costBudgetApproval = await request(baseUrl, `/api/ledger/approvals/${costBudget.body.budgetLine.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Approved cost basis checked.' })
+  });
+  assert.equal(costBudgetApproval.response.status, 200);
 
   const invoice = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices`, {
     method: 'POST',
@@ -369,6 +477,33 @@ test('finance controls clear follow-up queues and retain exact approval outcomes
   assert.equal(repeatedHandoff.body.financeHandoff.approval.id, preparedHandoff.body.financeHandoff.approval.id);
   assert.equal(repeatedHandoff.body.financeHandoff.reused, true);
   assert.equal(repeatedHandoff.body.job.financeHandoffs.length, 1);
+
+  const revisedBudget = await request(baseUrl, `/api/ledger/jobs/${jobId}/budget-lines`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'baseline', costCode: 'FIN-CONTROL-200', description: 'Approved cost-basis revision', budgetAmount: 100, forecastAmount: 100 })
+  });
+  assert.equal(revisedBudget.response.status, 201);
+  const revisedBudgetApproval = await request(baseUrl, `/api/ledger/approvals/${revisedBudget.body.budgetLine.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Approved cost-basis revision checked.' })
+  });
+  assert.equal(revisedBudgetApproval.response.status, 200);
+  const staleHandoffApproval = await request(baseUrl, `/api/ledger/approvals/${preparedHandoff.body.financeHandoff.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Finance Control QA', reason: 'Attempt approval against stale cost basis.' })
+  });
+  assert.equal(staleHandoffApproval.response.status, 409);
+  assert.equal(staleHandoffApproval.body.error.code, 'finance_handoff_cost_basis_stale');
+
+  const refreshedHandoff = await request(baseUrl, `/api/ledger/jobs/${jobId}/finance-handoffs/prepare`, {
+    method: 'POST',
+    body: JSON.stringify({ targetSystem: 'FAB', exportFormat: 'json', notes: 'Regenerated after approved cost-basis revision.' })
+  });
+  assert.equal(refreshedHandoff.response.status, 201);
+  assert.equal(refreshedHandoff.body.financeHandoff.id, preparedHandoff.body.financeHandoff.id);
+  assert.notEqual(refreshedHandoff.body.financeHandoff.approval.id, preparedHandoff.body.financeHandoff.approval.id);
+  assert.equal(refreshedHandoff.body.financeHandoff.reused, false);
+  assert.equal(refreshedHandoff.body.financeHandoff.package.costForecast.sourceHash, refreshedHandoff.body.financeHandoff.data.costForecastSourceHash);
 });
 
 test('finance handoff creation rolls back when approval persistence fails', () => {
@@ -380,6 +515,18 @@ test('finance handoff creation rolls back when approval persistence fails', () =
       title: 'Atomic finance handoff',
       client: { name: 'Atomic Finance Client' },
       assignAutomatically: false
+    });
+    const budget = ledger.createBudgetLine(job.id, {
+      status: 'baseline',
+      costCode: 'ATOMIC-100',
+      description: 'Atomic handoff cost basis',
+      budgetAmount: 1000,
+      forecastAmount: 1000
+    });
+    ledger.resolveApproval(budget.approval.id, {
+      status: 'approved',
+      resolvedBy: 'Atomic finance approver',
+      reason: 'Cost basis checked before handoff preparation.'
     });
     const originalCreateApproval = ledger.createApproval.bind(ledger);
     ledger.createApproval = () => {
@@ -404,6 +551,53 @@ test('finance handoff creation rolls back when approval persistence fails', () =
     );
 
     ledger.createApproval = originalCreateApproval;
+  } finally {
+    ledger.close();
+  }
+});
+
+test('legacy finance handoffs without a cost-source hash require a current replacement approval', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-finance-unbound-'));
+  const ledger = new ContractorOperatingLedger({ dbFile: path.join(directory, 'ledger.sqlite') });
+  try {
+    const job = ledger.createIntake({
+      title: 'Unbound finance handoff',
+      client: { name: 'Unbound Finance Client' },
+      assignAutomatically: false
+    });
+    const budget = ledger.createBudgetLine(job.id, {
+      status: 'baseline',
+      costCode: 'UNBOUND-100',
+      description: 'Approved finance handoff basis',
+      budgetAmount: 1000,
+      forecastAmount: 1000
+    });
+    ledger.resolveApproval(budget.approval.id, {
+      status: 'approved',
+      resolvedBy: 'Finance approver',
+      reason: 'Cost basis checked.'
+    });
+    const prepared = ledger.prepareFinanceHandoff(job.id, { targetSystem: 'FAB' });
+    const handoffRow = ledger.db.prepare('SELECT data_json FROM finance_handoffs WHERE id = ?').get(prepared.id);
+    const handoffData = JSON.parse(handoffRow.data_json);
+    delete handoffData.costForecastSourceHash;
+    ledger.db.prepare('UPDATE finance_handoffs SET data_json = ? WHERE id = ?')
+      .run(JSON.stringify(handoffData), prepared.id);
+
+    assert.throws(
+      () => ledger.resolveApproval(prepared.approval.id, {
+        status: 'approved',
+        resolvedBy: 'Finance approver',
+        reason: 'Attempt to approve an unbound package.'
+      }),
+      error => error.code === 'finance_handoff_cost_basis_stale'
+    );
+
+    const refreshed = ledger.prepareFinanceHandoff(job.id, { targetSystem: 'FAB' });
+    assert.equal(refreshed.id, prepared.id);
+    assert.equal(refreshed.reused, false);
+    assert.notEqual(refreshed.approval.id, prepared.approval.id);
+    assert.equal(refreshed.package.costForecast.sourceHash, refreshed.data.costForecastSourceHash);
   } finally {
     ledger.close();
   }

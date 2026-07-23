@@ -1447,7 +1447,9 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     }, { actor: 'postgres_contract_test' });
     const hostedForecast = ledger.calculateCostForecast(hostedForecastJob.id);
     assert.equal(hostedForecast.ready, true);
-    assert.equal(hostedForecast.summary.actual, 250);
+    assert.equal(hostedForecast.summary.actual, 0);
+    assert.equal(hostedForecast.summary.unreviewedCost, 250);
+    assert.equal(hostedForecast.summary.incurredCost, 250);
     assert.equal(hostedForecast.summary.forecast, 1400);
     const hostedForecastRequest = ledger.requestCostForecastSnapshot(hostedForecastJob.id, {}, { actor: 'postgres_contract_test' });
     assert.equal(hostedForecastRequest.snapshot.integrityValid, true);

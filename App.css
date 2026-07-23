@@ -1427,10 +1427,33 @@
 .cost-forecast-risks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .cost-forecast-risks span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 5px 7px; color: #854f13; background: #fff7e8; border: 1px solid #edd7af; border-radius: 4px; font-size: 10px; font-weight: 700; }
 .cost-forecast-risks code { overflow-wrap: anywhere; color: #5b4630; font-size: 10px; }
+.cost-forecast-detail { min-width: 0; margin-top: 12px; border-top: 1px solid #dfe7e3; border-bottom: 1px solid #dfe7e3; }
+.cost-forecast-detail summary { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 2px; color: #2d493f; cursor: pointer; }
+.cost-forecast-detail summary span { font-size: 11px; font-weight: 800; }
+.cost-forecast-detail summary small { overflow-wrap: anywhere; color: #6a7b74; font-size: 9px; text-align: right; }
+.cost-forecast-detail[open] summary { border-bottom: 1px solid #e3eae7; }
+.cost-forecast-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.cost-forecast-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }
+.cost-forecast-table th, .cost-forecast-table td { padding: 8px 9px; border-bottom: 1px solid #e4ebe8; text-align: right; white-space: nowrap; }
+.cost-forecast-table thead th { color: #687a72; background: #f4f7f6; font-size: 9px; text-transform: uppercase; }
+.cost-forecast-table th:first-child { position: sticky; left: 0; z-index: 1; min-width: 150px; max-width: 220px; text-align: left; background: #fff; }
+.cost-forecast-table thead th:first-child { z-index: 2; background: #f4f7f6; }
+.cost-forecast-table tbody th { display: table-cell; color: #2f473d; white-space: normal; }
+.cost-forecast-table tbody th code, .cost-forecast-table tbody th small { display: block; overflow-wrap: anywhere; }
+.cost-forecast-table tbody th small { margin-top: 3px; color: #75827d; font-size: 9px; font-weight: 500; }
+.cost-forecast-table .cost-review-required { color: #8b5d0c; background: #fff8ea; font-weight: 800; }
+.cost-forecast-table .cost-over-budget { color: #a13f37; font-weight: 800; }
+.cost-forecast-warnings { display: grid; gap: 5px; margin: 10px 0; padding: 0 0 0 18px; color: #75541f; font-size: 10px; line-height: 1.45; }
+.cost-forecast-history { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px 0; border-top: 1px solid #e4ebe8; }
+.cost-forecast-history span { display: grid; gap: 2px; padding-left: 8px; border-left: 3px solid #7a948a; }
+.cost-forecast-history strong { color: #2f473d; font-size: 10px; }
+.cost-forecast-history small { color: #71817a; font-size: 9px; }
+.cost-forecast-policy { margin: 0; padding: 9px 0 10px; color: #5f7169; font-size: 10px; line-height: 1.45; border-top: 1px solid #e4ebe8; }
 .invoice-preview { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 .status-payable_due { color: #94620a; background: #fff1d4; }
+.status-cost_review_required { color: #845d0f; background: #fff6d8; }
 .status-forecast_at_risk { color: #9b3f2f; background: #ffebe6; }
-@media (max-width: 760px) { .finance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.finance-summary div:nth-child(n+3) { border-top: 1px solid #e6ece9; }.finance-summary div:nth-child(odd) { border-left: 0; }.finance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }.invoice-preview { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .finance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.finance-summary div:nth-child(n+3) { border-top: 1px solid #e6ece9; }.finance-summary div:nth-child(odd) { border-left: 0; }.finance-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }.cost-forecast-detail summary { align-items: flex-start; flex-direction: column; gap: 3px; }.cost-forecast-detail summary small { text-align: left; }.cost-forecast-table { min-width: 700px; }.invoice-preview { grid-template-columns: 1fr; } }
 
 .work-plan-control { display: grid; gap: 16px; min-width: 0; }
 .work-plan-heading { align-items: center; }

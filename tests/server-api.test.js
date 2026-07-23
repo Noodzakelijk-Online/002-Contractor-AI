@@ -586,17 +586,51 @@ test('operating ledger persists intake, approvals, audit, and autonomous control
 
   const timeLog = await request(baseUrl, `/api/ledger/jobs/${jobId}/time-logs`, {
     method: 'POST',
-    body: JSON.stringify({ workDate: '2026-06-28', hours: 6.5, rate: 72, notes: 'Survey and preparation.' })
+    body: JSON.stringify({
+      workerId: scheduleWorker.body.worker.id,
+      workerName: scheduleWorker.body.worker.name,
+      workDate: '2026-06-28',
+      hours: 6.5,
+      rate: 72,
+      notes: 'Survey and preparation.'
+    })
   });
   assert.equal(timeLog.response.status, 201);
   assert.equal(timeLog.body.timeLog.hours, 6.5);
 
-  const expense = await request(baseUrl, `/api/ledger/jobs/${jobId}/expenses`, {
+  const timesheet = await request(baseUrl, `/api/ledger/workers/${scheduleWorker.body.worker.id}/timesheets`, {
     method: 'POST',
-    body: JSON.stringify({ category: 'materials', amount: 188.25, vendor: 'Bouwmaat', notes: 'Adhesive and fixings.' })
+    body: JSON.stringify({ periodStart: '2026-06-22' })
+  });
+  assert.equal(timesheet.response.status, 201);
+  const timesheetApproval = await request(baseUrl, `/api/ledger/approvals/${timesheet.body.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Time Test', reason: 'Worker, hours, week, rate, and job allocation checked.' })
+  });
+  assert.equal(timesheetApproval.response.status, 200);
+
+  const expense = await request(baseUrl, `/api/ledger/jobs/${jobId}/expense-receipts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      entryKey: 'server-api-expense-receipt-0001',
+      expenseDate: '2026-06-28',
+      category: 'materials',
+      totalAmount: 188.25,
+      taxAmount: 0,
+      taxTreatment: 'exempt',
+      paymentMethod: 'company_card',
+      vendor: 'Bouwmaat',
+      receiptReference: 'SERVER-API-EXPENSE-18825',
+      notes: 'Adhesive and fixings.'
+    })
   });
   assert.equal(expense.response.status, 201);
   assert.equal(expense.body.expense.amount, 188.25);
+  const expenseApproval = await request(baseUrl, `/api/ledger/approvals/${expense.body.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Expense Test', reason: 'Receipt, amount, tax treatment, and job allocation checked.' })
+  });
+  assert.equal(expenseApproval.response.status, 200);
 
   const invoice = await request(baseUrl, `/api/ledger/jobs/${jobId}/invoices`, {
     method: 'POST',

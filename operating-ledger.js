@@ -1255,7 +1255,11 @@ const LAST_PLANNER_VARIANCE_CATEGORIES = new Set([
 ]);
 const CREW_LOOKAHEAD_DAYS = 14;
 const CREW_CAPACITY_DAY_KEYS = Object.freeze(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
-const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v1';
+const COST_FORECAST_FORMAT = 'contractor-ai-cost-forecast/v2';
+const COST_FORECAST_RETAINED_FORMATS = new Set([
+  'contractor-ai-cost-forecast/v1',
+  COST_FORECAST_FORMAT
+]);
 const CASH_FLOW_FORECAST_FORMAT = 'contractor-ai-cash-flow-forecast/v1';
 const CASH_FLOW_FORECAST_WEEKS = 13;
 const PERFORMANCE_SCORECARD_FORMAT = 'contractor-ai-performance-scorecard/v1';
@@ -31519,6 +31523,77 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return code.slice(0, 80) || fallback;
   }
 
+  costForecastTimeLogLine(log = {}) {
+    return {
+      id: log.id,
+      jobId: log.jobId,
+      workDate: log.workDate,
+      hours: roundQuantity(log.hours),
+      billable: log.billable !== false,
+      rate: roundMoney(log.rate),
+      laborCost: roundMoney(normalizeNumber(log.hours, 0) * normalizeNumber(log.rate, 0)),
+      costCode: log.data?.costCode || log.costCode || null,
+      status: log.status,
+      source: log.data?.source || log.source || null,
+      verificationReference: log.data?.verificationReference || log.verificationReference || null,
+      entryKey: log.data?.entryKey || log.entryKey || null,
+      entryFingerprint: log.data?.entryFingerprint || log.entryFingerprint || null,
+      notes: log.notes || null
+    };
+  }
+
+  approvedCostForecastTimeLogEvidence(timeLogs = []) {
+    const workerIds = [...new Set(timeLogs.map(log => normalizeText(log.workerId, '')).filter(Boolean))].sort();
+    if (!workerIds.length) return new Map();
+    const placeholders = workerIds.map(() => '?').join(', ');
+    const rows = this.db.prepare(`
+      SELECT timesheets.*
+      FROM weekly_timesheets timesheets
+      JOIN approvals
+        ON approvals.id = timesheets.approval_id
+        AND approvals.status = 'approved'
+        AND approvals.target_type = 'weekly_timesheet'
+        AND approvals.target_id = timesheets.id
+      WHERE timesheets.status = 'approved'
+        AND timesheets.worker_id IN (${placeholders})
+      ORDER BY timesheets.period_start ASC, timesheets.version_number ASC
+    `).all(...workerIds);
+    const evidence = new Map();
+    for (const row of rows) {
+      const timesheet = this.mapWeeklyTimesheet(row);
+      if (!timesheet.integrityValid || !Array.isArray(timesheet.snapshot?.lines)) continue;
+      for (const line of timesheet.snapshot.lines) {
+        if (!line?.id) continue;
+        evidence.set(line.id, {
+          timesheetId: timesheet.id,
+          periodStart: timesheet.periodStart,
+          periodEnd: timesheet.periodEnd,
+          sourceHash: timesheet.sourceHash,
+          lineHash: sha256Json(this.costForecastTimeLogLine(line))
+        });
+      }
+    }
+    return evidence;
+  }
+
+  normalizeCostForecastAsOfDate(value, timestamp = nowIso()) {
+    const currentDate = timestamp.slice(0, 10);
+    const asOfDate = normalizeRetainedDate(value || currentDate, {
+      required: true,
+      label: 'Cost-forecast as-of date',
+      code: 'cost_forecast_as_of_date_invalid'
+    }).slice(0, 10);
+    if (asOfDate !== currentDate) {
+      throw ledgerInputError(
+        'cost_forecast_backdating_unsupported',
+        'Cost forecasts can only be frozen from the current ledger state. Historical backdating requires a period-close source ledger that is not configured.',
+        { requestedAsOfDate: asOfDate, currentDate },
+        409
+      );
+    }
+    return asOfDate;
+  }
+
   costForecastPurchaseOrderCode(purchaseOrder, budgetById = new Map()) {
     const budgetLine = purchaseOrder?.budgetLineId ? budgetById.get(purchaseOrder.budgetLineId) : null;
     return this.normalizeForecastCostCode(
@@ -31579,7 +31654,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const snapshotJson = normalizeText(row.snapshot_json, '');
     const snapshot = fromJson(snapshotJson, null);
     if (!snapshot
-      || snapshot.format !== COST_FORECAST_FORMAT
+      || !COST_FORECAST_RETAINED_FORMATS.has(snapshot.format)
       || snapshot.sourceHash !== row.source_hash
       || sha256Text(snapshotJson) !== row.snapshot_hash) {
       throw ledgerInputError(
@@ -31602,30 +31677,44 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const approvedBudgetStatuses = new Set(['approved', 'locked', 'baseline']);
     const inactiveStatuses = new Set(['cancelled', 'canceled', 'rejected', 'reversed', 'void', 'closed']);
     const supplierActualStatuses = new Set(['approved', 'partially_paid', 'paid', 'confirmed', 'settled', 'received']);
+    const approvalById = new Map((detail.approvals || []).map(approval => [approval.id, approval]));
+    const hasApprovedDecision = (record, targetType) => {
+      if (!record?.approvalId) return false;
+      const approval = approvalById.get(record.approvalId);
+      return Boolean(
+        approval
+        && approval.status === 'approved'
+        && approval.targetType === targetType
+        && approval.targetId === record.id
+      );
+    };
     const acceptedQuote = (detail.quotes || []).find(quote => normalizeStatus(quote.status, '') === 'accepted')
       || (detail.quotes || []).find(quote => !inactiveStatuses.has(normalizeStatus(quote.status, '')))
       || null;
-    const budgetLines = (detail.budgetLines || [])
+    const budgetCandidates = (detail.budgetLines || [])
       .filter(line => approvedBudgetStatuses.has(normalizeStatus(line.status, '')))
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const budgetLines = budgetCandidates.filter(line => hasApprovedDecision(line, 'budget_line'));
     const budgetById = new Map(budgetLines.map(line => [line.id, line]));
     const timeLogs = (detail.timeLogs || [])
       .filter(log => !inactiveStatuses.has(normalizeStatus(log.status, '')) && normalizeStatus(log.status, '') !== 'draft')
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const approvedTimeLogEvidence = this.approvedCostForecastTimeLogEvidence(timeLogs);
     const expenses = (detail.expenses || [])
       .filter(expense => !inactiveStatuses.has(normalizeStatus(expense.status, ''))
-        && !['draft', 'pending_approval'].includes(normalizeStatus(expense.status, '')))
+        && normalizeStatus(expense.status, '') !== 'draft')
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
     const purchaseOrders = (detail.purchaseOrders || [])
       .filter(order => !inactiveStatuses.has(normalizeStatus(order.status, '')) && (order.spendAuthorized || order.orderIssued))
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
     const purchaseOrderById = new Map(purchaseOrders.map(order => [order.id, order]));
     const supplierInvoices = (detail.supplierInvoices || [])
-      .filter(invoice => supplierActualStatuses.has(normalizeStatus(invoice.status, '')))
+      .filter(invoice => !inactiveStatuses.has(normalizeStatus(invoice.status, ''))
+        && normalizeStatus(invoice.status, '') !== 'draft')
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
     const currencyCandidates = [
       acceptedQuote?.currency,
-      ...budgetLines.map(line => line.currency),
+      ...budgetCandidates.map(line => line.currency),
       ...expenses.map(expense => expense.currency),
       ...purchaseOrders.map(order => order.currency),
       ...supplierInvoices.map(invoice => invoice.currency)
@@ -31644,11 +31733,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           reportedActual: 0,
           reportedCommitted: 0,
           laborActual: 0,
+          unreviewedLabor: 0,
           expenseActual: 0,
+          unreviewedExpense: 0,
           supplierActual: 0,
+          unreviewedSupplier: 0,
           externalCommitment: 0,
           authorizedNotIssued: 0,
-          sourceCounts: { budgetLines: 0, timeLogs: 0, expenses: 0, purchaseOrders: 0, supplierInvoices: 0 }
+          unreviewedCommitment: 0,
+          sourceCounts: {
+            budgetLines: 0,
+            timeLogs: 0,
+            approvedTimesheets: 0,
+            expenses: 0,
+            purchaseOrders: 0,
+            supplierInvoices: 0
+          }
         });
       }
       const entry = codeEntries.get(code);
@@ -31664,36 +31764,80 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       entry.reportedCommitted = roundMoney(entry.reportedCommitted + line.committedAmount);
       entry.sourceCounts.budgetLines += 1;
     }
+    const recognizedTimeLogIds = [];
+    const unreviewedTimeLogIds = [];
+    const approvedTimesheetIds = new Set();
     for (const log of timeLogs) {
       const entry = ensureCode(log.data?.costCode || 'LABOR', 'Direct labor');
-      entry.laborActual = roundMoney(entry.laborActual + roundMoney(log.hours * log.rate));
+      const retainedEvidence = approvedTimeLogEvidence.get(log.id);
+      const lineHash = sha256Json(this.costForecastTimeLogLine(log));
+      const recognized = Boolean(retainedEvidence && retainedEvidence.lineHash === lineHash);
+      if (recognized) {
+        entry.laborActual = roundMoney(entry.laborActual + roundMoney(log.hours * log.rate));
+        entry.sourceCounts.approvedTimesheets += 1;
+        approvedTimesheetIds.add(retainedEvidence.timesheetId);
+        recognizedTimeLogIds.push(log.id);
+      } else {
+        entry.unreviewedLabor = roundMoney(entry.unreviewedLabor + roundMoney(log.hours * log.rate));
+        unreviewedTimeLogIds.push(log.id);
+      }
       entry.sourceCounts.timeLogs += 1;
     }
+    const recognizedExpenseIds = [];
+    const unreviewedExpenseIds = [];
+    const invalidExpenseIds = [];
     for (const expense of expenses) {
       const entry = ensureCode(expense.data?.costCode || expense.category || 'EXPENSE', expense.category || 'Job expense');
-      entry.expenseActual = roundMoney(entry.expenseActual + expense.amount);
+      const recognized = expense.governedReceipt === true
+        && expense.integrityValid === true
+        && ['approved', 'pending_reversal'].includes(normalizeStatus(expense.status, ''))
+        && hasApprovedDecision(expense, 'expense');
+      if (recognized) {
+        entry.expenseActual = roundMoney(entry.expenseActual + expense.amount);
+        recognizedExpenseIds.push(expense.id);
+      } else {
+        entry.unreviewedExpense = roundMoney(entry.unreviewedExpense + expense.amount);
+        unreviewedExpenseIds.push(expense.id);
+        if (expense.governedReceipt === true && expense.integrityValid !== true) invalidExpenseIds.push(expense.id);
+      }
       entry.sourceCounts.expenses += 1;
     }
-    const approvedInvoiceNetByOrder = new Map();
+    const recognizedSupplierInvoiceIds = [];
+    const unreviewedSupplierInvoiceIds = [];
+    const invalidSupplierInvoiceIds = [];
+    const retainedInvoiceNetByOrder = new Map();
     for (const invoice of supplierInvoices) {
       const purchaseOrder = invoice.purchaseOrderId ? purchaseOrderById.get(invoice.purchaseOrderId) : null;
       const code = purchaseOrder
         ? this.costForecastPurchaseOrderCode(purchaseOrder, budgetById)
         : this.normalizeForecastCostCode(invoice.data?.costCode || 'UNALLOCATED');
       const entry = ensureCode(code, purchaseOrder?.supplier || invoice.supplier || 'Supplier cost');
-      entry.supplierActual = roundMoney(entry.supplierActual + invoice.netAmount);
+      const recognized = supplierActualStatuses.has(normalizeStatus(invoice.status, ''))
+        && hasApprovedDecision(invoice, 'supplier_invoice');
+      if (recognized) {
+        entry.supplierActual = roundMoney(entry.supplierActual + invoice.netAmount);
+        recognizedSupplierInvoiceIds.push(invoice.id);
+      } else {
+        entry.unreviewedSupplier = roundMoney(entry.unreviewedSupplier + invoice.netAmount);
+        unreviewedSupplierInvoiceIds.push(invoice.id);
+        if (supplierActualStatuses.has(normalizeStatus(invoice.status, ''))) invalidSupplierInvoiceIds.push(invoice.id);
+      }
       entry.sourceCounts.supplierInvoices += 1;
       if (invoice.purchaseOrderId) {
-        approvedInvoiceNetByOrder.set(
+        retainedInvoiceNetByOrder.set(
           invoice.purchaseOrderId,
-          roundMoney((approvedInvoiceNetByOrder.get(invoice.purchaseOrderId) || 0) + invoice.netAmount)
+          roundMoney((retainedInvoiceNetByOrder.get(invoice.purchaseOrderId) || 0) + invoice.netAmount)
         );
       }
     }
+    const invalidPurchaseOrderIds = [];
     for (const purchaseOrder of purchaseOrders) {
       const entry = ensureCode(this.costForecastPurchaseOrderCode(purchaseOrder, budgetById), purchaseOrder.supplier || 'Purchase commitment');
-      const remaining = roundMoney(Math.max(0, purchaseOrder.amount - (approvedInvoiceNetByOrder.get(purchaseOrder.id) || 0)));
-      if (purchaseOrder.orderIssued && purchaseOrder.externalCommitments === 1) {
+      const remaining = roundMoney(Math.max(0, purchaseOrder.amount - (retainedInvoiceNetByOrder.get(purchaseOrder.id) || 0)));
+      if (!hasApprovedDecision(purchaseOrder, 'purchase_order')) {
+        entry.unreviewedCommitment = roundMoney(entry.unreviewedCommitment + remaining);
+        invalidPurchaseOrderIds.push(purchaseOrder.id);
+      } else if (purchaseOrder.orderIssued && purchaseOrder.externalCommitments === 1) {
         entry.externalCommitment = roundMoney(entry.externalCommitment + remaining);
       } else if (purchaseOrder.spendAuthorized) {
         entry.authorizedNotIssued = roundMoney(entry.authorizedNotIssued + remaining);
@@ -31703,27 +31847,51 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
     const lines = [...codeEntries.values()].map(entry => {
       const actual = roundMoney(entry.laborActual + entry.expenseActual + entry.supplierActual);
-      const committedAndActual = roundMoney(actual + entry.externalCommitment + entry.authorizedNotIssued);
-      const forecast = roundMoney(Math.max(entry.operatorForecast, committedAndActual));
+      const unreviewedCost = roundMoney(entry.unreviewedLabor + entry.unreviewedExpense + entry.unreviewedSupplier);
+      const incurredCost = roundMoney(actual + unreviewedCost);
+      const unreviewedExposure = roundMoney(unreviewedCost + entry.unreviewedCommitment);
+      const committedAndIncurred = roundMoney(
+        incurredCost
+        + entry.externalCommitment
+        + entry.authorizedNotIssued
+        + entry.unreviewedCommitment
+      );
+      const forecast = roundMoney(Math.max(entry.operatorForecast, committedAndIncurred));
       const variance = roundMoney(entry.budget - forecast);
       const reportedActualVariance = roundMoney(entry.reportedActual - actual);
-      const reportedCommitmentVariance = roundMoney(entry.reportedCommitted - entry.externalCommitment - entry.authorizedNotIssued);
+      const reportedCommitmentVariance = roundMoney(
+        entry.reportedCommitted
+        - entry.externalCommitment
+        - entry.authorizedNotIssued
+        - entry.unreviewedCommitment
+      );
       return {
         costCode: entry.costCode,
         description: [...entry.descriptions].sort().join(' / ') || 'Unallocated cost',
         budget: roundMoney(entry.budget),
         operatorForecast: roundMoney(entry.operatorForecast),
         actual,
+        approvedActual: actual,
         laborActual: roundMoney(entry.laborActual),
         expenseActual: roundMoney(entry.expenseActual),
         supplierActual: roundMoney(entry.supplierActual),
+        unreviewedCost,
+        unreviewedLabor: roundMoney(entry.unreviewedLabor),
+        unreviewedExpense: roundMoney(entry.unreviewedExpense),
+        unreviewedSupplier: roundMoney(entry.unreviewedSupplier),
+        incurredCost,
         externalCommitment: roundMoney(entry.externalCommitment),
         authorizedNotIssued: roundMoney(entry.authorizedNotIssued),
-        costToComplete: roundMoney(Math.max(0, forecast - actual)),
+        unreviewedCommitment: roundMoney(entry.unreviewedCommitment),
+        unreviewedExposure,
+        costToComplete: roundMoney(Math.max(0, forecast - incurredCost)),
         forecast,
+        estimateAtCompletion: forecast,
         variance,
+        varianceAtCompletion: variance,
         overBudget: variance < -0.01,
-        unbudgeted: entry.budget <= 0 && committedAndActual > 0.01,
+        unbudgeted: entry.budget <= 0 && committedAndIncurred > 0.01,
+        reviewRequired: unreviewedExposure > 0.01,
         reportedActual: roundMoney(entry.reportedActual),
         reportedCommitted: roundMoney(entry.reportedCommitted),
         reportedActualVariance,
@@ -31735,8 +31903,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const total = key => roundMoney(lines.reduce((sum, line) => sum + normalizeNumber(line[key], 0), 0));
     const budget = total('budget');
     const actual = total('actual');
+    const unreviewedCost = total('unreviewedCost');
+    const incurredCost = total('incurredCost');
     const externalCommitment = total('externalCommitment');
     const authorizedNotIssued = total('authorizedNotIssued');
+    const unreviewedCommitment = total('unreviewedCommitment');
+    const unreviewedExposure = roundMoney(unreviewedCost + unreviewedCommitment);
     const forecast = total('forecast');
     const progressPercent = Math.max(0, Math.min(100, normalizeNumber(detail.progressPercent, 0)));
     const earnedValue = roundMoney(budget * progressPercent / 100);
@@ -31746,11 +31918,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       contractValue,
       budget,
       actual,
+      approvedActual: actual,
+      unreviewedCost,
+      incurredCost,
       externalCommitment,
       authorizedNotIssued,
+      unreviewedCommitment,
+      unreviewedExposure,
       forecast,
-      costToComplete: roundMoney(Math.max(0, forecast - actual)),
+      estimateAtCompletion: forecast,
+      costToComplete: roundMoney(Math.max(0, forecast - incurredCost)),
       budgetVariance: roundMoney(budget - forecast),
+      varianceAtCompletion: roundMoney(budget - forecast),
       projectedMargin,
       projectedMarginPercent: contractValue > 0 ? roundQuantity(projectedMargin / contractValue * 100) : null,
       progressPercent: roundQuantity(progressPercent),
@@ -31758,7 +31937,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       costPerformanceIndex: actual > 0 ? roundQuantity(earnedValue / actual) : null,
       unbudgetedCostCodes: lines.filter(line => line.unbudgeted).length,
       overBudgetCostCodes: lines.filter(line => line.overBudget).length,
+      reviewRequiredCostCodes: lines.filter(line => line.reviewRequired).length,
       costCodeCount: lines.length,
+      reviewRequired: unreviewedExposure > 0.01,
       atRisk: forecast > budget + 0.01 || projectedMargin < -0.01 || lines.some(line => line.unbudgeted)
     };
     const sourceBasis = {
@@ -31782,19 +31963,36 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       })),
       timeLogs: timeLogs.map(log => ({
         id: log.id,
+        workerId: log.workerId || null,
         costCode: this.normalizeForecastCostCode(log.data?.costCode || 'LABOR'),
         status: log.status,
         workDate: log.workDate,
         hours: roundQuantity(log.hours),
         rate: roundMoney(log.rate),
-        amount: roundMoney(log.hours * log.rate)
+        amount: roundMoney(log.hours * log.rate),
+        recognition: recognizedTimeLogIds.includes(log.id) ? 'approved_actual' : 'unreviewed',
+        timesheetId: approvedTimeLogEvidence.get(log.id)?.timesheetId || null,
+        lineHash: sha256Json(this.costForecastTimeLogLine(log))
       })),
+      approvedTimesheets: [...approvedTimesheetIds].sort().map(timesheetId => {
+        const evidence = [...approvedTimeLogEvidence.values()].find(item => item.timesheetId === timesheetId);
+        return {
+          id: timesheetId,
+          periodStart: evidence?.periodStart || null,
+          periodEnd: evidence?.periodEnd || null,
+          sourceHash: evidence?.sourceHash || null
+        };
+      }),
       expenses: expenses.map(expense => ({
         id: expense.id,
         costCode: this.normalizeForecastCostCode(expense.data?.costCode || expense.category || 'EXPENSE'),
         status: expense.status,
         currency: normalizeText(expense.currency, 'EUR').toUpperCase(),
-        amount: roundMoney(expense.amount)
+        amount: roundMoney(expense.amount),
+        governedReceipt: expense.governedReceipt === true,
+        integrityValid: expense.integrityValid === true,
+        approvalId: expense.approvalId || null,
+        recognition: recognizedExpenseIds.includes(expense.id) ? 'approved_actual' : 'unreviewed'
       })),
       purchaseOrders: purchaseOrders.map(order => ({
         id: order.id,
@@ -31802,18 +32000,43 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         status: order.status,
         currency: normalizeText(order.currency, 'EUR').toUpperCase(),
         amount: roundMoney(order.amount),
-        invoicedNet: roundMoney(approvedInvoiceNetByOrder.get(order.id) || 0),
+        invoicedNet: roundMoney(retainedInvoiceNetByOrder.get(order.id) || 0),
         spendAuthorized: order.spendAuthorized === true,
         orderIssued: order.orderIssued === true,
-        externalCommitments: normalizeNumber(order.externalCommitments, 0)
+        externalCommitments: normalizeNumber(order.externalCommitments, 0),
+        approvalId: order.approvalId || null,
+        recognition: invalidPurchaseOrderIds.includes(order.id)
+          ? 'unreviewed_commitment'
+          : order.orderIssued && order.externalCommitments === 1
+            ? 'external_commitment'
+            : 'authorized_not_issued'
       })),
       supplierInvoices: supplierInvoices.map(invoice => ({
         id: invoice.id,
         purchaseOrderId: invoice.purchaseOrderId || null,
         status: invoice.status,
         currency: normalizeText(invoice.currency, 'EUR').toUpperCase(),
-        netAmount: roundMoney(invoice.netAmount)
-      }))
+        netAmount: roundMoney(invoice.netAmount),
+        approvalId: invoice.approvalId || null,
+        recognition: recognizedSupplierInvoiceIds.includes(invoice.id) ? 'approved_actual' : 'unreviewed'
+      })),
+      recognition: {
+        approvedTimeLogIds: recognizedTimeLogIds,
+        unreviewedTimeLogIds,
+        approvedExpenseIds: recognizedExpenseIds,
+        unreviewedExpenseIds,
+        approvedSupplierInvoiceIds: recognizedSupplierInvoiceIds,
+        unreviewedSupplierInvoiceIds,
+        invalidPurchaseOrderIds
+      },
+      policy: {
+        actualRecognition: 'approved_weekly_timesheets_approved_expense_receipts_and_approved_supplier_invoices',
+        unreviewedEvidenceIncludedInEstimateAtCompletion: true,
+        unreviewedEvidenceRecognizedAsActual: false,
+        supplierInvoiceReducesLinkedCommitment: true,
+        snapshotApprovalApprovesUnderlyingCosts: false,
+        historicalBackdatingSupported: false
+      }
     };
     const sourceHash = sha256Json(sourceBasis);
     const snapshots = this.db.prepare(`
@@ -31825,6 +32048,26 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const pendingSnapshot = snapshots.find(snapshot => snapshot.status === 'pending_approval') || null;
     const blockers = [];
     if (!budgetLines.length || budget <= 0) blockers.push({ code: 'approved_budget_required', message: 'Approve at least one positive budget line before freezing a cost forecast.' });
+    if (budgetCandidates.length !== budgetLines.length) blockers.push({
+      code: 'cost_forecast_budget_approval_invalid',
+      message: `${budgetCandidates.length - budgetLines.length} budget line(s) claim an approved baseline status without a matching approval decision.`,
+      budgetLineIds: budgetCandidates.filter(line => !hasApprovedDecision(line, 'budget_line')).map(line => line.id)
+    });
+    if (invalidExpenseIds.length) blockers.push({
+      code: 'cost_forecast_expense_integrity_invalid',
+      message: `${invalidExpenseIds.length} governed expense receipt(s) failed retained-source verification.`,
+      expenseIds: invalidExpenseIds
+    });
+    if (invalidSupplierInvoiceIds.length) blockers.push({
+      code: 'cost_forecast_supplier_invoice_approval_invalid',
+      message: `${invalidSupplierInvoiceIds.length} supplier invoice(s) claim a recognized status without a matching approval decision.`,
+      supplierInvoiceIds: invalidSupplierInvoiceIds
+    });
+    if (invalidPurchaseOrderIds.length) blockers.push({
+      code: 'cost_forecast_purchase_order_approval_invalid',
+      message: `${invalidPurchaseOrderIds.length} purchase order(s) claim authorized or issued spend without a matching approval decision.`,
+      purchaseOrderIds: invalidPurchaseOrderIds
+    });
     if (mismatchedCurrencies.length) blockers.push({
       code: 'cost_forecast_currency_mismatch',
       message: `Cost records contain currencies outside ${currency}: ${mismatchedCurrencies.join(', ')}.`,
@@ -31844,6 +32087,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       code: 'unbudgeted_costs_present',
       message: `${summary.unbudgetedCostCodes} cost code(s) contain actual or committed cost without an approved budget.`
     });
+    if (unreviewedTimeLogIds.length) warnings.push({
+      code: 'labor_awaiting_timesheet_approval',
+      message: `${unreviewedTimeLogIds.length} time log(s) remain unreviewed until their exact source lines are covered by approved weekly timesheets.`,
+      timeLogIds: unreviewedTimeLogIds
+    });
+    if (unreviewedExpenseIds.length) warnings.push({
+      code: 'expense_evidence_unreviewed',
+      message: `${unreviewedExpenseIds.length} expense record(s) are included in EAC but excluded from approved actual cost until governed receipt review is complete.`,
+      expenseIds: unreviewedExpenseIds
+    });
+    if (unreviewedSupplierInvoiceIds.length) warnings.push({
+      code: 'supplier_invoice_unreviewed',
+      message: `${unreviewedSupplierInvoiceIds.length} supplier invoice(s) are included in EAC but excluded from approved actual cost until approval is complete.`,
+      supplierInvoiceIds: unreviewedSupplierInvoiceIds
+    });
+    if (unreviewedCommitment > 0.01) warnings.push({
+      code: 'purchase_commitment_unreviewed',
+      message: `${unreviewedCommitment.toFixed(2)} ${currency} of retained purchase-order exposure is included in EAC but is not recognized as an approved commitment.`,
+      purchaseOrderIds: invalidPurchaseOrderIds
+    });
+    const policy = {
+      actualRecognition: {
+        labor: 'exact_time_log_lines_in_current_approved_weekly_timesheets',
+        expenses: 'intact_governed_receipts_with_matching_approved_decisions',
+        supplier: 'supplier_invoices_with_matching_approved_decisions'
+      },
+      unreviewedEvidenceIncludedInEstimateAtCompletion: true,
+      unreviewedEvidenceRecognizedAsActual: false,
+      supplierInvoiceReducesLinkedCommitment: true,
+      snapshotApprovalApprovesUnderlyingCosts: false,
+      historicalBackdatingSupported: false,
+      externalCommitmentsCreated: 0
+    };
     return {
       format: COST_FORECAST_FORMAT,
       generatedAt: nowIso(),
@@ -31858,6 +32134,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       sourceBasis,
       lines,
       summary,
+      policy,
       snapshots,
       activeSnapshot: activeSnapshot ? {
         ...activeSnapshot,
@@ -31875,6 +32152,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.transaction(() => {
       const job = this.mapJob(this.requireJob(jobId));
       const actor = options.actor || payload.actor || 'Contractor.AI';
+      const timestamp = nowIso();
+      const asOfDate = this.normalizeCostForecastAsOfDate(payload.asOfDate || payload.as_of_date, timestamp);
       const forecast = this.calculateCostForecast(jobId);
       if (!forecast.ready) {
         throw ledgerInputError(
@@ -31908,11 +32187,6 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           409
         );
       }
-      const timestamp = nowIso();
-      const asOfDate = normalizeText(payload.asOfDate || payload.as_of_date, timestamp.slice(0, 10));
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate) || Number.isNaN(Date.parse(`${asOfDate}T00:00:00.000Z`))) {
-        throw ledgerInputError('cost_forecast_as_of_date_invalid', 'Cost-forecast as-of date must be a valid calendar date.');
-      }
       const versionNumber = normalizeNumber(this.db.prepare(`
         SELECT MAX(version_number) AS version_number
         FROM cost_forecast_snapshots
@@ -31934,11 +32208,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         lines: forecast.lines,
         summary: forecast.summary,
         warnings: forecast.warnings,
+        policy: forecast.policy,
         controls: {
           externalCommitmentsCreated: 0,
           fundsMoved: false,
           bookkeepingExported: false,
-          sourceCurrentAtRequest: true
+          sourceCurrentAtRequest: true,
+          underlyingCostEvidenceApprovedBySnapshot: false
         }
       };
       const snapshotJson = toJson(snapshot);
@@ -31969,7 +32245,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         jobId,
         approvalType: 'cost_forecast_snapshot',
         summary: `Approve cost forecast ${forecastNumber} for ${job.title}`,
-        reason: 'The snapshot freezes cost-code budget, actual, commitment, forecast, variance, and projected-margin evidence for management review.',
+        reason: 'The snapshot freezes approved actuals, separately disclosed unreviewed exposure, commitments, EAC, cost to complete, variance, and projected margin for management review. It does not approve the underlying time, receipt, invoice, or purchase evidence.',
         data: {
           forecastNumber,
           versionNumber,
@@ -31978,12 +32254,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           currency: forecast.currency,
           budget: forecast.summary.budget,
           actual: forecast.summary.actual,
+          unreviewedCost: forecast.summary.unreviewedCost,
+          incurredCost: forecast.summary.incurredCost,
           externalCommitment: forecast.summary.externalCommitment,
           authorizedNotIssued: forecast.summary.authorizedNotIssued,
+          unreviewedCommitment: forecast.summary.unreviewedCommitment,
           forecast: forecast.summary.forecast,
+          estimateAtCompletion: forecast.summary.estimateAtCompletion,
+          costToComplete: forecast.summary.costToComplete,
           budgetVariance: forecast.summary.budgetVariance,
+          varianceAtCompletion: forecast.summary.varianceAtCompletion,
           projectedMargin: forecast.summary.projectedMargin,
           atRisk: forecast.summary.atRisk,
+          reviewRequired: forecast.summary.reviewRequired,
+          underlyingCostEvidenceApproved: false,
           externalCommitments: 0
         }
       }, { actor, audit: false });
@@ -41551,6 +41835,40 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  financeHandoffCostForecastPackage(forecast = {}) {
+    return {
+      format: forecast.format || COST_FORECAST_FORMAT,
+      generatedAt: forecast.generatedAt || nowIso(),
+      asOfDate: forecast.asOfDate || null,
+      currency: forecast.currency || 'EUR',
+      sourceHash: forecast.sourceHash || null,
+      ready: forecast.ready === true,
+      blockers: forecast.blockers || [],
+      warnings: forecast.warnings || [],
+      summary: forecast.summary || {},
+      lines: forecast.lines || [],
+      policy: forecast.policy || {}
+    };
+  }
+
+  assertFinanceHandoffCostBasis(jobId, forecast = null) {
+    const current = forecast || this.calculateCostForecast(jobId);
+    if (current.ready !== true || current.summary?.reviewRequired === true) {
+      throw ledgerInputError(
+        'finance_handoff_cost_review_required',
+        'Finance handoff requires an approved cost basis and fully reviewed cost evidence.',
+        {
+          blockers: current.blockers || [],
+          unreviewedCost: current.summary?.unreviewedCost || 0,
+          unreviewedCommitment: current.summary?.unreviewedCommitment || 0,
+          unreviewedExposure: current.summary?.unreviewedExposure || 0
+        },
+        409
+      );
+    }
+    return current;
+  }
+
   createFinanceHandoff(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
@@ -41561,6 +41879,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const requestedStatus = normalizeStatus(payload.status, 'draft');
       const packageType = normalizeStatus(payload.packageType || payload.package_type, 'job_finance');
       const currency = normalizeText(payload.currency, 'EUR').toUpperCase();
+      const needsApproval = payload.requiresApproval === true
+        || ['ready', 'approved', 'submitted', 'sent', 'exported'].includes(requestedStatus)
+        || payload.submit === true;
+      const costForecast = this.calculateCostForecast(jobId, { detail });
+      if (needsApproval) this.assertFinanceHandoffCostBasis(jobId, costForecast);
       const amount = normalizeNumber(payload.amount, [
         ...(detail.invoices || []),
         ...(detail.payments || []),
@@ -41579,11 +41902,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         creditNotes: detail.creditNotes || [],
         payments: detail.payments || [],
         drawRequests: detail.drawRequests || [],
-        lienWaivers: detail.lienWaivers || []
+        lienWaivers: detail.lienWaivers || [],
+        costForecast: this.financeHandoffCostForecastPackage(costForecast)
       };
-      const needsApproval = payload.requiresApproval === true
-        || ['ready', 'approved', 'submitted', 'sent', 'exported'].includes(requestedStatus)
-        || payload.submit === true;
       const status = needsApproval && requestedStatus !== 'draft' ? 'pending_approval' : requestedStatus;
 
       this.db.prepare(`
@@ -41602,7 +41923,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         toJson({
           requestedStatus,
           notes: payload.notes || payload.note || null,
-          exportFormat: payload.exportFormat || payload.export_format || 'json'
+          exportFormat: payload.exportFormat || payload.export_format || 'json',
+          costForecastSourceHash: costForecast.sourceHash
         }),
         timestamp,
         timestamp
@@ -41617,7 +41939,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           approvalType: 'finance_handoff',
           summary: `Approve finance handoff ${id} to ${normalizeText(payload.targetSystem || payload.target_system, 'FAB')}`,
           reason: 'Finance handoff packages can expose client/job financial data and require approval before export or submission.',
-          data: { requestedStatus, amount, packageType }
+          data: { requestedStatus, amount, packageType, costForecastSourceHash: costForecast.sourceHash }
         }, { actor, audit: false });
         this.db.prepare('UPDATE finance_handoffs SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
       }
@@ -41635,6 +41957,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const actor = options.actor || payload.actor || 'Contractor.AI';
 
     return this.transaction(() => {
+      const detail = this.getJobDetail(jobId, { includeAudit: false });
+      const costForecast = this.assertFinanceHandoffCostBasis(
+        jobId,
+        this.calculateCostForecast(jobId, { detail })
+      );
       const existing = this.db.prepare(`
         SELECT * FROM finance_handoffs
         WHERE job_id = ? AND status IN ('draft', 'ready', 'pending_approval')
@@ -41658,15 +41985,28 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND status = 'pending'").get(existing.approval_id)
         : null;
       if (pendingApproval) {
-        return {
-          ...this.mapFinanceHandoff(existing),
-          approval: this.mapApproval(pendingApproval),
-          created: false,
-          reused: true
-        };
+        const existingCostForecastSourceHash = fromJson(existing.data_json, {}).costForecastSourceHash || null;
+        if (existingCostForecastSourceHash === costForecast.sourceHash) {
+          return {
+            ...this.mapFinanceHandoff(existing),
+            approval: this.mapApproval(pendingApproval),
+            created: false,
+            reused: true
+          };
+        }
+        const staleAt = nowIso();
+        this.db.prepare(`
+          UPDATE approvals
+          SET status = 'cancelled', resolved_by = ?, resolved_at = ?, reason = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending'
+        `).run(actor, staleAt, 'Superseded because the finance-handoff cost basis changed.', staleAt, pendingApproval.id);
+        this.db.prepare(`
+          UPDATE finance_handoffs
+          SET status = 'draft', approval_id = NULL, updated_at = ?
+          WHERE id = ? AND job_id = ?
+        `).run(staleAt, existing.id, jobId);
       }
 
-      const detail = this.getJobDetail(jobId, { includeAudit: false });
       const timestamp = nowIso();
       const targetSystem = normalizeText(payload.targetSystem || payload.target_system, existing.target_system || 'FAB');
       const packageType = normalizeStatus(payload.packageType || payload.package_type, existing.package_type || 'job_finance');
@@ -41683,7 +42023,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         creditNotes: detail.creditNotes || [],
         payments: detail.payments || [],
         drawRequests: detail.drawRequests || [],
-        lienWaivers: detail.lienWaivers || []
+        lienWaivers: detail.lienWaivers || [],
+        costForecast: this.financeHandoffCostForecastPackage(costForecast)
       };
       const amount = [
         ...packagePayload.invoices,
@@ -41698,14 +42039,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         approvalType: 'finance_handoff',
         summary: `Approve finance handoff ${existing.id} to ${targetSystem}`,
         reason: 'Finance handoff packages can expose client/job financial data and require approval before export or submission.',
-        data: { requestedStatus: 'approved', amount, packageType }
+        data: { requestedStatus: 'approved', amount, packageType, costForecastSourceHash: costForecast.sourceHash }
       }, { actor, audit: false });
       const data = {
         ...fromJson(existing.data_json, {}),
         requestedStatus: 'approved',
         notes: payload.notes || payload.note || fromJson(existing.data_json, {}).notes || null,
         exportFormat,
-        externalDelivery: false
+        externalDelivery: false,
+        costForecastSourceHash: costForecast.sourceHash
       };
       this.db.prepare(`
         UPDATE finance_handoffs
@@ -47573,8 +47915,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         WHERE id = ?
       `).run(approvedStatus, approvedStatus, timestamp, timestamp, targetId);
     } else if (targetType === 'finance_handoff') {
-      const handoff = this.db.prepare('SELECT data_json FROM finance_handoffs WHERE id = ?').get(targetId);
-      const requestedStatus = normalizeStatus(fromJson(handoff?.data_json, {}).requestedStatus, 'ready');
+      const handoff = this.db.prepare('SELECT job_id, data_json FROM finance_handoffs WHERE id = ?').get(targetId);
+      if (!handoff) {
+        throw ledgerInputError('finance_handoff_not_found', 'The finance handoff no longer exists.', { financeHandoffId: targetId }, 409);
+      }
+      const data = fromJson(handoff.data_json, {});
+      const costForecast = this.assertFinanceHandoffCostBasis(handoff.job_id);
+      if (!data.costForecastSourceHash || data.costForecastSourceHash !== costForecast.sourceHash) {
+        throw ledgerInputError(
+          'finance_handoff_cost_basis_stale',
+          'The finance-handoff package is not bound to the current cost basis. Prepare a current package.',
+          {
+            expectedSourceHash: data.costForecastSourceHash || null,
+            currentSourceHash: costForecast.sourceHash
+          },
+          409
+        );
+      }
+      const requestedStatus = normalizeStatus(data.requestedStatus, 'ready');
       const approvedStatus = ['ready', 'approved', 'submitted', 'sent', 'exported'].includes(requestedStatus)
         ? (['submitted', 'sent', 'exported'].includes(requestedStatus) ? 'ready_to_export' : requestedStatus)
         : 'ready';
@@ -48710,6 +49068,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (flags.paymentOutstanding || flags.paymentFollowUp) return 'payment_follow_up';
     if (flags.invoicePackageReady || flags.creditNotePackageReady) return 'invoice_ready';
     if (flags.invoiceReady) return 'invoice_ready';
+    if (flags.costForecastReviewRequired) return 'cost_review_required';
     if (flags.costForecastAtRisk) return 'forecast_at_risk';
     if (flags.handoffReady) return 'handoff_ready';
     if (flags.needsCosts) return 'needs_costs';
@@ -48726,6 +49085,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       paymentFollowUp: 0,
       supplierPayableDue: 0,
       forecastAtRisk: 0,
+      costReviewRequired: 0,
       handoffReady: 0,
       needsCosts: 0,
       stable: 0,
@@ -48751,6 +49111,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       openLienWaivers: 0,
       costForecastReady: 0,
       costForecastAtRisk: 0,
+      costForecastReviewRequired: 0,
       costForecastStale: 0,
       pendingCostForecasts: 0,
       contractValue: 0,
@@ -48783,8 +49144,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       unplannedBillingValue: 0,
       costBudgetValue: 0,
       actualCostValue: 0,
+      unreviewedCostValue: 0,
+      incurredCostValue: 0,
       committedCostValue: 0,
       authorizedCostValue: 0,
+      unreviewedCommitmentValue: 0,
+      costToCompleteValue: 0,
       forecastCostValue: 0,
       forecastMarginValue: 0,
       costVarianceValue: 0
@@ -48796,6 +49161,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (status === 'payment_follow_up') summary.paymentFollowUp += 1;
       if (status === 'payable_due') summary.supplierPayableDue += 1;
       if (status === 'forecast_at_risk') summary.forecastAtRisk += 1;
+      if (status === 'cost_review_required') summary.costReviewRequired += 1;
       if (row.flags?.paymentOutstanding) summary.paymentOutstanding += 1;
       if (status === 'handoff_ready') summary.handoffReady += 1;
       if (status === 'needs_costs') summary.needsCosts += 1;
@@ -48822,6 +49188,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.openLienWaivers += normalizeNumber(row.counts?.openLienWaivers, 0);
       summary.costForecastReady += row.costForecast?.ready ? 1 : 0;
       summary.costForecastAtRisk += row.costForecast?.summary?.atRisk ? 1 : 0;
+      summary.costForecastReviewRequired += row.flags?.costForecastReviewRequired ? 1 : 0;
       summary.costForecastStale += row.costForecast?.activeSnapshot && !row.costForecast?.snapshotCurrent ? 1 : 0;
       summary.pendingCostForecasts += row.costForecast?.pendingSnapshot ? 1 : 0;
       const money = row.money || {};
@@ -48855,8 +49222,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.unplannedBillingValue += normalizeNumber(money.unplannedBillingValue, 0);
       summary.costBudgetValue += normalizeNumber(row.costForecast?.summary?.budget, 0);
       summary.actualCostValue += normalizeNumber(row.costForecast?.summary?.actual, 0);
+      summary.unreviewedCostValue += normalizeNumber(row.costForecast?.summary?.unreviewedCost, 0);
+      summary.incurredCostValue += normalizeNumber(row.costForecast?.summary?.incurredCost, 0);
       summary.committedCostValue += normalizeNumber(row.costForecast?.summary?.externalCommitment, 0);
       summary.authorizedCostValue += normalizeNumber(row.costForecast?.summary?.authorizedNotIssued, 0);
+      summary.unreviewedCommitmentValue += normalizeNumber(row.costForecast?.summary?.unreviewedCommitment, 0);
+      summary.costToCompleteValue += normalizeNumber(row.costForecast?.summary?.costToComplete, 0);
       summary.forecastCostValue += normalizeNumber(row.costForecast?.summary?.forecast, 0);
       summary.forecastMarginValue += normalizeNumber(row.costForecast?.summary?.projectedMargin, 0);
       summary.costVarianceValue += normalizeNumber(row.costForecast?.summary?.budgetVariance, 0);
@@ -49051,8 +49422,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const supplierPayableOutstanding = supplierPayableValue > 0.01;
         const supplierPayableDue = dueSupplierInvoices.length > 0;
         const handoffMissing = hasFinancialActivity && !activeHandoffs.length;
+        const costForecastReviewRequired = costForecast.summary.reviewRequired === true
+          || (costForecast.ready !== true && !missingBudget);
         const handoffReady = !missingCosts
           && !missingBudget
+          && costForecast.ready === true
+          && costForecastReviewRequired === false
           && (handoffMissing || activeHandoffs.some(handoff => ['draft', 'ready'].includes(normalizeStatus(handoff.status, 'draft'))));
         const approvalRequired = pendingFinanceApprovals.length > 0
           || activeInvoices.some(invoice => invoice.approvalId && ['draft', 'submitted', 'pending_approval'].includes(normalizeStatus(invoice.status, 'draft')))
@@ -49078,6 +49453,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           purchaseOrderDeliveryReady: purchaseOrderDeliveryCandidates.length > 0,
           invoicePrepared: preparedInvoices.length > 0,
           costForecastAtRisk: costForecast.summary.atRisk === true,
+          costForecastReviewRequired,
           costForecastBlocked: costForecast.ready !== true,
           costForecastStale: Boolean(costForecast.activeSnapshot && !costForecast.snapshotCurrent),
           handoffReady,
@@ -49089,6 +49465,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const financeStatus = this.classifyFinanceReadiness(flags);
         const nextActions = [];
         if (approvalRequired) nextActions.push({ type: 'review_finance_approval', label: 'Review finance approval gates', approvalId: pendingFinanceApprovals[0]?.id || null, requiresApproval: false });
+        if (costForecastReviewRequired) nextActions.push({
+          type: 'review_cost_evidence',
+          label: 'Resolve cost evidence review',
+          unreviewedCost: costForecast.summary.unreviewedCost,
+          unreviewedCommitment: costForecast.summary.unreviewedCommitment,
+          unreviewedExposure: costForecast.summary.unreviewedExposure,
+          reviewRequiredCostCodes: costForecast.summary.reviewRequiredCostCodes,
+          blockers: costForecast.blockers,
+          requiresApproval: false
+        });
         if (invoicePackageReady) nextActions.push({
           type: 'prepare_invoice_package',
           label: 'Prepare immutable invoice issue package',
@@ -49340,8 +49726,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             budgetActualValue,
             costBudgetValue: costForecast.summary.budget,
             actualCostValue: costForecast.summary.actual,
+            unreviewedCostValue: costForecast.summary.unreviewedCost,
+            incurredCostValue: costForecast.summary.incurredCost,
             committedCostValue: costForecast.summary.externalCommitment,
             authorizedCostValue: costForecast.summary.authorizedNotIssued,
+            unreviewedCommitmentValue: costForecast.summary.unreviewedCommitment,
+            costToCompleteValue: costForecast.summary.costToComplete,
             forecastCostValue: costForecast.summary.forecast,
             costVarianceValue: costForecast.summary.budgetVariance,
             earnedValue: costForecast.summary.earnedValue,
@@ -49381,7 +49771,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (mode === 'payable_due') return row.flags?.supplierPayableDue === true;
       if (mode === 'invoice') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true || row.flags?.creditNotePackageReady === true;
       if (mode === 'invoice_ready') return row.flags?.invoiceReady === true || row.flags?.invoicePackageReady === true || row.flags?.creditNotePackageReady === true;
-      if (mode === 'forecast' || mode === 'forecast_at_risk') return row.flags?.costForecastAtRisk === true || row.flags?.costForecastStale === true;
+      if (mode === 'forecast' || mode === 'forecast_at_risk') {
+        return row.flags?.costForecastAtRisk === true
+          || row.flags?.costForecastStale === true
+          || row.flags?.costForecastReviewRequired === true;
+      }
+      if (mode === 'cost_review' || mode === 'cost_review_required') return row.flags?.costForecastReviewRequired === true;
       if (mode === 'handoff') return row.flags?.handoffReady === true;
       if (mode === 'handoff_ready') return row.flags?.handoffReady === true;
       if (mode === 'costs') return row.flags?.needsCosts === true;
@@ -49395,10 +49790,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       payment_follow_up: 1,
       payable_due: 1,
       invoice_ready: 2,
-      forecast_at_risk: 3,
-      handoff_ready: 4,
-      needs_costs: 5,
-      stable: 6
+      cost_review_required: 3,
+      forecast_at_risk: 4,
+      handoff_ready: 5,
+      needs_costs: 6,
+      stable: 7
     };
     const priorityScore = priority => {
       const rank = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -54318,6 +54714,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       LIMIT 5
     `).all();
     for (const job of jobsNeedingFinanceHandoff) {
+      const costForecast = this.calculateCostForecast(job.id);
+      if (costForecast.ready !== true || costForecast.summary.reviewRequired === true) continue;
       actions.push({ type: 'create_finance_handoff', jobId: job.id, severity: 'medium', message: `${job.title} needs a finance handoff package for FAB/bookkeeping review.` });
     }
 
@@ -62672,7 +63070,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       snapshot,
       integrityValid: Boolean(
         snapshot
-        && snapshot.format === COST_FORECAST_FORMAT
+        && COST_FORECAST_RETAINED_FORMATS.has(snapshot.format)
         && snapshot.sourceHash === row.source_hash
         && sha256Text(snapshotJson) === row.snapshot_hash
       ),

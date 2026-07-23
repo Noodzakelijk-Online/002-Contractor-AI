@@ -76,7 +76,7 @@ test('field receipt approval recognizes VAT-aware cost and compensating reversal
   await page.getByRole('button', { name: 'Finance', exact: true }).click();
   const finance = page.getByTestId('finance-workspace');
   let financeRow = finance.locator('.finance-item').filter({ hasText: fixture.job.title });
-  await expect(financeRow).toContainText(/Actual cost.*100,00/);
+  await expect(financeRow).toContainText(/Approved actual.*100,00/);
   await expect(financeRow).toContainText(`${receiptReference} / approved`);
   await financeRow.getByRole('button', { name: `Reverse expense for ${fixture.job.title}` }).click();
 
@@ -94,7 +94,7 @@ test('field receipt approval recognizes VAT-aware cost and compensating reversal
 
   await page.getByRole('button', { name: 'Finance', exact: true }).click();
   financeRow = finance.locator('.finance-item').filter({ hasText: fixture.job.title });
-  await expect(financeRow).toContainText(/Actual cost.*0,00/);
+  await expect(financeRow).toContainText(/Approved actual.*0,00/);
   await expect(financeRow).toContainText(`${receiptReference} / reversed`);
 
   await page.getByRole('button', { name: 'Field updates', exact: true }).click();

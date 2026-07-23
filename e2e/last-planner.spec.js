@@ -81,6 +81,7 @@ test('Last Planner workspace governs make-ready, weekly promises, daily evidence
   await expect(board.getByRole('heading', { name: 'Last Planner weekly control' })).toBeVisible();
   await board.getByLabel('Week starts').fill(weekStart);
   await board.getByRole('button', { name: 'Load week' }).click();
+  await expect(board).toContainText('Look-ahead current');
   await board.locator('.last-planner-job-select select').selectOption({ label: title });
   await expect(board).toContainText('Look-ahead current');
   await expect(board).toContainText(taskTitle);
@@ -152,6 +153,7 @@ test('Last Planner workspace governs make-ready, weekly promises, daily evidence
   await page.getByRole('button', { name: 'Schedule', exact: true }).click();
   await board.getByLabel('Week starts').fill(weekStart);
   await board.getByRole('button', { name: 'Load week' }).click();
+  await expect(board).toContainText('Look-ahead current');
   await board.locator('.last-planner-job-select select').selectOption({ label: title });
   const commitment = board.getByTestId('last-planner-commitment').filter({ hasText: 'Complete and inspect the browser weekly scope.' });
   await commitment.getByRole('button', { name: 'Record outcome' }).click();

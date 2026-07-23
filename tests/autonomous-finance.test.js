@@ -166,6 +166,70 @@ test('autonomous cycle plans approved contract billing before deriving an invoic
   ));
 });
 
+test('autonomous finance does not draft a handoff while retained costs require review', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const intake = await request(baseUrl, '/api/ledger/intake', {
+    method: 'POST',
+    body: JSON.stringify({
+      clientName: 'Autonomous Cost Review Client',
+      title: `Autonomous cost review ${Date.now()}`,
+      service: 'commercial renovation',
+      status: 'in_progress',
+      progressPercent: 50,
+      estimatedCost: 2000,
+      contractValue: 3000,
+      assignAutomatically: false
+    })
+  });
+  assert.equal(intake.response.status, 201);
+  const jobId = intake.body.job.id;
+  const budget = await request(baseUrl, `/api/ledger/jobs/${jobId}/budget-lines`, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'baseline',
+      costCode: 'AUTO-REVIEW-100',
+      description: 'Autonomous review baseline',
+      budgetAmount: 2000,
+      forecastAmount: 2000
+    })
+  });
+  assert.equal(budget.response.status, 201);
+  const budgetApproval = await request(baseUrl, `/api/ledger/approvals/${budget.body.budgetLine.approval.id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved', resolvedBy: 'Autonomous Finance QA', reason: 'Cost basis checked.' })
+  });
+  assert.equal(budgetApproval.response.status, 200);
+  const unreviewedExpense = await request(baseUrl, `/api/ledger/jobs/${jobId}/expenses`, {
+    method: 'POST',
+    body: JSON.stringify({ category: 'materials', amount: 250, costCode: 'AUTO-REVIEW-100', vendor: 'Unreviewed supplier' })
+  });
+  assert.equal(unreviewedExpense.response.status, 201);
+
+  const finance = await request(baseUrl, `/api/ledger/finance?mode=cost_review&jobIds=${encodeURIComponent(jobId)}`);
+  assert.equal(finance.response.status, 200);
+  const row = finance.body.jobs.find(item => item.jobId === jobId);
+  assert.ok(row);
+  assert.equal(row.financeStatus, 'cost_review_required');
+  assert.equal(row.flags.handoffReady, false);
+  assert.equal(row.nextActions.some(action => action.type === 'review_cost_evidence'), true);
+  assert.equal(row.nextActions.some(action => action.type === 'prepare_finance_handoff'), false);
+
+  const dryRun = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({
+      dryRun: true,
+      actionTypes: ['create_finance_handoff'],
+      jobIds: [jobId]
+    })
+  });
+  assert.equal(dryRun.response.status, 200);
+  assert.equal(dryRun.body.preview.some(action => action.type === 'create_finance_handoff' && action.jobId === jobId), false);
+});
+
 test('autonomous cycle freezes a current cost forecast without creating an external commitment', async t => {
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));

@@ -18,6 +18,14 @@ async function createBrowserJob(request, title, overrides = {}) {
   return response.json();
 }
 
+function weekStart(value = new Date()) {
+  const date = new Date(value);
+  date.setUTCHours(0, 0, 0, 0);
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() - day + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 async function approveCommercialScope(request, jobId, entryKey) {
   const response = await request.post(`/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
     data: {
@@ -2288,6 +2296,16 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     assignAutomatically: false
   });
   const futureDueAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const costWorkerResponse = await request.post('/api/ledger/workers', {
+    data: {
+      name: `Browser finance installer ${Date.now()}`,
+      role: 'Installer',
+      status: 'available',
+      hourlyRate: 55
+    }
+  });
+  expect(costWorkerResponse.ok()).toBeTruthy();
+  const costWorker = (await costWorkerResponse.json()).worker;
 
   const receivableTime = await request.post(`/api/ledger/jobs/${receivableJob.job.id}/time-logs`, {
     data: { hours: 8, rate: 55, notes: 'Verified browser finance labor.' }
@@ -2332,16 +2350,6 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { integration: 'playwright_test_provider', providerMessageId: 'browser-receivable-message' }
   });
   expect(receivableDelivery.ok()).toBeTruthy();
-  const receivableHandoffResponse = await request.post(`/api/ledger/jobs/${receivableJob.job.id}/finance-handoffs`, {
-    data: { status: 'approved', targetSystem: 'FAB', notes: 'Browser pre-approved bookkeeping package.' }
-  });
-  expect(receivableHandoffResponse.ok()).toBeTruthy();
-  const receivableHandoff = await receivableHandoffResponse.json();
-  const handoffApproval = await request.post(`/api/ledger/approvals/${receivableHandoff.financeHandoff.approvalId}/resolve`, {
-    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Bookkeeping package checked.' }
-  });
-  expect(handoffApproval.ok()).toBeTruthy();
-
   await page.goto('/');
   await page.getByRole('button', { name: 'Finance', exact: true }).click();
   const finance = page.getByTestId('finance-workspace');
@@ -2351,6 +2359,7 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   let control = page.getByTestId('finance-control-modal');
   await expect(control.getByRole('heading', { name: 'Record costs' })).toBeVisible();
   await control.getByLabel('Hours').fill('4');
+  await control.getByLabel('Worker').selectOption(costWorker.id);
   await control.getByLabel('Expense amount (EUR)').fill('120');
   await control.getByLabel('Vendor').fill('Bouwmaat');
   await control.getByLabel('Receipt reference').fill('BROWSER-COST-120');
@@ -2376,6 +2385,9 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
   await page.getByRole('button', { name: 'Refresh data' }).click();
 
   costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
+  await expect(costRow).toContainText(/cost review required/i);
+  await expect(costRow.getByRole('button', { name: `Review cost evidence for ${costJob.job.title}` })).toBeVisible();
+  await expect(costRow.getByRole('button', { name: `Finance handoff for ${costJob.job.title}` })).toHaveCount(0);
   await costRow.getByRole('button', { name: `Budget baseline for ${costJob.job.title}` }).click();
   control = page.getByTestId('finance-control-modal');
   await expect(control.getByRole('heading', { name: 'Budget baseline' })).toBeVisible();
@@ -2393,6 +2405,16 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Budget baseline checked.' }
   });
   expect(budgetApproval.ok()).toBeTruthy();
+
+  const timesheetResponse = await request.post(`/api/ledger/workers/${costWorker.id}/timesheets`, {
+    data: { periodStart: weekStart() }
+  });
+  expect(timesheetResponse.ok()).toBeTruthy();
+  const timesheet = await timesheetResponse.json();
+  const timesheetApproval = await request.post(`/api/ledger/approvals/${timesheet.approval.id}/resolve`, {
+    data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Worker, week, hours, rate, and job allocation checked.' }
+  });
+  expect(timesheetApproval.ok()).toBeTruthy();
   await page.getByRole('button', { name: 'Refresh data' }).click();
 
   costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
@@ -2540,8 +2562,18 @@ test('finance workspace freezes, approves, and invalidates a source-linked cost 
   await page.getByRole('button', { name: 'Finance', exact: true }).click();
   const finance = page.getByTestId('finance-workspace');
   let row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
+  await expect(row).toContainText(/cost review required/i);
+  await expect(row.getByRole('button', { name: `Review cost evidence for ${intake.job.title}` })).toBeVisible();
+  await expect(row.getByRole('button', { name: `Finance handoff for ${intake.job.title}` })).toHaveCount(0);
   await expect(row).toContainText('Cost budget');
-  await expect(row).toContainText('Actual cost');
+  await expect(row).toContainText('Approved actual');
+  await expect(row).toContainText('Unreviewed cost');
+  await expect(row).toContainText('Cost to complete');
+  await row.getByText('Cost-code review', { exact: true }).click();
+  await expect(row.getByRole('columnheader', { name: 'EAC' })).toBeVisible();
+  await expect(row.getByRole('rowheader', { name: /BROWSER-FC-100/ })).toBeVisible();
+  await expect(row).toContainText(/time log\(s\) remain unreviewed/i);
+  await expect(row).toContainText(/expense record\(s\) are included in EAC/i);
   await expect(row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` })).toBeVisible();
   await row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` }).click();
   await expect(page.getByText(/Cost forecast FC-\d{4}-\d{6} retained from the current cost-code evidence/)).toBeVisible();
@@ -2559,6 +2591,11 @@ test('finance workspace freezes, approves, and invalidates a source-linked cost 
   row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await expect(row).toContainText(/FC-\d{4}-\d{6} current/);
   await expect(row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` })).toHaveCount(0);
+  if ((await row.locator('details.cost-forecast-detail').getAttribute('open')) === null) {
+    await row.getByText('Cost-code review', { exact: true }).click();
+  }
+  await expect(row.locator('.cost-forecast-history')).toContainText(/FC-\d{4}-\d{6}/);
+  await expect(row).toContainText(/Forecast approval freezes this review only/i);
 
   const changedCost = await request.post(`/api/ledger/jobs/${intake.job.id}/expenses`, {
     data: { status: 'submitted', amount: 75, category: 'materials', costCode: 'BROWSER-FC-100', vendor: 'Bouwmaat', receiptRef: 'BROWSER-FC-REVISION' }

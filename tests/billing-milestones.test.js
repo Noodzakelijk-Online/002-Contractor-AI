@@ -140,6 +140,18 @@ test('billing milestones remain contract-bounded and bind exact values to one in
 test('rejected finance approvals leave no pending records without a pending decision', t => {
   const ledger = temporaryLedger(t);
   const job = contractJob(ledger, 'rollback', 2500);
+  const retainedCostBasis = ledger.createBudgetLine(job.id, {
+    status: 'baseline',
+    costCode: 'ROLLBACK-BASIS',
+    description: 'Retained finance handoff cost basis',
+    budgetAmount: 2500,
+    forecastAmount: 2500
+  });
+  ledger.resolveApproval(retainedCostBasis.approval.id, {
+    status: 'approved',
+    resolvedBy: 'owner',
+    reason: 'Cost basis checked before finance handoff review.'
+  });
   const controls = [
     ledger.createBudgetLine(job.id, { status: 'approved', budgetAmount: 2000, forecastAmount: 2000 }),
     ledger.createPurchaseOrder(job.id, { status: 'approved', supplier: 'Rollback Supplier', amount: 300 }),
@@ -159,7 +171,8 @@ test('rejected finance approvals leave no pending records without a pending deci
   }
 
   const detail = ledger.getJobDetail(job.id, { includeAudit: false });
-  assert.equal(detail.budgetLines[0].status, 'rejected');
+  assert.equal(detail.budgetLines.find(line => line.id === controls[0].id).status, 'rejected');
+  assert.equal(detail.budgetLines.find(line => line.id === retainedCostBasis.id).status, 'baseline');
   assert.equal(detail.purchaseOrders[0].status, 'rejected');
   assert.equal(detail.drawRequests[0].status, 'rejected');
   assert.equal(detail.lienWaivers[0].status, 'rejected');

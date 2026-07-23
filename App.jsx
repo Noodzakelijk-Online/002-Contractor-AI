@@ -133,6 +133,7 @@ const FINANCE_ACTION_LABELS = {
   record_payment_reconciliation: 'Record payment',
   record_payment_follow_up: 'Payment follow-up',
   prepare_finance_handoff: 'Finance handoff',
+  review_cost_evidence: 'Review cost evidence',
   record_time_expense: 'Record costs',
   request_expense_reversal: 'Reverse expense',
   create_budget_line: 'Budget baseline',
@@ -569,6 +570,7 @@ function emptyFinanceActionDraft() {
     amount: '',
     taxRate: '21',
     forecastAmount: '',
+    workerId: '',
     hours: '',
     rate: '52',
     expenseAmount: '',
@@ -1084,7 +1086,7 @@ function reconcileApprovalResolution(data, approvalId, dashboard = null) {
   }
 }
 
-async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false) {
+async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false, viewContext = {}) {
   if (section === 'pipeline') {
     const [opportunities, marketFit, bidDecisions, bids, partners] = await Promise.all([
       api('/api/ledger/opportunities?includeClosed=true&limit=500'),
@@ -1112,10 +1114,13 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     return { jobs: jobs.jobs || [], inspectionTemplates: templates.templates || [] }
   }
   if (section === 'schedule') {
+    const lastPlannerParameters = new URLSearchParams()
+    if (viewContext.lastPlannerWeekStart) lastPlannerParameters.set('weekStart', viewContext.lastPlannerWeekStart)
+    const lastPlannerPath = `/api/ledger/last-planner${lastPlannerParameters.size ? `?${lastPlannerParameters.toString()}` : ''}`
     const [schedule, crewCapacity, lastPlanner] = await Promise.all([
       api('/api/ledger/schedule?horizonDays=180&limit=500'),
       api('/api/ledger/crew-capacity'),
-      api('/api/ledger/last-planner'),
+      api(lastPlannerPath),
     ])
     return { schedule, crewCapacity: crewCapacity.board || null, lastPlanner: lastPlanner.board || null }
   }
@@ -1185,11 +1190,17 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'finance') {
-    const [finance, cashFlow] = await Promise.all([
+    const [finance, cashFlow, workers] = await Promise.all([
       api('/api/ledger/finance?limit=100'),
       api('/api/ledger/cash-flow'),
+      api('/api/ledger/workers?limit=500'),
     ])
-    return { finance, cashFlow: cashFlow.cashFlow }
+    return {
+      finance,
+      cashFlow: cashFlow.cashFlow,
+      workers: workers.workers || [],
+      workerSummary: workers.summary || {},
+    }
   }
   if (section === 'performance') {
     const result = await api('/api/ledger/performance-scorecard')
@@ -2365,6 +2376,18 @@ function FinanceWorkspace({
           <strong>{currency.format(summary.forecastCostValue || 0)}</strong>
         </div>
         <div>
+          <span>Approved actual</span>
+          <strong>{currency.format(summary.actualCostValue || 0)}</strong>
+        </div>
+        <div>
+          <span>Unreviewed cost</span>
+          <strong>{currency.format(summary.unreviewedCostValue || 0)}</strong>
+        </div>
+        <div>
+          <span>Cost to complete</span>
+          <strong>{currency.format(summary.costToCompleteValue || 0)}</strong>
+        </div>
+        <div>
           <span>Forecast margin</span>
           <strong>{currency.format(summary.forecastMarginValue || 0)}</strong>
         </div>
@@ -2394,6 +2417,7 @@ function FinanceWorkspace({
             .filter((line) => line.overBudget || line.unbudgeted)
             .sort((left, right) => Number(left.variance || 0) - Number(right.variance || 0))
             .slice(0, 3)
+          const forecastHistory = (costForecast.snapshots || []).slice(0, 4)
           const financeActions = canAct
             ? item.nextActions
                 ?.filter(
@@ -2433,7 +2457,13 @@ function FinanceWorkspace({
                     Cost budget <strong>{currency.format(forecastSummary.budget || 0)}</strong>
                   </span>
                   <span>
-                    Actual cost <strong>{currency.format(forecastSummary.actual || 0)}</strong>
+                    Approved actual <strong>{currency.format(forecastSummary.actual || 0)}</strong>
+                  </span>
+                  <span>
+                    Unreviewed cost <strong>{currency.format(forecastSummary.unreviewedCost || 0)}</strong>
+                  </span>
+                  <span>
+                    Incurred evidence <strong>{currency.format(forecastSummary.incurredCost || 0)}</strong>
                   </span>
                   <span>
                     Issued commitments <strong>{currency.format(forecastSummary.externalCommitment || 0)}</strong>
@@ -2442,10 +2472,13 @@ function FinanceWorkspace({
                     Authorized, not issued <strong>{currency.format(forecastSummary.authorizedNotIssued || 0)}</strong>
                   </span>
                   <span>
-                    Forecast cost <strong>{currency.format(forecastSummary.forecast || 0)}</strong>
+                    Cost to complete <strong>{currency.format(forecastSummary.costToComplete || 0)}</strong>
                   </span>
                   <span>
-                    Cost variance <strong>{currency.format(forecastSummary.budgetVariance || 0)}</strong>
+                    EAC <strong>{currency.format(forecastSummary.estimateAtCompletion ?? forecastSummary.forecast ?? 0)}</strong>
+                  </span>
+                  <span>
+                    VAC <strong>{currency.format(forecastSummary.varianceAtCompletion ?? forecastSummary.budgetVariance ?? 0)}</strong>
                   </span>
                   <span>
                     Forecast margin <strong>{currency.format(forecastSummary.projectedMargin || 0)}</strong>
@@ -2460,6 +2493,81 @@ function FinanceWorkspace({
                       </span>
                     ))}
                   </div>
+                ) : null}
+                {(costForecast.lines || []).length ? (
+                  <details className="cost-forecast-detail">
+                    <summary>
+                      <span>Cost-code review</span>
+                      <small>
+                        {(costForecast.lines || []).length} code{(costForecast.lines || []).length === 1 ? '' : 's'}
+                        {' / '}
+                        {forecastSummary.reviewRequiredCostCodes || 0} awaiting source review
+                      </small>
+                    </summary>
+                    <div className="cost-forecast-table-wrap">
+                      <table className="cost-forecast-table">
+                        <thead>
+                          <tr>
+                            <th scope="col">Cost code</th>
+                            <th scope="col">Budget</th>
+                            <th scope="col">Approved</th>
+                            <th scope="col">Unreviewed</th>
+                            <th scope="col">Commitments</th>
+                            <th scope="col">CTC</th>
+                            <th scope="col">EAC</th>
+                            <th scope="col">VAC</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(costForecast.lines || []).map((line) => (
+                            <tr key={line.costCode}>
+                              <th scope="row">
+                                <code>{line.costCode}</code>
+                                <small>{line.description}</small>
+                              </th>
+                              <td>{currency.format(line.budget || 0)}</td>
+                              <td>{currency.format(line.actual || 0)}</td>
+                              <td className={line.unreviewedExposure > 0 ? 'cost-review-required' : ''}>
+                                {currency.format(line.unreviewedExposure || 0)}
+                              </td>
+                              <td>
+                                {currency.format(
+                                  Number(line.externalCommitment || 0)
+                                  + Number(line.authorizedNotIssued || 0)
+                                  + Number(line.unreviewedCommitment || 0),
+                                )}
+                              </td>
+                              <td>{currency.format(line.costToComplete || 0)}</td>
+                              <td>{currency.format(line.estimateAtCompletion ?? line.forecast ?? 0)}</td>
+                              <td className={line.varianceAtCompletion < 0 ? 'cost-over-budget' : ''}>
+                                {currency.format(line.varianceAtCompletion ?? line.variance ?? 0)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {(costForecast.warnings || []).length ? (
+                      <ul className="cost-forecast-warnings" aria-label={`${item.jobTitle} cost forecast warnings`}>
+                        {(costForecast.warnings || []).map((warning) => (
+                          <li key={warning.code}>{warning.message}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {forecastHistory.length ? (
+                      <div className="cost-forecast-history" aria-label={`${item.jobTitle} retained cost forecast history`}>
+                        {forecastHistory.map((snapshot) => (
+                          <span key={snapshot.id}>
+                            <strong>{snapshot.forecastNumber}</strong>
+                            <small>{formatStatus(snapshot.status)} / {formatDate(snapshot.asOfDate)}</small>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    <p className="cost-forecast-policy">
+                      Forecast approval freezes this review only. Timesheets, receipts, supplier invoices, and purchase commitments retain their own approval gates.
+                    </p>
+                  </details>
                 ) : null}
                 <div className="finance-flags">
                   {costForecast.activeSnapshot ? (
@@ -2477,6 +2585,11 @@ function FinanceWorkspace({
                   ) : null}
                   {forecastSummary.unbudgetedCostCodes ? (
                     <span className="tag tag-amber">{forecastSummary.unbudgetedCostCodes} unbudgeted cost code{forecastSummary.unbudgetedCostCodes === 1 ? '' : 's'}</span>
+                  ) : null}
+                  {forecastSummary.reviewRequired ? (
+                    <span className="tag tag-amber">
+                      {currency.format(forecastSummary.unreviewedExposure || 0)} awaiting source review
+                    </span>
                   ) : null}
                   {item.counts?.billingMilestones ? (
                     <span className="tag tag-green">
@@ -2681,7 +2794,7 @@ function FinanceWorkspace({
                     key={`${action.type}-${action.creditNoteId || action.supplierInvoiceId || action.purchaseOrderId || action.invoiceId || action.paymentId || action.expenseId || item.jobId}`}
                     aria-label={`${FINANCE_ACTION_LABELS[action.type]} for ${job.title}`}
                     disabled={submitting}
-                    onClick={() => onAction(item, action)}
+                    onClick={() => action.type === 'review_cost_evidence' ? onOpen(job) : onAction(item, action)}
                   >
                     <ClipboardCheck size={16} />
                     {FINANCE_ACTION_LABELS[action.type]}
@@ -2942,6 +3055,7 @@ function App() {
   const sectionRef = useRef('today')
   const resourceViewRef = useRef('workforce')
   const sectionLoadSequenceRef = useRef(0)
+  const lastPlannerWeekRef = useRef('')
   const resourceViewLoadTimerRef = useRef(null)
 
   useEffect(() => () => {
@@ -3081,8 +3195,13 @@ function App() {
         api('/api/ledger/approvals?status=pending&limit=100'),
         currentSection === 'today'
           ? Promise.resolve({})
-          : loadSectionPatch(currentSection, resourceViewRef.current, fieldScoped),
+          : loadSectionPatch(currentSection, resourceViewRef.current, fieldScoped, {
+              lastPlannerWeekStart: lastPlannerWeekRef.current,
+            }),
       ])
+      if (sectionPatch.lastPlanner?.week?.weekStart) {
+        lastPlannerWeekRef.current = sectionPatch.lastPlanner.week.weekStart
+      }
       if (sectionPatch.organization) setOrganizationProfileDraft(organizationDraft(sectionPatch.organization))
       hasLoadedDataRef.current = true
       setData((current) => ({
@@ -3317,8 +3436,13 @@ function App() {
     setSectionLoading(true)
     setError('')
     try {
-      const patch = await loadSectionPatch(next, nextResourceView, fieldScoped)
+      const patch = await loadSectionPatch(next, nextResourceView, fieldScoped, {
+        lastPlannerWeekStart: lastPlannerWeekRef.current,
+      })
       if (sequence !== sectionLoadSequenceRef.current) return
+      if (patch.lastPlanner?.week?.weekStart) {
+        lastPlannerWeekRef.current = patch.lastPlanner.week.weekStart
+      }
       if (patch.organization) setOrganizationProfileDraft(organizationDraft(patch.organization))
       setData((current) => current ? { ...current, ...patch } : current)
       if (next === 'operations') void refreshOperationsCommandPlan(sequence)
@@ -9507,13 +9631,15 @@ function App() {
         notes,
       }
     } else if (type === 'record_time_expense') {
+      const selectedWorker = workers.find((worker) => worker.id === financeActionDraft.workerId) || null
       if (
         !(financeControlHours > 0 || financeControlExpense > 0) ||
         financeControlHours > 24 ||
         financeControlRate < 0 ||
-        financeControlExpense < 0
+        financeControlExpense < 0 ||
+        (financeControlHours > 0 && !selectedWorker)
       ) {
-        setError('Record positive hours or a positive expense. Hours cannot exceed 24 and the rate cannot be negative.')
+        setError('Record positive hours or a positive expense. Labor also requires an active worker; hours cannot exceed 24 and the rate cannot be negative.')
         return
       }
       if (financeControlExpense > 0 && !vendor) {
@@ -9538,6 +9664,8 @@ function App() {
         timeLog:
           financeControlHours > 0
             ? {
+                workerId: selectedWorker.id,
+                workerName: selectedWorker.name,
                 workDate: financeActionDraft.dueAt,
                 hours: financeControlHours,
                 rate: financeControlRate,
@@ -10144,10 +10272,14 @@ function App() {
   }
 
   async function loadLastPlannerWeek(weekStart) {
+    const sequence = ++sectionLoadSequenceRef.current
+    setSectionLoading(false)
     setSubmitting(true)
     setError('')
     try {
       const result = await api(`/api/ledger/last-planner?weekStart=${encodeURIComponent(weekStart)}`)
+      if (sequence !== sectionLoadSequenceRef.current || sectionRef.current !== 'schedule') return false
+      if (result.board?.week?.weekStart) lastPlannerWeekRef.current = result.board.week.weekStart
       setData((current) => current ? { ...current, lastPlanner: result.board || current.lastPlanner } : current)
       return true
     } catch (requestError) {
@@ -18358,6 +18490,25 @@ function App() {
                         onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, hours: event.target.value })}
                       />
                     </label>
+                    {financeControlHours > 0 ? (
+                      <label>
+                        Worker
+                        <select
+                          required
+                          value={financeActionDraft.workerId}
+                          onChange={(event) => setFinanceActionDraft({ ...financeActionDraft, workerId: event.target.value })}
+                        >
+                          <option value="">Select active worker</option>
+                          {workers
+                            .filter((worker) => !['retired', 'inactive'].includes(worker.status))
+                            .map((worker) => (
+                              <option key={worker.id} value={worker.id}>
+                                {worker.name} / {worker.role || formatStatus(worker.status)}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                    ) : null}
                     <label>
                       Hourly rate (EUR)
                       <input

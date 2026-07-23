@@ -395,7 +395,18 @@ test('operational export and backup are local, auditable maintenance controls', 
   });
   assert.equal(capabilities.body.capabilities.costForecasting.sourceLinked, true);
   assert.equal(capabilities.body.capabilities.costForecasting.costCodeBreakdown, true);
+  assert.deepEqual(capabilities.body.capabilities.costForecasting.actualSources, [
+    'approved_weekly_timesheets',
+    'approved_expense_receipts',
+    'approved_supplier_invoices'
+  ]);
+  assert.equal(capabilities.body.capabilities.costForecasting.unreviewedIncludedInEstimateAtCompletion, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.unreviewedRecognizedAsActual, false);
+  assert.equal(capabilities.body.capabilities.costForecasting.financeHandoffRequiresReviewedEvidence, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.financeHandoffRequiresApprovedCostBasis, true);
+  assert.equal(capabilities.body.capabilities.costForecasting.financeHandoffSourceCurrentApprovalRequired, true);
   assert.equal(capabilities.body.capabilities.costForecasting.doubleCountControl, 'supplier_invoice_reduces_linked_order_commitment');
+  assert.equal(capabilities.body.capabilities.costForecasting.historicalBackdatingSupported, false);
   assert.equal(capabilities.body.capabilities.costForecasting.immutableSnapshots, true);
   assert.equal(capabilities.body.capabilities.costForecasting.approvalRequired, true);
   assert.equal(capabilities.body.capabilities.costForecasting.sourceCurrentApprovalRequired, true);

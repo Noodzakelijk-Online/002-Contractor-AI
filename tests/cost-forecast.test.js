@@ -46,6 +46,12 @@ function setupForecastJob(ledger, suffix = '1') {
     contractValue: 5000,
     assignAutomatically: false
   }, { actor: 'forecast-test' });
+  const worker = ledger.upsertWorker({
+    name: `Forecast worker ${suffix}`,
+    role: 'Installer',
+    status: 'available',
+    hourlyRate: 50
+  }, { actor: 'forecast-test' });
   const materialBudget = ledger.createBudgetLine(job.id, {
     status: 'baseline',
     costCode: 'MAT-100',
@@ -69,6 +75,8 @@ function setupForecastJob(ledger, suffix = '1') {
     status: 'approved', resolvedBy: 'Budget approver', reason: 'Labor budget checked.'
   });
   ledger.addTimeLog(job.id, {
+    workerId: worker.id,
+    workerName: worker.name,
     workDate: '2026-07-16',
     hours: 10,
     rate: 50,
@@ -76,14 +84,28 @@ function setupForecastJob(ledger, suffix = '1') {
     status: 'submitted',
     notes: 'Verified direct labor.'
   }, { actor: 'forecast-test' });
-  ledger.addExpense(job.id, {
+  const timesheet = ledger.requestWeeklyTimesheet(worker.id, {
+    periodStart: '2026-07-13'
+  }, { actor: 'forecast-test' });
+  ledger.resolveApproval(timesheet.approval.id, {
+    status: 'approved', resolvedBy: 'Timesheet approver', reason: 'Worker, week, hours, rate, and source checked.'
+  });
+  const expense = ledger.createExpenseReceipt(job.id, {
+    entryKey: `forecast-expense-${suffix}-100`,
+    expenseDate: '2026-07-15',
     category: 'materials',
-    amount: 100,
+    totalAmount: 100,
+    taxAmount: 0,
+    taxTreatment: 'exempt',
+    paymentMethod: 'company_card',
     currency: 'EUR',
     costCode: 'MAT-100',
-    status: 'submitted',
-    receiptRef: 'MAT-RECEIPT-100'
+    vendor: `Forecast materials ${suffix}`,
+    receiptReference: `MAT-RECEIPT-${suffix}-100`
   }, { actor: 'forecast-test' });
+  ledger.resolveApproval(expense.approval.id, {
+    status: 'approved', resolvedBy: 'Expense approver', reason: 'Receipt, allocation, tax treatment, and evidence checked.'
+  });
   const purchaseOrder = ledger.createPurchaseOrder(job.id, {
     status: 'ready_to_order',
     tradePartnerId: supplier.id,
@@ -120,7 +142,7 @@ function setupForecastJob(ledger, suffix = '1') {
   ledger.resolveApproval(supplierInvoice.approval.id, {
     status: 'approved', resolvedBy: 'Payables approver', reason: 'Three-way match checked.'
   });
-  return { job, supplier, materialBudget, laborBudget, purchaseOrder, supplierInvoice };
+  return { job, worker, supplier, materialBudget, laborBudget, purchaseOrder, supplierInvoice };
 }
 
 test('cost forecast derives evidence without double counting and freezes source-current snapshots', t => {
@@ -132,6 +154,9 @@ test('cost forecast derives evidence without double counting and freezes source-
   assert.equal(forecast.currency, 'EUR');
   assert.equal(forecast.summary.budget, 3000);
   assert.equal(forecast.summary.actual, 1000);
+  assert.equal(forecast.summary.unreviewedCost, 0);
+  assert.equal(forecast.summary.incurredCost, 1000);
+  assert.equal(forecast.summary.costToComplete, 900);
   assert.equal(forecast.summary.externalCommitment, 800);
   assert.equal(forecast.summary.authorizedNotIssued, 0);
   assert.equal(forecast.summary.forecast, 1900);
@@ -143,6 +168,7 @@ test('cost forecast derives evidence without double counting and freezes source-
   assert.equal(material.actual, 500);
   assert.equal(material.supplierActual, 400);
   assert.equal(material.expenseActual, 100);
+  assert.equal(material.unreviewedCost, 0);
   assert.equal(material.externalCommitment, 800);
   assert.equal(material.forecast, 1300);
   assert.equal(material.reportedActual, 9999);
@@ -171,7 +197,10 @@ test('cost forecast derives evidence without double counting and freezes source-
   }, { actor: 'forecast-test' });
   forecast = ledger.calculateCostForecast(job.id);
   assert.equal(forecast.snapshotCurrent, false);
-  assert.equal(forecast.summary.actual, 1050);
+  assert.equal(forecast.summary.actual, 1000);
+  assert.equal(forecast.summary.unreviewedCost, 50);
+  assert.equal(forecast.summary.incurredCost, 1050);
+  assert.ok(forecast.warnings.some(warning => warning.code === 'expense_evidence_unreviewed'));
   const revised = ledger.requestCostForecastSnapshot(job.id, {}, { actor: 'office' });
   assert.match(revised.snapshot.forecastNumber, /-000002$/);
   ledger.addExpense(job.id, {
@@ -212,6 +241,50 @@ test('mixed currencies and missing approved budgets block a forecast snapshot', 
     () => ledger.requestCostForecastSnapshot(job.id),
     error => error.code === 'cost_forecast_not_ready' && error.statusCode === 409
   );
+});
+
+test('cost recognition fails closed when approved source evidence no longer matches', t => {
+  const ledger = temporaryLedger(t);
+  const { job, supplierInvoice } = setupForecastJob(ledger, '3');
+  const timeLog = ledger.getJobDetail(job.id, { includeAudit: false }).timeLogs[0];
+  ledger.db.prepare('UPDATE time_logs SET notes = ?, updated_at = ? WHERE id = ?')
+    .run('Changed after timesheet approval.', new Date().toISOString(), timeLog.id);
+  let forecast = ledger.calculateCostForecast(job.id);
+  assert.equal(forecast.summary.actual, 500);
+  assert.equal(forecast.summary.unreviewedCost, 500);
+  assert.ok(forecast.warnings.some(warning => warning.code === 'labor_awaiting_timesheet_approval'));
+
+  const expense = ledger.getJobDetail(job.id, { includeAudit: false }).expenses.find(item => item.governedReceipt);
+  const expenseRow = ledger.db.prepare('SELECT data_json FROM expenses WHERE id = ?').get(expense.id);
+  const expenseData = JSON.parse(expenseRow.data_json);
+  ledger.db.prepare('UPDATE expenses SET data_json = ? WHERE id = ?')
+    .run(JSON.stringify({ ...expenseData, totalAmount: 999 }), expense.id);
+  forecast = ledger.calculateCostForecast(job.id);
+  assert.ok(forecast.blockers.some(blocker => blocker.code === 'cost_forecast_expense_integrity_invalid'));
+  assert.throws(
+    () => ledger.requestCostForecastSnapshot(job.id),
+    error => error.code === 'cost_forecast_not_ready' && error.statusCode === 409
+  );
+
+  ledger.db.prepare("UPDATE approvals SET status = 'pending', resolved_at = NULL, resolved_by = NULL WHERE id = ?")
+    .run(supplierInvoice.approvalId);
+  forecast = ledger.calculateCostForecast(job.id);
+  assert.ok(forecast.blockers.some(blocker => blocker.code === 'cost_forecast_supplier_invoice_approval_invalid'));
+});
+
+test('retained v1 cost forecasts remain readable after the recognition-policy upgrade', t => {
+  const ledger = temporaryLedger(t);
+  const { job } = setupForecastJob(ledger, '4');
+  const requested = ledger.requestCostForecastSnapshot(job.id);
+  const row = ledger.db.prepare('SELECT snapshot_json FROM cost_forecast_snapshots WHERE id = ?').get(requested.snapshot.id);
+  const snapshot = { ...JSON.parse(row.snapshot_json), format: 'contractor-ai-cost-forecast/v1' };
+  const snapshotJson = JSON.stringify(snapshot);
+  const snapshotHash = require('node:crypto').createHash('sha256').update(snapshotJson).digest('hex');
+  ledger.db.prepare('UPDATE cost_forecast_snapshots SET snapshot_json = ?, snapshot_hash = ? WHERE id = ?')
+    .run(snapshotJson, snapshotHash, requested.snapshot.id);
+  const retained = ledger.getCostForecastSnapshot(requested.snapshot.id);
+  assert.equal(retained.integrityValid, true);
+  assert.equal(retained.snapshot.format, 'contractor-ai-cost-forecast/v1');
 });
 
 test('cost forecast snapshot tampering is detected by direct reads and diagnostics', t => {
