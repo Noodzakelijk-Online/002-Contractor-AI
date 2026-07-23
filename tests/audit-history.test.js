@@ -99,5 +99,5 @@ test('audit history rejects invalid cursors, ranges, and unbounded filters', t =
   const fractionalLimit = ledger.listAuditPage({ limit: 2.9 });
   assert.equal(fractionalLimit.page.limit, 2);
   assert.equal(fractionalLimit.events.length, 2);
-  assert.equal(ledger.migrationStatus().currentVersion, '061_last_planner_lite');
+  assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
 });

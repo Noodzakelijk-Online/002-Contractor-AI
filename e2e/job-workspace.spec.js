@@ -2641,7 +2641,7 @@ test('owner investigates cursor-paged audit history with retained chain proof', 
   const oldestSequence = (await rows.last().locator('.audit-sequence strong').innerText()).replace('#', '');
   await expect(panel.locator('.audit-history-summary code')).toHaveText(`#${newestSequence} to #${oldestSequence}`);
 
-  await panel.getByLabel('Action').selectOption('create_intake_job');
+  await panel.getByTestId('audit-action-filter').selectOption('create_intake_job');
   await panel.getByRole('button', { name: 'Apply', exact: true }).click();
   const visibleActions = panel.locator('.audit-event-copy > div > strong');
   await expect.poll(async () => {

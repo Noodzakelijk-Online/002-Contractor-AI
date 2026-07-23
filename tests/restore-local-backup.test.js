@@ -207,11 +207,15 @@ test('backup verification accepts a complete migration 059 ledger without migrat
   createBackupLedger(ledgerFile, 'Crew planning compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE five_s_actions;
+    DROP TABLE five_s_audits;
+    DROP TABLE five_s_standards;
+    DROP TABLE five_s_locations;
     DROP TABLE last_planner_outcomes;
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
     DROP TABLE daily_operating_cycles;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -224,10 +228,14 @@ test('backup verification accepts a complete migration 060 ledger without migrat
   createBackupLedger(ledgerFile, 'Daily cycle compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE five_s_actions;
+    DROP TABLE five_s_audits;
+    DROP TABLE five_s_standards;
+    DROP TABLE five_s_locations;
     DROP TABLE last_planner_outcomes;
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
-    DELETE FROM ledger_schema_migrations WHERE version = '061_last_planner_lite';
+    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -258,6 +266,37 @@ test('backup verification rejects a migration 061 ledger with missing Last Plann
   assert.throws(
     () => verifySqliteBackupDatabase(ledgerFile),
     /Last Planner constraints are incomplete: idx_last_planner_outcomes_result/i
+  );
+});
+
+test('backup verification accepts a complete migration 061 ledger without migration 062', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-last-planner-compatibility-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Last Planner compatibility fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP TABLE five_s_actions;
+    DROP TABLE five_s_audits;
+    DROP TABLE five_s_standards;
+    DROP TABLE five_s_locations;
+    DELETE FROM ledger_schema_migrations WHERE version = '062_governed_five_s';
+  `);
+  database.close();
+  assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
+});
+
+test('backup verification rejects a migration 062 ledger with missing 5S constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-five-s-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, '5S schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_five_s_actions_due');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /5S constraints are incomplete: idx_five_s_actions_due/i
   );
 });
 

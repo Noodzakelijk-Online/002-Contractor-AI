@@ -48,6 +48,16 @@ function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+function migrationFiveSItems(tool) {
+  return [
+    { id: 'migration-sort', stage: 'sort', title: 'Remove unrelated stock', requirement: 'Only retained job stock and equipment remain.' },
+    { id: 'migration-set', stage: 'set_in_order', itemType: 'tool', toolId: tool.id, title: 'Return laser to marked home', requirement: 'The laser is available, inspection-ready, and stored in its marked home.' },
+    { id: 'migration-shine', stage: 'shine', title: 'Clean the vehicle store', requirement: 'Shelves, floor, and retained equipment are clean and damage is visible.' },
+    { id: 'migration-standardize', stage: 'standardize', title: 'Keep labels current', requirement: 'Every retained position has a readable label or visual outline.' },
+    { id: 'migration-sustain', stage: 'sustain', title: 'Retain the audit cadence', requirement: 'The current standard and next audit cadence are visible.' }
+  ];
+}
+
 function pgClient(databaseUrl) {
   const options = resolvePostgresConnectionOptions(databaseUrl);
   return new Client({
@@ -901,6 +911,45 @@ function createBackupFixture(t, suffix = 'success') {
     status: 'approved', resolvedBy: 'migration_fixture_approver', reason: 'Migration pursuit evidence verified.'
   });
   const pursuitDecision = source.getOpportunityBidDecision(pursuitDecisionRequest.decision.id);
+  const fiveSLocationName = `Migration service van ${suffix}`;
+  const fiveSTool = source.upsertTool({
+    name: `Migration laser ${suffix}`,
+    category: 'measurement',
+    status: 'available',
+    currentLocation: fiveSLocationName
+  }, { actor: 'migration_fixture' });
+  const fiveSLocation = source.createFiveSLocation({
+    jobId: job.id,
+    name: fiveSLocationName,
+    locationType: 'vehicle',
+    identifier: `MIGRATION-VAN-${suffix}`,
+    owner: 'Migration field lead',
+    auditFrequencyDays: 7,
+    entryKey: `migration-five-s-location-${suffix}`
+  }, { actor: 'migration_fixture' }).location;
+  const fiveSStandardRequest = source.requestFiveSStandard(fiveSLocation.id, {
+    items: migrationFiveSItems(fiveSTool),
+    reason: 'Retain the governed vehicle organization standard through hosted migration.',
+    entryKey: `migration-five-s-standard-${suffix}`
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(fiveSStandardRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'All five stages and linked equipment identity were verified.'
+  });
+  const fiveSStandard = source.listFiveSStandards({ locationId: fiveSLocation.id, status: 'approved' })[0];
+  const fiveSAudit = source.recordFiveSAudit(fiveSLocation.id, {
+    standardId: fiveSStandard.id,
+    auditDate: new Date().toISOString().slice(0, 10),
+    auditedBy: 'Migration field lead',
+    evidenceReferences: [`migration:five-s-photo-set:${suffix}`],
+    entryKey: `migration-five-s-audit-${suffix}`,
+    results: fiveSStandard.items.map(item => ({
+      itemId: item.id,
+      result: 'pass',
+      note: 'Checked against the approved migration standard.'
+    }))
+  }, { actor: 'migration_fixture' }).audit;
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -932,7 +981,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 3 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1060,7 +1109,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '061_last_planner_lite');
+  assert.equal(migration.migrationVersion, '062_governed_five_s');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1156,6 +1205,14 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedCustody.checkoutFingerprint, fixture.equipmentCustody.checkoutFingerprint);
     assert.equal(migratedCustody.returnFingerprint, fixture.equipmentCustody.returnFingerprint);
     assert.equal(migratedCustody.returnCondition, 'damaged');
+    const migratedFiveSBoard = hosted.getFiveSBoard({ jobId: fixture.job.id, includeGlobal: false });
+    const migratedFiveSRow = migratedFiveSBoard.rows.find(item => item.location.id === fixture.fiveSLocation.id);
+    assert.equal(migratedFiveSRow.currentStandard.id, fixture.fiveSStandard.id);
+    assert.equal(migratedFiveSRow.latestAudit.id, fixture.fiveSAudit.id);
+    assert.equal(migratedFiveSRow.latestAudit.status, 'compliant');
+    assert.equal(migratedFiveSRow.latestAudit.integrityValid, true);
+    assert.equal(migratedFiveSRow.linkedTools[0].id, fixture.fiveSTool.id);
+    assert.equal(migratedFiveSBoard.safeguards.vehicleDispatched, false);
     const migratedExpense = detail.expenses.find(item => item.id === fixture.expenseReceipt.id);
     assert.equal(migratedExpense.status, 'approved');
     assert.equal(migratedExpense.entryFingerprint, fixture.expenseReceipt.entryFingerprint);

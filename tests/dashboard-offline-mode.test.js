@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const dashboardRootSource = fs.readFileSync(path.join(__dirname, '..', 'App.jsx'), 'utf8');
+const fiveSWorkspaceSource = fs.readFileSync(path.join(__dirname, '..', 'components', 'FiveSWorkspace.jsx'), 'utf8');
 const dashboardSource = [
   dashboardRootSource,
   fs.readFileSync(path.join(__dirname, '..', 'dashboard-format.js'), 'utf8'),
@@ -35,6 +36,16 @@ test('large navigation and job controls are loaded through local suspense bounda
   assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="job controls" mode="job">/);
+});
+
+test('5S mutations cannot be overwritten by an older parent board request', () => {
+  assert.match(fiveSWorkspaceSource, /const hasLocalMutationRef = useRef\(false\)/);
+  assert.match(fiveSWorkspaceSource, /if \(!hasLocalMutationRef\.current\) setBoard\(suppliedBoard\)/);
+  assert.match(fiveSWorkspaceSource, /function retainMutationBoard\(nextBoard\)/);
+  assert.match(fiveSWorkspaceSource, /hasLocalMutationRef\.current = true/);
+  assert.match(fiveSWorkspaceSource, /retainMutationBoard\(result\.board\)/);
+  assert.match(fiveSWorkspaceSource, /if \(!fieldMode && suppliedBoard\) \{/);
+  assert.match(fiveSWorkspaceSource, /setLoading\(false\)/);
 });
 
 test('performance workspace renders ten evidence-backed perspectives with governed targets and snapshots', () => {
@@ -156,7 +167,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return', 'five_s_audit'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -263,6 +274,20 @@ test('equipment custody connects reservations, field handoff, exact offline retr
   assert.match(dashboardSource, /equipment-custody\/check-out/);
   assert.match(dashboardSource, /equipment-custody\/\$\{encodeURIComponent\(custodySessionId\)\}\/return/);
   assert.match(dashboardSource, /Damaged, unsafe, and lost returns are quarantined automatically/);
+});
+
+test('governed 5S connects approved standards, canonical equipment state, corrective action, and exact offline replay', () => {
+  const source = `${dashboardSource}\n${fiveSWorkspaceSource}`;
+  assert.match(fiveSWorkspaceSource, /'field-five-s-workspace' : 'five-s-workspace'/);
+  assert.match(fiveSWorkspaceSource, /data-testid="five-s-location-form"/);
+  assert.match(fiveSWorkspaceSource, /data-testid="five-s-standard-form"/);
+  assert.match(fiveSWorkspaceSource, /'field-five-s-audit-form' : 'five-s-audit-form'/);
+  assert.match(source, /type: 'five_s_audit'/);
+  assert.match(source, /type === 'five_s_audit'/);
+  assert.match(source, /five-s\/locations\/\$\{encodeURIComponent\(fiveSLocationId\)\}\/audits/);
+  assert.match(source, /exact approved standard revision/i);
+  assert.match(fiveSWorkspaceSource, /Canonical equipment link/);
+  assert.match(fiveSWorkspaceSource, /do not change tool custody or status, dispatch a vehicle/i);
 });
 
 test('job workspace schedules and completes immutable approval-backed inspection checklists', () => {

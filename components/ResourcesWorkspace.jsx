@@ -18,6 +18,7 @@ import {
   Search,
   ShieldCheck,
   Timer,
+  Truck,
   TriangleAlert,
   Undo2,
   Users,
@@ -35,6 +36,7 @@ import {
   shortHash,
 } from '../dashboard-format'
 import Empty from './EmptyState'
+import FiveSWorkspace from './FiveSWorkspace'
 
 function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitting, onCreate, onEdit, onRetire, onOpenApprovals }) {
   const [query, setQuery] = useState('')
@@ -1102,6 +1104,7 @@ function ResourcesWorkspace({
   tools,
   toolSummary,
   equipmentCustody,
+  fiveS,
   tradePartners,
   tradePartnerSummary,
   timesheets,
@@ -1142,12 +1145,14 @@ function ResourcesWorkspace({
   onPrepareTimesheetExport,
   onOpenApprovals,
   onOpen,
+  request,
 }) {
   const [workforceMode, setWorkforceMode] = useState('readiness')
   const isWorkforce = view === 'workforce'
   const isInventory = view === 'inventory'
   const isReceiving = view === 'receiving'
   const isEquipment = view === 'equipment'
+  const isFiveS = view === 'five_s'
   const isPartners = view === 'partners'
   const isTimesheets = view === 'timesheets'
   const isCrewDirectory = isWorkforce && workforceMode === 'crew'
@@ -1161,7 +1166,7 @@ function ResourcesWorkspace({
     <section className="panel page-panel resources-workspace" data-testid="resources-workspace">
       <div className="panel-heading resources-heading">
         <div>
-          <h2>{isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : 'Resource readiness'}</h2>
+          <h2>{isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : isFiveS ? '5S organization control' : 'Resource readiness'}</h2>
           <p>
             {isTimesheets
               ? 'Review submitted worker time by week, resolve exceptions, approve immutable revisions, and prepare a controlled payroll handoff.'
@@ -1169,6 +1174,8 @@ function ResourcesWorkspace({
                 ? 'Retain delivery-note evidence, resolve quantity and damage exceptions, and connect accepted goods to purchasing and finance.'
               : isPartners
               ? 'Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.'
+              : isFiveS
+                ? 'Control vehicle, trailer, depot, store, and job-storage standards with approved checks, field audits, and evidence-backed corrective actions.'
               : isEquipment
                 ? 'Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.'
                 : isQualifications
@@ -1216,6 +1223,15 @@ function ResourcesWorkspace({
           >
             <Wrench size={15} />
             Equipment
+          </button>
+          <button
+            role="tab"
+            aria-selected={isFiveS}
+            className={isFiveS ? 'resource-tab-active' : ''}
+            onClick={() => onViewChange('five_s')}
+          >
+            <Truck size={15} />
+            5S
           </button>
           <button
             role="tab"
@@ -1279,7 +1295,17 @@ function ResourcesWorkspace({
           </div>
         </div>
       ) : null}
-      {isReceiving ? (
+      {isFiveS ? (
+        <FiveSWorkspace
+          board={fiveS}
+          request={request}
+          jobs={jobs}
+          tools={tools}
+          canCoordinate={canCoordinate}
+          canApprove={canApprove}
+          onOpenApprovals={onOpenApprovals}
+        />
+      ) : isReceiving ? (
         <MaterialReceivingWorkspace
           register={materialReceiving}
           canCoordinate={canCoordinate}

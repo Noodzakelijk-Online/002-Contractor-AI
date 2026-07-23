@@ -1112,6 +1112,15 @@ const DAILY_OPERATING_CYCLE_FORMAT = 'contractor-ai-daily-operating-cycle/v1';
 const LAST_PLANNER_CONSTRAINT_FORMAT = 'contractor-ai-last-planner-constraint/v1';
 const LAST_PLANNER_WEEKLY_PLAN_FORMAT = 'contractor-ai-last-planner-weekly-plan/v1';
 const LAST_PLANNER_OUTCOME_FORMAT = 'contractor-ai-last-planner-outcome/v1';
+const FIVE_S_STANDARD_FORMAT = 'contractor-ai-five-s-standard/v1';
+const FIVE_S_AUDIT_FORMAT = 'contractor-ai-five-s-audit/v1';
+const FIVE_S_ACTION_FORMAT = 'contractor-ai-five-s-action/v1';
+const FIVE_S_STAGES = Object.freeze(['sort', 'set_in_order', 'shine', 'standardize', 'sustain']);
+const FIVE_S_STAGE_SET = new Set(FIVE_S_STAGES);
+const FIVE_S_LOCATION_TYPES = new Set(['vehicle', 'trailer', 'depot', 'tool_store', 'site_storage', 'work_area', 'other']);
+const FIVE_S_ITEM_TYPES = new Set(['tool', 'material', 'condition', 'document', 'ppe', 'consumable', 'other']);
+const FIVE_S_RESULT_STATUSES = new Set(['pass', 'fail', 'not_applicable']);
+const FIVE_S_ACTION_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const LAST_PLANNER_CONSTRAINT_CATEGORIES = new Set([
   'design',
   'information',
@@ -5329,6 +5338,124 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON last_planner_outcomes(job_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_last_planner_outcomes_result
           ON last_planner_outcomes(result, created_at DESC);
+      `);
+    }
+  },
+  {
+    version: '062_governed_five_s',
+    description: 'Retain approval-backed 5S standards, replay-safe audits, and evidence-backed corrective actions for tools and vehicles.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS five_s_locations (
+          id TEXT PRIMARY KEY,
+          job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+          name TEXT NOT NULL,
+          location_type TEXT NOT NULL,
+          identifier TEXT,
+          owner TEXT NOT NULL,
+          audit_frequency_days INTEGER NOT NULL DEFAULT 7,
+          status TEXT NOT NULL DEFAULT 'active',
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_five_s_locations_job_status
+          ON five_s_locations(job_id, status, name);
+        CREATE INDEX IF NOT EXISTS idx_five_s_locations_type_status
+          ON five_s_locations(location_type, status, name);
+
+        CREATE TABLE IF NOT EXISTS five_s_standards (
+          id TEXT PRIMARY KEY,
+          location_id TEXT NOT NULL REFERENCES five_s_locations(id) ON DELETE CASCADE,
+          version_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          approval_id TEXT REFERENCES approvals(id),
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(location_id, version_number)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_five_s_standard_one_pending
+          ON five_s_standards(location_id)
+          WHERE status = 'pending_approval';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_five_s_standard_one_approved
+          ON five_s_standards(location_id)
+          WHERE status = 'approved';
+        CREATE INDEX IF NOT EXISTS idx_five_s_standard_history
+          ON five_s_standards(location_id, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS five_s_audits (
+          id TEXT PRIMARY KEY,
+          location_id TEXT NOT NULL REFERENCES five_s_locations(id) ON DELETE CASCADE,
+          job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+          standard_id TEXT NOT NULL REFERENCES five_s_standards(id),
+          audit_date TEXT NOT NULL,
+          audited_by TEXT NOT NULL,
+          status TEXT NOT NULL,
+          score_percent REAL NOT NULL,
+          results_json TEXT NOT NULL DEFAULT '[]',
+          evidence_references_json TEXT NOT NULL DEFAULT '[]',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_five_s_audits_location_date
+          ON five_s_audits(location_id, audit_date DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_five_s_audits_job_date
+          ON five_s_audits(job_id, audit_date DESC)
+          WHERE job_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_five_s_audits_status
+          ON five_s_audits(status, audit_date DESC);
+
+        CREATE TABLE IF NOT EXISTS five_s_actions (
+          id TEXT PRIMARY KEY,
+          audit_id TEXT NOT NULL REFERENCES five_s_audits(id) ON DELETE CASCADE,
+          location_id TEXT NOT NULL REFERENCES five_s_locations(id) ON DELETE CASCADE,
+          job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+          standard_item_id TEXT NOT NULL,
+          stage TEXT NOT NULL,
+          title TEXT NOT NULL,
+          finding TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          due_date TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          resolution_evidence_reference TEXT,
+          resolution_note TEXT,
+          resolution_source_hash TEXT,
+          resolution_snapshot_hash TEXT,
+          resolution_snapshot_json TEXT,
+          resolution_entry_key TEXT UNIQUE,
+          resolution_entry_fingerprint TEXT,
+          resolved_at TEXT,
+          resolved_by TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(audit_id, standard_item_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_five_s_actions_location_status
+          ON five_s_actions(location_id, status, due_date);
+        CREATE INDEX IF NOT EXISTS idx_five_s_actions_job_status
+          ON five_s_actions(job_id, status, due_date)
+          WHERE job_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_five_s_actions_due
+          ON five_s_actions(status, due_date, severity);
       `);
     }
   }
@@ -27685,6 +27812,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       WHERE job_id = ? AND work_date = ? AND status = 'active'
       ORDER BY created_at
     `).all(jobId, workDate).map(row => ({ id: row.id, sourceHash: row.source_hash, snapshotHash: row.snapshot_hash }));
+    const fiveSBoard = this.getFiveSBoard({ jobId, includeGlobal: false });
     return {
       lookaheadPlan: plan ? {
         id: plan.id,
@@ -27705,7 +27833,33 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       } : null,
       allocations,
       activePermits,
-      preTaskPlans
+      preTaskPlans,
+      fiveS: {
+        applicable: fiveSBoard.applicable,
+        ready: fiveSBoard.ready,
+        summary: fiveSBoard.summary,
+        locations: fiveSBoard.rows.map(row => ({
+          id: row.location.id,
+          name: row.location.name,
+          type: row.location.locationType,
+          status: row.status,
+          ready: row.ready,
+          currentStandard: row.currentStandard ? {
+            id: row.currentStandard.id,
+            versionNumber: row.currentStandard.versionNumber,
+            sourceHash: row.currentStandard.sourceHash,
+            snapshotHash: row.currentStandard.snapshotHash
+          } : null,
+          latestAudit: row.latestAudit ? {
+            id: row.latestAudit.id,
+            auditDate: row.latestAudit.auditDate,
+            status: row.latestAudit.status,
+            sourceHash: row.latestAudit.sourceHash,
+            snapshotHash: row.latestAudit.snapshotHash
+          } : null,
+          openActionIds: row.openActions.map(action => action.id)
+        }))
+      }
     };
   }
 
@@ -28800,6 +28954,961 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         assignmentsCreated: 0,
         crewNotifications: 0,
         clientCommitments: 0,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      }
+    };
+  }
+
+  requireFiveSLocation(locationId, options = {}) {
+    const row = this.db.prepare(`
+      SELECT locations.*, jobs.title AS job_title
+      FROM five_s_locations locations
+      LEFT JOIN jobs ON jobs.id = locations.job_id
+      WHERE locations.id = ?
+    `).get(locationId);
+    if (!row) throw ledgerInputError('five_s_location_not_found', '5S location not found.', { locationId }, 404);
+    if (options.active !== false && row.status !== 'active') {
+      throw ledgerInputError('five_s_location_inactive', '5S work cannot be retained against an inactive location.', { locationId, status: row.status }, 409);
+    }
+    return this.mapFiveSLocation(row);
+  }
+
+  listFiveSLocations(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.jobId || filters.job_id) {
+      conditions.push('locations.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('locations.status = ?');
+      values.push(status);
+    }
+    const locationType = normalizeStatus(filters.locationType || filters.location_type, 'all');
+    if (locationType !== 'all') {
+      conditions.push('locations.location_type = ?');
+      values.push(locationType);
+    }
+    const limit = Math.max(1, Math.min(5_000, Math.round(normalizeNumber(filters.limit, 500))));
+    return this.db.prepare(`
+      SELECT locations.*, jobs.title AS job_title
+      FROM five_s_locations locations
+      LEFT JOIN jobs ON jobs.id = locations.job_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY CASE locations.status WHEN 'active' THEN 0 ELSE 1 END, locations.name, locations.created_at
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapFiveSLocation(row));
+  }
+
+  createFiveSLocation(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const jobId = normalizeText(payload.jobId || payload.job_id, '') || null;
+      const job = jobId ? this.requireJob(jobId) : null;
+      const name = normalizeText(payload.name || payload.label, '');
+      const locationType = normalizeStatus(payload.locationType || payload.location_type, 'other');
+      const identifier = normalizeText(payload.identifier || payload.registration || payload.reference, '') || null;
+      const owner = normalizeText(payload.owner || payload.responsible, '');
+      const auditFrequencyDays = Math.round(normalizeNumber(payload.auditFrequencyDays || payload.audit_frequency_days, 7));
+      if (name.length < 3 || name.length > 160) {
+        throw ledgerInputError('five_s_location_name_invalid', '5S location name must contain 3 to 160 characters.');
+      }
+      if (!FIVE_S_LOCATION_TYPES.has(locationType)) {
+        throw ledgerInputError('five_s_location_type_invalid', '5S location type is not supported.');
+      }
+      if (identifier && identifier.length > 120) {
+        throw ledgerInputError('five_s_location_identifier_invalid', '5S location identifier must contain 120 characters or fewer.');
+      }
+      if (owner.length < 2 || owner.length > 160) {
+        throw ledgerInputError('five_s_location_owner_invalid', '5S location owner must contain 2 to 160 characters.');
+      }
+      if (auditFrequencyDays < 1 || auditFrequencyDays > 365) {
+        throw ledgerInputError('five_s_frequency_invalid', '5S audit frequency must be between 1 and 365 days.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('five_s_location_entry_key_invalid', '5S location replay key must contain 8 to 200 safe characters.');
+      }
+      const normalized = { jobId, name, locationType, identifier, owner, auditFrequencyDays };
+      const entryFingerprint = sha256Json(normalized);
+      const replay = this.db.prepare('SELECT * FROM five_s_locations WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('five_s_location_entry_key_reused', '5S location replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { location: this.requireFiveSLocation(replay.id, { active: false }), replayed: true, externalCommitments: 0 };
+      }
+      const duplicate = this.db.prepare(`
+        SELECT id FROM five_s_locations
+        WHERE lower(name) = lower(?) AND COALESCE(job_id, '') = COALESCE(?, '') AND status = 'active'
+      `).get(name, jobId);
+      if (duplicate) {
+        throw ledgerInputError('five_s_location_exists', 'An active 5S location with this name already exists in the selected scope.', { locationId: duplicate.id }, 409);
+      }
+      const id = makeId('five_s_location');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO five_s_locations (
+          id, job_id, name, location_type, identifier, owner, audit_frequency_days,
+          status, entry_key, entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, name, locationType, identifier, owner, auditFrequencyDays,
+        entryKey, entryFingerprint,
+        toJson({
+          jobTitle: job?.title || null,
+          internalOrganizationOnly: true,
+          vehicleRegistered: locationType === 'vehicle',
+          externalCommitments: 0
+        }),
+        timestamp, timestamp
+      );
+      const location = this.requireFiveSLocation(id);
+      this.audit({
+        entityType: 'five_s_location',
+        entityId: id,
+        jobId,
+        action: 'retain_five_s_location',
+        actor,
+        after: location,
+        metadata: { locationType, auditFrequencyDays, entryKey, externalCommitments: 0 }
+      });
+      return { location, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  normalizeFiveSStandardItems(location, itemInputs = []) {
+    if (!Array.isArray(itemInputs) || itemInputs.length < FIVE_S_STAGES.length || itemInputs.length > 100) {
+      throw ledgerInputError('five_s_standard_items_invalid', 'A 5S standard requires between 5 and 100 checks and must cover all five stages.');
+    }
+    const seenIds = new Set();
+    const stages = new Set();
+    const items = itemInputs.map((input, index) => {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw ledgerInputError('five_s_standard_item_invalid', `5S check ${index + 1} must be an object.`);
+      }
+      const stage = normalizeStatus(input.stage, '');
+      if (!FIVE_S_STAGE_SET.has(stage)) {
+        throw ledgerInputError('five_s_standard_stage_invalid', `5S check ${index + 1} must use sort, set_in_order, shine, standardize, or sustain.`);
+      }
+      const itemType = normalizeStatus(input.itemType || input.item_type, 'condition');
+      if (!FIVE_S_ITEM_TYPES.has(itemType)) {
+        throw ledgerInputError('five_s_standard_item_type_invalid', `5S check ${index + 1} uses an unsupported item type.`);
+      }
+      const title = normalizeText(input.title || input.name, '');
+      const requirement = normalizeText(input.requirement || input.description, '');
+      if (title.length < 3 || title.length > 160) {
+        throw ledgerInputError('five_s_standard_title_invalid', `5S check ${index + 1} title must contain 3 to 160 characters.`);
+      }
+      if (requirement.length < 5 || requirement.length > 1_000) {
+        throw ledgerInputError('five_s_standard_requirement_invalid', `5S check ${index + 1} requirement must contain 5 to 1,000 characters.`);
+      }
+      const itemId = normalizeText(input.id || input.itemId || input.item_id, `five_s_${stage}_${index + 1}`);
+      if (!/^[A-Za-z0-9._:-]{3,120}$/.test(itemId) || seenIds.has(itemId)) {
+        throw ledgerInputError('five_s_standard_item_id_invalid', `5S check ${index + 1} needs a unique safe identifier.`);
+      }
+      seenIds.add(itemId);
+      stages.add(stage);
+      const toolId = normalizeText(input.toolId || input.tool_id, '') || null;
+      let tool = null;
+      if (itemType === 'tool' && !toolId) {
+        throw ledgerInputError('five_s_standard_tool_required', `Tool check ${index + 1} must reference canonical equipment.`);
+      }
+      if (toolId) {
+        const toolRow = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId);
+        if (!toolRow) throw ledgerInputError('five_s_standard_tool_not_found', `Tool check ${index + 1} references equipment that was not found.`, { toolId }, 404);
+        tool = this.mapTool(toolRow);
+        if (tool.status === 'retired') {
+          throw ledgerInputError('five_s_standard_tool_retired', `Retired equipment cannot be retained in an active 5S standard.`, { toolId }, 409);
+        }
+      }
+      const expectedLocation = normalizeText(input.expectedLocation || input.expected_location, toolId ? location.name : '') || null;
+      if (expectedLocation && expectedLocation.length > 240) {
+        throw ledgerInputError('five_s_standard_expected_location_invalid', `5S check ${index + 1} expected location must contain 240 characters or fewer.`);
+      }
+      const required = normalizeBoolean(input.required, true);
+      const allowNotApplicable = normalizeBoolean(input.allowNotApplicable ?? input.allow_not_applicable, !required);
+      return {
+        id: itemId,
+        stage,
+        itemType,
+        title,
+        requirement,
+        required,
+        allowNotApplicable,
+        toolId,
+        tool: tool ? { id: tool.id, name: tool.name, category: tool.category } : null,
+        expectedLocation
+      };
+    });
+    const missingStages = FIVE_S_STAGES.filter(stage => !stages.has(stage));
+    if (missingStages.length) {
+      throw ledgerInputError('five_s_standard_stages_incomplete', `The 5S standard must include every stage. Missing: ${missingStages.join(', ')}.`);
+    }
+    return items;
+  }
+
+  fiveSStandardSource(locationId, itemInputs = []) {
+    const location = this.requireFiveSLocation(locationId);
+    const items = this.normalizeFiveSStandardItems(location, itemInputs);
+    const sourceBasis = {
+      format: FIVE_S_STANDARD_FORMAT,
+      location: {
+        id: location.id,
+        jobId: location.jobId,
+        name: location.name,
+        locationType: location.locationType,
+        identifier: location.identifier,
+        owner: location.owner,
+        auditFrequencyDays: location.auditFrequencyDays,
+        updatedAt: location.updatedAt
+      },
+      items
+    };
+    return { location, items, sourceBasis, sourceHash: sha256Json(sourceBasis) };
+  }
+
+  listFiveSStandards(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.locationId || filters.location_id) {
+      conditions.push('standards.location_id = ?');
+      values.push(filters.locationId || filters.location_id);
+    }
+    if (filters.jobId || filters.job_id) {
+      conditions.push('locations.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('standards.status = ?');
+      values.push(status);
+    }
+    const limit = Math.max(1, Math.min(5_000, Math.round(normalizeNumber(filters.limit, 500))));
+    return this.db.prepare(`
+      SELECT standards.*, locations.name AS location_name, locations.location_type,
+        locations.job_id, locations.owner AS location_owner, locations.audit_frequency_days,
+        locations.status AS location_status, jobs.title AS job_title
+      FROM five_s_standards standards
+      JOIN five_s_locations locations ON locations.id = standards.location_id
+      LEFT JOIN jobs ON jobs.id = locations.job_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY standards.location_id, standards.version_number DESC
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapFiveSStandard(row));
+  }
+
+  requestFiveSStandard(locationId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('five_s_standard_entry_key_invalid', '5S standard replay key must contain 8 to 200 safe characters.');
+      }
+      const source = this.fiveSStandardSource(locationId, payload.items);
+      const entryFingerprint = sha256Json({
+        locationId,
+        items: source.items.map(item => ({
+          id: item.id,
+          stage: item.stage,
+          itemType: item.itemType,
+          title: item.title,
+          requirement: item.requirement,
+          required: item.required,
+          allowNotApplicable: item.allowNotApplicable,
+          toolId: item.toolId,
+          expectedLocation: item.expectedLocation
+        }))
+      });
+      const replay = this.db.prepare('SELECT * FROM five_s_standards WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.location_id !== locationId || replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('five_s_standard_entry_key_reused', '5S standard replay key was already used for different content.', { entryKey }, 409);
+        }
+        return {
+          standard: this.mapFiveSStandard(replay),
+          approval: replay.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replay.approval_id)) : null,
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      const pending = this.db.prepare(`
+        SELECT id, approval_id FROM five_s_standards
+        WHERE location_id = ? AND status = 'pending_approval'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(locationId);
+      if (pending) {
+        throw ledgerInputError('five_s_standard_pending', 'Resolve the pending 5S standard before requesting another revision.', { standardId: pending.id, approvalId: pending.approval_id }, 409);
+      }
+      const versionNumber = normalizeNumber(this.db.prepare(`
+        SELECT MAX(version_number) AS version_number FROM five_s_standards WHERE location_id = ?
+      `).get(locationId)?.version_number, 0) + 1;
+      const id = makeId('five_s_standard');
+      const timestamp = nowIso();
+      const snapshot = {
+        ...source.sourceBasis,
+        standardId: id,
+        versionNumber,
+        sourceHash: source.sourceHash,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          internalOrganizationStandardOnly: true,
+          toolStatusChanged: false,
+          vehicleDispatched: false,
+          spendCommitted: false,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO five_s_standards (
+          id, location_id, version_number, status, source_hash, snapshot_hash,
+          snapshot_json, approval_id, entry_key, entry_fingerprint, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+      `).run(
+        id, locationId, versionNumber, source.sourceHash, snapshotHash, snapshotJson,
+        entryKey, entryFingerprint,
+        toJson({ reason: normalizeText(payload.reason || payload.notes, '') || null, externalCommitments: 0 }),
+        timestamp, timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'five_s_standard',
+        targetId: id,
+        jobId: source.location.jobId,
+        approvalType: 'internal_five_s_standard',
+        summary: `Approve 5S standard v${versionNumber} for ${source.location.name}`,
+        reason: 'Verify all five stages, linked equipment identity, expected positions, ownership, and audit cadence before field reliance.',
+        data: {
+          locationId,
+          locationType: source.location.locationType,
+          versionNumber,
+          sourceHash: source.sourceHash,
+          snapshotHash,
+          itemCount: source.items.length,
+          linkedToolCount: source.items.filter(item => item.toolId).length,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE five_s_standards SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const standard = this.listFiveSStandards({ locationId, limit: 500 }).find(item => item.id === id);
+      this.audit({
+        entityType: 'five_s_standard',
+        entityId: id,
+        jobId: source.location.jobId,
+        action: 'request_five_s_standard_approval',
+        actor,
+        after: standard,
+        metadata: { approvalId: approval.id, locationId, versionNumber, sourceHash: source.sourceHash, snapshotHash, externalCommitments: 0 }
+      });
+      return { standard, approval, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  applyFiveSStandardApproval(standardId) {
+    const row = this.db.prepare('SELECT * FROM five_s_standards WHERE id = ?').get(standardId);
+    if (!row) throw ledgerInputError('five_s_standard_not_found', '5S standard not found.', { standardId }, 404);
+    if (row.status === 'approved') return this.mapFiveSStandard(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('five_s_standard_state_conflict', `5S standard cannot be approved from ${row.status}.`, { standardId, status: row.status }, 409);
+    }
+    const before = this.mapFiveSStandard(row);
+    if (!before.integrityValid) {
+      throw ledgerInputError('five_s_standard_integrity_failed', 'The retained 5S standard failed integrity verification.', { standardId }, 409);
+    }
+    const current = this.fiveSStandardSource(row.location_id, before.items);
+    if (current.sourceHash !== row.source_hash) {
+      throw ledgerInputError('five_s_standard_stale', 'Location or linked equipment identity changed after the 5S standard was requested.', { standardId, currentSourceHash: current.sourceHash }, 409);
+    }
+    const approval = row.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.approval_id) : null;
+    const actor = approval?.resolved_by || approval?.requested_by || 'approval';
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE five_s_standards SET status = 'superseded', updated_at = ?
+      WHERE location_id = ? AND status = 'approved' AND id <> ?
+    `).run(timestamp, row.location_id, standardId);
+    this.db.prepare(`
+      UPDATE five_s_standards SET status = 'approved', data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(toJson({
+      ...fromJson(row.data_json, {}),
+      approval: { approvalId: row.approval_id || null, approvedAt: timestamp, approvedBy: actor },
+      externalCommitments: 0
+    }), timestamp, standardId);
+    const after = this.listFiveSStandards({ locationId: row.location_id, limit: 500 }).find(item => item.id === standardId);
+    this.audit({
+      entityType: 'five_s_standard',
+      entityId: standardId,
+      jobId: current.location.jobId,
+      action: 'approve_five_s_standard',
+      actor,
+      before,
+      after,
+      metadata: { approvalId: row.approval_id || null, locationId: row.location_id, versionNumber: row.version_number, externalCommitments: 0 }
+    });
+    return after;
+  }
+
+  listFiveSAudits(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.locationId || filters.location_id) {
+      conditions.push('audits.location_id = ?');
+      values.push(filters.locationId || filters.location_id);
+    }
+    if (filters.jobId || filters.job_id) {
+      conditions.push('audits.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('audits.status = ?');
+      values.push(status);
+    }
+    const limit = Math.max(1, Math.min(10_000, Math.round(normalizeNumber(filters.limit, 1_000))));
+    return this.db.prepare(`
+      SELECT audits.*, locations.name AS location_name, locations.location_type,
+        standards.version_number AS standard_version, jobs.title AS job_title
+      FROM five_s_audits audits
+      JOIN five_s_locations locations ON locations.id = audits.location_id
+      JOIN five_s_standards standards ON standards.id = audits.standard_id
+      LEFT JOIN jobs ON jobs.id = audits.job_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY audits.audit_date DESC, audits.created_at DESC, audits.id
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapFiveSAudit(row));
+  }
+
+  listFiveSActions(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.locationId || filters.location_id) {
+      conditions.push('actions.location_id = ?');
+      values.push(filters.locationId || filters.location_id);
+    }
+    if (filters.jobId || filters.job_id) {
+      conditions.push('actions.job_id = ?');
+      values.push(filters.jobId || filters.job_id);
+    }
+    if (filters.auditId || filters.audit_id) {
+      conditions.push('actions.audit_id = ?');
+      values.push(filters.auditId || filters.audit_id);
+    }
+    const status = normalizeStatus(filters.status, 'all');
+    if (status !== 'all') {
+      conditions.push('actions.status = ?');
+      values.push(status);
+    }
+    const limit = Math.max(1, Math.min(10_000, Math.round(normalizeNumber(filters.limit, 1_000))));
+    return this.db.prepare(`
+      SELECT actions.*, locations.name AS location_name, audits.audit_date,
+        jobs.title AS job_title
+      FROM five_s_actions actions
+      JOIN five_s_locations locations ON locations.id = actions.location_id
+      JOIN five_s_audits audits ON audits.id = actions.audit_id
+      LEFT JOIN jobs ON jobs.id = actions.job_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY CASE actions.status WHEN 'open' THEN 0 ELSE 1 END,
+        actions.due_date, actions.created_at, actions.id
+      LIMIT ?
+    `).all(...values, limit).map(row => this.mapFiveSAction(row));
+  }
+
+  fiveSToolState(toolId) {
+    const row = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(toolId);
+    if (!row) return null;
+    const tool = this.mapTool(row);
+    const activeCustodyRow = this.db.prepare(`
+      SELECT sessions.*, workers.name AS worker_name, jobs.title AS job_title
+      FROM equipment_custody_sessions sessions
+      LEFT JOIN workers ON workers.id = sessions.worker_id
+      LEFT JOIN jobs ON jobs.id = sessions.job_id
+      WHERE sessions.tool_id = ? AND sessions.status = 'checked_out'
+      ORDER BY sessions.checked_out_at DESC LIMIT 1
+    `).get(toolId);
+    const activeCustody = activeCustodyRow ? this.mapEquipmentCustodySession(activeCustodyRow) : null;
+    const inspection = this.assessToolInspection(tool);
+    return {
+      id: tool.id,
+      name: tool.name,
+      category: tool.category,
+      status: tool.status,
+      currentLocation: tool.currentLocation,
+      inspectionStatus: inspection.status,
+      reservationReady: inspection.reservationReady !== false && tool.status === 'available',
+      activeCustody: activeCustody ? {
+        id: activeCustody.id,
+        jobId: activeCustody.jobId,
+        jobTitle: activeCustody.jobTitle,
+        workerId: activeCustody.workerId,
+        workerName: activeCustody.workerName,
+        checkoutLocation: activeCustody.checkoutLocation,
+        dueBackAt: activeCustody.dueBackAt
+      } : null,
+      updatedAt: tool.updatedAt
+    };
+  }
+
+  recordFiveSAudit(locationId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const location = this.requireFiveSLocation(locationId);
+      const standardRow = this.db.prepare(`
+        SELECT * FROM five_s_standards
+        WHERE location_id = ? AND status = 'approved'
+        ORDER BY version_number DESC LIMIT 1
+      `).get(locationId);
+      if (!standardRow) {
+        throw ledgerInputError('five_s_standard_required', 'An approved 5S standard is required before an audit can be retained.', { locationId }, 409);
+      }
+      const standard = this.mapFiveSStandard(standardRow);
+      if (!standard.integrityValid) {
+        throw ledgerInputError('five_s_standard_integrity_failed', 'The approved 5S standard failed integrity verification.', { standardId: standard.id }, 409);
+      }
+      const requestedStandardId = normalizeText(payload.standardId || payload.standard_id, '') || standard.id;
+      if (requestedStandardId !== standard.id) {
+        throw ledgerInputError('five_s_standard_not_current', 'The selected 5S standard is not the current approved revision.', { standardId: requestedStandardId, currentStandardId: standard.id }, 409);
+      }
+      const auditDate = normalizeRetainedDate(payload.auditDate || payload.audit_date, {
+        required: true,
+        label: '5S audit date',
+        code: 'five_s_audit_date_invalid'
+      }).slice(0, 10);
+      if (auditDate > nowIso().slice(0, 10)) {
+        throw ledgerInputError('five_s_audit_future_date', 'A 5S audit cannot be retained for a future date.');
+      }
+      const auditedBy = normalizeText(payload.auditedBy || payload.audited_by || payload.inspector, '');
+      if (auditedBy.length < 2 || auditedBy.length > 160) {
+        throw ledgerInputError('five_s_auditor_invalid', '5S auditor must contain 2 to 160 characters.');
+      }
+      const evidenceReferences = [...new Set(normalizeList(
+        payload.evidenceReferences || payload.evidence_references || payload.evidenceReference || payload.evidence_reference
+      ).map(value => normalizeText(value, '')).filter(Boolean))];
+      if (!evidenceReferences.length || evidenceReferences.some(value => value.length < 3 || value.length > 500)) {
+        throw ledgerInputError('five_s_audit_evidence_required', '5S audit requires at least one evidence reference containing 3 to 500 characters.');
+      }
+      if (!Array.isArray(payload.results) || payload.results.length !== standard.items.length) {
+        throw ledgerInputError('five_s_audit_results_incomplete', '5S audit must retain exactly one result for every current standard check.');
+      }
+      const resultByItem = new Map();
+      for (const input of payload.results) {
+        const itemId = normalizeText(input?.itemId || input?.item_id || input?.id, '');
+        if (!itemId || resultByItem.has(itemId)) {
+          throw ledgerInputError('five_s_audit_result_duplicate', '5S audit results must use each standard item exactly once.');
+        }
+        resultByItem.set(itemId, input);
+      }
+      const toolStates = new Map();
+      const results = standard.items.map((item, index) => {
+        const input = resultByItem.get(item.id);
+        if (!input) throw ledgerInputError('five_s_audit_result_missing', `5S check ${item.title} is missing a result.`, { itemId: item.id });
+        const result = normalizeStatus(input.result || input.status, '');
+        if (!FIVE_S_RESULT_STATUSES.has(result)) {
+          throw ledgerInputError('five_s_audit_result_invalid', `5S check ${item.title} must be pass, fail, or not_applicable.`);
+        }
+        if (result === 'not_applicable' && !item.allowNotApplicable) {
+          throw ledgerInputError('five_s_audit_not_applicable_blocked', `Required 5S check ${item.title} cannot be marked not applicable.`, { itemId: item.id }, 409);
+        }
+        let toolState = null;
+        if (item.toolId) {
+          toolState = this.fiveSToolState(item.toolId);
+          if (!toolState) {
+            throw ledgerInputError('five_s_audit_tool_missing', `Linked equipment for ${item.title} no longer exists.`, { toolId: item.toolId }, 409);
+          }
+          toolStates.set(item.toolId, toolState);
+          const expected = normalizeText(item.expectedLocation, '').toLowerCase();
+          const actual = normalizeText(toolState.currentLocation, '').toLowerCase();
+          const canonicalMismatch = toolState.status !== 'available'
+            || toolState.reservationReady !== true
+            || (expected && actual !== expected);
+          if (result === 'pass' && canonicalMismatch) {
+            throw ledgerInputError(
+              'five_s_audit_tool_state_conflict',
+              `${item.title} cannot pass while canonical equipment status, inspection readiness, or location contradicts the standard.`,
+              { itemId: item.id, toolId: item.toolId, expectedLocation: item.expectedLocation, toolState },
+              409
+            );
+          }
+        }
+        const note = normalizeText(input.note || input.notes || input.observation, '') || null;
+        const finding = result === 'fail' ? normalizeText(input.finding || input.issue || note, '') : null;
+        const actionOwner = result === 'fail'
+          ? normalizeText(input.actionOwner || input.action_owner || input.owner || location.owner, '')
+          : null;
+        const actionDueDate = result === 'fail'
+          ? normalizeRetainedDate(input.actionDueDate || input.action_due_date || input.dueDate || input.due_date, {
+            required: true,
+            label: `Corrective-action due date for ${item.title}`,
+            code: 'five_s_action_due_invalid'
+          }).slice(0, 10)
+          : null;
+        const severity = result === 'fail' ? normalizeStatus(input.severity, item.required ? 'high' : 'medium') : null;
+        if (result === 'fail' && (finding.length < 5 || finding.length > 2_000)) {
+          throw ledgerInputError('five_s_finding_required', `Failed check ${item.title} requires a 5 to 2,000 character finding.`);
+        }
+        if (result === 'fail' && (actionOwner.length < 2 || actionOwner.length > 160)) {
+          throw ledgerInputError('five_s_action_owner_invalid', `Failed check ${item.title} requires a corrective-action owner.`);
+        }
+        if (result === 'fail' && actionDueDate < auditDate) {
+          throw ledgerInputError('five_s_action_due_before_audit', `Corrective action for ${item.title} cannot be due before the audit date.`);
+        }
+        if (result === 'fail' && !FIVE_S_ACTION_SEVERITIES.has(severity)) {
+          throw ledgerInputError('five_s_action_severity_invalid', `Corrective action for ${item.title} has an unsupported severity.`);
+        }
+        return {
+          itemId: item.id,
+          index,
+          stage: item.stage,
+          itemType: item.itemType,
+          title: item.title,
+          requirement: item.requirement,
+          required: item.required,
+          allowNotApplicable: item.allowNotApplicable,
+          toolId: item.toolId,
+          expectedLocation: item.expectedLocation,
+          result,
+          note,
+          finding,
+          actionOwner,
+          actionDueDate,
+          severity,
+          toolState
+        };
+      });
+      if (resultByItem.size !== standard.items.length) {
+        throw ledgerInputError('five_s_audit_result_unknown', '5S audit contains a result that is not present in the current standard.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('five_s_audit_entry_key_invalid', '5S audit replay key must contain 8 to 200 safe characters.');
+      }
+      const normalized = {
+        locationId,
+        standardId: standard.id,
+        auditDate,
+        auditedBy,
+        evidenceReferences,
+        results: results.map(result => ({
+          itemId: result.itemId,
+          result: result.result,
+          note: result.note,
+          finding: result.finding,
+          actionOwner: result.actionOwner,
+          actionDueDate: result.actionDueDate,
+          severity: result.severity
+        }))
+      };
+      const entryFingerprint = sha256Json(normalized);
+      const replay = this.db.prepare('SELECT * FROM five_s_audits WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.location_id !== locationId || replay.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('five_s_audit_entry_key_reused', '5S audit replay key was already used for different content.', { entryKey }, 409);
+        }
+        return {
+          audit: this.mapFiveSAudit(replay),
+          actions: this.listFiveSActions({ auditId: replay.id, limit: 500 }),
+          replayed: true,
+          externalCommitments: 0
+        };
+      }
+      const id = makeId('five_s_audit');
+      const timestamp = nowIso();
+      const applicable = results.filter(result => result.result !== 'not_applicable');
+      const passed = applicable.filter(result => result.result === 'pass').length;
+      const failed = applicable.filter(result => result.result === 'fail').length;
+      const scorePercent = applicable.length ? Math.round((passed / applicable.length) * 1_000) / 10 : 100;
+      const status = failed ? 'action_required' : 'compliant';
+      const sourceBasis = {
+        format: FIVE_S_AUDIT_FORMAT,
+        auditId: id,
+        location: {
+          id: location.id,
+          jobId: location.jobId,
+          name: location.name,
+          locationType: location.locationType,
+          identifier: location.identifier,
+          owner: location.owner,
+          auditFrequencyDays: location.auditFrequencyDays,
+          updatedAt: location.updatedAt
+        },
+        standard: {
+          id: standard.id,
+          versionNumber: standard.versionNumber,
+          sourceHash: standard.sourceHash,
+          snapshotHash: standard.snapshotHash
+        },
+        auditDate,
+        auditedBy,
+        evidenceReferences,
+        results,
+        toolStates: [...toolStates.values()].sort((left, right) => left.id.localeCompare(right.id))
+      };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis,
+        sourceHash,
+        status,
+        scorePercent,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          fieldEvidenceOnly: true,
+          standardApprovalRequired: true,
+          toolStatusChanged: false,
+          custodyChanged: false,
+          vehicleDispatched: false,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO five_s_audits (
+          id, location_id, job_id, standard_id, audit_date, audited_by, status,
+          score_percent, results_json, evidence_references_json, source_hash,
+          snapshot_hash, snapshot_json, entry_key, entry_fingerprint, data_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, locationId, location.jobId, standard.id, auditDate, auditedBy, status,
+        scorePercent, toJson(results, []), toJson(evidenceReferences, []), sourceHash,
+        snapshotHash, snapshotJson, entryKey, entryFingerprint,
+        toJson({ passed, failed, notApplicable: results.length - applicable.length, externalCommitments: 0 }),
+        timestamp, timestamp
+      );
+      for (const result of results.filter(item => item.result === 'fail')) {
+        const actionId = makeId('five_s_action');
+        const actionSourceBasis = {
+          format: FIVE_S_ACTION_FORMAT,
+          actionId,
+          auditId: id,
+          auditSnapshotHash: snapshotHash,
+          locationId,
+          jobId: location.jobId,
+          standardItemId: result.itemId,
+          stage: result.stage,
+          title: result.title,
+          finding: result.finding,
+          severity: result.severity,
+          owner: result.actionOwner,
+          dueDate: result.actionDueDate
+        };
+        const actionSourceHash = sha256Json(actionSourceBasis);
+        const actionSnapshot = {
+          ...actionSourceBasis,
+          sourceHash: actionSourceHash,
+          retainedAt: timestamp,
+          retainedBy: actor,
+          safeguards: { internalCorrectiveActionOnly: true, externalCommitments: 0 }
+        };
+        const actionSnapshotJson = toJson(actionSnapshot);
+        this.db.prepare(`
+          INSERT INTO five_s_actions (
+            id, audit_id, location_id, job_id, standard_item_id, stage, title,
+            finding, severity, owner, due_date, status, source_hash, snapshot_hash,
+            snapshot_json, data_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
+        `).run(
+          actionId, id, locationId, location.jobId, result.itemId, result.stage, result.title,
+          result.finding, result.severity, result.actionOwner, result.actionDueDate,
+          actionSourceHash, sha256Text(actionSnapshotJson), actionSnapshotJson,
+          toJson({ toolId: result.toolId, expectedLocation: result.expectedLocation, externalCommitments: 0 }),
+          timestamp, timestamp
+        );
+      }
+      const audit = this.listFiveSAudits({ locationId, limit: 500 }).find(item => item.id === id);
+      const actions = this.listFiveSActions({ auditId: id, limit: 500 });
+      this.audit({
+        entityType: 'five_s_audit',
+        entityId: id,
+        jobId: location.jobId,
+        action: 'retain_five_s_audit',
+        actor,
+        after: audit,
+        metadata: {
+          locationId,
+          standardId: standard.id,
+          status,
+          scorePercent,
+          failed,
+          actionIds: actions.map(action => action.id),
+          sourceHash,
+          snapshotHash,
+          entryKey,
+          externalCommitments: 0
+        }
+      });
+      return { audit, actions, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  resolveFiveSAction(actionId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const row = this.db.prepare('SELECT * FROM five_s_actions WHERE id = ?').get(actionId);
+      if (!row) throw ledgerInputError('five_s_action_not_found', '5S corrective action not found.', { actionId }, 404);
+      const before = this.mapFiveSAction(row);
+      if (!before.integrityValid) {
+        throw ledgerInputError('five_s_action_integrity_failed', 'The retained 5S corrective action failed integrity verification.', { actionId }, 409);
+      }
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      const resolutionNote = normalizeText(payload.resolutionNote || payload.resolution_note || payload.notes, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 500) {
+        throw ledgerInputError('five_s_action_evidence_required', '5S corrective-action resolution requires a 3 to 500 character evidence reference.');
+      }
+      if (resolutionNote.length < 5 || resolutionNote.length > 2_000) {
+        throw ledgerInputError('five_s_action_resolution_required', '5S corrective-action resolution requires a 5 to 2,000 character note.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('five_s_action_entry_key_invalid', '5S corrective-action replay key must contain 8 to 200 safe characters.');
+      }
+      const normalized = { actionId, actionSnapshotHash: before.snapshotHash, evidenceReference, resolutionNote };
+      const entryFingerprint = sha256Json(normalized);
+      const replay = this.db.prepare('SELECT * FROM five_s_actions WHERE resolution_entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.id !== actionId || replay.resolution_entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('five_s_action_entry_key_reused', '5S corrective-action replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { action: this.mapFiveSAction(replay), replayed: true, externalCommitments: 0 };
+      }
+      if (row.status !== 'open') {
+        throw ledgerInputError('five_s_action_state_conflict', `5S corrective action cannot be resolved from ${row.status}.`, { actionId, status: row.status }, 409);
+      }
+      const timestamp = nowIso();
+      const sourceBasis = { format: FIVE_S_ACTION_FORMAT, ...normalized };
+      const sourceHash = sha256Json(sourceBasis);
+      const snapshot = {
+        ...sourceBasis,
+        sourceHash,
+        resolvedAt: timestamp,
+        resolvedBy: actor,
+        safeguards: {
+          evidenceBackedResolutionOnly: true,
+          toolStatusChanged: false,
+          inspectionCertified: false,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        UPDATE five_s_actions
+        SET status = 'resolved', resolution_evidence_reference = ?, resolution_note = ?,
+          resolution_source_hash = ?, resolution_snapshot_hash = ?, resolution_snapshot_json = ?,
+          resolution_entry_key = ?, resolution_entry_fingerprint = ?, resolved_at = ?,
+          resolved_by = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'open'
+      `).run(
+        evidenceReference, resolutionNote, sourceHash, snapshotHash, snapshotJson,
+        entryKey, entryFingerprint, timestamp, actor,
+        toJson({ ...fromJson(row.data_json, {}), resolutionEvidenceReference: evidenceReference, externalCommitments: 0 }),
+        timestamp, actionId
+      );
+      const after = this.listFiveSActions({ locationId: row.location_id, limit: 5_000 }).find(action => action.id === actionId);
+      this.audit({
+        entityType: 'five_s_action',
+        entityId: actionId,
+        jobId: row.job_id,
+        action: 'resolve_five_s_action',
+        actor,
+        before,
+        after,
+        metadata: { locationId: row.location_id, auditId: row.audit_id, sourceHash, snapshotHash, entryKey, externalCommitments: 0 }
+      });
+      return { action: after, replayed: false, externalCommitments: 0 };
+    });
+  }
+
+  getFiveSBoard(filters = {}) {
+    const jobId = normalizeText(filters.jobId || filters.job_id, '') || null;
+    const includeGlobal = normalizeBoolean(filters.includeGlobal ?? filters.include_global, !jobId);
+    const locations = this.listFiveSLocations({ status: filters.status || 'active', limit: 5_000 })
+      .filter(location => !jobId || location.jobId === jobId || (includeGlobal && !location.jobId));
+    const locationIds = new Set(locations.map(location => location.id));
+    const standards = this.listFiveSStandards({ status: 'all', limit: 10_000 }).filter(standard => locationIds.has(standard.locationId));
+    const audits = this.listFiveSAudits({ limit: 10_000 }).filter(audit => locationIds.has(audit.locationId));
+    const actions = this.listFiveSActions({ limit: 10_000 }).filter(action => locationIds.has(action.locationId));
+    const today = nowIso().slice(0, 10);
+    const rows = locations.map(location => {
+      const locationStandards = standards.filter(standard => standard.locationId === location.id);
+      const currentStandard = locationStandards.find(standard => standard.status === 'approved') || null;
+      const pendingStandard = locationStandards.find(standard => standard.status === 'pending_approval') || null;
+      const locationAudits = audits.filter(audit => audit.locationId === location.id);
+      const latestAudit = locationAudits[0] || null;
+      const openActions = actions.filter(action => action.locationId === location.id && action.status === 'open');
+      const criticalActions = openActions.filter(action => action.severity === 'critical');
+      const nextAuditDate = latestAudit
+        ? new Date(Date.parse(`${latestAudit.auditDate}T00:00:00.000Z`) + location.auditFrequencyDays * 86_400_000).toISOString().slice(0, 10)
+        : null;
+      const auditDue = Boolean(currentStandard && (!latestAudit || nextAuditDate < today));
+      const linkedTools = currentStandard
+        ? [...new Set(currentStandard.items.map(item => item.toolId).filter(Boolean))]
+          .map(toolId => this.fiveSToolState(toolId)).filter(Boolean)
+        : [];
+      const ready = Boolean(
+        currentStandard?.integrityValid
+        && latestAudit?.integrityValid
+        && latestAudit.status === 'compliant'
+        && !auditDue
+        && !openActions.length
+      );
+      return {
+        location,
+        currentStandard,
+        pendingStandard,
+        latestAudit,
+        openActions,
+        criticalActions,
+        linkedTools,
+        nextAuditDate,
+        auditDue,
+        ready,
+        status: !currentStandard
+          ? 'standard_required'
+          : auditDue
+            ? 'audit_due'
+            : openActions.length
+              ? 'action_required'
+              : ready
+                ? 'ready'
+                : 'attention'
+      };
+    });
+    const scored = rows.map(row => row.latestAudit?.scorePercent).filter(value => Number.isFinite(value));
+    return {
+      format: FIVE_S_AUDIT_FORMAT,
+      generatedAt: nowIso(),
+      applicable: rows.length > 0,
+      ready: rows.length ? rows.every(row => row.ready) : true,
+      rows,
+      locations,
+      standards,
+      audits,
+      actions,
+      summary: {
+        locations: rows.length,
+        ready: rows.filter(row => row.ready).length,
+        standardRequired: rows.filter(row => !row.currentStandard).length,
+        pendingStandards: rows.filter(row => row.pendingStandard).length,
+        auditsDue: rows.filter(row => row.auditDue).length,
+        openActions: actions.filter(action => action.status === 'open').length,
+        overdueActions: actions.filter(action => action.status === 'open' && action.dueDate < today).length,
+        criticalActions: actions.filter(action => action.status === 'open' && action.severity === 'critical').length,
+        averageScorePercent: scored.length ? Math.round((scored.reduce((sum, value) => sum + value, 0) / scored.length) * 10) / 10 : null
+      },
+      safeguards: {
+        approvalRequiredForStandards: true,
+        fieldAuditReplayProtected: true,
+        canonicalToolStateChecked: true,
+        toolStatusChanged: false,
+        custodyChanged: false,
+        scheduleChanged: false,
+        vehicleDispatched: false,
         supplierCommitments: 0,
         externalCommitments: 0
       }
@@ -42217,6 +43326,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           timestamp,
           before.target_id
         );
+      } else if (before.target_type === 'five_s_standard') {
+        this.db.prepare(`
+          UPDATE five_s_standards
+          SET status = ?, data_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending_approval'
+        `).run(
+          status,
+          toJson({
+            ...fromJson(this.db.prepare('SELECT data_json FROM five_s_standards WHERE id = ?').get(before.target_id)?.data_json, {}),
+            decision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            },
+            externalCommitments: 0
+          }),
+          timestamp,
+          before.target_id
+        );
       } else if (before.target_type === 'cost_forecast') {
         this.db.prepare(`
           UPDATE cost_forecast_snapshots
@@ -42798,6 +43928,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyCrewLookaheadApproval(targetId);
     } else if (targetType === 'last_planner_weekly_plan') {
       this.applyLastPlannerWeeklyPlanApproval(targetId);
+    } else if (targetType === 'five_s_standard') {
+      this.applyFiveSStandardApproval(targetId);
     } else if (targetType === 'cost_forecast') {
       this.applyCostForecastApproval(targetId);
     } else if (targetType === 'cash_flow_forecast') {
@@ -47705,6 +48837,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       lastPlannerConstraints: this.listLastPlannerConstraints({ jobId, limit: 500 }),
       lastPlannerWeeklyPlans: this.listLastPlannerWeeklyPlans({ jobId, limit: 500 }),
       lastPlannerOutcomes: this.listLastPlannerOutcomes({ jobId, limit: 1_000 }),
+      fiveSLocations: this.listFiveSLocations({ jobId, limit: 500 }),
+      fiveSStandards: this.listFiveSStandards({ jobId, limit: 500 }),
+      fiveSAudits: this.listFiveSAudits({ jobId, limit: 1_000 }),
+      fiveSActions: this.listFiveSActions({ jobId, limit: 1_000 }),
       rfis: this.db.prepare('SELECT * FROM rfi_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapRfi(row)),
       submittals: this.db.prepare('SELECT * FROM submittal_records WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapSubmittal(row)),
       transmittals: this.db.prepare('SELECT * FROM document_transmittals WHERE job_id = ? ORDER BY created_at DESC').all(jobId)
@@ -50602,6 +51738,80 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
     }
 
+    if (options.includeFiveS === true) {
+      try {
+        const board = this.getFiveSBoard();
+        for (const row of board.rows.filter(item => item.location.jobId)) {
+          if (!row.currentStandard && !row.pendingStandard) {
+            const sourceHash = row.location.entryFingerprint;
+            const taskId = `task_five_s_${sha256Json({
+              type: 'standard',
+              locationId: row.location.id,
+              sourceHash
+            }).slice(0, 26)}`;
+            if (!this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) {
+              actions.push({
+                type: 'review_five_s_standard',
+                jobId: row.location.jobId,
+                locationId: row.location.id,
+                taskId,
+                sourceHash,
+                severity: 'medium',
+                message: `${row.location.jobTitle || 'Job'} needs an operator-owned 5S standard for ${row.location.name}.`
+              });
+            }
+          }
+          if (row.auditDue && row.currentStandard) {
+            const sourceHash = sha256Json({
+              locationId: row.location.id,
+              standardId: row.currentStandard.id,
+              standardSourceHash: row.currentStandard.sourceHash,
+              latestAuditId: row.latestAudit?.id || null,
+              nextAuditDate: row.nextAuditDate
+            });
+            const taskId = `task_five_s_${sha256Json({
+              type: 'audit',
+              locationId: row.location.id,
+              sourceHash
+            }).slice(0, 26)}`;
+            if (!this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) {
+              actions.push({
+                type: 'perform_five_s_audit',
+                jobId: row.location.jobId,
+                locationId: row.location.id,
+                standardId: row.currentStandard.id,
+                taskId,
+                sourceHash,
+                severity: row.latestAudit ? 'high' : 'medium',
+                message: `${row.location.jobTitle || 'Job'} needs a retained 5S audit for ${row.location.name}.`
+              });
+            }
+          }
+          for (const correctiveAction of row.openActions) {
+            const sourceHash = correctiveAction.snapshotHash;
+            const taskId = `task_five_s_${sha256Json({
+              type: 'action',
+              actionId: correctiveAction.id,
+              sourceHash
+            }).slice(0, 26)}`;
+            if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+            actions.push({
+              type: 'review_five_s_action',
+              jobId: row.location.jobId,
+              locationId: row.location.id,
+              fiveSActionId: correctiveAction.id,
+              taskId,
+              sourceHash,
+              severity: correctiveAction.overdue ? 'high' : correctiveAction.severity,
+              message: `${row.location.jobTitle || 'Job'} has an open 5S corrective action for ${row.location.name}: ${correctiveAction.title}.`
+            });
+          }
+        }
+      } catch {
+        // Diagnostics reports malformed retained 5S evidence; autonomy remains fail-closed.
+      }
+    }
+
     const procurementWithoutPurchaseOrders = this.db.prepare(`
       SELECT procurement_orders.id, procurement_orders.job_id, procurement_orders.supplier, procurement_orders.amount, jobs.title
       FROM procurement_orders
@@ -51168,6 +52378,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const type = normalizeStatus(actionType, 'review');
     if (type.includes('approval')) return 'approval';
     if (type.includes('drawing')) return 'field_assurance';
+    if (type.includes('five_s')) return 'inventory';
     if (type.includes('invoice') || type.includes('payment') || type.includes('budget') || type.includes('forecast') || type.includes('purchase') || type.includes('draw') || type.includes('waiver') || type.includes('finance')) return 'finance';
     if (type.includes('client') || type.includes('selection') || type.includes('aftercare') || type.includes('warranty') || type.includes('punch') || type.includes('recurring') || type.includes('handover')) return 'client_success';
     if (type.includes('safety') || type.includes('permit') || type.includes('pre_task') || type.includes('inspection') || type.includes('nonconformance') || type.includes('incident') || type.includes('observation') || type.includes('environmental') || type.includes('rfi') || type.includes('submittal') || type.includes('transmittal') || type.includes('meeting') || type.includes('jha') || type.includes('sds') || type.includes('access') || type.includes('attendance') || type.includes('timesheet') || type.includes('production') || type.includes('productivity')) return 'field_assurance';
@@ -51210,6 +52421,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       'review_last_planner_constraint',
       'review_last_planner_outcome',
       'prepare_last_planner_week',
+      'review_five_s_standard',
+      'perform_five_s_audit',
+      'review_five_s_action',
       'draft_invoice',
       'create_finance_handoff',
       'create_procurement_order',
@@ -51592,7 +52806,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       includeLastPlanner: !actionTypeFilter.size
         || actionTypeFilter.has('review_last_planner_constraint')
         || actionTypeFilter.has('review_last_planner_outcome')
-        || actionTypeFilter.has('prepare_last_planner_week')
+        || actionTypeFilter.has('prepare_last_planner_week'),
+      includeFiveS: !actionTypeFilter.size
+        || actionTypeFilter.has('review_five_s_standard')
+        || actionTypeFilter.has('perform_five_s_audit')
+        || actionTypeFilter.has('review_five_s_action')
     }).filter(action => {
       if (actionTypeFilter.size && !actionTypeFilter.has(normalizeStatus(action.type, ''))) return false;
       if (jobFilter.size && action.jobId && !jobFilter.has(action.jobId)) return false;
@@ -52210,6 +53428,68 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               entityType: 'task', entityId: task.id, jobId: action.jobId,
               action: 'autonomous_create_last_planner_review_task', actor, after: task,
               metadata: { lastPlannerAction: action.type, sourceHash: action.sourceHash, externalCommitments: 0 }
+            });
+          } catch (error) {
+            blocked.push({ ...action, status: 'blocked', reason: error.message });
+          }
+        }
+
+        const fiveSReviews = preview.filter(action => [
+          'review_five_s_standard',
+          'perform_five_s_audit',
+          'review_five_s_action'
+        ].includes(action.type)).slice(0, 15);
+        for (const action of fiveSReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0 });
+            continue;
+          }
+          try {
+            const title = action.type === 'review_five_s_standard'
+              ? 'Prepare operator-owned 5S standard'
+              : action.type === 'perform_five_s_audit'
+                ? 'Perform retained 5S audit'
+                : 'Resolve 5S corrective action with evidence';
+            const task = this.addTask(action.jobId, {
+              title,
+              description: `${action.message} Verify the retained location, approved standard, canonical equipment state, and field evidence in the 5S workspace. Automation cannot approve standards, infer audit results, resolve findings, change custody or equipment status, dispatch vehicles, authorize spend, or contact external parties.`,
+              status: 'open',
+              priority: action.severity,
+              source: 'autonomous_cycle',
+              data: {
+                internalOnly: true,
+                excludeFromWorkPlan: true,
+                fiveSAction: action.type,
+                fiveSSourceHash: action.sourceHash,
+                locationId: action.locationId,
+                standardId: action.standardId || null,
+                correctiveActionId: action.fiveSActionId || null,
+                toolStatusChanged: false,
+                custodyChanged: false,
+                vehicleDispatched: false,
+                notificationsSent: 0,
+                externalCommitments: 0
+              }
+            }, { id: action.taskId, actor, audit: false });
+            applied.push({
+              ...action,
+              taskId: task.id,
+              status: 'task_created',
+              toolStatusChanged: false,
+              custodyChanged: false,
+              vehicleDispatched: false,
+              notificationsSent: 0,
+              externalCommitments: 0
+            });
+            this.audit({
+              entityType: 'task',
+              entityId: task.id,
+              jobId: action.jobId,
+              action: 'autonomous_create_five_s_review_task',
+              actor,
+              after: task,
+              metadata: { fiveSAction: action.type, locationId: action.locationId, sourceHash: action.sourceHash, externalCommitments: 0 }
             });
           } catch (error) {
             blocked.push({ ...action, status: 'blocked', reason: error.message });
@@ -53507,6 +54787,60 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         if (!cycleRow || cycleRow.job_id !== outcome.jobId || cycleRow.work_date !== commitment?.workDate || cycleRow.status !== 'closed') {
           issues.push({ severity: 'error', message: `Last Planner outcome ${outcome.id} has invalid daily-cycle source evidence ${cycleId}.` });
         }
+      }
+    }
+    const fiveSLocations = this.listFiveSLocations({ status: 'all', limit: 5_000 });
+    for (const location of fiveSLocations) {
+      if (!location.integrityValid) {
+        issues.push({ severity: 'error', message: `5S location ${location.id} failed retained entry fingerprint verification.` });
+      }
+    }
+    const fiveSStandards = this.listFiveSStandards({ status: 'all', limit: 10_000 });
+    for (const standard of fiveSStandards) {
+      if (!standard.integrityValid) {
+        issues.push({ severity: 'error', message: `5S standard ${standard.id} failed retained source or snapshot integrity verification.` });
+      }
+      if (standard.status === 'approved') {
+        const approval = standard.approvalId
+          ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'five_s_standard' AND target_id = ? AND status = 'approved'").get(standard.approvalId, standard.id)
+          : null;
+        if (!approval) {
+          issues.push({ severity: 'error', message: `Approved 5S standard ${standard.id} lacks its matching approval decision.` });
+        }
+      }
+      if (['pending_approval', 'approved'].includes(standard.status)) {
+        try {
+          const source = this.fiveSStandardSource(standard.locationId, standard.items);
+          if (source.sourceHash !== standard.sourceHash) {
+            issues.push({
+              severity: 'warning',
+              message: `5S standard ${standard.id} is stale because the location or linked equipment identity changed.`
+            });
+          }
+        } catch (error) {
+          issues.push({
+            severity: standard.status === 'pending_approval' ? 'warning' : 'error',
+            message: `5S standard ${standard.id} cannot be reconciled with its current source: ${error.message}`
+          });
+        }
+      }
+    }
+    for (const audit of this.listFiveSAudits({ limit: 20_000 })) {
+      if (!audit.integrityValid) {
+        issues.push({ severity: 'error', message: `5S audit ${audit.id} failed retained source or snapshot integrity verification.` });
+      }
+      const standard = fiveSStandards.find(candidate => candidate.id === audit.standardId);
+      if (!standard || standard.locationId !== audit.locationId || !['approved', 'superseded'].includes(standard.status)) {
+        issues.push({ severity: 'error', message: `5S audit ${audit.id} is not bound to an approved retained location standard.` });
+      }
+    }
+    for (const correctiveAction of this.listFiveSActions({ status: 'all', limit: 20_000 })) {
+      if (!correctiveAction.integrityValid) {
+        issues.push({ severity: 'error', message: `5S corrective action ${correctiveAction.id} failed retained source or resolution integrity verification.` });
+      }
+      const audit = this.db.prepare('SELECT id, location_id, job_id FROM five_s_audits WHERE id = ?').get(correctiveAction.auditId);
+      if (!audit || audit.location_id !== correctiveAction.locationId || (audit.job_id || null) !== (correctiveAction.jobId || null)) {
+        issues.push({ severity: 'error', message: `5S corrective action ${correctiveAction.id} crosses a missing or mismatched audit boundary.` });
       }
     }
     const approvedForecastsWithoutApproval = Number(this.db.prepare(`
@@ -55167,6 +56501,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         lastPlannerConstraints: this.count('last_planner_constraints'),
         lastPlannerWeeklyPlans: this.count('last_planner_weekly_plans'),
         lastPlannerOutcomes: this.count('last_planner_outcomes'),
+        fiveSLocations: this.count('five_s_locations'),
+        fiveSStandards: this.count('five_s_standards'),
+        fiveSAudits: this.count('five_s_audits'),
+        fiveSActions: this.count('five_s_actions'),
         rfiRecords: this.count('rfi_records'),
         submittals: this.count('submittal_records'),
         governedDrawingRevisions: Number(this.db.prepare("SELECT COUNT(*) AS count FROM documents WHERE type = 'drawing_revision'").get().count || 0),
@@ -56776,6 +58114,248 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       entryFingerprint: row.entry_fingerprint,
       weekStart: row.week_start || null,
       weekEnd: row.week_end || null,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapFiveSLocation(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const entryFingerprint = sha256Json({
+      jobId: row.job_id || null,
+      name: row.name,
+      locationType: row.location_type,
+      identifier: row.identifier || null,
+      owner: row.owner,
+      auditFrequencyDays: normalizeNumber(row.audit_frequency_days, 7)
+    });
+    return {
+      id: row.id,
+      jobId: row.job_id || null,
+      jobTitle: row.job_title || data.jobTitle || null,
+      name: row.name,
+      locationType: row.location_type,
+      identifier: row.identifier || null,
+      owner: row.owner,
+      auditFrequencyDays: normalizeNumber(row.audit_frequency_days, 7),
+      status: row.status,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid: entryFingerprint === row.entry_fingerprint,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapFiveSStandard(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+    const entryFingerprint = snapshot ? sha256Json({
+      locationId: row.location_id,
+      items: items.map(item => ({
+        id: item.id,
+        stage: item.stage,
+        itemType: item.itemType,
+        title: item.title,
+        requirement: item.requirement,
+        required: item.required,
+        allowNotApplicable: item.allowNotApplicable,
+        toolId: item.toolId || null,
+        expectedLocation: item.expectedLocation || null
+      }))
+    }) : null;
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === FIVE_S_STANDARD_FORMAT
+      && snapshot.standardId === row.id
+      && snapshot.location?.id === row.location_id
+      && snapshot.versionNumber === normalizeNumber(row.version_number, 0)
+      && snapshot.sourceHash === row.source_hash
+      && retainedSnapshotSourceHash(snapshot, [
+        'standardId',
+        'versionNumber',
+        'sourceHash',
+        'retainedAt',
+        'retainedBy',
+        'safeguards'
+      ]) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && entryFingerprint === row.entry_fingerprint
+      && items.length >= FIVE_S_STAGES.length
+      && FIVE_S_STAGES.every(stage => items.some(item => item.stage === stage))
+    );
+    const data = fromJson(row.data_json, {});
+    return {
+      id: row.id,
+      locationId: row.location_id,
+      locationName: row.location_name || snapshot?.location?.name || null,
+      locationType: row.location_type || snapshot?.location?.locationType || null,
+      locationStatus: row.location_status || null,
+      locationOwner: row.location_owner || snapshot?.location?.owner || null,
+      auditFrequencyDays: normalizeNumber(row.audit_frequency_days || snapshot?.location?.auditFrequencyDays, 7),
+      jobId: row.job_id || snapshot?.location?.jobId || null,
+      jobTitle: row.job_title || null,
+      versionNumber: normalizeNumber(row.version_number, 0),
+      status: row.status,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      items,
+      approvalId: row.approval_id || null,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapFiveSAudit(row) {
+    if (!row) return null;
+    const results = fromJson(row.results_json, []);
+    const evidenceReferences = fromJson(row.evidence_references_json, []);
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const entryFingerprint = sha256Json({
+      locationId: row.location_id,
+      standardId: row.standard_id,
+      auditDate: row.audit_date,
+      auditedBy: row.audited_by,
+      evidenceReferences,
+      results: results.map(result => ({
+        itemId: result.itemId,
+        result: result.result,
+        note: result.note || null,
+        finding: result.finding || null,
+        actionOwner: result.actionOwner || null,
+        actionDueDate: result.actionDueDate || null,
+        severity: result.severity || null
+      }))
+    });
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === FIVE_S_AUDIT_FORMAT
+      && snapshot.auditId === row.id
+      && snapshot.location?.id === row.location_id
+      && snapshot.standard?.id === row.standard_id
+      && snapshot.auditDate === row.audit_date
+      && snapshot.auditedBy === row.audited_by
+      && snapshot.status === row.status
+      && normalizeNumber(snapshot.scorePercent, -1) === normalizeNumber(row.score_percent, -2)
+      && snapshot.sourceHash === row.source_hash
+      && retainedSnapshotSourceHash(snapshot, [
+        'sourceHash',
+        'status',
+        'scorePercent',
+        'retainedAt',
+        'retainedBy',
+        'safeguards'
+      ]) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && entryFingerprint === row.entry_fingerprint
+    );
+    return {
+      id: row.id,
+      locationId: row.location_id,
+      locationName: row.location_name || snapshot?.location?.name || null,
+      locationType: row.location_type || snapshot?.location?.locationType || null,
+      jobId: row.job_id || null,
+      jobTitle: row.job_title || null,
+      standardId: row.standard_id,
+      standardVersion: normalizeNumber(row.standard_version || snapshot?.standard?.versionNumber, 0),
+      auditDate: row.audit_date,
+      auditedBy: row.audited_by,
+      status: row.status,
+      scorePercent: normalizeNumber(row.score_percent, 0),
+      results,
+      evidenceReferences,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid,
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapFiveSAction(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === FIVE_S_ACTION_FORMAT
+      && snapshot.actionId === row.id
+      && snapshot.auditId === row.audit_id
+      && snapshot.locationId === row.location_id
+      && snapshot.standardItemId === row.standard_item_id
+      && snapshot.sourceHash === row.source_hash
+      && retainedSnapshotSourceHash(snapshot, ['sourceHash', 'retainedAt', 'retainedBy', 'safeguards']) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    const resolutionSnapshotJson = normalizeText(row.resolution_snapshot_json, '');
+    const resolutionSnapshot = fromJson(resolutionSnapshotJson, null);
+    const resolutionIntegrityValid = row.status !== 'resolved' ? !row.resolution_snapshot_hash : Boolean(
+      resolutionSnapshot
+      && resolutionSnapshot.format === FIVE_S_ACTION_FORMAT
+      && resolutionSnapshot.actionId === row.id
+      && resolutionSnapshot.actionSnapshotHash === row.snapshot_hash
+      && resolutionSnapshot.evidenceReference === row.resolution_evidence_reference
+      && resolutionSnapshot.resolutionNote === row.resolution_note
+      && resolutionSnapshot.sourceHash === row.resolution_source_hash
+      && retainedSnapshotSourceHash(resolutionSnapshot, [
+        'sourceHash',
+        'resolvedAt',
+        'resolvedBy',
+        'safeguards'
+      ]) === row.resolution_source_hash
+      && sha256Text(resolutionSnapshotJson) === row.resolution_snapshot_hash
+      && sha256Json({
+        actionId: row.id,
+        actionSnapshotHash: row.snapshot_hash,
+        evidenceReference: row.resolution_evidence_reference,
+        resolutionNote: row.resolution_note
+      }) === row.resolution_entry_fingerprint
+    );
+    return {
+      id: row.id,
+      auditId: row.audit_id,
+      auditDate: row.audit_date || null,
+      locationId: row.location_id,
+      locationName: row.location_name || null,
+      jobId: row.job_id || null,
+      jobTitle: row.job_title || null,
+      standardItemId: row.standard_item_id,
+      stage: row.stage,
+      title: row.title,
+      finding: row.finding,
+      severity: row.severity,
+      owner: row.owner,
+      dueDate: row.due_date,
+      status: row.status,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      resolutionEvidenceReference: row.resolution_evidence_reference || null,
+      resolutionNote: row.resolution_note || null,
+      resolutionSourceHash: row.resolution_source_hash || null,
+      resolutionSnapshotHash: row.resolution_snapshot_hash || null,
+      resolutionSnapshot,
+      resolutionEntryKey: row.resolution_entry_key || null,
+      resolvedAt: row.resolved_at || null,
+      resolvedBy: row.resolved_by || null,
+      integrityValid: integrityValid && resolutionIntegrityValid,
+      resolutionIntegrityValid,
+      overdue: row.status === 'open' && row.due_date < nowIso().slice(0, 10),
       data: fromJson(row.data_json, {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -58608,6 +60188,32 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.integrityValid = plan?.integrityValid === true;
       preview.sourceHash = plan?.sourceHash || data.sourceHash || null;
       preview.snapshotHash = plan?.snapshotHash || data.snapshotHash || null;
+      preview.externalCommitments = 0;
+    } else if (targetType === 'five_s_standard') {
+      const row = this.db.prepare('SELECT * FROM five_s_standards WHERE id = ?').get(approval.targetId || approval.target_id);
+      const standard = row ? this.mapFiveSStandard(row) : null;
+      const itemCount = standard?.items?.length ?? data.itemCount ?? 0;
+      const linkedToolCount = standard?.items
+        ? new Set(standard.items.map(item => item.toolId).filter(Boolean)).size
+        : data.linkedToolCount ?? 0;
+      primaryEffect = `Approve 5S standard version ${standard?.versionNumber || data.versionNumber || '?'} for ${standard?.locationName || data.locationName || 'the retained location'}.`;
+      addEffect(`Activate ${itemCount} retained check(s) across Sort, Set in order, Shine, Standardize, and Sustain.`);
+      if (linkedToolCount) addEffect(`Bind ${linkedToolCount} canonical tool record(s) to their retained storage and readiness checks.`);
+      addSafeguard('Approval is blocked if the location or linked tool identity changed after the request.');
+      addSafeguard('Does not change tool status or custody, dispatch a vehicle, place an order, authorize spend, change a schedule, or make an external commitment.');
+      riskLevel = 'high';
+      preview.locationId = standard?.locationId || data.locationId || null;
+      preview.locationName = standard?.locationName || data.locationName || null;
+      preview.locationType = standard?.locationType || data.locationType || null;
+      preview.versionNumber = standard?.versionNumber || data.versionNumber || null;
+      preview.itemCount = itemCount;
+      preview.linkedToolCount = linkedToolCount;
+      preview.stages = standard?.items
+        ? [...new Set(standard.items.map(item => item.stage))]
+        : data.stages || [];
+      preview.integrityValid = standard?.integrityValid === true;
+      preview.sourceHash = standard?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = standard?.snapshotHash || data.snapshotHash || null;
       preview.externalCommitments = 0;
     } else if (targetType === 'schedule_commitment') {
       const patch = data.patch || {};

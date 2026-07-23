@@ -1211,6 +1211,7 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody$/.test(pathName)
         || /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody-plan$/.test(pathName)
+        || pathName === '/api/ledger/five-s'
         || pathName === '/api/ledger/work-permits'
         || /^\/api\/ledger\/jobs\/[^/]+\/work-permits$/.test(pathName)
         || pathName === '/api/ledger/pre-task-plans'
@@ -1232,6 +1233,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/attendance\/[^/]+\/check-out$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/check-out$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/equipment-custody\/[^/]+\/return$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/five-s\/locations\/[^/]+\/audits$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/expense-receipts$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daywork-tickets$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/nonconformances$/.test(pathName)) return true;
@@ -1945,6 +1947,7 @@ app.get('/api/session', (req, res) => {
         schedule: !fieldWorker,
         crewCapacity: !fieldWorker,
         lastPlanner: !fieldWorker,
+        fiveS: true,
         approvals: role === 'owner' || role === 'approver',
         dispatch: !fieldWorker,
         resources: !fieldWorker,
@@ -6001,6 +6004,99 @@ app.post('/api/ledger/jobs/:id/last-planner/plans/:planId/commitments/:commitmen
   }), 201);
 });
 
+app.get('/api/ledger/five-s', (req, res) => {
+  if (req.operator?.role === 'field_worker') {
+    const jobId = String(req.query.jobId || req.query.job_id || '').trim();
+    if (!jobId) {
+      return sendError(req, res, 400, 'five_s_job_scope_required', 'Field workers must select an assigned job to view its 5S controls.');
+    }
+    if (!fieldWorkerCanAccessJob(req, jobId)) {
+      return sendError(req, res, 403, 'field_job_scope_forbidden', 'This field worker is not assigned to the requested 5S job.');
+    }
+    return handleLedgerRequest(req, res, () => ({
+      success: true,
+      board: projectFieldRecord(operatingLedger.getFiveSBoard({ jobId, includeGlobal: false }))
+    }));
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    board: operatingLedger.getFiveSBoard(req.query || {})
+  }));
+});
+
+app.get('/api/ledger/five-s/locations', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    locations: operatingLedger.listFiveSLocations(req.query || {})
+  }));
+});
+
+app.post('/api/ledger/five-s/locations', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createFiveSLocation(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.getFiveSBoard()
+  }), 201);
+});
+
+app.post('/api/ledger/five-s/locations/:locationId/standards', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestFiveSStandard(req.params.locationId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.getFiveSBoard()
+  }), 201);
+});
+
+app.post('/api/ledger/five-s/locations/:locationId/audits', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.recordFiveSAudit(req.params.locationId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      ...result,
+      board: operatingLedger.getFiveSBoard()
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/jobs/:id/five-s/locations/:locationId/audits', (req, res) => {
+  const payload = { ...(req.body || {}) };
+  if (req.operator?.role === 'field_worker') payload.auditedBy = fieldWorkerIdentity(req).workerName;
+  return handleLedgerRequest(req, res, () => {
+    const location = operatingLedger.requireFiveSLocation(req.params.locationId);
+    if (String(location.jobId || '') !== String(req.params.id)) {
+      const error = new Error('The selected 5S location does not belong to the requested job.');
+      error.code = 'five_s_location_job_mismatch';
+      error.statusCode = 409;
+      error.details = { locationId: location.id, locationJobId: location.jobId, requestedJobId: req.params.id };
+      throw error;
+    }
+    const result = operatingLedger.recordFiveSAudit(req.params.locationId, payload, {
+      actor: actorFromRequest(req, payload.actor || 'dashboard')
+    });
+    return {
+      success: true,
+      ...recordForOperator(req, result),
+      board: recordForOperator(req, operatingLedger.getFiveSBoard({ jobId: req.params.id, includeGlobal: false }))
+    };
+  }, 201);
+});
+
+app.post('/api/ledger/five-s/actions/:actionId/resolve', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.resolveFiveSAction(req.params.actionId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    board: operatingLedger.getFiveSBoard()
+  }));
+});
+
 app.post('/api/ledger/schedule/recommend', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -6458,6 +6554,10 @@ function operationalExport() {
     lastPlannerConstraints: operatingLedger.listLastPlannerConstraints({ status: 'all', limit: 10_000 }),
     lastPlannerWeeklyPlans: operatingLedger.listLastPlannerWeeklyPlans({ status: 'all', limit: 10_000 }),
     lastPlannerOutcomes: operatingLedger.listLastPlannerOutcomes({ limit: 20_000 }),
+    fiveSLocations: operatingLedger.listFiveSLocations({ status: 'all', limit: 5_000 }),
+    fiveSStandards: operatingLedger.listFiveSStandards({ status: 'all', limit: 10_000 }),
+    fiveSAudits: operatingLedger.listFiveSAudits({ limit: 20_000 }),
+    fiveSActions: operatingLedger.listFiveSActions({ status: 'all', limit: 20_000 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
@@ -6540,6 +6640,10 @@ function validateOperationalExport(snapshot) {
     'lastPlannerConstraints',
     'lastPlannerWeeklyPlans',
     'lastPlannerOutcomes',
+    'fiveSLocations',
+    'fiveSStandards',
+    'fiveSAudits',
+    'fiveSActions',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
     'dayworkTickets',
@@ -6632,6 +6736,10 @@ function validateOperationalExport(snapshot) {
       lastPlannerConstraints: Array.isArray(snapshot.lastPlannerConstraints) ? snapshot.lastPlannerConstraints.length : 0,
       lastPlannerWeeklyPlans: Array.isArray(snapshot.lastPlannerWeeklyPlans) ? snapshot.lastPlannerWeeklyPlans.length : 0,
       lastPlannerOutcomes: Array.isArray(snapshot.lastPlannerOutcomes) ? snapshot.lastPlannerOutcomes.length : 0,
+      fiveSLocations: Array.isArray(snapshot.fiveSLocations) ? snapshot.fiveSLocations.length : 0,
+      fiveSStandards: Array.isArray(snapshot.fiveSStandards) ? snapshot.fiveSStandards.length : 0,
+      fiveSAudits: Array.isArray(snapshot.fiveSAudits) ? snapshot.fiveSAudits.length : 0,
+      fiveSActions: Array.isArray(snapshot.fiveSActions) ? snapshot.fiveSActions.length : 0,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
@@ -7292,6 +7400,22 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         supplierCommitments: 0,
         externalCommitments: 0
       },
+      fiveSOrganization: {
+        available: true,
+        locations: ['vehicle', 'trailer', 'depot', 'tool_store', 'site_storage', 'work_area', 'other'],
+        standardStages: ['sort', 'set_in_order', 'shine', 'standardize', 'sustain'],
+        standardApproval: 'immutable_source_current_snapshot',
+        canonicalEquipmentChecks: true,
+        failedChecks: 'corrective_action_required',
+        resolutionEvidence: 'required',
+        exactReplay: true,
+        autonomy: 'internal_review_task_only',
+        toolStatusChanged: false,
+        custodyChanged: false,
+        vehicleDispatched: false,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
@@ -7356,6 +7480,13 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         lastPlannerOutcomeEvidence: 'closed_daily_cycle_and_sha256_snapshot',
         lastPlannerAutonomy: 'internal_review_task_only',
         lastPlannerCommitmentInference: false,
+        fiveSLocationEntryKey: 'durable_exact_replay',
+        fiveSStandardApproval: 'source_current_approval_gated',
+        fiveSAuditEntryKey: 'durable_exact_replay',
+        fiveSAuditToolState: 'canonical_status_inspection_location_checked',
+        fiveSCorrectiveActionResolution: 'evidence_bound_exact_replay',
+        fiveSAutonomy: 'internal_review_task_only',
+        fiveSVehicleDispatch: false,
         formalVariationEntryKey: 'durable_exact_replay',
         formalVariationSnapshot: 'accepted_contract_source_sha256',
         formalVariationRevision: 'explicit_approved_supersession',

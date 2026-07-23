@@ -1158,6 +1158,43 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup Last Planner constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('062_governed_five_s')) {
+        for (const table of ['five_s_locations', 'five_s_standards', 'five_s_audits', 'five_s_actions']) {
+          if (!retainedTables.has(table)) throw new Error(`Backup 5S schema is incomplete: ${table}.`);
+        }
+        const locationColumns = new Set(database.prepare('PRAGMA table_info(five_s_locations)').all().map(row => row.name));
+        for (const column of ['job_id', 'name', 'location_type', 'identifier', 'owner', 'audit_frequency_days', 'status', 'entry_key', 'entry_fingerprint']) {
+          if (!locationColumns.has(column)) throw new Error(`Backup 5S schema is incomplete: five_s_locations.${column}.`);
+        }
+        const standardColumns = new Set(database.prepare('PRAGMA table_info(five_s_standards)').all().map(row => row.name));
+        for (const column of ['location_id', 'version_number', 'status', 'source_hash', 'snapshot_hash', 'snapshot_json', 'approval_id', 'entry_key', 'entry_fingerprint']) {
+          if (!standardColumns.has(column)) throw new Error(`Backup 5S schema is incomplete: five_s_standards.${column}.`);
+        }
+        const auditColumns = new Set(database.prepare('PRAGMA table_info(five_s_audits)').all().map(row => row.name));
+        for (const column of ['location_id', 'job_id', 'standard_id', 'audit_date', 'audited_by', 'status', 'score_percent', 'results_json', 'evidence_references_json', 'source_hash', 'snapshot_hash', 'snapshot_json', 'entry_key', 'entry_fingerprint']) {
+          if (!auditColumns.has(column)) throw new Error(`Backup 5S schema is incomplete: five_s_audits.${column}.`);
+        }
+        const actionColumns = new Set(database.prepare('PRAGMA table_info(five_s_actions)').all().map(row => row.name));
+        for (const column of ['audit_id', 'location_id', 'job_id', 'standard_item_id', 'stage', 'title', 'finding', 'severity', 'owner', 'due_date', 'status', 'source_hash', 'snapshot_hash', 'snapshot_json', 'resolution_evidence_reference', 'resolution_note', 'resolution_source_hash', 'resolution_snapshot_hash', 'resolution_snapshot_json', 'resolution_entry_key', 'resolution_entry_fingerprint']) {
+          if (!actionColumns.has(column)) throw new Error(`Backup 5S schema is incomplete: five_s_actions.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_five_s_locations_job_status',
+          'idx_five_s_locations_type_status',
+          'idx_five_s_standard_one_pending',
+          'idx_five_s_standard_one_approved',
+          'idx_five_s_standard_history',
+          'idx_five_s_audits_location_date',
+          'idx_five_s_audits_job_date',
+          'idx_five_s_audits_status',
+          'idx_five_s_actions_location_status',
+          'idx_five_s_actions_job_status',
+          'idx_five_s_actions_due'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup 5S constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

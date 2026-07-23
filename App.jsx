@@ -90,6 +90,7 @@ const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
 const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
 const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
+const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -208,6 +209,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   const workPermitId = type === 'work_permit_acknowledgement' ? String(payload?.permitId || '') : ''
   const preTaskPlanId = ['pre_task_plan_acknowledgement', 'pre_task_plan_suspension'].includes(type) ? String(payload?.planId || '') : ''
   const dailyCycleId = type === 'daily_cycle_close' ? String(payload?.cycleId || '') : ''
+  const fiveSLocationId = type === 'five_s_audit' ? String(payload?.locationId || '') : ''
   const route =
     type === 'daily_huddle'
       ? 'daily-cycles'
@@ -243,6 +245,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? 'equipment-custody/check-out'
       : type === 'equipment_return' && custodySessionId
         ? `equipment-custody/${encodeURIComponent(custodySessionId)}/return`
+      : type === 'five_s_audit' && fiveSLocationId
+        ? `five-s/locations/${encodeURIComponent(fiveSLocationId)}/audits`
       : type === 'progress'
         ? 'progress'
         : type === 'observation'
@@ -263,6 +267,7 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
   delete requestPayload.permitId
   delete requestPayload.planId
   delete requestPayload.cycleId
+  delete requestPayload.locationId
   return api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/${route}`, {
     method: 'POST',
     body: JSON.stringify(requestPayload),
@@ -1098,6 +1103,17 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
         tools: result.tools || [],
         toolSummary: result.summary || {},
         equipmentCustody: custody.equipmentCustody || { summary: {}, sessions: [], active: [], exceptions: [], actions: [], policy: {} },
+      }
+    }
+    if (resourceView === 'five_s') {
+      const [fiveS, tools] = await Promise.all([
+        api('/api/ledger/five-s'),
+        api('/api/ledger/tools?limit=500'),
+      ])
+      return {
+        fiveS: fiveS.board || null,
+        tools: tools.tools || [],
+        toolSummary: tools.summary || {},
       }
     }
     if (resourceView === 'partners') {
@@ -2933,6 +2949,7 @@ function App() {
           inventory: { jobs: [], summary: {} },
           materialReceiving: { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} },
           equipmentCustody: { summary: {}, sessions: [], active: [], exceptions: [], actions: [], policy: {} },
+          fiveS: null,
           tradePartners: [],
           tradePartnerSummary: {},
           finance: { jobs: [], summary: {} },
@@ -2981,6 +2998,7 @@ function App() {
           inventory: { jobs: [], summary: {} },
           materialReceiving: { summary: {}, receipts: [], purchaseOrders: [], actions: [], policy: {} },
           equipmentCustody: { summary: {}, sessions: [], active: [], exceptions: [], actions: [], policy: {} },
+          fiveS: null,
           tradePartners: [],
           tradePartnerSummary: {},
           finance: { jobs: [], summary: {} },
@@ -5056,6 +5074,35 @@ function App() {
       setError(requestError.message)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  async function submitFieldFiveSAudit({ id, jobId, locationId, payload }) {
+    const draft = {
+      id,
+      type: 'five_s_audit',
+      jobId,
+      payload: { ...payload, locationId },
+      operatorScope: outboxScope,
+    }
+    if (navigator.onLine === false) {
+      await enqueueFieldOperationDraft(draft)
+      await refreshOutboxState()
+      notify('5S audit saved locally with the exact approved standard revision and will sync after reconnection.')
+      return { queued: true }
+    }
+    try {
+      const result = await recordFieldOperation(draft)
+      notify(result.replayed
+        ? 'This 5S audit was already retained; no duplicate evidence was created.'
+        : '5S field condition and corrective actions were retained.')
+      return result
+    } catch (requestError) {
+      if (!shouldQueueFieldMutation(requestError)) throw requestError
+      await enqueueFieldOperationDraft(draft)
+      await refreshOutboxState()
+      notify('Connection interrupted. The complete 5S audit was saved locally for an exact retry.')
+      return { queued: true }
     }
   }
 
@@ -10680,6 +10727,7 @@ function App() {
                   tools={tools}
                   toolSummary={data.toolSummary}
                   equipmentCustody={data.equipmentCustody}
+                  fiveS={data.fiveS}
                   tradePartners={tradePartners}
                   tradePartnerSummary={data.tradePartnerSummary}
                   timesheets={data.timesheets}
@@ -10720,6 +10768,7 @@ function App() {
                   onPrepareTimesheetExport={prepareTimesheetHandoff}
                   onOpenApprovals={openApprovals}
                   onOpen={openJobWorkspace}
+                  request={api}
                 />
               </LazyControlBoundary>
             ) : null}
@@ -11522,6 +11571,17 @@ function App() {
                     <Empty title="No equipment handoff available" detail="This job has no checkout-ready retained equipment reservation." />
                   ) : null}
                   <p className="attendance-policy">Custody records are internal operational evidence. External hire, spend, and statutory inspection remain separately governed.</p>
+                </section>
+                <section className="evidence-form field-five-s-panel">
+                  <LazyControlBoundary label="5S field controls">
+                    <FiveSWorkspace
+                      request={api}
+                      jobs={activeJobs}
+                      fieldMode
+                      operatorName={operator.name || operator.worker?.name || ''}
+                      onSubmitFieldAudit={submitFieldFiveSAudit}
+                    />
+                  </LazyControlBoundary>
                 </section>
                 <section className="evidence-form field-environmental-panel" data-testid="field-environmental-panel">
                   <div className="panel-heading">

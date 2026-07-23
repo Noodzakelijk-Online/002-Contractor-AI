@@ -147,13 +147,13 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
         </label>
         <label>
           <span>Record type</span>
-          <select value={filters.entityType} onChange={(event) => setFilters({ ...filters, entityType: event.target.value })}>
+          <select data-testid="audit-record-type-filter" value={filters.entityType} onChange={(event) => setFilters({ ...filters, entityType: event.target.value })}>
             {facetOptions(facets.entityTypes, 'record types')}
           </select>
         </label>
         <label>
           <span>Action</span>
-          <select value={filters.action} onChange={(event) => setFilters({ ...filters, action: event.target.value })}>
+          <select data-testid="audit-action-filter" value={filters.action} onChange={(event) => setFilters({ ...filters, action: event.target.value })}>
             {facetOptions(facets.actions, 'actions')}
           </select>
         </label>

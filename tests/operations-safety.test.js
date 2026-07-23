@@ -292,12 +292,12 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(invalidBackup.body.error.code, 'invalid_backup_id');
 
   const readiness = await request(baseUrl, '/api/readiness');
-  assert.equal(readiness.response.status, 200);
+  assert.equal(readiness.response.status, 200, JSON.stringify(readiness.body));
   assert.equal(readiness.body.runtime.mode, 'local');
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '061_last_planner_lite');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '062_governed_five_s');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -369,6 +369,13 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.requestSafety.equipmentRetirement, 'approval_gated');
   assert.equal(capabilities.body.capabilities.requestSafety.equipmentActiveReservationGate, true);
   assert.equal(capabilities.body.capabilities.requestSafety.equipmentDormantReservationRelease, 'retained_atomic');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSLocationEntryKey, 'durable_exact_replay');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSStandardApproval, 'source_current_approval_gated');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSAuditEntryKey, 'durable_exact_replay');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSAuditToolState, 'canonical_status_inspection_location_checked');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSCorrectiveActionResolution, 'evidence_bound_exact_replay');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSAutonomy, 'internal_review_task_only');
+  assert.equal(capabilities.body.capabilities.requestSafety.fiveSVehicleDispatch, false);
   assert.equal(capabilities.body.capabilities.requestSafety.browserOutboxScope, 'operator');
   assert.equal(capabilities.body.capabilities.requestSafety.payloadConflictRejected, true);
   assert.equal(capabilities.body.capabilities.communications.outboundDraftOnly, true);
@@ -410,6 +417,16 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.automation.coordination, 'durable_compare_and_swap_lease');
   assert.equal(capabilities.body.capabilities.automation.multiReplicaSafe, true);
   assert.equal(capabilities.body.capabilities.automation.externalCommitments, 0);
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.standardApproval, 'immutable_source_current_snapshot');
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.canonicalEquipmentChecks, true);
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.failedChecks, 'corrective_action_required');
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.resolutionEvidence, 'required');
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.exactReplay, true);
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.autonomy, 'internal_review_task_only');
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.toolStatusChanged, false);
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.custodyChanged, false);
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.vehicleDispatched, false);
+  assert.equal(capabilities.body.capabilities.fiveSOrganization.externalCommitments, 0);
 
   const auditIntegrity = await request(baseUrl, '/api/operations/audit-integrity');
   assert.equal(auditIntegrity.response.status, 200);
@@ -588,7 +605,7 @@ test('hosted readiness uses the PostgreSQL ledger adapter when durable services 
   const readiness = await request(baseUrl, '/api/readiness', {
     headers: { Authorization: 'Bearer production-token-with-sufficient-length' }
   });
-  assert.equal(readiness.response.status, 200);
+  assert.equal(readiness.response.status, 200, JSON.stringify(readiness.body));
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.databaseMode, 'postgres');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');

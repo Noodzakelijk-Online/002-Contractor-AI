@@ -213,8 +213,17 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '061_last_planner_lite'")) {
     failures.push('Canonical Last Planner lite migration is missing.');
   }
+  if (!ledgerSource.includes("version: '062_governed_five_s'")) {
+    failures.push('Canonical governed 5S migration is missing.');
+  }
   if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
     failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
+  }
+  if (!serverSource.includes("fiveSAuditToolState: 'canonical_status_inspection_location_checked'")) {
+    failures.push('5S capability does not bind audits to canonical equipment state.');
+  }
+  if (!serverSource.includes("fiveSVehicleDispatch: false")) {
+    failures.push('5S capability does not explicitly prohibit inferred vehicle dispatch.');
   }
   if (!serverSource.includes("takeoffWorkBreakdown: 'validated_wbs_codes_and_server_rollups'")) {
     failures.push('Quantity takeoff capability does not declare validated WBS rollups.');
