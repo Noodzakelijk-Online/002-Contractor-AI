@@ -257,7 +257,7 @@ test('13-week forecast derives ledger cash, expands assumptions, and freezes sou
   );
   assert.equal(ledger.listApprovals({ status: 'pending' }).some(item => item.id === revised.approval.id), true);
   assert.equal(ledger.diagnose().valid, true);
-  assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+  assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
 });
 
 test('cash-flow forecast blocks mixed currencies and detects retained snapshot tampering', t => {

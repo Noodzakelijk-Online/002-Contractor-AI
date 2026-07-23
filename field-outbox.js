@@ -7,6 +7,7 @@ const MAX_TOTAL_EVIDENCE_BYTES = 50 * 1024 * 1024;
 const MAX_OPERATION_DRAFTS = 100;
 const MAX_TOTAL_OPERATION_BYTES = 1024 * 1024;
 const FIELD_OPERATION_TYPES = new Set(['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'lmra_assessment', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return', 'five_s_audit']);
+const PHOTO_EVIDENCE_PHASES = new Set(['before', 'during', 'after']);
 
 function onlineState() {
   return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
@@ -102,8 +103,21 @@ export async function fieldEvidenceDraftCount(operatorScope) {
   return (await listFieldEvidenceDrafts({ operatorScope })).length;
 }
 
-export async function enqueueFieldEvidenceDraft({ id, jobId, notes, riskLevel, file, operatorScope }) {
+export async function enqueueFieldEvidenceDraft({
+  id,
+  jobId,
+  notes,
+  riskLevel,
+  file,
+  operatorScope,
+  photoEvidenceSetId,
+  photoEvidencePhase,
+  capturedAt
+}) {
   if (!jobId || !file) throw new Error('A job and evidence file are required before saving an offline draft.');
+  if (photoEvidenceSetId && (!PHOTO_EVIDENCE_PHASES.has(String(photoEvidencePhase || '')) || !capturedAt)) {
+    throw new Error('Governed offline photo evidence requires its retained set, phase, and device capture time.');
+  }
   const scope = requireOperatorScope(operatorScope);
   const drafts = await listFieldEvidenceDrafts();
   const nextSize = Number(file.size || 0);
@@ -117,6 +131,9 @@ export async function enqueueFieldEvidenceDraft({ id, jobId, notes, riskLevel, f
     jobId: String(jobId),
     notes: String(notes || ''),
     riskLevel: String(riskLevel || 'medium'),
+    photoEvidenceSetId: String(photoEvidenceSetId || ''),
+    photoEvidencePhase: String(photoEvidencePhase || ''),
+    capturedAt: String(capturedAt || ''),
     file,
     operatorScope: scope,
     createdAt: new Date().toISOString()

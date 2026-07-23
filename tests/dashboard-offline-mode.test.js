@@ -88,7 +88,9 @@ test('portfolio schedule is role-gated, ledger-backed, rendered, and connected t
 
 test('dashboard mutations remain API-backed and confirmation-gated where they affect retained operations', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/intake'/);
-  assert.match(dashboardSource, /api\(`\/api\/ledger\/approvals\/\$\{item\.id\}\/resolve`/);
+  assert.match(dashboardSource, /api\(`\/api\/ledger\/approvals\/\$\{item\.id\}\/resolve\?includeDashboard=false`/);
+  assert.match(dashboardSource, /function reconcileApprovalResolution\(data, approvalId, dashboard = null\)/);
+  assert.match(dashboardSource, /pendingApprovals: Math\.max\(0, Number\(currentDashboard\.metrics\.pendingApprovals \|\| 0\) - 1\)/);
   assert.match(dashboardSource, /data-testid="approval-review-modal"/);
   assert.match(dashboardSource, /approvalReview\.item\.decision\?\.safeguards/);
   assert.match(dashboardSource, /required=\{approvalReview\.status === 'rejected' \|\| approvalReview\.item\.data\?\.requiresExceptionOverride === true\}/);
@@ -314,6 +316,21 @@ test('job workspace schedules governed installation QC and immutable approval-ba
   assert.match(dashboardSource, /Govern task completion as installation QC/);
   assert.match(dashboardSource, /Evidence required to pass/);
   assert.match(dashboardSource, /Offline capture may queue evidence, but never releases a hold point or completes the task/);
+});
+
+test('governed photo evidence connects office scheduling, worker-scoped sequence capture, offline replay, and independent release', () => {
+  assert.match(dashboardSource, /data-testid="photo-evidence-control"/);
+  assert.match(dashboardSource, /data-testid="photo-evidence-schedule-form"/);
+  assert.match(dashboardRootSource, /data-testid="field-evidence-form"/);
+  assert.match(dashboardRootSource, /data-testid="photo-evidence-context"/);
+  assert.match(dashboardRootSource, /\/photo-evidence`/);
+  assert.match(dashboardRootSource, /\/photo-evidence\/\$\{encodeURIComponent\(setId\)\}\/review/);
+  assert.match(dashboardRootSource, /payload\.append\('photoEvidencePhase', photoEvidencePhase\)/);
+  assert.match(dashboardRootSource, /payload\.append\('capturedAt', new Date\(capturedAt\)\.toISOString\(\)\)/);
+  assert.match(outboxSource, /photoEvidenceSetId: String\(photoEvidenceSetId \|\| ''\)/);
+  assert.match(outboxSource, /photoEvidencePhase: String\(photoEvidencePhase \|\| ''\)/);
+  assert.match(outboxSource, /capturedAt: String\(capturedAt \|\| ''\)/);
+  assert.match(dashboardSource, /Offline capture can queue files and metadata, but cannot request review, release evidence, or complete the task/);
 });
 
 test('dashboard loads a field worker only through scoped ledger calls and hides owner workflow navigation', () => {

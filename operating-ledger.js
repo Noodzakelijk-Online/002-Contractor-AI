@@ -38,13 +38,13 @@ const LEDGER_CAPABILITY_BLUEPRINT = [
     key: 'field-production',
     label: 'Field production and resources',
     vendors: ['Raken', 'Procore', 'Contractor Foreman'],
-    capabilities: ['daily field reports', 'RFIs', 'time tracking', 'production tracking', 'material tracking', 'equipment tracking', 'workforce availability', 'kiosk attendance', 'labor map'],
+    capabilities: ['daily field reports', 'RFIs', 'time tracking', 'production tracking', 'governed before/during/after photos', 'material tracking', 'equipment tracking', 'workforce availability', 'kiosk attendance', 'labor map'],
     sourceEvidence: [
       'Raken focuses on field-first daily reports, photo documentation, time tracking, production tracking, resource scheduling, material tracking and equipment management.',
       'Procore adds daywork sheets, resource tracking, timecards and equipment visibility.'
     ],
     serviceGroups: [
-      { name: 'Field capture', services: ['Progress update', 'daily field report', 'daywork / meerwerk quantities', 'photo evidence', 'time log'] },
+      { name: 'Field capture', services: ['Progress update', 'daily field report', 'daywork / meerwerk quantities', 'task-bound before/during/after photo evidence', 'time log'] },
       { name: 'Production resources', services: ['Material needs', 'tool/equipment reservation', 'equipment custody and return', 'worker availability', 'worker instruction', 'production variance'] }
     ]
   },
@@ -161,6 +161,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'equipment_custody', label: 'Equipment custody and return', table: 'equipment_custody_sessions', detailKey: 'equipmentCustody', readyStatuses: ['checked_out', 'returned', 'exception'] },
     { key: 'availability', label: 'Worker availability', table: 'worker_availability_periods', readyStatuses: ['active', 'pending_cancellation'], ledgerOnly: true },
     { key: 'evidence', label: 'Photo evidence', table: 'documents', detailKey: 'documents' },
+    { key: 'governed_photo_evidence', label: 'Released before/during/after task evidence', table: 'photo_evidence_sets', detailKey: 'photoEvidenceSets', readyStatuses: ['released'] },
     { key: 'drawing', label: 'Current field drawings', table: 'documents', detailKey: 'drawings', readyStatuses: ['current'] },
     { key: 'instructions', label: 'Worker instructions', table: 'worker_instructions', detailKey: 'workerInstructions' }
   ],
@@ -226,6 +227,11 @@ const INSTALLATION_QC_CONTROL_FORMAT = 'contractor.ai/installation-qc-control/v1
 const INSTALLATION_QC_SOURCE_FORMAT = 'contractor.ai/installation-qc-source/v1';
 const INSTALLATION_QC_STAGES = new Set(['pre_installation', 'first_work', 'in_process', 'pre_concealment', 'testing', 'final_acceptance']);
 const INSPECTION_CONTROL_POINTS = new Set(['check', 'witness', 'hold']);
+const PHOTO_EVIDENCE_SET_FORMAT = 'contractor.ai/photo-evidence-set/v1';
+const PHOTO_EVIDENCE_CAPTURE_FORMAT = 'contractor.ai/photo-evidence-capture/v1';
+const PHOTO_EVIDENCE_REVIEW_FORMAT = 'contractor.ai/photo-evidence-review/v1';
+const PHOTO_EVIDENCE_PHASES = ['before', 'during', 'after'];
+const PHOTO_EVIDENCE_PHASE_SET = new Set(PHOTO_EVIDENCE_PHASES);
 
 const BUILT_IN_INSPECTION_TEMPLATES = [
   {
@@ -5743,6 +5749,67 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           installationTemplate.updated_at
         );
       }
+    }
+  },
+  {
+    version: '065_governed_photo_evidence',
+    description: 'Bind before, during, and after photographic evidence to retained tasks, assigned workers, private checksummed documents, exact field capture, independent approval, and task completion gates.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_evidence_sets (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES job_tasks(id) ON DELETE RESTRICT,
+          assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE RESTRICT,
+          assigned_worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+          title TEXT NOT NULL,
+          work_location TEXT NOT NULL,
+          required_phases_json TEXT NOT NULL DEFAULT '["before","during","after"]',
+          status TEXT NOT NULL DEFAULT 'scheduled',
+          latest_approval_id TEXT REFERENCES approvals(id) ON DELETE SET NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          released_at TEXT,
+          released_by TEXT,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_photo_evidence_set_job_status
+          ON photo_evidence_sets(job_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_photo_evidence_set_task_status
+          ON photo_evidence_sets(task_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_photo_evidence_set_worker_status
+          ON photo_evidence_sets(assigned_worker_id, status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS photo_evidence_captures (
+          id TEXT PRIMARY KEY,
+          set_id TEXT NOT NULL REFERENCES photo_evidence_sets(id) ON DELETE CASCADE,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES job_tasks(id) ON DELETE RESTRICT,
+          document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE RESTRICT,
+          phase TEXT NOT NULL,
+          captured_at TEXT NOT NULL,
+          captured_by_worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+          caption TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(set_id, document_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_photo_evidence_capture_set_phase
+          ON photo_evidence_captures(set_id, phase, captured_at DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_photo_evidence_capture_worker
+          ON photo_evidence_captures(captured_by_worker_id, captured_at DESC);
+      `);
     }
   }
 ];
@@ -17040,6 +17107,30 @@ class ContractorOperatingLedger {
           photoCount: normalizeList(progress.photos).length,
           createdAt: progress.createdAt
         })),
+        photoEvidenceSets: (detail.photoEvidenceSets || []).map(set => ({
+          id: set.id,
+          taskId: set.taskId,
+          title: set.title,
+          workLocation: set.workLocation,
+          status: set.status,
+          effectiveStatus: set.effectiveStatus,
+          cycleNumber: set.currentCycle,
+          sourceHash: set.sourceHash,
+          snapshotHash: set.snapshotHash,
+          latestApprovalId: set.latestApprovalId,
+          releasedAt: set.releasedAt,
+          releasedBy: set.releasedBy,
+          captures: (set.captures || []).map(capture => ({
+            id: capture.id,
+            phase: capture.phase,
+            capturedAt: capture.capturedAt,
+            caption: compactText(capture.caption),
+            documentId: capture.documentId,
+            contentHash: capture.document?.contentHash || null,
+            sourceHash: capture.sourceHash,
+            snapshotHash: capture.snapshotHash
+          }))
+        })),
         tasks: (detail.tasks || []).filter(task => normalizeStatus(task.status, '') === 'completed').map(task => ({
           ...recordBase(task),
           priority: task.priority,
@@ -17174,6 +17265,12 @@ class ContractorOperatingLedger {
       || (item.installationQc && item.installationQc.readyForTaskCompletion !== true)
     ));
     if (openInspections.length) blockers.push({ code: 'open_inspections', label: `${openInspections.length} inspection(s) remain open`, recordIds: openInspections.map(item => item.id) });
+    const unreleasedPhotoEvidence = (detail.photoEvidenceSets || []).filter(set => set.readyForTaskCompletion !== true);
+    if (unreleasedPhotoEvidence.length) blockers.push({
+      code: 'photo_evidence_not_released',
+      label: `${unreleasedPhotoEvidence.length} governed photo-evidence set(s) remain incomplete, stale, or unapproved`,
+      recordIds: unreleasedPhotoEvidence.map(set => set.id)
+    });
     const currentPermits = (detail.permits || []).filter(item => {
       if (closed(item, ['cancelled', 'canceled', 'rejected', 'void'])) return false;
       const expired = item.expiresAt && Date.parse(item.expiresAt) < Date.now();
@@ -27674,6 +27771,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
         if (!['completed', 'cancelled'].includes(taskRow.status)) {
           this.assertTaskInstallationQcReady(jobId, row.linked_task_id);
+          this.assertTaskPhotoEvidenceReady(jobId, row.linked_task_id);
           const beforeTask = this.mapTask(taskRow);
           this.db.prepare(`
             UPDATE job_tasks
@@ -35956,6 +36054,704 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return controls;
   }
 
+  buildPhotoEvidenceSetSource(jobId, payload = {}, options = {}) {
+    const taskId = normalizeText(payload.taskId || payload.task_id, '');
+    const assignmentId = normalizeText(payload.assignmentId || payload.assignment_id, '');
+    const workerId = normalizeText(
+      payload.assignedWorkerId || payload.assigned_worker_id || payload.workerId || payload.worker_id,
+      ''
+    );
+    const task = this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, jobId);
+    if (!task) {
+      throw ledgerInputError('photo_evidence_task_required', 'Photo evidence requires a retained task on the same job.', { jobId, taskId }, 409);
+    }
+    if (options.requireOperational !== false && ['completed', 'cancelled', 'canceled'].includes(normalizeStatus(task.status, 'open'))) {
+      throw ledgerInputError('photo_evidence_task_closed', 'Photo evidence cannot be scheduled against a completed or cancelled task.', { jobId, taskId, status: task.status }, 409);
+    }
+    const assignment = this.db.prepare(`
+      SELECT assignments.*, workers.name AS worker_name, workers.status AS worker_status
+      FROM assignments
+      JOIN workers ON workers.id = assignments.worker_id
+      WHERE assignments.id = ? AND assignments.job_id = ? AND assignments.worker_id = ?
+    `).get(assignmentId, jobId, workerId);
+    if (!assignment) {
+      throw ledgerInputError(
+        'photo_evidence_assignment_required',
+        'Photo evidence requires an assigned worker with a retained assignment to this job.',
+        { jobId, taskId, assignmentId, workerId },
+        409
+      );
+    }
+    if (options.requireOperational !== false && (
+      !this.activeAssignmentStatus(assignment.status)
+      || normalizeStatus(assignment.status, '') === 'pending_approval'
+      || fromJson(assignment.data_json, {}).requiresApproval === true
+    )) {
+      throw ledgerInputError(
+        'photo_evidence_assignment_inactive',
+        'Photo evidence requires an active approved worker assignment.',
+        { jobId, assignmentId, workerId, status: assignment.status },
+        409
+      );
+    }
+    if (options.requireOperational !== false && ['retired', 'inactive', 'offline'].includes(normalizeStatus(assignment.worker_status, 'available'))) {
+      throw ledgerInputError(
+        'photo_evidence_worker_unavailable',
+        'The assigned photo-evidence worker is no longer available.',
+        { jobId, assignmentId, workerId, status: assignment.worker_status },
+        409
+      );
+    }
+    if (task.assignee_id && String(task.assignee_id) !== String(workerId)) {
+      throw ledgerInputError(
+        'photo_evidence_task_assignee_mismatch',
+        'The photo-evidence worker must match the retained task assignee.',
+        { jobId, taskId, taskAssigneeId: task.assignee_id, workerId },
+        409
+      );
+    }
+    const title = normalizeText(payload.title, '');
+    if (title.length < 3 || title.length > 240) {
+      throw ledgerInputError('photo_evidence_title_invalid', 'Photo evidence title must be between 3 and 240 characters.');
+    }
+    const workLocation = normalizeText(payload.workLocation || payload.work_location || payload.location, '');
+    if (workLocation.length < 2 || workLocation.length > 240) {
+      throw ledgerInputError('photo_evidence_location_invalid', 'Photo evidence work location must be between 2 and 240 characters.');
+    }
+    const requestedPhases = normalizeList(payload.requiredPhases || payload.required_phases);
+    const requiredPhases = requestedPhases.length
+      ? PHOTO_EVIDENCE_PHASES.filter(phase => requestedPhases.includes(phase))
+      : [...PHOTO_EVIDENCE_PHASES];
+    if (
+      requiredPhases.length !== PHOTO_EVIDENCE_PHASES.length
+      || requiredPhases.some((phase, index) => phase !== PHOTO_EVIDENCE_PHASES[index])
+    ) {
+      throw ledgerInputError(
+        'photo_evidence_phases_invalid',
+        'Governed photo evidence requires the complete before, during, and after sequence.'
+      );
+    }
+    const source = {
+      format: PHOTO_EVIDENCE_SET_FORMAT,
+      jobId,
+      task: {
+        id: task.id,
+        title: task.title,
+        assigneeId: task.assignee_id || null
+      },
+      assignment: {
+        id: assignment.id,
+        workerId: assignment.worker_id
+      },
+      worker: {
+        id: assignment.worker_id,
+        name: assignment.worker_name
+      },
+      title,
+      workLocation,
+      requiredPhases
+    };
+    return {
+      source,
+      sourceHash: sha256Json(source),
+      task,
+      assignment,
+      title,
+      workLocation,
+      requiredPhases
+    };
+  }
+
+  createPhotoEvidenceSet(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('photo_evidence_entry_key_invalid', 'Photo evidence scheduling requires a retry key containing 8 to 200 safe characters.');
+      }
+      const source = this.buildPhotoEvidenceSetSource(jobId, payload);
+      const entryFingerprint = sha256Json({
+        jobId,
+        sourceHash: source.sourceHash,
+        notes: normalizeText(payload.notes || payload.note, '') || null
+      });
+      const id = `photo_set_${sha256Text(`${jobId}\0${entryKey}`).slice(0, 24)}`;
+      const existing = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ? OR entry_key = ?').get(id, entryKey);
+      if (existing) {
+        if (existing.job_id !== jobId || existing.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError(
+            'photo_evidence_entry_key_conflict',
+            'This photo-evidence retry key is already bound to different task, worker, location, or notes.',
+            { entryKey },
+            409
+          );
+        }
+        return { ...this.mapPhotoEvidenceSet(existing), replayed: true };
+      }
+      const timestamp = nowIso();
+      const snapshot = {
+        format: PHOTO_EVIDENCE_SET_FORMAT,
+        photoEvidenceSetId: id,
+        jobId,
+        source: source.source,
+        sourceHash: source.sourceHash,
+        entryFingerprint,
+        scheduledAt: timestamp
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO photo_evidence_sets (
+          id, job_id, task_id, assignment_id, assigned_worker_id, title, work_location,
+          required_phases_json, status, latest_approval_id, source_hash, snapshot_json,
+          snapshot_hash, released_at, released_by, entry_key, entry_fingerprint,
+          data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        jobId,
+        source.task.id,
+        source.assignment.id,
+        source.assignment.worker_id,
+        source.title,
+        source.workLocation,
+        toJson(source.requiredPhases),
+        source.sourceHash,
+        snapshotJson,
+        snapshotHash,
+        entryKey,
+        entryFingerprint,
+        toJson({
+          currentCycle: 1,
+          notes: normalizeText(payload.notes || payload.note, '') || null,
+          scheduledBy: actor,
+          externalCommitments: 0
+        }),
+        timestamp,
+        timestamp
+      );
+      const taskData = fromJson(source.task.data_json, {});
+      this.db.prepare('UPDATE job_tasks SET data_json = ?, updated_at = ? WHERE id = ? AND job_id = ?')
+        .run(toJson({ ...taskData, photoEvidenceRequired: true }), timestamp, source.task.id, jobId);
+      const photoEvidenceSet = this.mapPhotoEvidenceSet(
+        this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ?').get(id)
+      );
+      this.audit({
+        entityType: 'photo_evidence_set',
+        entityId: id,
+        jobId,
+        action: 'schedule_photo_evidence',
+        actor,
+        after: photoEvidenceSet,
+        metadata: {
+          taskId: source.task.id,
+          assignmentId: source.assignment.id,
+          assignedWorkerId: source.assignment.worker_id,
+          sourceHash: source.sourceHash,
+          requiredPhases: source.requiredPhases,
+          externalCommitments: 0
+        }
+      });
+      return photoEvidenceSet;
+    });
+  }
+
+  getPhotoEvidenceSet(setId, options = {}) {
+    const row = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ?').get(String(setId || ''));
+    if (!row || (options.jobId && row.job_id !== options.jobId)) {
+      throw ledgerInputError('photo_evidence_set_not_found', 'The requested photo-evidence set was not found.', { setId }, 404);
+    }
+    return this.mapPhotoEvidenceSet(row);
+  }
+
+  listPhotoEvidenceSets(filters = {}) {
+    const clauses = [];
+    const parameters = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('job_id = ?');
+      parameters.push(filters.jobId || filters.job_id);
+    }
+    if (filters.taskId || filters.task_id) {
+      clauses.push('task_id = ?');
+      parameters.push(filters.taskId || filters.task_id);
+    }
+    if (filters.workerId || filters.worker_id) {
+      clauses.push('assigned_worker_id = ?');
+      parameters.push(filters.workerId || filters.worker_id);
+    }
+    if (filters.status && filters.status !== 'all') {
+      clauses.push('status = ?');
+      parameters.push(normalizeStatus(filters.status, 'scheduled'));
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = Math.min(Math.max(Number(filters.limit || 500), 1), 5000);
+    return this.db.prepare(`
+      SELECT * FROM photo_evidence_sets
+      ${where}
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT ?
+    `).all(...parameters, limit).map(row => this.mapPhotoEvidenceSet(row));
+  }
+
+  listPhotoEvidenceCaptures(filters = {}) {
+    const clauses = [];
+    const parameters = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('job_id = ?');
+      parameters.push(filters.jobId || filters.job_id);
+    }
+    if (filters.setId || filters.set_id) {
+      clauses.push('set_id = ?');
+      parameters.push(filters.setId || filters.set_id);
+    }
+    if (filters.workerId || filters.worker_id) {
+      clauses.push('captured_by_worker_id = ?');
+      parameters.push(filters.workerId || filters.worker_id);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = Math.min(Math.max(Number(filters.limit || 1000), 1), 20_000);
+    return this.db.prepare(`
+      SELECT * FROM photo_evidence_captures
+      ${where}
+      ORDER BY captured_at DESC, created_at DESC
+      LIMIT ?
+    `).all(...parameters, limit).map(row => this.mapPhotoEvidenceCapture(row));
+  }
+
+  recordPhotoEvidenceCapture(jobId, setId, documentId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('photo_evidence_capture_entry_key_invalid', 'Photo capture requires a retry key containing 8 to 200 safe characters.');
+      }
+      const setRow = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ? AND job_id = ?').get(setId, jobId);
+      if (!setRow) {
+        throw ledgerInputError('photo_evidence_set_not_found', 'The requested photo-evidence set was not found for this job.', { setId, jobId }, 404);
+      }
+      const existing = this.db.prepare('SELECT * FROM photo_evidence_captures WHERE entry_key = ?').get(entryKey);
+      const phase = normalizeStatus(payload.phase || payload.evidencePhase || payload.evidence_phase, '');
+      if (!PHOTO_EVIDENCE_PHASE_SET.has(phase)) {
+        throw ledgerInputError('photo_evidence_phase_invalid', 'Photo evidence phase must be before, during, or after.');
+      }
+      const caption = normalizeText(payload.caption || payload.notes || payload.note, '');
+      if (caption.length < 3 || caption.length > 600) {
+        throw ledgerInputError('photo_evidence_caption_invalid', 'Photo evidence caption must be between 3 and 600 characters.');
+      }
+      const capturedAtInput = normalizeText(payload.capturedAt || payload.captured_at, '');
+      const capturedAtDate = new Date(capturedAtInput);
+      if (!capturedAtInput || Number.isNaN(capturedAtDate.getTime())) {
+        throw ledgerInputError('photo_evidence_capture_time_required', 'Photo evidence requires a valid device capture time.');
+      }
+      if (capturedAtDate.getTime() > Date.now() + 5 * 60 * 1000) {
+        throw ledgerInputError('photo_evidence_capture_time_future', 'Photo evidence capture time cannot be in the future.');
+      }
+      const capturedAt = capturedAtDate.toISOString();
+      const setData = fromJson(setRow.data_json, {});
+      const currentCycle = Math.max(1, Number(setData.currentCycle || 1)) + (setRow.status === 'rejected' ? 1 : 0);
+      const assignedWorkerId = setRow.assigned_worker_id;
+      const capturedByWorkerId = normalizeText(
+        payload.capturedByWorkerId || payload.captured_by_worker_id || options.workerId || assignedWorkerId,
+        ''
+      );
+      if (capturedByWorkerId !== assignedWorkerId) {
+        throw ledgerInputError(
+          'photo_evidence_worker_scope_forbidden',
+          'Only the retained assigned worker can record this governed photo evidence.',
+          { setId, assignedWorkerId },
+          403
+        );
+      }
+      if (options.enforceWorkerScope === true && String(options.workerId || '') !== String(assignedWorkerId)) {
+        throw ledgerInputError(
+          'photo_evidence_worker_scope_forbidden',
+          'Only the retained assigned worker can record this governed photo evidence.',
+          { setId, assignedWorkerId },
+          403
+        );
+      }
+      const documentRow = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+      if (!documentRow) {
+        throw ledgerInputError('photo_evidence_document_invalid', 'Photo evidence requires a retained document from the same job.', { documentId, jobId }, 404);
+      }
+      const documentData = fromJson(documentRow.data_json, {});
+      const mimeType = normalizeStatus(documentRow.mime_type, '');
+      const contentHash = normalizeText(documentData.analysis?.upload?.sha256 || documentData.contentHash, '');
+      if (
+        documentRow.type !== 'photo'
+        || !mimeType.startsWith('image/')
+        || !['stored', 'needs_review'].includes(normalizeStatus(documentRow.status, ''))
+        || !/^[a-f0-9]{64}$/i.test(contentHash)
+      ) {
+        throw ledgerInputError(
+          'photo_evidence_document_invalid',
+          'Governed photo evidence requires a private retained image with a valid SHA-256 checksum.',
+          { documentId, type: documentRow.type, mimeType, status: documentRow.status },
+          409
+        );
+      }
+      if (existing) {
+        const existingCycle = Math.max(1, Number(fromJson(existing.data_json, {}).cycleNumber || 1));
+        const existingFingerprint = sha256Json({
+          jobId,
+          setId,
+          taskId: setRow.task_id,
+          documentId,
+          phase,
+          capturedAt,
+          capturedByWorkerId,
+          caption,
+          contentHash,
+          cycleNumber: existingCycle
+        });
+        if (existing.entry_fingerprint !== existingFingerprint) {
+          throw ledgerInputError(
+            'photo_evidence_capture_entry_key_conflict',
+            'This photo capture retry key is already bound to different retained evidence.',
+            { entryKey },
+            409
+          );
+        }
+        return {
+          capture: { ...this.mapPhotoEvidenceCapture(existing), replayed: true },
+          photoEvidenceSet: this.getPhotoEvidenceSet(setId, { jobId }),
+          replayed: true
+        };
+      }
+      const set = this.mapPhotoEvidenceSet(setRow);
+      if (set.integrityValid !== true || set.sourceCurrent !== true) {
+        throw ledgerInputError(
+          'photo_evidence_source_stale',
+          'Photo evidence cannot be captured because its retained task, assignment, worker, or location source is stale.',
+          { setId, integrityValid: set.integrityValid, sourceCurrent: set.sourceCurrent },
+          409
+        );
+      }
+      if (['captures_complete', 'pending_review', 'released'].includes(setRow.status)) {
+        throw ledgerInputError(
+          'photo_evidence_capture_locked',
+          'Photo evidence is locked after the sequence is complete, while review is pending, or after release.',
+          { setId, status: setRow.status },
+          409
+        );
+      }
+      if (setRow.status === 'rejected' && phase !== 'before') {
+        throw ledgerInputError(
+          'photo_evidence_new_cycle_before_required',
+          'A rejected photo-evidence set must restart with a new before photo.',
+          { setId, nextCycle: currentCycle },
+          409
+        );
+      }
+      const cycleRows = this.db.prepare(`
+        SELECT * FROM photo_evidence_captures
+        WHERE set_id = ?
+        ORDER BY captured_at ASC, created_at ASC
+      `).all(setId).filter(row => Number(fromJson(row.data_json, {}).cycleNumber || 1) === currentCycle);
+      const latestByPhase = new Map();
+      for (const row of cycleRows) latestByPhase.set(row.phase, row);
+      const phaseIndex = PHOTO_EVIDENCE_PHASES.indexOf(phase);
+      if (latestByPhase.has(phase)) {
+        throw ledgerInputError(
+          'photo_evidence_phase_already_captured',
+          `${phase} photographic evidence is already retained for this cycle.`,
+          { setId, phase, cycleNumber: currentCycle },
+          409
+        );
+      }
+      const retainedLaterPhase = PHOTO_EVIDENCE_PHASES
+        .slice(phaseIndex + 1)
+        .find(retainedPhase => latestByPhase.has(retainedPhase));
+      if (retainedLaterPhase) {
+        throw ledgerInputError(
+          'photo_evidence_sequence_invalid',
+          `${phase} photographic evidence cannot be added after ${retainedLaterPhase} evidence in the same cycle.`,
+          { setId, phase, retainedLaterPhase, cycleNumber: currentCycle },
+          409
+        );
+      }
+      const missingPriorPhase = PHOTO_EVIDENCE_PHASES.slice(0, phaseIndex).find(required => !latestByPhase.has(required));
+      if (missingPriorPhase) {
+        throw ledgerInputError(
+          'photo_evidence_sequence_invalid',
+          `${missingPriorPhase} photographic evidence must be retained before ${phase} evidence.`,
+          { setId, phase, missingPriorPhase, cycleNumber: currentCycle },
+          409
+        );
+      }
+      const priorTimes = PHOTO_EVIDENCE_PHASES.slice(0, phaseIndex)
+        .map(required => Date.parse(latestByPhase.get(required)?.captured_at || ''))
+        .filter(Number.isFinite);
+      if (priorTimes.some(value => value > capturedAtDate.getTime())) {
+        throw ledgerInputError(
+          'photo_evidence_chronology_invalid',
+          'Photo evidence capture time must follow the retained earlier phases.',
+          { setId, phase, capturedAt, cycleNumber: currentCycle },
+          409
+        );
+      }
+      const entryFingerprint = sha256Json({
+        jobId,
+        setId,
+        taskId: setRow.task_id,
+        documentId,
+        phase,
+        capturedAt,
+        capturedByWorkerId,
+        caption,
+        contentHash,
+        cycleNumber: currentCycle
+      });
+      const id = `photo_capture_${sha256Text(`${setId}\0${entryKey}`).slice(0, 24)}`;
+      const source = {
+        format: PHOTO_EVIDENCE_CAPTURE_FORMAT,
+        photoEvidenceSetId: setId,
+        photoEvidenceSetSourceHash: setRow.source_hash,
+        jobId,
+        taskId: setRow.task_id,
+        document: {
+          id: documentRow.id,
+          filename: documentRow.filename,
+          mimeType: documentRow.mime_type,
+          sizeBytes: normalizeNumber(documentRow.size_bytes, 0),
+          contentHash
+        },
+        phase,
+        capturedAt,
+        capturedByWorkerId,
+        caption,
+        cycleNumber: currentCycle
+      };
+      const sourceHash = sha256Json(source);
+      const timestamp = nowIso();
+      const snapshot = {
+        format: PHOTO_EVIDENCE_CAPTURE_FORMAT,
+        photoEvidenceCaptureId: id,
+        source,
+        sourceHash,
+        entryFingerprint,
+        retainedAt: timestamp
+      };
+      const snapshotJson = toJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO photo_evidence_captures (
+          id, set_id, job_id, task_id, document_id, phase, captured_at,
+          captured_by_worker_id, caption, source_hash, snapshot_json, snapshot_hash,
+          entry_key, entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        setId,
+        jobId,
+        setRow.task_id,
+        documentId,
+        phase,
+        capturedAt,
+        capturedByWorkerId,
+        caption,
+        sourceHash,
+        snapshotJson,
+        snapshotHash,
+        entryKey,
+        entryFingerprint,
+        toJson({
+          cycleNumber: currentCycle,
+          capturedByActor: actor,
+          private: true,
+          externalCommitments: 0
+        }),
+        timestamp,
+        timestamp
+      );
+      latestByPhase.set(phase, { phase });
+      const complete = PHOTO_EVIDENCE_PHASES.every(required => latestByPhase.has(required));
+      this.db.prepare(`
+        UPDATE photo_evidence_sets
+        SET status = ?, latest_approval_id = NULL, released_at = NULL, released_by = NULL,
+            data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ?
+      `).run(
+        complete ? 'captures_complete' : 'capturing',
+        toJson({
+          ...setData,
+          currentCycle,
+          lastCaptureId: id,
+          lastCapturedAt: capturedAt,
+          priorRejectedApprovalId: setRow.status === 'rejected' ? setRow.latest_approval_id || null : setData.priorRejectedApprovalId || null
+        }),
+        timestamp,
+        setId,
+        jobId
+      );
+      const capture = this.mapPhotoEvidenceCapture(
+        this.db.prepare('SELECT * FROM photo_evidence_captures WHERE id = ?').get(id)
+      );
+      const photoEvidenceSet = this.getPhotoEvidenceSet(setId, { jobId });
+      this.audit({
+        entityType: 'photo_evidence_capture',
+        entityId: id,
+        jobId,
+        action: 'record_photo_evidence_capture',
+        actor,
+        after: capture,
+        metadata: {
+          photoEvidenceSetId: setId,
+          taskId: setRow.task_id,
+          documentId,
+          phase,
+          cycleNumber: currentCycle,
+          sourceHash,
+          privateEvidence: true,
+          externalCommitments: 0
+        }
+      });
+      return { capture, photoEvidenceSet, replayed: false };
+    });
+  }
+
+  requestPhotoEvidenceReview(jobId, setId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('photo_evidence_review_entry_key_invalid', 'Photo evidence review requires a retry key containing 8 to 200 safe characters.');
+      }
+      const row = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ? AND job_id = ?').get(setId, jobId);
+      if (!row) {
+        throw ledgerInputError('photo_evidence_set_not_found', 'The requested photo-evidence set was not found for this job.', { setId, jobId }, 404);
+      }
+      const priorApproval = this.db.prepare(`
+        SELECT * FROM approvals
+        WHERE target_type = 'photo_evidence_set' AND target_id = ?
+        ORDER BY created_at DESC
+      `).all(setId).find(approval => fromJson(approval.data_json, {}).entryKey === entryKey);
+      if (priorApproval) {
+        return {
+          photoEvidenceSet: this.getPhotoEvidenceSet(setId, { jobId }),
+          approval: this.mapApproval(priorApproval),
+          replayed: true
+        };
+      }
+      const photoEvidenceSet = this.mapPhotoEvidenceSet(row);
+      if (photoEvidenceSet.integrityValid !== true || photoEvidenceSet.sourceCurrent !== true) {
+        throw ledgerInputError(
+          'photo_evidence_source_stale',
+          'Photo evidence cannot enter review because its retained task, assignment, worker, or location source is stale.',
+          { setId, integrityValid: photoEvidenceSet.integrityValid, sourceCurrent: photoEvidenceSet.sourceCurrent },
+          409
+        );
+      }
+      if (row.status !== 'captures_complete' || photoEvidenceSet.complete !== true) {
+        throw ledgerInputError(
+          'photo_evidence_sequence_incomplete',
+          'Before, during, and after photographic evidence must be retained in sequence before review.',
+          { setId, missingPhases: photoEvidenceSet.missingPhases, cycleNumber: photoEvidenceSet.currentCycle },
+          409
+        );
+      }
+      if (photoEvidenceSet.captures.some(capture => capture.integrityValid !== true)) {
+        throw ledgerInputError('photo_evidence_integrity_invalid', 'One or more retained photo captures failed integrity verification.', { setId }, 409);
+      }
+      const reviewSnapshot = {
+        format: PHOTO_EVIDENCE_REVIEW_FORMAT,
+        photoEvidenceSetId: setId,
+        jobId,
+        taskId: row.task_id,
+        sourceHash: row.source_hash,
+        cycleNumber: photoEvidenceSet.currentCycle,
+        captures: photoEvidenceSet.captures.map(capture => ({
+          id: capture.id,
+          phase: capture.phase,
+          capturedAt: capture.capturedAt,
+          documentId: capture.documentId,
+          sourceHash: capture.sourceHash,
+          snapshotHash: capture.snapshotHash
+        }))
+      };
+      const reviewSnapshotHash = sha256Json(reviewSnapshot);
+      const approvalId = `approval_${sha256Text(`photo-evidence-review:${setId}\0${entryKey}`).slice(0, 24)}`;
+      const approval = this.createApproval({
+        id: approvalId,
+        targetType: 'photo_evidence_set',
+        targetId: setId,
+        jobId,
+        approvalType: 'photo_evidence_review',
+        requestedBy: actor,
+        summary: `Review before/during/after evidence: ${row.title}`,
+        data: {
+          entryKey,
+          requestedBy: actor,
+          reviewSnapshot,
+          reviewSnapshotHash,
+          captureActorIds: [...new Set(photoEvidenceSet.captures.map(capture => capture.capturedByActor).filter(Boolean))],
+          externalCommitments: 0
+        }
+      }, { actor });
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE photo_evidence_sets
+        SET status = 'pending_review', latest_approval_id = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND job_id = ? AND status = 'captures_complete'
+      `).run(
+        approval.id,
+        toJson({
+          ...fromJson(row.data_json, {}),
+          latestReviewSnapshotHash: reviewSnapshotHash,
+          latestReviewRequestedAt: timestamp,
+          latestReviewRequestedBy: actor
+        }),
+        timestamp,
+        setId,
+        jobId
+      );
+      const after = this.getPhotoEvidenceSet(setId, { jobId });
+      this.audit({
+        entityType: 'photo_evidence_set',
+        entityId: setId,
+        jobId,
+        action: 'request_photo_evidence_review',
+        actor,
+        before: photoEvidenceSet,
+        after,
+        metadata: {
+          approvalId: approval.id,
+          reviewSnapshotHash,
+          cycleNumber: photoEvidenceSet.currentCycle,
+          externalCommitments: 0
+        }
+      });
+      return { photoEvidenceSet: after, approval, replayed: false };
+    });
+  }
+
+  assertTaskPhotoEvidenceReady(jobId, taskId) {
+    const sets = this.listPhotoEvidenceSets({ jobId, taskId, limit: 500 });
+    const blockers = sets.filter(set => set.readyForTaskCompletion !== true);
+    if (blockers.length) {
+      throw ledgerInputError(
+        'task_photo_evidence_hold',
+        'Task completion is blocked until every scheduled photo-evidence set has source-current, checksum-protected before, during, and after captures with independent approval.',
+        {
+          jobId,
+          taskId,
+          blockers: blockers.map(set => ({
+            photoEvidenceSetId: set.id,
+            status: set.effectiveStatus,
+            sourceCurrent: set.sourceCurrent,
+            integrityValid: set.integrityValid,
+            missingPhases: set.missingPhases
+          }))
+        },
+        409
+      );
+    }
+    return sets;
+  }
+
   listInspectionTemplates(filters = {}) {
     const includeSuperseded = filters.includeSuperseded === true || filters.include_superseded === true;
     const discipline = normalizeStatus(filters.discipline, '');
@@ -41167,7 +41963,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             error.code = 'task_transition_evidence_required';
             throw error;
           }
-          if (requestedStatus === 'completed') this.assertTaskInstallationQcReady(jobId, row.id);
+          if (requestedStatus === 'completed') {
+            this.assertTaskInstallationQcReady(jobId, row.id);
+            this.assertTaskPhotoEvidenceReady(jobId, row.id);
+          }
         },
         update(row, next) {
           const completed = next.data.requestedStatus === 'completed';
@@ -43969,6 +44768,113 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return control;
   }
 
+  validatePhotoEvidenceApproval(approvalRow, payload = {}, options = {}) {
+    if (approvalRow?.target_type !== 'photo_evidence_set') return null;
+    const row = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ?').get(approvalRow.target_id);
+    if (!row) {
+      throw ledgerInputError('photo_evidence_set_not_found', 'The photo-evidence set for this approval no longer exists.', { setId: approvalRow.target_id }, 409);
+    }
+    const photoEvidenceSet = this.mapPhotoEvidenceSet(row);
+    if (photoEvidenceSet.latestApprovalId !== approvalRow.id || row.status !== 'pending_review') {
+      throw ledgerInputError(
+        'photo_evidence_latest_review_required',
+        'Only the latest pending photo-evidence review can be resolved.',
+        { setId: row.id, latestApprovalId: photoEvidenceSet.latestApprovalId },
+        409
+      );
+    }
+    const reason = normalizeText(payload.reason || payload.notes, '');
+    if (reason.length < 4) {
+      throw ledgerInputError('photo_evidence_approval_reason_required', 'Photo-evidence approval requires an explicit review reason.');
+    }
+    const resolver = normalizeText(payload.resolvedBy || payload.actor || options.actor, 'user');
+    const approvalData = fromJson(approvalRow.data_json, {});
+    const captureActors = new Set(normalizeList(approvalData.captureActorIds).map(value => normalizeText(value, '')).filter(Boolean));
+    if (
+      options.enforceSeparation === true
+      && (resolver === normalizeText(approvalRow.requested_by, '') || captureActors.has(resolver))
+    ) {
+      throw ledgerInputError(
+        'photo_evidence_independent_approval_required',
+        'Photo evidence must be approved by a different authenticated operator than the field capturer and review requester.',
+        { setId: row.id, requestedBy: approvalRow.requested_by, captureActors: [...captureActors] },
+        409
+      );
+    }
+    const resolutionStatus = normalizeStatus(payload.status || payload.decision, 'approved');
+    if (resolutionStatus !== 'approved') return photoEvidenceSet;
+    if (
+      photoEvidenceSet.integrityValid !== true
+      || photoEvidenceSet.captureIntegrityValid !== true
+      || photoEvidenceSet.reviewIntegrityValid !== true
+    ) {
+      throw ledgerInputError('photo_evidence_integrity_invalid', 'Photo-evidence retained data failed integrity verification.', { setId: row.id }, 409);
+    }
+    if (photoEvidenceSet.sourceCurrent !== true) {
+      throw ledgerInputError('photo_evidence_source_stale', 'Photo evidence cannot release while its task, assignment, worker, or location source is stale.', { setId: row.id }, 409);
+    }
+    if (photoEvidenceSet.complete !== true) {
+      throw ledgerInputError(
+        'photo_evidence_sequence_incomplete',
+        'Before, during, and after photographic evidence must remain complete and chronological at approval.',
+        { setId: row.id, missingPhases: photoEvidenceSet.missingPhases },
+        409
+      );
+    }
+    return photoEvidenceSet;
+  }
+
+  applyPhotoEvidenceApproval(setId, timestamp = nowIso()) {
+    const row = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ?').get(setId);
+    if (!row) {
+      throw ledgerInputError('photo_evidence_set_not_found', 'The photo-evidence set for this approval no longer exists.', { setId }, 409);
+    }
+    const approval = row.latest_approval_id
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND status = 'approved'").get(row.latest_approval_id)
+      : null;
+    if (!approval) {
+      throw ledgerInputError('photo_evidence_approval_missing', 'The approved photo-evidence review could not be loaded.', { setId }, 409);
+    }
+    const before = this.mapPhotoEvidenceSet(row);
+    const actor = approval.resolved_by || approval.requested_by || 'approval';
+    this.db.prepare(`
+      UPDATE photo_evidence_sets
+      SET status = 'released', released_at = ?, released_by = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_review'
+    `).run(
+      timestamp,
+      actor,
+      toJson({
+        ...fromJson(row.data_json, {}),
+        release: {
+          approvalId: approval.id,
+          releasedAt: timestamp,
+          releasedBy: actor,
+          reason: approval.reason || null
+        }
+      }),
+      timestamp,
+      setId
+    );
+    const after = this.getPhotoEvidenceSet(setId, { jobId: row.job_id });
+    this.audit({
+      entityType: 'photo_evidence_set',
+      entityId: setId,
+      jobId: row.job_id,
+      action: 'release_photo_evidence',
+      actor,
+      before,
+      after,
+      metadata: {
+        approvalId: approval.id,
+        cycleNumber: after.currentCycle,
+        captureIds: after.captures.map(capture => capture.id),
+        externalCommitments: 0
+      }
+    });
+    return after;
+  }
+
   resolveApproval(approvalId, payload = {}, options = {}) {
     return this.transaction(() => {
       const before = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId);
@@ -43983,7 +44889,15 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.statusCode = 400;
         throw error;
       }
+      if (before.status !== 'pending') {
+        if (before.status === status) return this.mapApproval(before);
+        const error = new Error(`Approval was already resolved as ${before.status}`);
+        error.statusCode = 409;
+        error.code = 'approval_already_resolved';
+        throw error;
+      }
       if (status === 'approved') this.validateInstallationQcApproval(before, payload, options);
+      if (before.target_type === 'photo_evidence_set') this.validatePhotoEvidenceApproval(before, payload, options);
       if (status === 'approved' && before.target_type === 'supplier_invoice') {
         const supplierInvoice = this.db.prepare('SELECT data_json FROM supplier_invoices WHERE id = ?').get(before.target_id);
         const matchExceptions = fromJson(supplierInvoice?.data_json, {}).match?.exceptions || [];
@@ -43994,13 +44908,6 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             'Approving a supplier invoice with match exceptions requires an explicit override reason.'
           );
         }
-      }
-      if (before.status !== 'pending') {
-        if (before.status === status) return this.mapApproval(before);
-        const error = new Error(`Approval was already resolved as ${before.status}`);
-        error.statusCode = 409;
-        error.code = 'approval_already_resolved';
-        throw error;
       }
       if (status === 'approved' && before.job_id && !['job_archive', 'job_restore'].includes(before.target_type)) {
         this.requireJob(before.job_id);
@@ -44026,6 +44933,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           actor: payload.resolvedBy || payload.actor || options.actor || 'user',
           reason: payload.reason || payload.notes || null
         });
+      } else if (before.target_type === 'photo_evidence_set') {
+        const row = this.db.prepare('SELECT * FROM photo_evidence_sets WHERE id = ?').get(before.target_id);
+        if (row && row.latest_approval_id === before.id) {
+          this.db.prepare(`
+            UPDATE photo_evidence_sets
+            SET status = 'rejected', released_at = NULL, released_by = NULL,
+                data_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(
+            toJson({
+              ...fromJson(row.data_json, {}),
+              rejection: {
+                approvalId: before.id,
+                status,
+                resolvedAt: timestamp,
+                resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+                reason: payload.reason || payload.notes || null
+              }
+            }),
+            timestamp,
+            before.target_id
+          );
+        }
       } else if (before.target_type === 'change_order') {
         const changeOrder = this.db.prepare('SELECT data_json FROM change_orders WHERE id = ?').get(before.target_id);
         if (changeOrder) {
@@ -45024,7 +45954,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   applyApprovalTarget(targetType, targetId) {
     const timestamp = nowIso();
-    if (targetType === 'bid_package_selection') {
+    if (targetType === 'photo_evidence_set') {
+      this.applyPhotoEvidenceApproval(targetId, timestamp);
+    } else if (targetType === 'bid_package_selection') {
       this.applyBidPackageSelection(targetId, timestamp);
     } else if (targetType === 'quote') {
       this.assertQuoteCommercialScopeCurrent(targetId);
@@ -50111,6 +51043,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       lmraAssessments: this.listLmraAssessments({ jobId, limit: 500 }),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
       installationQcControls: this.listInstallationQcControls({ jobId, limit: 500 }),
+      photoEvidenceSets: this.listPhotoEvidenceSets({ jobId, limit: 500 }),
       nonconformances: this.listNonconformances({ jobId, limit: 500 }),
       observations: this.db.prepare('SELECT * FROM observation_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapObservation(row)),
       incidents: this.db.prepare('SELECT * FROM incident_records WHERE job_id = ? ORDER BY occurred_at DESC, created_at DESC').all(jobId).map(row => this.mapIncident(row)),
@@ -52395,6 +53328,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
 
+    const photoEvidenceRows = this.db.prepare(`
+      SELECT sets.*, jobs.title AS job_title, job_tasks.title AS task_title
+      FROM photo_evidence_sets sets
+      JOIN jobs ON jobs.id = sets.job_id
+      JOIN job_tasks ON job_tasks.id = sets.task_id
+      WHERE ${this.operationalJobStatusSql('jobs')}
+        AND job_tasks.status NOT IN ('completed', 'cancelled', 'canceled')
+        AND sets.status NOT IN ('released', 'pending_review')
+      ORDER BY sets.updated_at ASC
+      LIMIT 25
+    `).all();
+    for (const row of photoEvidenceRows) {
+      const set = this.mapPhotoEvidenceSet(row);
+      if (set.readyForTaskCompletion) continue;
+      const reviewBasis = `${set.id}:${set.currentCycle}:${set.effectiveStatus}:${set.sourceHash}:${set.captures.map(capture => capture.snapshotHash).join(':')}`;
+      const taskId = `task_${sha256Text(`photo-evidence-review:${reviewBasis}`).slice(0, 24)}`;
+      if (this.db.prepare('SELECT id FROM job_tasks WHERE id = ?').get(taskId)) continue;
+      actions.push({
+        type: 'review_photo_evidence',
+        jobId: set.jobId,
+        photoEvidenceSetId: set.id,
+        sourceTaskId: set.taskId,
+        taskId,
+        severity: ['integrity_invalid', 'stale', 'review_invalid', 'rejected'].includes(set.effectiveStatus) ? 'high' : 'medium',
+        message: `${row.job_title}: ${row.task_title} has governed photographic evidence in ${set.effectiveStatus.replace(/_/g, ' ')} state. Review the assigned worker, source currency, checksum-protected before/during/after sequence, and independent sign-off without fabricating evidence or releasing the task hold automatically.`
+      });
+    }
+
     const jobsWithoutSafetyMeetings = this.db.prepare(`
       SELECT jobs.id, jobs.title, jobs.risk_level, jobs.priority
       FROM jobs
@@ -54477,6 +55438,45 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             after: task,
             metadata: {
               sourceInspectionId: action.inspectionId,
+              holdReleased: false,
+              externalCommitments: 0
+            }
+          });
+        }
+
+        const photoEvidenceReviews = preview.filter(action => action.type === 'review_photo_evidence').slice(0, 5);
+        for (const action of photoEvidenceReviews) {
+          const task = this.addTask(action.jobId, {
+            title: 'Review photographic evidence hold',
+            description: action.message,
+            status: 'open',
+            priority: action.severity,
+            dueAt: futureIsoDate(action.severity === 'high' ? 1 : 2),
+            data: {
+              internalOnly: true,
+              photoEvidenceReview: true,
+              sourcePhotoEvidenceSetId: action.photoEvidenceSetId,
+              sourceTaskId: action.sourceTaskId,
+              holdReleased: false,
+              externalCommitments: 0
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({
+            ...action,
+            taskId: task.id,
+            status: 'review_task_created',
+            holdReleased: false,
+            externalCommitments: 0
+          });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_photo_evidence_review_task',
+            actor,
+            after: task,
+            metadata: {
+              sourcePhotoEvidenceSetId: action.photoEvidenceSetId,
               holdReleased: false,
               externalCommitments: 0
             }
@@ -57974,6 +58974,22 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
       }
     }
+    for (const set of this.listPhotoEvidenceSets({ limit: 5_000 })) {
+      if (!set.integrityValid || !set.captureIntegrityValid) {
+        issues.push({ severity: 'error', message: `Photo-evidence set ${set.id} failed retained set or capture integrity verification.` });
+      }
+      if (set.status === 'pending_review' && set.latestApproval?.status !== 'pending') {
+        issues.push({ severity: 'error', message: `Photo-evidence set ${set.id} is pending review without its matching pending approval.` });
+      }
+      if (set.status === 'released' && (
+        set.latestApproval?.status !== 'approved'
+        || set.readyForTaskCompletion !== true
+        || !set.releasedAt
+        || !set.releasedBy
+      )) {
+        issues.push({ severity: 'error', message: `Released photo-evidence set ${set.id} lacks source-current, independently approved before/during/after evidence.` });
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -58040,6 +59056,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         inspectionTemplates: this.count('inspection_templates'),
         inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
         installationQcControls: this.count('installation_qc_controls'),
+        photoEvidenceSets: this.count('photo_evidence_sets'),
+        photoEvidenceCaptures: this.count('photo_evidence_captures'),
         inspectionRecords: this.count('inspection_records'),
         nonconformanceRecords: this.count('nonconformance_records'),
         openNonconformances: Number(this.db.prepare("SELECT COUNT(*) AS count FROM nonconformance_records WHERE status <> 'closed'").get().count || 0),
@@ -60227,6 +61245,236 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       entryKey: row.entry_key,
       entryFingerprint: row.entry_fingerprint,
       integrityValid,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapPhotoEvidenceCapture(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const cycleNumber = Math.max(1, Number(data.cycleNumber || 1));
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const documentRow = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?')
+      .get(row.document_id, row.job_id);
+    const documentData = fromJson(documentRow?.data_json, {});
+    const currentContentHash = normalizeText(
+      documentData.analysis?.upload?.sha256 || documentData.contentHash,
+      ''
+    );
+    const retainedContentHash = normalizeText(snapshot?.source?.document?.contentHash, '');
+    const entryFingerprint = sha256Json({
+      jobId: row.job_id,
+      setId: row.set_id,
+      taskId: row.task_id,
+      documentId: row.document_id,
+      phase: row.phase,
+      capturedAt: row.captured_at,
+      capturedByWorkerId: row.captured_by_worker_id,
+      caption: row.caption,
+      contentHash: retainedContentHash,
+      cycleNumber
+    });
+    const snapshotIntegrityValid = Boolean(
+      snapshot
+      && snapshot.format === PHOTO_EVIDENCE_CAPTURE_FORMAT
+      && snapshot.photoEvidenceCaptureId === row.id
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.entryFingerprint === row.entry_fingerprint
+      && snapshot.source?.photoEvidenceSetId === row.set_id
+      && snapshot.source?.jobId === row.job_id
+      && snapshot.source?.taskId === row.task_id
+      && snapshot.source?.document?.id === row.document_id
+      && snapshot.source?.phase === row.phase
+      && snapshot.source?.capturedAt === row.captured_at
+      && snapshot.source?.capturedByWorkerId === row.captured_by_worker_id
+      && snapshot.source?.caption === row.caption
+      && Number(snapshot.source?.cycleNumber || 1) === cycleNumber
+      && sha256Json(snapshot.source) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    const documentIntegrityValid = Boolean(
+      documentRow
+      && documentRow.type === 'photo'
+      && normalizeStatus(documentRow.mime_type, '').startsWith('image/')
+      && ['stored', 'needs_review'].includes(normalizeStatus(documentRow.status, ''))
+      && /^[a-f0-9]{64}$/i.test(retainedContentHash)
+      && retainedContentHash === currentContentHash
+    );
+    const integrityValid = Boolean(
+      snapshotIntegrityValid
+      && documentIntegrityValid
+      && row.entry_fingerprint === entryFingerprint
+    );
+    return {
+      id: row.id,
+      photoEvidenceSetId: row.set_id,
+      jobId: row.job_id,
+      taskId: row.task_id,
+      documentId: row.document_id,
+      document: documentRow ? {
+        id: documentRow.id,
+        title: documentRow.title,
+        filename: documentRow.filename,
+        mimeType: documentRow.mime_type,
+        sizeBytes: normalizeNumber(documentRow.size_bytes, 0),
+        status: documentRow.status,
+        contentHash: currentContentHash
+      } : null,
+      phase: row.phase,
+      capturedAt: row.captured_at,
+      capturedByWorkerId: row.captured_by_worker_id,
+      capturedByActor: data.capturedByActor || null,
+      caption: row.caption,
+      cycleNumber,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      snapshotIntegrityValid,
+      documentIntegrityValid,
+      integrityValid,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapPhotoEvidenceSet(row) {
+    if (!row) return null;
+    const data = fromJson(row.data_json, {});
+    const requiredPhases = fromJson(row.required_phases_json, [...PHOTO_EVIDENCE_PHASES]);
+    const currentCycle = Math.max(1, Number(data.currentCycle || 1));
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const entryFingerprint = sha256Json({
+      jobId: row.job_id,
+      sourceHash: row.source_hash,
+      notes: data.notes || null
+    });
+    const integrityValid = Boolean(
+      snapshot
+      && snapshot.format === PHOTO_EVIDENCE_SET_FORMAT
+      && snapshot.photoEvidenceSetId === row.id
+      && snapshot.jobId === row.job_id
+      && snapshot.sourceHash === row.source_hash
+      && snapshot.entryFingerprint === row.entry_fingerprint
+      && sha256Json(snapshot.source) === row.source_hash
+      && sha256Text(snapshotJson) === row.snapshot_hash
+      && row.entry_fingerprint === entryFingerprint
+      && Array.isArray(requiredPhases)
+      && requiredPhases.length === PHOTO_EVIDENCE_PHASES.length
+      && requiredPhases.every((phase, index) => phase === PHOTO_EVIDENCE_PHASES[index])
+    );
+    let sourceCurrent = false;
+    try {
+      const current = this.buildPhotoEvidenceSetSource(row.job_id, {
+        taskId: row.task_id,
+        assignmentId: row.assignment_id,
+        assignedWorkerId: row.assigned_worker_id,
+        title: row.title,
+        workLocation: row.work_location,
+        requiredPhases
+      }, { requireOperational: row.status !== 'released' });
+      sourceCurrent = current.sourceHash === row.source_hash;
+    } catch {
+      sourceCurrent = false;
+    }
+    const allCaptureRows = this.db.prepare(`
+      SELECT * FROM photo_evidence_captures
+      WHERE set_id = ?
+      ORDER BY captured_at ASC, created_at ASC
+    `).all(row.id);
+    const latestByPhase = new Map();
+    for (const captureRow of allCaptureRows) {
+      const capture = this.mapPhotoEvidenceCapture(captureRow);
+      if (capture.cycleNumber === currentCycle) latestByPhase.set(capture.phase, capture);
+    }
+    const captures = PHOTO_EVIDENCE_PHASES.map(phase => latestByPhase.get(phase)).filter(Boolean);
+    const missingPhases = PHOTO_EVIDENCE_PHASES.filter(phase => !latestByPhase.has(phase));
+    const chronologyValid = captures.every((capture, index) => (
+      index === 0 || Date.parse(captures[index - 1].capturedAt) <= Date.parse(capture.capturedAt)
+    ));
+    const captureIntegrityValid = captures.every(capture => capture.integrityValid === true);
+    const complete = missingPhases.length === 0 && chronologyValid && captureIntegrityValid;
+    const approvalRow = row.latest_approval_id
+      ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(row.latest_approval_id)
+      : null;
+    const approval = approvalRow ? this.mapApproval(approvalRow) : null;
+    const approvalData = fromJson(approvalRow?.data_json, {});
+    const reviewSnapshot = approvalData.reviewSnapshot || null;
+    const reviewSnapshotHash = approvalData.reviewSnapshotHash || null;
+    const expectedReviewCaptures = captures.map(capture => ({
+      id: capture.id,
+      phase: capture.phase,
+      capturedAt: capture.capturedAt,
+      documentId: capture.documentId,
+      sourceHash: capture.sourceHash,
+      snapshotHash: capture.snapshotHash
+    }));
+    const reviewIntegrityValid = !approvalRow
+      ? row.status !== 'pending_review' && row.status !== 'released'
+      : Boolean(
+        reviewSnapshot
+        && reviewSnapshot.format === PHOTO_EVIDENCE_REVIEW_FORMAT
+        && reviewSnapshot.photoEvidenceSetId === row.id
+        && reviewSnapshot.jobId === row.job_id
+        && reviewSnapshot.taskId === row.task_id
+        && reviewSnapshot.sourceHash === row.source_hash
+        && Number(reviewSnapshot.cycleNumber || 0) === currentCycle
+        && sha256Json(reviewSnapshot) === reviewSnapshotHash
+        && sha256Json(reviewSnapshot.captures || []) === sha256Json(expectedReviewCaptures)
+      );
+    const effectiveStatus = integrityValid !== true || captureIntegrityValid !== true
+      ? 'integrity_invalid'
+      : sourceCurrent !== true
+        ? 'stale'
+        : reviewIntegrityValid !== true
+          ? 'review_invalid'
+          : row.status;
+    const readyForTaskCompletion = Boolean(
+      row.status === 'released'
+      && approval?.status === 'approved'
+      && integrityValid
+      && sourceCurrent
+      && complete
+      && reviewIntegrityValid
+    );
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      taskId: row.task_id,
+      assignmentId: row.assignment_id,
+      assignedWorkerId: row.assigned_worker_id,
+      assignedWorkerName: snapshot?.source?.worker?.name || null,
+      title: row.title,
+      taskTitle: snapshot?.source?.task?.title || null,
+      workLocation: row.work_location,
+      requiredPhases,
+      status: row.status,
+      effectiveStatus,
+      latestApprovalId: row.latest_approval_id || null,
+      latestApproval: approval,
+      currentCycle,
+      captures,
+      captureCount: captures.length,
+      missingPhases,
+      complete,
+      chronologyValid,
+      captureIntegrityValid,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      integrityValid,
+      sourceCurrent,
+      reviewIntegrityValid,
+      readyForTaskCompletion,
+      releasedAt: row.released_at || null,
+      releasedBy: row.released_by || null,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
       data,
       createdAt: row.created_at,
       updatedAt: row.updated_at

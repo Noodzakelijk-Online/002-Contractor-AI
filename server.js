@@ -1220,6 +1220,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/lmra$/.test(pathName)
         || pathName === '/api/ledger/installation-qc'
         || /^\/api\/ledger\/jobs\/[^/]+\/installation-qc$/.test(pathName)
+        || pathName === '/api/ledger/photo-evidence'
+        || /^\/api\/ledger\/jobs\/[^/]+\/photo-evidence$/.test(pathName)
         || pathName === '/api/ledger/sds-sheets'
         || /^\/api\/ledger\/jobs\/[^/]+\/sds-sheets$/.test(pathName)
         || pathName === '/api/ledger/drawings'
@@ -1280,9 +1282,9 @@ function scopedLedgerJobs(req, filters = {}) {
 }
 
 const FIELD_RECORD_PRIVATE_KEYS = new Set([
-  'amount', 'approval', 'approvalId', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'closureApprovalId', 'closureHash', 'conflicts', 'correctionApprovalId', 'correctiveActionHash', 'cost', 'currency',
+  'amount', 'approval', 'approvalId', 'capturedByActor', 'checkInEntryFingerprint', 'checkInEntryKey', 'checkOutEntryFingerprint', 'checkOutEntryKey', 'clientEmail', 'clientId', 'clientPhone', 'closureApprovalId', 'closureHash', 'conflicts', 'correctionApprovalId', 'correctiveActionHash', 'cost', 'currency',
   'checkoutEntryKey', 'checkoutFingerprint', 'data', 'email', 'entryFingerprint', 'entryKey', 'estimatedCost', 'hourlyRate', 'lineItems', 'marginTargetPercent', 'phone', 'planHash', 'portalToken',
-  'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
+  'latestApproval', 'providerMessageId', 'rate', 'receipt', 'receiptRef', 'storageRef', 'subtotal', 'supplier',
   'returnEntryKey', 'returnFingerprint', 'snapshot', 'snapshotHash', 'sourceCurrentHash', 'sourceHash',
   'huddleEntryKey', 'huddleSnapshot', 'huddleSnapshotHash', 'huddleSourceHash', 'eodEntryKey', 'eodSnapshot', 'eodSnapshotHash', 'eodSourceHash',
   'taxAmount', 'taxRate', 'token', 'total'
@@ -1444,6 +1446,9 @@ function projectFieldJobDetail(req, detail) {
     ))),
     installationQcControls: projectFieldRecords((detail.installationQcControls || []).filter(control => (
       scopeWorkerId && String(control.assignedWorkerId || '') === String(scopeWorkerId)
+    ))),
+    photoEvidenceSets: projectFieldRecords((detail.photoEvidenceSets || []).filter(set => (
+      scopeWorkerId && String(set.assignedWorkerId || '') === String(scopeWorkerId)
     ))),
     nonconformances: projectFieldRecords(detail.nonconformances),
     observations: projectFieldRecords(detail.observations),
@@ -2219,7 +2224,7 @@ function resolveUploadLedgerJobDetail(payload = {}) {
   }
 }
 
-function createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload = {}, analysis = {}) {
+function createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload = {}, analysis = {}, options = {}) {
   if (!ledgerDetail?.id || !ledgerDocument?.id) return { records: {}, actions: [] };
 
   const filename = ledgerDocument.filename || payload.filename || payload.name || 'uploaded evidence';
@@ -2235,6 +2240,39 @@ function createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload = {},
     }, { actor: 'upload_api' })
   };
   const actions = [{ type: 'record_ledger_progress_evidence', id: records.progress.id, message: 'Ledger progress evidence recorded.' }];
+  const photoEvidenceSetId = String(
+    payload.photoEvidenceSetId || payload.photo_evidence_set_id || ''
+  ).trim();
+  if (photoEvidenceSetId) {
+    const captureEntryKey = String(
+      payload.photoEvidenceEntryKey || payload.photo_evidence_entry_key
+      || payload.captureEntryKey || payload.capture_entry_key || ''
+    ).trim();
+    const result = operatingLedger.recordPhotoEvidenceCapture(
+      ledgerDetail.id,
+      photoEvidenceSetId,
+      ledgerDocument.id,
+      {
+        phase: payload.photoEvidencePhase || payload.photo_evidence_phase || payload.phase,
+        capturedAt: payload.capturedAt || payload.captured_at,
+        caption: payload.caption || notes,
+        capturedByWorkerId: options.workerId,
+        entryKey: captureEntryKey
+      },
+      {
+        actor: options.actor || 'upload_api',
+        workerId: options.workerId || null,
+        enforceWorkerScope: options.enforceWorkerScope === true
+      }
+    );
+    records.photoEvidenceCapture = result.capture;
+    records.photoEvidenceSet = result.photoEvidenceSet;
+    actions.push({
+      type: 'record_governed_photo_evidence',
+      id: result.capture.id,
+      message: `${result.capture.phase} photo evidence was retained against the scheduled task.`
+    });
+  }
 
   if (analysis.riskDetected) {
     records.task = operatingLedger.addTask(ledgerDetail.id, {
@@ -3664,6 +3702,64 @@ app.get('/api/ledger/jobs/:id/installation-qc', (req, res) => {
       }).map(control => recordForOperator(req, control))
     };
   });
+});
+
+app.get('/api/ledger/photo-evidence', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const workerId = req.operator?.role === 'field_worker'
+      ? req.operator.scope?.workerId
+      : (req.query.workerId || req.query.worker_id);
+    return {
+      success: true,
+      photoEvidenceSets: operatingLedger.listPhotoEvidenceSets({
+        jobId: req.query.jobId || req.query.job_id,
+        taskId: req.query.taskId || req.query.task_id,
+        workerId,
+        status: req.query.status,
+        limit: req.query.limit
+      }).map(set => recordForOperator(req, set))
+    };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/photo-evidence', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const workerId = req.operator?.role === 'field_worker'
+      ? req.operator.scope?.workerId
+      : (req.query.workerId || req.query.worker_id);
+    return {
+      success: true,
+      photoEvidenceSets: operatingLedger.listPhotoEvidenceSets({
+        jobId: req.params.id,
+        taskId: req.query.taskId || req.query.task_id,
+        workerId,
+        status: req.query.status,
+        limit: req.query.limit
+      }).map(set => recordForOperator(req, set))
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/photo-evidence', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    photoEvidenceSet: operatingLedger.createPhotoEvidenceSet(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
+});
+
+app.post('/api/ledger/jobs/:id/photo-evidence/:setId/review', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.requestPhotoEvidenceReview(req.params.id, req.params.setId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    job: jobForOperator(req, req.params.id),
+    dashboard: dashboardForOperator(req)
+  }), 201);
 });
 
 app.post('/api/ledger/inspection-templates', (req, res) => {
@@ -5524,13 +5620,16 @@ app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
         operatingLedger.getOpportunityBidDecision(approval.targetId).opportunityId
       );
     }
+    const includeDashboard = String(
+      req.query.includeDashboard ?? req.query.include_dashboard ?? 'true'
+    ).toLowerCase() !== 'false';
     return {
       success: true,
       approval,
       job: approval.jobId ? operatingLedger.getJobDetail(approval.jobId) : null,
       bidPackage,
       bidDecision,
-      dashboard: operatingLedger.dashboardSummary()
+      dashboard: includeDashboard ? operatingLedger.dashboardSummary() : null
     };
   });
 });
@@ -6478,6 +6577,14 @@ app.post('/api/ledger/upload', async (req, res) => {
         if (req.operator?.role === 'field_worker' && !fieldWorkerCanAccessJob(req, requestedJobId)) {
           throw new UploadRequestError(403, 'field_job_scope_forbidden', 'This field worker is not assigned to the evidence job.');
         }
+        const governedPhotoEvidenceSetId = payload.photoEvidenceSetId || payload.photo_evidence_set_id;
+        if (governedPhotoEvidenceSetId && req.operator?.authenticated === true && req.operator?.role !== 'field_worker') {
+          throw new UploadRequestError(
+            403,
+            'photo_evidence_worker_scope_forbidden',
+            'Authenticated governed photo evidence must be captured by the retained assigned field worker.'
+          );
+        }
         if (!resolveUploadLedgerJobDetail(payload, actorFromRequest(req, 'upload_api'))?.id) {
           throw new UploadRequestError(404, 'ledger_job_not_found', 'The requested operating-ledger job was not found.');
         }
@@ -6566,7 +6673,11 @@ app.post('/api/ledger/upload', async (req, res) => {
         tags: [analysis.category, payload.category, payload.riskLevel].filter(Boolean),
         analysis
       }, { actor });
-      const ledgerFollowUp = createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload, analysis, actor);
+      const ledgerFollowUp = createLedgerUploadFollowUps(ledgerDetail, ledgerDocument, payload, analysis, {
+        actor,
+        workerId: req.operator?.role === 'field_worker' ? req.operator.scope?.workerId : null,
+        enforceWorkerScope: req.operator?.role === 'field_worker' && req.operator?.authenticated === true
+      });
       const body = {
         success: true,
         filename: payload.filename || payload.name || 'metadata-only',
@@ -6612,6 +6723,16 @@ app.post('/api/ledger/upload', async (req, res) => {
     }
     if (error instanceof UploadRequestError) {
       return sendError(req, res, error.statusCode, error.code, error.message, error.details);
+    }
+    if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 600) {
+      return sendError(
+        req,
+        res,
+        error.statusCode,
+        error.code || 'ledger_upload_rejected',
+        error.message || 'The evidence upload was rejected.',
+        error.details || serializeError(error)
+      );
     }
     throw error;
   }
@@ -6727,6 +6848,8 @@ function operationalExport() {
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     installationQcControls: operatingLedger.listInstallationQcControls({ limit: 5000 }),
+    photoEvidenceSets: operatingLedger.listPhotoEvidenceSets({ limit: 5000 }),
+    photoEvidenceCaptures: operatingLedger.listPhotoEvidenceCaptures({ limit: 20_000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
     handoverPackages: operatingLedger.listHandoverPackages({ limit: 500 }),
     approvals: operatingLedger.listApprovals({ status: 'all', limit: 500 }),
@@ -6815,6 +6938,8 @@ function validateOperationalExport(snapshot) {
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
     'installationQcControls',
+    'photoEvidenceSets',
+    'photoEvidenceCaptures',
     'dayworkTickets',
     'nonconformances'
   ]) {
@@ -6913,6 +7038,8 @@ function validateOperationalExport(snapshot) {
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       installationQcControls: Array.isArray(snapshot.installationQcControls) ? snapshot.installationQcControls.length : 0,
+      photoEvidenceSets: Array.isArray(snapshot.photoEvidenceSets) ? snapshot.photoEvidenceSets.length : 0,
+      photoEvidenceCaptures: Array.isArray(snapshot.photoEvidenceCaptures) ? snapshot.photoEvidenceCaptures.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
       submittals: Array.isArray(snapshot.projectControls?.submittals) ? snapshot.projectControls.submittals.length : 0,
       transmittals: Array.isArray(snapshot.projectControls?.transmittals) ? snapshot.projectControls.transmittals.length : 0,
@@ -7737,6 +7864,15 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         installationQcOfflineRelease: false,
         installationQcAutonomy: 'internal_review_task_only',
         installationQcReleaseInference: false,
+        photoEvidenceEntryKey: 'durable_exact_replay',
+        photoEvidenceWorkerCapture: 'authenticated_assigned_worker_scoped',
+        photoEvidenceSequence: 'before_during_after_chronological',
+        photoEvidenceIntegrity: 'private_document_sha256_and_immutable_snapshots',
+        photoEvidenceTaskCompletionGate: true,
+        photoEvidenceReview: 'source_current_independent_approval_gated',
+        photoEvidenceOfflineRelease: false,
+        photoEvidenceAutonomy: 'internal_review_task_only',
+        photoEvidenceReleaseInference: false,
         sdsRevisionEntryKey: 'durable',
         sdsRevisionSourceIntegrity: 'product_document_snapshot_sha256',
         sdsRevisionApproval: 'source_current_approval_gated',

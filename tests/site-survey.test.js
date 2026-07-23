@@ -112,7 +112,7 @@ test('site surveys are replay-safe, evidence-bound, approval-gated, and carried 
   assert.equal(ledger.diagnose().valid, true);
   assert.equal(ledger.diagnose().counts.opportunityEvidence, 1);
   assert.equal(ledger.diagnose().counts.approvedOpportunitySiteSurveys, 1);
-  assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+  assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
 });
 

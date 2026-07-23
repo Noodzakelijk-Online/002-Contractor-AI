@@ -1277,6 +1277,74 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('065_governed_photo_evidence')) {
+        for (const table of ['photo_evidence_sets', 'photo_evidence_captures']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup photo-evidence schema is incomplete: ${table}.`);
+          }
+        }
+        const photoSetColumns = new Set(
+          database.prepare('PRAGMA table_info(photo_evidence_sets)').all().map(row => row.name)
+        );
+        for (const column of [
+          'id',
+          'job_id',
+          'task_id',
+          'assignment_id',
+          'assigned_worker_id',
+          'required_phases_json',
+          'status',
+          'latest_approval_id',
+          'source_hash',
+          'snapshot_json',
+          'snapshot_hash',
+          'released_at',
+          'released_by',
+          'entry_key',
+          'entry_fingerprint'
+        ]) {
+          if (!photoSetColumns.has(column)) {
+            throw new Error(`Backup photo-evidence schema is incomplete: photo_evidence_sets.${column}.`);
+          }
+        }
+        const photoCaptureColumns = new Set(
+          database.prepare('PRAGMA table_info(photo_evidence_captures)').all().map(row => row.name)
+        );
+        for (const column of [
+          'id',
+          'set_id',
+          'job_id',
+          'task_id',
+          'document_id',
+          'phase',
+          'captured_at',
+          'captured_by_worker_id',
+          'caption',
+          'source_hash',
+          'snapshot_json',
+          'snapshot_hash',
+          'entry_key',
+          'entry_fingerprint'
+        ]) {
+          if (!photoCaptureColumns.has(column)) {
+            throw new Error(`Backup photo-evidence schema is incomplete: photo_evidence_captures.${column}.`);
+          }
+        }
+        const retainedIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name)
+        );
+        for (const index of [
+          'idx_photo_evidence_set_job_status',
+          'idx_photo_evidence_set_task_status',
+          'idx_photo_evidence_set_worker_status',
+          'idx_photo_evidence_capture_set_phase',
+          'idx_photo_evidence_capture_worker'
+        ]) {
+          if (!retainedIndexes.has(index)) {
+            throw new Error(`Backup photo-evidence constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

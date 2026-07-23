@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { ContractorOperatingLedger } = require('../operating-ledger');
 
 const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-safety-briefing-api-'));
 const tokens = {
@@ -130,15 +131,29 @@ test('safety briefing API scopes field identity, supports offline replay, and ke
   assert.equal(signoff.body.safetyMeeting.integrityValid, true);
   assert.ok(signoff.body.approval.id);
 
-  const approved = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(signoff.body.approval.id)}/resolve`, {
-    token: tokens.approver,
-    method: 'POST',
-    body: JSON.stringify({
-      status: 'approved',
-      reason: 'Worker identity, briefing topics, facilitator evidence, and completion reference verified.'
-    })
-  });
+  const originalDashboardSummary = ContractorOperatingLedger.prototype.dashboardSummary;
+  let dashboardSummaryCalls = 0;
+  ContractorOperatingLedger.prototype.dashboardSummary = function countedDashboardSummary(...args) {
+    dashboardSummaryCalls += 1;
+    return originalDashboardSummary.apply(this, args);
+  };
+  let approved;
+  try {
+    approved = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(signoff.body.approval.id)}/resolve?includeDashboard=false`, {
+      token: tokens.approver,
+      method: 'POST',
+      body: JSON.stringify({
+        status: 'approved',
+        reason: 'Worker identity, briefing topics, facilitator evidence, and completion reference verified.'
+      })
+    });
+  } finally {
+    ContractorOperatingLedger.prototype.dashboardSummary = originalDashboardSummary;
+  }
   assert.equal(approved.response.status, 200, JSON.stringify(approved.body));
+  assert.equal(approved.body.dashboard, null);
+  assert.equal(approved.body.job.id, jobId);
+  assert.equal(dashboardSummaryCalls, 0);
   const retained = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/safety-meetings`);
   assert.equal(retained.response.status, 200);
   assert.equal(retained.body.safetyMeetings[0].status, 'completed');
@@ -156,7 +171,7 @@ test('safety briefing API scopes field identity, supports offline replay, and ke
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '064_governed_installation_qc');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '065_governed_photo_evidence');
   assert.equal(diagnostics.body.diagnostics.counts.safetyMeetingAttendees, 1);
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities', { token: tokens.owner });

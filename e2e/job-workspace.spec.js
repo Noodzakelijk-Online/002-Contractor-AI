@@ -1531,7 +1531,7 @@ test('field assurance prepares internal safety records and gates an RFI answer',
   safetyRow = assurance.locator('.assurance-item').filter({ hasText: safetyJob.job.title });
   await expect(safetyRow.getByRole('button', { name: `Prepare safety pack for ${safetyJob.job.title}` })).toHaveCount(0);
   await safetyRow.getByRole('button', { name: `Capture field evidence for ${safetyJob.job.title}` }).click();
-  await expect(page.getByTestId('field-evidence-form').getByLabel('Job')).toHaveValue(safetyJob.job.id);
+  await expect(page.getByTestId('field-evidence-form').getByRole('combobox', { name: 'Job', exact: true })).toHaveValue(safetyJob.job.id);
 
   await safetyRow.getByRole('button', { name: `Approve JHA for ${safetyJob.job.title}` }).click();
   const jhaModal = page.getByTestId('field-assurance-modal');

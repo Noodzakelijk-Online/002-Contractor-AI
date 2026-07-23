@@ -103,6 +103,7 @@ const FieldAssuranceWorkspace = lazy(() => loadJobWorkspaceControls().then((modu
 const FieldRiskControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.FieldRiskControl })))
 const InspectionChecklistControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.InspectionChecklistControl })))
 const NonconformanceControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.NonconformanceControl })))
+const PhotoEvidenceControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.PhotoEvidenceControl })))
 const ProductionControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.ProductionControl })))
 const ProjectControls = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.ProjectControls })))
 const TakeoffControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.TakeoffControl })))
@@ -179,14 +180,30 @@ async function api(path, options = {}) {
   return String(options.method || 'GET').toUpperCase() === 'GET' ? retryTransientRequest(request) : request()
 }
 
-async function recordFieldEvidence({ id, jobId, notes, riskLevel, file }) {
+async function recordFieldEvidence({
+  id,
+  jobId,
+  notes,
+  riskLevel,
+  file,
+  photoEvidenceSetId,
+  photoEvidencePhase,
+  capturedAt,
+}) {
   const payload = new FormData()
   payload.append('evidenceFile', file)
   payload.append('jobId', jobId)
   payload.append('notes', notes)
   payload.append('riskLevel', riskLevel)
-  payload.append('category', file.type.startsWith('image/') ? 'field_photo' : 'document')
+  payload.append('category', photoEvidenceSetId ? 'governed_field_photo' : file.type.startsWith('image/') ? 'field_photo' : 'document')
   payload.append('attachToBuild', 'false')
+  if (photoEvidenceSetId) {
+    payload.append('photoEvidenceSetId', photoEvidenceSetId)
+    payload.append('photoEvidencePhase', photoEvidencePhase)
+    payload.append('capturedAt', new Date(capturedAt).toISOString())
+    payload.append('caption', notes)
+    payload.append('photoEvidenceEntryKey', id || createFieldEvidenceDraftId())
+  }
   const response = await fetch('/api/ledger/upload', {
     method: 'POST',
     credentials: 'same-origin',
@@ -200,6 +217,17 @@ async function recordFieldEvidence({ id, jobId, notes, riskLevel, file }) {
     throw error
   }
   return result
+}
+
+function emptyFieldEvidenceDraft() {
+  return {
+    jobId: '',
+    notes: '',
+    riskLevel: 'medium',
+    photoEvidenceSetId: '',
+    photoEvidencePhase: 'before',
+    capturedAt: toLocalDateTimeInput(new Date()),
+  }
 }
 
 async function recordFieldOperation({ id, type, jobId, payload }) {
@@ -1034,6 +1062,25 @@ function reconcileJobCollections(data, job) {
     archivedJobs: archived
       ? upsertById(data.archivedJobs, job)
       : (data.archivedJobs || EMPTY_LIST).filter((item) => item.id !== job.id),
+  }
+}
+
+function reconcileApprovalResolution(data, approvalId, dashboard = null) {
+  if (!data) return data
+  const currentDashboard = data.dashboard
+  const nextDashboard = dashboard || (currentDashboard ? {
+    ...currentDashboard,
+    metrics: currentDashboard.metrics ? {
+      ...currentDashboard.metrics,
+      pendingApprovals: Math.max(0, Number(currentDashboard.metrics.pendingApprovals || 0) - 1),
+    } : currentDashboard.metrics,
+    nextActions: (currentDashboard.nextActions || EMPTY_LIST)
+      .filter((action) => action.approvalId !== approvalId),
+  } : currentDashboard)
+  return {
+    ...data,
+    dashboard: nextDashboard,
+    approvals: (data.approvals || EMPTY_LIST).filter((approval) => approval.id !== approvalId),
   }
 }
 
@@ -2851,7 +2898,8 @@ function App() {
   const [portalLink, setPortalLink] = useState('')
   const [notice, setNotice] = useState(null)
   const [intake, setIntake] = useState({ clientName: '', title: '', service: '', address: '', description: '', priority: 'medium' })
-  const [evidence, setEvidence] = useState({ jobId: '', notes: '', riskLevel: 'medium' })
+  const [evidence, setEvidence] = useState(() => emptyFieldEvidenceDraft())
+  const [fieldPhotoEvidenceSets, setFieldPhotoEvidenceSets] = useState([])
   const [fieldProgress, setFieldProgress] = useState(emptyFieldProgress)
   const [dailyHuddle, setDailyHuddle] = useState(emptyDailyHuddle)
   const [fieldDailyCycles, setFieldDailyCycles] = useState([])
@@ -3125,6 +3173,12 @@ function App() {
     () => jobs.filter((job) => !['archived', 'completed', 'cancelled', 'rejected'].includes(job.status)).slice(0, 8),
     [jobs],
   )
+  const selectedFieldPhotoEvidenceSet = fieldPhotoEvidenceSets.find(set => set.id === evidence.photoEvidenceSetId) || null
+  const availableFieldPhotoEvidenceSets = fieldPhotoEvidenceSets.filter(set => (
+    !['captures_complete', 'pending_review', 'released'].includes(set.status)
+    && set.integrityValid !== false
+    && set.sourceCurrent !== false
+  ))
   const selectedFieldMaterialReceiptPlan = fieldMaterialReceiptPlans.find(plan => plan.purchaseOrder?.id === fieldMaterialReceipt.purchaseOrderId) || null
   const selectedDailyCycle = fieldDailyCycles.find(cycle => cycle.id === fieldDailyLog.cycleId) || null
   const selectedEquipmentCheckoutPlan = equipmentCheckoutPlans.find(plan => plan.reservation?.id === equipmentCheckoutDraft.reservationId) || null
@@ -3569,7 +3623,7 @@ function App() {
     const { item, status } = approvalReview
     setSubmitting(true)
     try {
-      const result = await api(`/api/ledger/approvals/${item.id}/resolve`, {
+      const result = await api(`/api/ledger/approvals/${item.id}/resolve?includeDashboard=false`, {
         method: 'POST',
         body: JSON.stringify({
           status,
@@ -3579,25 +3633,23 @@ function App() {
       })
       setApprovalReview(null)
       setApprovalReason('')
+      notify(`Approval ${status}. The ledger and audit trail were updated.`)
       if (result.bidPackage) {
         setSelectedBidPackage(result.bidPackage)
         setData((current) => {
           if (!current) return current
-          const next = {
+          const next = reconcileApprovalResolution({
             ...current,
-            dashboard: result.dashboard || current.dashboard,
-            approvals: (current.approvals || EMPTY_LIST).filter((approval) => approval.id !== item.id),
             bidPackages: upsertById(current.bidPackages, result.bidPackage),
-          }
+          }, item.id, result.dashboard)
           return result.job ? reconcileJobCollections(next, result.job) : next
         })
         if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
       } else if (result.job) {
-        setData((current) => reconcileJobCollections({
-          ...current,
-          dashboard: result.dashboard || current?.dashboard,
-          approvals: (current?.approvals || EMPTY_LIST).filter((approval) => approval.id !== item.id),
-        }, result.job))
+        setData((current) => reconcileJobCollections(
+          reconcileApprovalResolution(current, item.id, result.dashboard),
+          result.job,
+        ))
         if (selectedJobId === result.job.id) setSelectedJob(result.job)
       } else {
         await refresh()
@@ -3613,7 +3665,6 @@ function App() {
         } : current)
       }
       setSubmitting(false)
-      notify(`Approval ${status}. The ledger and audit trail were updated.`)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -4426,6 +4477,21 @@ function App() {
     }
   }
 
+  async function selectFieldEvidenceJob(jobId) {
+    setEvidence({
+      ...emptyFieldEvidenceDraft(),
+      jobId,
+    })
+    setFieldPhotoEvidenceSets([])
+    if (!jobId) return
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/photo-evidence`)
+      setFieldPhotoEvidenceSets(result.photoEvidenceSets || [])
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
   async function uploadEvidence(event) {
     event.preventDefault()
     const file = evidenceInputRef.current?.files?.[0]
@@ -4433,11 +4499,23 @@ function App() {
       setError('Choose a job and an evidence file before recording a field update.')
       return
     }
+    if (evidence.photoEvidenceSetId && (
+      !file.type.startsWith('image/')
+      || !evidence.photoEvidencePhase
+      || !evidence.capturedAt
+      || evidence.notes.trim().length < 3
+    )) {
+      setError('Governed evidence requires an image, phase, device capture time, and a caption of at least 3 characters.')
+      return
+    }
     const draft = {
       id: createFieldEvidenceDraftId(),
       jobId: evidence.jobId,
       notes: evidence.notes,
       riskLevel: evidence.riskLevel,
+      photoEvidenceSetId: evidence.photoEvidenceSetId,
+      photoEvidencePhase: evidence.photoEvidencePhase,
+      capturedAt: evidence.capturedAt,
       file,
       operatorScope: outboxScope,
     }
@@ -4446,22 +4524,56 @@ function App() {
       if (navigator.onLine === false) {
         await enqueueFieldEvidenceDraft(draft)
         await refreshOutboxState()
-        setEvidence({ jobId: '', notes: '', riskLevel: 'medium' })
+        const nextPhase = evidence.photoEvidenceSetId
+          ? ['before', 'during', 'after'][['before', 'during', 'after'].indexOf(evidence.photoEvidencePhase) + 1]
+          : null
+        setEvidence(nextPhase ? {
+          ...evidence,
+          notes: '',
+          photoEvidencePhase: nextPhase,
+          capturedAt: toLocalDateTimeInput(new Date()),
+        } : emptyFieldEvidenceDraft())
+        if (!nextPhase) setFieldPhotoEvidenceSets([])
         evidenceInputRef.current.value = ''
         notify('Field evidence was saved locally and will be recorded when this device reconnects.')
         return
       }
       const result = await recordFieldEvidence(draft)
-      setEvidence({ jobId: '', notes: '', riskLevel: 'medium' })
+      const updatedPhotoEvidenceSet = result.ledgerFollowUp?.records?.photoEvidenceSet || null
+      if (updatedPhotoEvidenceSet) {
+        setFieldPhotoEvidenceSets((current) => upsertById(current, updatedPhotoEvidenceSet))
+        setEvidence({
+          ...evidence,
+          notes: '',
+          photoEvidencePhase: updatedPhotoEvidenceSet.missingPhases?.[0] || evidence.photoEvidencePhase,
+          capturedAt: toLocalDateTimeInput(new Date()),
+        })
+      } else {
+        setEvidence(emptyFieldEvidenceDraft())
+        setFieldPhotoEvidenceSets([])
+      }
       evidenceInputRef.current.value = ''
-      notify(`${result.ledgerDocument?.filename || file.name} was recorded in the operating ledger.`)
+      notify(
+        updatedPhotoEvidenceSet
+          ? `${formatStatus(result.ledgerFollowUp.records.photoEvidenceCapture.phase)} photo retained. ${updatedPhotoEvidenceSet.complete ? 'The sequence is ready for office review.' : `${formatStatus(updatedPhotoEvidenceSet.missingPhases?.[0] || 'next')} evidence is next.`}`
+          : `${result.ledgerDocument?.filename || file.name} was recorded in the operating ledger.`,
+      )
       await refresh()
     } catch (requestError) {
       if (shouldQueueFieldMutation(requestError)) {
         try {
           await enqueueFieldEvidenceDraft(draft)
           await refreshOutboxState()
-          setEvidence({ jobId: '', notes: '', riskLevel: 'medium' })
+          const nextPhase = evidence.photoEvidenceSetId
+            ? ['before', 'during', 'after'][['before', 'during', 'after'].indexOf(evidence.photoEvidencePhase) + 1]
+            : null
+          setEvidence(nextPhase ? {
+            ...evidence,
+            notes: '',
+            photoEvidencePhase: nextPhase,
+            capturedAt: toLocalDateTimeInput(new Date()),
+          } : emptyFieldEvidenceDraft())
+          if (!nextPhase) setFieldPhotoEvidenceSets([])
           evidenceInputRef.current.value = ''
           notify('Connection interrupted. Field evidence was saved locally for a controlled retry.')
           return
@@ -7011,6 +7123,56 @@ function App() {
     }
   }
 
+  async function schedulePhotoEvidenceSet(payload) {
+    if (!selectedJobId || !canCoordinate) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/photo-evidence`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      notify(`${result.photoEvidenceSet.title} scheduled. Task completion now requires released before, during, and after evidence.`)
+      await refresh()
+      return result.photoEvidenceSet
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function requestPhotoEvidenceReview(setId, payload) {
+    if (!selectedJobId || !setId || !canCoordinate) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(
+        `/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/photo-evidence/${encodeURIComponent(setId)}/review`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      )
+      setSelectedJob(result.job)
+      setData((current) => current && result.approval ? {
+        ...current,
+        approvals: upsertById(current.approvals || [], result.approval),
+        dashboard: result.dashboard || current.dashboard,
+      } : current)
+      notify(
+        result.replayed
+          ? 'The exact photo-evidence review request was already retained.'
+          : 'The checksum-protected before/during/after sequence is waiting for independent approval.',
+      )
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function scheduleInspectionChecklist(payload) {
     if (!selectedJobId || !canCoordinate) return null
     setSubmitting(true)
@@ -9168,7 +9330,7 @@ function App() {
     setSubmitting(true)
     setError('')
     try {
-      await api(`/api/ledger/communications/${encodeURIComponent(communicationId)}/delivery-receipt`, {
+      const result = await api(`/api/ledger/communications/${encodeURIComponent(communicationId)}/delivery-receipt`, {
         method: 'POST',
         body: JSON.stringify({
           integration: financeOrderDeliveryDraft.integration.trim(),
@@ -9176,11 +9338,21 @@ function App() {
           sentAt: toIsoDateTime(financeOrderDeliveryDraft.sentAt),
         }),
       })
+      setData((current) => {
+        if (!current) return current
+        const next = {
+          ...current,
+          dashboard: result.dashboard || current.dashboard,
+          finance: result.finance || current.finance,
+        }
+        return result.job ? reconcileJobCollections(next, result.job) : next
+      })
+      if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
       notify(
         `Verified provider receipt retained for ${financeOrderDelivery.action.issueReference || 'the purchase order'}. The order is now an external commitment; no payment was initiated.`,
       )
       closeFinanceOrderDelivery()
-      await refresh()
+      await refreshSection('finance')
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -12325,11 +12497,33 @@ function App() {
                   <div className="form-grid">
                     <label>
                       Job
-                      <select required value={evidence.jobId} onChange={(event) => setEvidence({ ...evidence, jobId: event.target.value })}>
+                      <select required value={evidence.jobId} onChange={(event) => void selectFieldEvidenceJob(event.target.value)}>
                         <option value="">Select an active job</option>
                         {activeJobs.map((job) => (
                           <option key={job.id} value={job.id}>
                             {job.title}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Evidence workflow
+                      <select
+                        value={evidence.photoEvidenceSetId}
+                        onChange={(event) => {
+                          const selected = fieldPhotoEvidenceSets.find(set => set.id === event.target.value)
+                          setEvidence({
+                            ...evidence,
+                            photoEvidenceSetId: event.target.value,
+                            photoEvidencePhase: selected?.status === 'rejected' ? 'before' : selected?.missingPhases?.[0] || 'before',
+                            capturedAt: toLocalDateTimeInput(new Date()),
+                          })
+                        }}
+                      >
+                        <option value="">General job evidence</option>
+                        {availableFieldPhotoEvidenceSets.map((set) => (
+                          <option key={set.id} value={set.id}>
+                            {set.taskTitle || set.title} / {set.workLocation}
                           </option>
                         ))}
                       </select>
@@ -12343,24 +12537,71 @@ function App() {
                         <option value="critical">Critical</option>
                       </select>
                     </label>
+                    {selectedFieldPhotoEvidenceSet ? (
+                      <>
+                        <label>
+                          Evidence phase
+                          <select
+                            required
+                            value={evidence.photoEvidencePhase}
+                            onChange={(event) => setEvidence({ ...evidence, photoEvidencePhase: event.target.value })}
+                          >
+                            <option value="before">Before</option>
+                            <option value="during">During</option>
+                            <option value="after">After</option>
+                          </select>
+                        </label>
+                        <label>
+                          Device capture time
+                          <input
+                            required
+                            type="datetime-local"
+                            max={toLocalDateTimeInput(new Date())}
+                            value={evidence.capturedAt}
+                            onChange={(event) => setEvidence({ ...evidence, capturedAt: event.target.value })}
+                          />
+                        </label>
+                        <div className="form-span evidence-governance-context" data-testid="photo-evidence-context">
+                          <strong>{selectedFieldPhotoEvidenceSet.taskTitle || selectedFieldPhotoEvidenceSet.title}</strong>
+                          <span>{selectedFieldPhotoEvidenceSet.workLocation}</span>
+                          <span>
+                            Cycle {selectedFieldPhotoEvidenceSet.currentCycle}
+                            {' / '}
+                            {selectedFieldPhotoEvidenceSet.captureCount || 0} of 3 phases retained
+                          </span>
+                        </div>
+                      </>
+                    ) : null}
                     <label className="form-span">
                       Evidence file
                       <input
                         ref={evidenceInputRef}
                         required
                         type="file"
-                        accept="image/jpeg,image/png,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        accept={selectedFieldPhotoEvidenceSet
+                          ? 'image/jpeg,image/png,image/webp'
+                          : 'image/jpeg,image/png,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document'}
                       />
                     </label>
                     <label className="form-span">
-                      Site note
+                      {selectedFieldPhotoEvidenceSet ? 'Photo caption' : 'Site note'}
                       <textarea
+                        required={Boolean(selectedFieldPhotoEvidenceSet)}
+                        minLength={selectedFieldPhotoEvidenceSet ? 3 : undefined}
+                        maxLength={600}
                         value={evidence.notes}
                         onChange={(event) => setEvidence({ ...evidence, notes: event.target.value })}
-                        placeholder="Describe what this file proves, what changed, or what needs review."
+                        placeholder={selectedFieldPhotoEvidenceSet
+                          ? 'Describe the visible condition, exact location, and what this phase proves.'
+                          : 'Describe what this file proves, what changed, or what needs review.'}
                       />
                     </label>
                   </div>
+                  {selectedFieldPhotoEvidenceSet ? (
+                    <p className="attendance-policy">
+                      Captures sync in sequence and remain private. Offline capture can queue files and metadata, but cannot request review, release evidence, or complete the task.
+                    </p>
+                  ) : null}
                   <div className="modal-actions">
                     {outboxPending ? (
                       <button
@@ -14831,6 +15072,15 @@ function App() {
                     onIssueMeeting={issueProjectMeeting}
                     onCompleteMeetingAction={completeProjectMeetingAction}
                     onCreateMeetingFollowUp={createProjectMeetingFollowUp}
+                    onOpenApprovals={openApprovals}
+                  />
+                  <PhotoEvidenceControl
+                    job={selectedJob}
+                    canCoordinate={canCoordinate}
+                    canApprove={capabilities.approvals === true}
+                    submitting={submitting}
+                    onSchedule={schedulePhotoEvidenceSet}
+                    onRequestReview={requestPhotoEvidenceReview}
                     onOpenApprovals={openApprovals}
                   />
                   <InspectionChecklistControl

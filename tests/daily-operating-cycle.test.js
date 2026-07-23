@@ -129,7 +129,7 @@ test('daily start huddle and EOD report retain one replay-safe approval-linked o
   assert.equal(approved.approvalStatus, 'approved');
   assert.equal(approved.fieldReportStatus, 'submitted');
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+  assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
 });
 
 test('daily huddle fails closed on missing assignment and safety concern keeps closure pending', t => {

@@ -1538,7 +1538,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '064_governed_installation_qc');
+    assert.equal(migrations.currentVersion, '065_governed_photo_evidence');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1620,12 +1620,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('064_governed_installation_qc'));
+  assert.deepEqual(versions, Array(4).fill('065_governed_photo_evidence'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 64);
+    assert.equal(Number(migrationCount.count), 65);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -2270,7 +2270,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2673,7 +2673,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2781,7 +2781,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2916,7 +2916,7 @@ test('PostgreSQL LMRA parity preserves worker evidence, source-current readiness
     assert.equal(stop.assessment.outcome, 'stop_work');
     assert.equal(stop.stopWorkImmediate, true);
     assert.equal(ledger.getLmraAssessment(assessmentId).readyForHazardousWork, false);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2928,6 +2928,151 @@ test('PostgreSQL LMRA parity preserves worker evidence, source-current readiness
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.readyForHazardousWork, false);
     assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL photo evidence preserves task-bound checksummed phases and independent release across restart', { skip: !connectionString }, () => {
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  let jobId;
+  let taskId;
+  let setId;
+  try {
+    const job = ledger.createIntake({
+      title: `Hosted photographic evidence job ${marker}`,
+      client: { name: `Hosted photographic client ${marker}`, country: 'NL' },
+      status: 'in_progress',
+      assignAutomatically: false
+    }, { actor: 'postgres_photo_evidence_operator' });
+    jobId = job.id;
+    const worker = ledger.upsertWorker({
+      id: `postgres-photo-worker-${marker}`,
+      name: `Hosted Photo Worker ${marker}`,
+      role: 'Installer',
+      status: 'available'
+    }, { actor: 'postgres_photo_evidence_operator' });
+    const assignment = ledger.addAssignment(jobId, {
+      workerId: worker.id,
+      role: worker.role,
+      status: 'planned'
+    }, { actor: 'postgres_photo_evidence_operator' });
+    const task = ledger.addTask(jobId, {
+      title: `Install hosted roof outlet ${marker}`,
+      status: 'in_progress',
+      priority: 'high',
+      assigneeId: worker.id
+    }, { actor: 'postgres_photo_evidence_operator' });
+    taskId = task.id;
+    const set = ledger.createPhotoEvidenceSet(jobId, {
+      entryKey: `postgres-photo-set-${marker}`,
+      taskId,
+      assignmentId: assignment.id,
+      assignedWorkerId: worker.id,
+      title: `Hosted roof outlet evidence ${marker}`,
+      workLocation: 'Hosted building / Roof / Outlet 07',
+      requiredPhases: ['before', 'during', 'after'],
+      notes: 'Retain the substrate, membrane overlap, and finished outlet.'
+    }, { actor: 'role:office_operator:postgres-photo' });
+    setId = set.id;
+    assert.throws(
+      () => ledger.transitionLifecycleRecord(jobId, 'task', taskId, {
+        status: 'completed',
+        notes: 'Attempted completion before photographic release.'
+      }),
+      error => error.code === 'task_photo_evidence_hold'
+    );
+
+    for (const [index, phase] of ['before', 'during', 'after'].entries()) {
+      const storageRef = `postgres-photo/${marker}/${phase}.jpg`;
+      const sha256 = crypto.createHash('sha256').update(`${marker}:${phase}`).digest('hex');
+      const document = ledger.addDocument(jobId, {
+        type: 'photo',
+        title: `${phase} hosted roof outlet evidence`,
+        filename: `${phase}-hosted-roof-outlet.jpg`,
+        mimeType: 'image/jpeg',
+        sizeBytes: 256 + index,
+        storageRef,
+        status: 'stored',
+        analysis: {
+          category: 'governed_field_photo',
+          upload: {
+            storageRef,
+            mimeType: 'image/jpeg',
+            size: 256 + index,
+            sha256
+          }
+        }
+      }, { actor: `role:field_worker:${worker.id}` });
+      const captured = ledger.recordPhotoEvidenceCapture(
+        jobId,
+        setId,
+        document.id,
+        {
+          entryKey: `postgres-photo-capture-${phase}-${marker}`,
+          phase,
+          capturedAt: new Date(Date.now() - (3 - index) * 60 * 1000).toISOString(),
+          caption: `${phase} condition at hosted roof outlet 07`,
+          capturedByWorkerId: worker.id
+        },
+        {
+          actor: `role:field_worker:${worker.id}`,
+          workerId: worker.id,
+          enforceWorkerScope: true
+        }
+      );
+      assert.equal(captured.capture.documentIntegrityValid, true);
+    }
+    const review = ledger.requestPhotoEvidenceReview(jobId, setId, {
+      entryKey: `postgres-photo-review-${marker}`
+    }, { actor: 'role:office_operator:postgres-photo' });
+    assert.equal(review.photoEvidenceSet.status, 'pending_review');
+    assert.throws(
+      () => ledger.resolveApproval(review.approval.id, {
+        status: 'approved',
+        resolvedBy: 'role:office_operator:postgres-photo',
+        reason: 'Attempted hosted self approval.'
+      }, {
+        actor: 'role:office_operator:postgres-photo',
+        enforceSeparation: true
+      }),
+      error => error.code === 'photo_evidence_independent_approval_required'
+    );
+    ledger.resolveApproval(review.approval.id, {
+      status: 'approved',
+      resolvedBy: 'role:approver:postgres-quality',
+      reason: 'Hosted checksum, phase chronology, task source, and location independently verified.'
+    }, {
+      actor: 'role:approver:postgres-quality',
+      enforceSeparation: true
+    });
+    const released = ledger.getPhotoEvidenceSet(setId, { jobId });
+    assert.equal(released.status, 'released');
+    assert.equal(released.readyForTaskCompletion, true);
+    assert.equal(released.captures.length, 3);
+    const completed = ledger.transitionLifecycleRecord(jobId, 'task', taskId, {
+      status: 'completed',
+      notes: 'Hosted task completed after governed photographic release.'
+    });
+    assert.equal(completed.record.status, 'completed');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
+  } finally {
+    ledger.close();
+  }
+
+  ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const set = ledger.getPhotoEvidenceSet(setId, { jobId });
+    const task = ledger.getJobDetail(jobId).tasks.find(item => item.id === taskId);
+    assert.equal(set.status, 'released');
+    assert.equal(set.integrityValid, true);
+    assert.equal(set.captureIntegrityValid, true);
+    assert.equal(set.reviewIntegrityValid, true);
+    assert.equal(set.readyForTaskCompletion, true);
+    assert.deepEqual(set.captures.map(capture => capture.phase), ['before', 'during', 'after']);
+    assert.equal(task.status, 'completed');
+    assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
   }
@@ -2999,7 +3144,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -3086,7 +3231,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger?.close();
   }
@@ -3191,7 +3336,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -3257,7 +3402,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
@@ -3312,7 +3457,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
@@ -3404,7 +3549,7 @@ test('PostgreSQL crew capacity preserves source-current two-week approval and re
       reason: 'Hosted source-current two-week capacity plan verified.'
     });
     assert.equal(ledger.listCrewCapacityBoard({ referenceDate: windowStart }).plans.current, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
@@ -3491,7 +3636,7 @@ test('PostgreSQL daily operating cycle preserves approval-linked huddle and EOD 
       reason: 'Hosted plan-versus-actual evidence verified.'
     });
     assert.equal(ledger.getDailyOperatingCycle(cycleId).status, 'closed');
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
@@ -3629,7 +3774,7 @@ test('PostgreSQL Last Planner lite preserves make-ready, weekly approval, daily 
     outcomeId = outcome.outcome.id;
     assert.equal(outcome.outcome.integrityValid, true);
     assert.equal(ledger.getLastPlannerBoard({ jobId, weekStart }).summary.ppcPercent, 100);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
@@ -3730,7 +3875,7 @@ test('PostgreSQL 5S control preserves approved standards, audits, and corrective
     }, { actor: 'postgres_five_s_field' });
     assert.equal(compliant.audit.integrityValid, true);
     assert.equal(ledger.getFiveSBoard({ jobId, includeGlobal: false }).ready, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
@@ -3892,7 +4037,7 @@ test('PostgreSQL installation QC preserves task holds, retained evidence, and in
       notes: 'Hosted installation released with retained evidence.'
     });
     assert.equal(completed.record.status, 'completed');
-    assert.equal(ledger.migrationStatus().currentVersion, '064_governed_installation_qc');
+    assert.equal(ledger.migrationStatus().currentVersion, '065_governed_photo_evidence');
   } finally {
     ledger.close();
   }
