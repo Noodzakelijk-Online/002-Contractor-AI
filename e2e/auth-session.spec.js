@@ -122,3 +122,120 @@ test('field worker opens an assigned job and completes only the scoped task', as
   ]));
   expect(projected.job.punchItems[0].data).toBeUndefined();
 });
+
+test('field worker completes a live LMRA, then records changed-condition stop-work on mobile', async ({ page, request }) => {
+  const ownerHeaders = { 'X-Contractor-AI-Token': OWNER_ACCESS_KEY };
+  const fieldHeaders = { 'X-Contractor-AI-Token': FIELD_ACCESS_KEY };
+  const suffix = Date.now();
+  expect((await request.post('/api/ledger/workers', {
+    headers: ownerHeaders,
+    data: { id: FIELD_WORKER_ID, name: 'Browser Field Task Worker', role: 'installer', status: 'available' }
+  })).ok()).toBeTruthy();
+  const intakeResponse = await request.post('/api/ledger/intake', {
+    headers: ownerHeaders,
+    data: {
+      title: `Authenticated LMRA job ${suffix}`,
+      client: { name: 'LMRA browser client' },
+      status: 'in_progress',
+      riskLevel: 'high',
+      assignAutomatically: false
+    }
+  });
+  expect(intakeResponse.ok()).toBeTruthy();
+  const job = (await intakeResponse.json()).job;
+  expect((await request.post(`/api/ledger/jobs/${job.id}/assignments`, {
+    headers: ownerHeaders,
+    data: { workerId: FIELD_WORKER_ID, workerName: 'Browser Field Task Worker', role: 'installer', status: 'assigned' }
+  })).ok()).toBeTruthy();
+  const jhaResponse = await request.post(`/api/ledger/jobs/${job.id}/jhas`, {
+    headers: ownerHeaders,
+    data: {
+      title: `Browser LMRA JHA ${suffix}`,
+      status: 'approved',
+      riskLevel: 'high',
+      hazards: ['Stored electrical energy'],
+      controls: ['Lock, tag, test, and prove dead']
+    }
+  });
+  expect(jhaResponse.ok()).toBeTruthy();
+  const jha = (await jhaResponse.json()).jha;
+  expect((await request.post(`/api/ledger/approvals/${jha.approval.id}/resolve`, {
+    headers: ownerHeaders,
+    data: { status: 'approved', resolvedBy: 'Browser owner', reason: 'LMRA JHA verified for the field flow.' }
+  })).ok()).toBeTruthy();
+  const planResponse = await request.post(`/api/ledger/jobs/${job.id}/pre-task-plans`, {
+    headers: ownerHeaders,
+    data: {
+      entryKey: `browser-lmra-plan-${suffix}`,
+      workDate: new Date().toISOString().slice(0, 10),
+      shiftLabel: 'Day shift',
+      title: 'Install isolated distribution equipment',
+      location: 'Main plant room',
+      preparedBy: 'Browser supervisor',
+      responsibleWorkerId: FIELD_WORKER_ID,
+      jhaId: jha.id,
+      evidenceReference: `browser-lmra-method:${suffix}`,
+      steps: [{
+        stepKey: 'install',
+        description: 'Install isolated distribution equipment',
+        hazards: ['Stored electrical energy'],
+        controls: ['Verify isolation before work']
+      }]
+    }
+  });
+  expect(planResponse.ok()).toBeTruthy();
+  const planResult = await planResponse.json();
+  expect((await request.post(`/api/ledger/approvals/${planResult.approval.id}/resolve`, {
+    headers: ownerHeaders,
+    data: { status: 'approved', resolvedBy: 'Browser owner', reason: 'LMRA plan and frozen worker verified.' }
+  })).ok()).toBeTruthy();
+  expect((await request.post(`/api/ledger/jobs/${job.id}/pre-task-plans/${planResult.preTaskPlan.id}/acknowledgments`, {
+    headers: fieldHeaders,
+    data: {
+      entryKey: `browser-lmra-plan-ack-${suffix}`,
+      acknowledged: true,
+      evidenceReference: `browser-lmra-worker-device:${suffix}`
+    }
+  })).ok()).toBeTruthy();
+
+  await page.goto('/');
+  await page.locator('#operator-access-key').fill(FIELD_ACCESS_KEY);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Field updates', exact: true }).click();
+  const panel = page.getByTestId('lmra-control');
+  await expect(panel.getByRole('heading', { name: 'Last-minute risk assessment' })).toBeVisible();
+  const selectors = panel.locator('.lmra-selector select');
+  await selectors.nth(0).selectOption(job.id);
+  await expect(selectors.nth(1).locator(`option[value="${planResult.preTaskPlan.id}"]`)).toHaveCount(1);
+  await selectors.nth(1).selectOption(planResult.preTaskPlan.id);
+  await expect(panel.getByText('Plan and worker acknowledgement are current.')).toBeVisible();
+
+  await panel.getByLabel('Activity', { exact: true }).fill('Install isolated distribution equipment');
+  await panel.getByLabel('Work area', { exact: true }).fill('Main plant room');
+  await panel.getByLabel('Evidence reference', { exact: true }).fill(`browser-live-lmra:${suffix}`);
+  for (const checkbox of await panel.locator('.lmra-check input').all()) await checkbox.check();
+  await panel.locator('.lmra-attestation input').check();
+  await panel.getByRole('button', { name: 'Validate and retain LMRA' }).click();
+  await expect(page.getByText(/LMRA ready until/)).toBeVisible();
+  await expect(panel.locator('.lmra-row').first()).toContainText('ready');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const geometry = await panel.evaluate(element => ({
+    pageWidth: document.documentElement.scrollWidth,
+    viewportWidth: document.documentElement.clientWidth,
+    panelWidth: element.scrollWidth,
+    panelClientWidth: element.clientWidth
+  }));
+  expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+  expect(geometry.panelWidth).toBeLessThanOrEqual(geometry.panelClientWidth + 1);
+
+  await panel.getByLabel('Activity', { exact: true }).fill('Restart installation after nearby lift');
+  await panel.getByLabel('Work area', { exact: true }).fill('Main plant room');
+  await panel.getByLabel('Evidence reference', { exact: true }).fill(`browser-stop-lmra:${suffix}`);
+  const checks = panel.locator('.lmra-check input');
+  for (let index = 0; index < 6; index += 1) await checks.nth(index).check();
+  await panel.getByLabel('Stop-work reason', { exact: true }).fill('An unplanned lifting operation entered the controlled work area.');
+  await panel.getByRole('button', { name: 'Retain stop-work LMRA' }).click();
+  await expect(page.getByText('Stop-work LMRA retained. Resolve the condition and complete a linked reassessment.')).toBeVisible();
+  await expect(panel.locator('.lmra-row').first()).toContainText('stop work');
+});

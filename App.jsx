@@ -86,6 +86,7 @@ const MarketFitControl = lazy(() => import('./components/MarketFitControl'))
 const BidDecisionControl = lazy(() => import('./components/BidDecisionControl'))
 const SiteSurveyControl = lazy(() => import('./components/SiteSurveyControl'))
 const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
+const LmraControl = lazy(() => import('./components/LmraControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
 const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
@@ -229,6 +230,8 @@ async function recordFieldOperation({ id, type, jobId, payload }) {
         ? `pre-task-plans/${encodeURIComponent(preTaskPlanId)}/acknowledgments`
       : type === 'pre_task_plan_suspension' && preTaskPlanId
         ? `pre-task-plans/${encodeURIComponent(preTaskPlanId)}/suspend`
+      : type === 'lmra_assessment'
+        ? 'lmra'
       : type === 'production_entry'
         ? 'production-entries'
       : type === 'daywork_ticket'
@@ -11185,6 +11188,18 @@ function App() {
                     operator={operator}
                     fieldScoped={fieldScoped}
                     canCoordinate={canCoordinate}
+                    apiRequest={api}
+                    recordFieldOperation={recordFieldOperation}
+                    notify={notify}
+                    refresh={refresh}
+                    outboxScope={outboxScope}
+                    refreshOutboxState={refreshOutboxState}
+                  />
+                </LazyControlBoundary>
+                <LazyControlBoundary label="last-minute risk assessment controls">
+                  <LmraControl
+                    jobs={activeJobs}
+                    fieldScoped={fieldScoped}
                     apiRequest={api}
                     recordFieldOperation={recordFieldOperation}
                     notify={notify}

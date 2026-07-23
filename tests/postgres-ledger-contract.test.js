@@ -1537,7 +1537,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '062_governed_five_s');
+    assert.equal(migrations.currentVersion, '063_governed_lmra');
     assert.equal(migrations.pending.length, 0);
     const operatorSession = {
       sessionIdHash: `postgres-session-${Date.now()}`,
@@ -1618,12 +1618,12 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('062_governed_five_s'));
+  assert.deepEqual(versions, Array(4).fill('063_governed_lmra'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 62);
+    assert.equal(Number(migrationCount.count), 63);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
@@ -2268,7 +2268,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2671,7 +2671,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2779,7 +2779,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2806,6 +2806,125 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.plan.status, 'closed');
     assert.equal(closed.plan.definitionIntegrityValid, true);
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+});
+
+test('PostgreSQL LMRA parity preserves worker evidence, source-current readiness, stop-work, and exact replay', { skip: !connectionString }, () => {
+  let ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  const marker = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let jobId;
+  let assessmentId;
+  try {
+    const job = ledger.createIntake({
+      clientName: `Hosted LMRA client ${marker}`,
+      title: `Hosted LMRA ${marker}`,
+      status: 'in_progress',
+      riskLevel: 'high',
+      assignAutomatically: false
+    }, { actor: 'postgres_lmra_test' });
+    jobId = job.id;
+    const worker = ledger.upsertWorker({
+      id: `postgres-lmra-worker-${marker}`,
+      name: `Hosted LMRA worker ${marker}`,
+      role: 'Installer',
+      status: 'available'
+    }, { actor: 'postgres_lmra_test' });
+    ledger.addAssignment(job.id, {
+      workerId: worker.id,
+      workerName: worker.name,
+      role: worker.role,
+      status: 'assigned'
+    }, { actor: 'postgres_lmra_test' });
+    const jha = ledger.createJhaRecord(job.id, {
+      title: `Hosted LMRA JHA ${marker}`,
+      status: 'approved',
+      riskLevel: 'high',
+      hazards: ['Stored electrical energy'],
+      controls: ['Lock, tag, test, and prove dead']
+    }, { actor: 'postgres_lmra_test' });
+    ledger.resolveApproval(jha.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_lmra_approver',
+      reason: 'Hosted LMRA JHA verified.'
+    });
+    const createdPlan = ledger.createPreTaskPlan(job.id, {
+      entryKey: `postgres-lmra-plan-${marker}`,
+      workDate: new Date().toISOString().slice(0, 10),
+      shiftLabel: 'Day shift',
+      title: 'Hosted LMRA installation plan',
+      location: 'Hosted plant room',
+      preparedBy: 'Hosted supervisor',
+      responsibleWorkerId: worker.id,
+      jhaId: jha.id,
+      evidenceReference: `postgres-lmra-method:${marker}`,
+      steps: [{
+        stepKey: 'install',
+        description: 'Install isolated distribution equipment',
+        hazards: ['Stored energy'],
+        controls: ['Verify isolation before work']
+      }]
+    }, { actor: 'postgres_lmra_test' });
+    ledger.resolveApproval(createdPlan.approval.id, {
+      status: 'approved',
+      resolvedBy: 'postgres_lmra_approver',
+      reason: 'Hosted LMRA plan and worker verified.'
+    });
+    ledger.acknowledgePreTaskPlan(job.id, createdPlan.plan.id, {
+      entryKey: `postgres-lmra-plan-ack-${marker}`,
+      workerId: worker.id,
+      acknowledged: true,
+      evidenceReference: `postgres-lmra-worker-device:${marker}`
+    }, { actor: 'postgres_field_worker' });
+    const readyChecks = {
+      task_understood: true,
+      work_area_safe: true,
+      controls_in_place: true,
+      ppe_ready: true,
+      equipment_ready: true,
+      emergency_ready: true,
+      no_changed_conditions: true
+    };
+    const payload = {
+      entryKey: `postgres-lmra-assessment-${marker}`,
+      workerId: worker.id,
+      workerName: worker.name,
+      preTaskPlanId: createdPlan.plan.id,
+      workArea: 'Hosted plant room',
+      activity: 'Install isolated distribution equipment',
+      clientCapturedAt: new Date().toISOString(),
+      checks: readyChecks,
+      safeToStart: true,
+      evidenceReference: `postgres-lmra-device:${marker}`
+    };
+    const created = ledger.createLmraAssessment(job.id, payload, { actor: 'postgres_field_worker' });
+    assessmentId = created.assessment.id;
+    assert.equal(created.assessment.readyForHazardousWork, true);
+    assert.equal(created.assessment.integrityValid, true);
+    assert.equal(ledger.createLmraAssessment(job.id, payload).replayed, true);
+    const stop = ledger.createLmraAssessment(job.id, {
+      ...payload,
+      entryKey: `postgres-lmra-stop-${marker}`,
+      checks: { ...readyChecks, no_changed_conditions: false },
+      safeToStart: false,
+      stopWorkReason: 'Hosted work conditions changed after the live assessment.'
+    }, { actor: 'postgres_field_worker' });
+    assert.equal(stop.assessment.outcome, 'stop_work');
+    assert.equal(stop.stopWorkImmediate, true);
+    assert.equal(ledger.getLmraAssessment(assessmentId).readyForHazardousWork, false);
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
+    assert.equal(ledger.diagnose().valid, true);
+  } finally {
+    ledger.close();
+  }
+
+  ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const retained = ledger.getLmraAssessment(assessmentId, { jobId });
+    assert.equal(retained.integrityValid, true);
+    assert.equal(retained.readyForHazardousWork, false);
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2878,7 +2997,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2965,7 +3084,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger?.close();
   }
@@ -3070,7 +3189,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -3136,7 +3255,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger.close();
   }
@@ -3191,7 +3310,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger.close();
   }
@@ -3283,7 +3402,7 @@ test('PostgreSQL crew capacity preserves source-current two-week approval and re
       reason: 'Hosted source-current two-week capacity plan verified.'
     });
     assert.equal(ledger.listCrewCapacityBoard({ referenceDate: windowStart }).plans.current, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger.close();
   }
@@ -3370,7 +3489,7 @@ test('PostgreSQL daily operating cycle preserves approval-linked huddle and EOD 
       reason: 'Hosted plan-versus-actual evidence verified.'
     });
     assert.equal(ledger.getDailyOperatingCycle(cycleId).status, 'closed');
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger.close();
   }
@@ -3508,7 +3627,7 @@ test('PostgreSQL Last Planner lite preserves make-ready, weekly approval, daily 
     outcomeId = outcome.outcome.id;
     assert.equal(outcome.outcome.integrityValid, true);
     assert.equal(ledger.getLastPlannerBoard({ jobId, weekStart }).summary.ppcPercent, 100);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger.close();
   }
@@ -3609,7 +3728,7 @@ test('PostgreSQL 5S control preserves approved standards, audits, and corrective
     }, { actor: 'postgres_five_s_field' });
     assert.equal(compliant.audit.integrityValid, true);
     assert.equal(ledger.getFiveSBoard({ jobId, includeGlobal: false }).ready, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+    assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
   } finally {
     ledger.close();
   }

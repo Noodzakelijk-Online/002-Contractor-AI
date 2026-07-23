@@ -216,11 +216,20 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '062_governed_five_s'")) {
     failures.push('Canonical governed 5S migration is missing.');
   }
+  if (!ledgerSource.includes("version: '063_governed_lmra'")) {
+    failures.push('Canonical governed LMRA migration is missing.');
+  }
   if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
     failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
   }
   if (!serverSource.includes("fiveSAuditToolState: 'canonical_status_inspection_location_checked'")) {
     failures.push('5S capability does not bind audits to canonical equipment state.');
+  }
+  if (!serverSource.includes("lmraSourceValidation: 'server_current_at_receipt'")) {
+    failures.push('LMRA capability does not require a current server-side source check.');
+  }
+  if (!serverSource.includes('lmraOfflineAuthorization: false')) {
+    failures.push('LMRA capability does not explicitly block offline authorization.');
   }
   if (!serverSource.includes("fiveSVehicleDispatch: false")) {
     failures.push('5S capability does not explicitly prohibit inferred vehicle dispatch.');

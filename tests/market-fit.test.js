@@ -100,7 +100,7 @@ test('governed market-fit profiles are replay-safe, approval-gated, versioned, a
   assert.equal(ledger.activeMarketFitProfile().id, revision.profile.id);
   assert.equal(ledger.listOpportunityFitAssessments({ opportunityId: pursue.id }).length, 1);
   assert.equal(ledger.diagnose().valid, true);
-  assert.equal(ledger.migrationStatus().currentVersion, '062_governed_five_s');
+  assert.equal(ledger.migrationStatus().currentVersion, '063_governed_lmra');
 });
 
 test('autonomous market-fit work retains evidence then opens only an internal review task', t => {

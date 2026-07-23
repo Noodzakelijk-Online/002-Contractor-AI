@@ -170,6 +170,6 @@ test('daily-cycle API enforces field identity and retains approval, export, capa
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '062_governed_five_s');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '063_governed_lmra');
   assert.equal(diagnostics.body.diagnostics.counts.dailyOperatingCycles, 1);
 });

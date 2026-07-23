@@ -146,5 +146,5 @@ test('equipment custody API gives assigned field workers replay-safe checkout an
   assert.equal(register.body.equipmentCustody.policy.externalCommitments, 0);
   const diagnostics = await request(baseUrl, '/api/ledger/debug');
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '062_governed_five_s');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '063_governed_lmra');
 });

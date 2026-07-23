@@ -207,6 +207,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
   createBackupLedger(ledgerFile, 'Crew planning compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE lmra_assessments;
     DROP TABLE five_s_actions;
     DROP TABLE five_s_audits;
     DROP TABLE five_s_standards;
@@ -215,7 +216,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
     DROP TABLE daily_operating_cycles;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -228,6 +229,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
   createBackupLedger(ledgerFile, 'Daily cycle compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE lmra_assessments;
     DROP TABLE five_s_actions;
     DROP TABLE five_s_audits;
     DROP TABLE five_s_standards;
@@ -235,7 +237,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
     DROP TABLE last_planner_outcomes;
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -276,11 +278,12 @@ test('backup verification accepts a complete migration 061 ledger without migrat
   createBackupLedger(ledgerFile, 'Last Planner compatibility fixture');
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
+    DROP TABLE lmra_assessments;
     DROP TABLE five_s_actions;
     DROP TABLE five_s_audits;
     DROP TABLE five_s_standards;
     DROP TABLE five_s_locations;
-    DELETE FROM ledger_schema_migrations WHERE version = '062_governed_five_s';
+    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -297,6 +300,34 @@ test('backup verification rejects a migration 062 ledger with missing 5S constra
   assert.throws(
     () => verifySqliteBackupDatabase(ledgerFile),
     /5S constraints are incomplete: idx_five_s_actions_due/i
+  );
+});
+
+test('backup verification accepts a complete migration 062 ledger without migration 063', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-five-s-compatibility-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, '5S compatibility fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec(`
+    DROP TABLE lmra_assessments;
+    DELETE FROM ledger_schema_migrations WHERE version = '063_governed_lmra';
+  `);
+  database.close();
+  assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
+});
+
+test('backup verification rejects a migration 063 ledger with missing LMRA constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-lmra-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'LMRA schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_lmra_outcome_validity');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /LMRA constraints are incomplete: idx_lmra_outcome_validity/i
   );
 });
 

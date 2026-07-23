@@ -1216,6 +1216,8 @@ function allowsOperatorRequest(role, req) {
         || /^\/api\/ledger\/jobs\/[^/]+\/work-permits$/.test(pathName)
         || pathName === '/api/ledger/pre-task-plans'
         || /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans$/.test(pathName)
+        || pathName === '/api/ledger/lmra'
+        || /^\/api\/ledger\/jobs\/[^/]+\/lmra$/.test(pathName)
         || pathName === '/api/ledger/sds-sheets'
         || /^\/api\/ledger\/jobs\/[^/]+\/sds-sheets$/.test(pathName)
         || pathName === '/api/ledger/drawings'
@@ -1240,6 +1242,7 @@ function allowsOperatorRequest(role, req) {
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/environmental-activities$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/work-permits\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/pre-task-plans\/[^/]+\/(acknowledgments|suspend)$/.test(pathName)) return true;
+    if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/lmra$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/safety-meetings\/[^/]+\/acknowledgments$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daily-cycles$/.test(pathName)) return true;
     if (req.method === 'POST' && /^\/api\/ledger\/jobs\/[^/]+\/daily-cycles\/[^/]+\/end-of-day$/.test(pathName)) return true;
@@ -1430,6 +1433,9 @@ function projectFieldJobDetail(req, detail) {
     submittals: projectFieldRecords(detail.submittals),
     permits: projectFieldRecords(detail.permits),
     preTaskPlans: (detail.preTaskPlans || []).map(plan => preTaskPlanForOperator(req, plan)),
+    lmraAssessments: (detail.lmraAssessments || [])
+      .filter(assessment => scopeWorkerId && String(assessment.workerId || '') === String(scopeWorkerId))
+      .map(projectFieldRecord),
     inspections: projectFieldRecords(detail.inspections),
     nonconformances: projectFieldRecords(detail.nonconformances),
     observations: projectFieldRecords(detail.observations),
@@ -1714,6 +1720,34 @@ function preTaskPlanForOperator(req, plan) {
       && ownAcknowledgement.integrityValid === true,
     fieldScoped: true
   });
+}
+
+function lmraPayloadForOperator(req, payload = {}) {
+  if (req.operator?.role !== 'field_worker') {
+    const error = new Error('LMRA evidence must be completed by an authenticated field worker.');
+    error.statusCode = 403;
+    error.code = 'lmra_field_worker_required';
+    throw error;
+  }
+  const identity = fieldWorkerIdentity(req);
+  if (!identity.workerId) {
+    const error = new Error('Field LMRA capture requires an operator token linked to one worker identity.');
+    error.statusCode = 403;
+    error.code = 'field_worker_identity_required';
+    throw error;
+  }
+  return {
+    ...payload,
+    workerId: identity.workerId,
+    worker_id: identity.workerId,
+    workerName: identity.workerName,
+    worker_name: identity.workerName,
+    source: 'field_lmra_assessment'
+  };
+}
+
+function lmraForOperator(req, assessment) {
+  return req.operator?.role === 'field_worker' ? projectFieldRecord(assessment) : assessment;
 }
 
 function getLedgerDiagnostics({ force = false } = {}) {
@@ -3415,6 +3449,62 @@ app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/close', (req, res) => {
       externalCommitments: 0
     };
   });
+});
+
+app.get('/api/ledger/lmra', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}) };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    const assessments = operatingLedger.listLmraAssessments(filters)
+      .filter(assessment => fieldWorkerCanAccessJob(req, assessment.jobId))
+      .map(assessment => lmraForOperator(req, assessment));
+    return {
+      success: true,
+      lmraAssessments: assessments,
+      policy: {
+        workerScopedActualEvidence: true,
+        exactReplay: true,
+        sourceCurrentAtServerReceipt: true,
+        queuedOfflineAuthorizesWork: false,
+        validityMinutesMaximum: 240,
+        changedConditionsRequireReassessment: true,
+        stopWorkImmediate: true,
+        authorizationInference: false,
+        externalCommitments: 0
+      }
+    };
+  });
+});
+
+app.get('/api/ledger/jobs/:id/lmra', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const filters = { ...(req.query || {}), jobId: req.params.id };
+    if (req.operator?.role === 'field_worker') filters.workerId = fieldWorkerIdentity(req).workerId;
+    return {
+      success: true,
+      lmraAssessments: operatingLedger.listLmraAssessments(filters).map(assessment => lmraForOperator(req, assessment))
+    };
+  });
+});
+
+app.post('/api/ledger/jobs/:id/lmra', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createLmraAssessment(
+      req.params.id,
+      lmraPayloadForOperator(req, req.body || {}),
+      { actor: actorFromRequest(req, 'field_lmra_assessment') }
+    );
+    return {
+      success: true,
+      lmraAssessment: lmraForOperator(req, result.assessment),
+      replayed: result.replayed === true,
+      stopWorkImmediate: result.stopWorkImmediate === true,
+      authorizationInferred: false,
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      externalCommitments: 0
+    };
+  }, 201);
 });
 
 app.get('/api/ledger/work-permits', (req, res) => {
@@ -6558,6 +6648,7 @@ function operationalExport() {
     fiveSStandards: operatingLedger.listFiveSStandards({ status: 'all', limit: 10_000 }),
     fiveSAudits: operatingLedger.listFiveSAudits({ limit: 20_000 }),
     fiveSActions: operatingLedger.listFiveSActions({ status: 'all', limit: 20_000 }),
+    lmraAssessments: operatingLedger.listLmraAssessments({ limit: 20_000 }),
     inspectionTemplates: operatingLedger.listInspectionTemplates({ includeSuperseded: true }),
     inspectionChecklistSubmissions: operatingLedger.listInspectionChecklistSubmissions({ limit: 5000 }),
     projectControls: operatingLedger.listProjectControls({ limit: 5000 }),
@@ -6644,6 +6735,7 @@ function validateOperationalExport(snapshot) {
     'fiveSStandards',
     'fiveSAudits',
     'fiveSActions',
+    'lmraAssessments',
     'inspectionTemplates',
     'inspectionChecklistSubmissions',
     'dayworkTickets',
@@ -6740,6 +6832,7 @@ function validateOperationalExport(snapshot) {
       fiveSStandards: Array.isArray(snapshot.fiveSStandards) ? snapshot.fiveSStandards.length : 0,
       fiveSAudits: Array.isArray(snapshot.fiveSAudits) ? snapshot.fiveSAudits.length : 0,
       fiveSActions: Array.isArray(snapshot.fiveSActions) ? snapshot.fiveSActions.length : 0,
+      lmraAssessments: Array.isArray(snapshot.lmraAssessments) ? snapshot.lmraAssessments.length : 0,
       inspectionTemplates: Array.isArray(snapshot.inspectionTemplates) ? snapshot.inspectionTemplates.length : 0,
       inspectionChecklistSubmissions: Array.isArray(snapshot.inspectionChecklistSubmissions) ? snapshot.inspectionChecklistSubmissions.length : 0,
       rfis: Array.isArray(snapshot.projectControls?.rfis) ? snapshot.projectControls.rfis.length : 0,
@@ -7416,6 +7509,23 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         supplierCommitments: 0,
         externalCommitments: 0
       },
+      lastMinuteRiskAssessment: {
+        available: true,
+        timing: 'immediately_before_hazardous_work',
+        workerEvidence: 'authenticated_worker_scoped',
+        sourceBinding: ['active_pre_task_plan', 'worker_acknowledgement', 'linked_work_permit', 'assigned_task'],
+        checks: ['task_understood', 'work_area_safe', 'controls_in_place', 'ppe_ready', 'equipment_ready', 'emergency_ready', 'no_changed_conditions'],
+        validityMinutesMaximum: 240,
+        offlineCapture: 'queued_evidence_does_not_authorize_until_server_source_check',
+        stopWork: 'immediate_and_reassessment_required',
+        exactReplay: true,
+        autonomy: 'internal_review_task_only',
+        assessmentInferred: false,
+        authorizationInferred: false,
+        scheduleChanged: false,
+        supplierCommitments: 0,
+        externalCommitments: 0
+      },
       auditIntegrity: {
         ...ledgerDiagnostics.auditIntegrity,
         verificationEndpoint: '/api/operations/audit-integrity',
@@ -7516,6 +7626,14 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         preTaskPlanClosure: 'evidence_retained',
         preTaskPlanActivationInference: false,
         preTaskPlanAcknowledgementInference: false,
+        lmraEntryKey: 'durable_exact_replay',
+        lmraWorkerEvidence: 'authenticated_worker_scoped',
+        lmraSourceValidation: 'server_current_at_receipt',
+        lmraOfflineAuthorization: false,
+        lmraValidity: 'time_bounded_and_latest_assessment_only',
+        lmraStopWork: 'explicit_reassessment_required',
+        lmraAutonomy: 'internal_review_task_only',
+        lmraAuthorizationInference: false,
         sdsRevisionEntryKey: 'durable',
         sdsRevisionSourceIntegrity: 'product_document_snapshot_sha256',
         sdsRevisionApproval: 'source_current_approval_gated',

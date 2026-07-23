@@ -1195,6 +1195,45 @@ function verifySqliteBackupDatabase(ledgerFile) {
           if (!retainedIndexes.has(index)) throw new Error(`Backup 5S constraints are incomplete: ${index}.`);
         }
       }
+      if (appliedMigrations.has('063_governed_lmra')) {
+        if (!retainedTables.has('lmra_assessments')) throw new Error('Backup LMRA schema is incomplete: lmra_assessments.');
+        const lmraColumns = new Set(database.prepare('PRAGMA table_info(lmra_assessments)').all().map(row => row.name));
+        for (const column of [
+          'job_id',
+          'task_id',
+          'pre_task_plan_id',
+          'work_permit_id',
+          'worker_id',
+          'worker_name',
+          'work_area',
+          'activity',
+          'assessed_at',
+          'valid_until',
+          'outcome',
+          'checks_json',
+          'observed_hazards_json',
+          'evidence_reference',
+          'stop_work_reason',
+          'reassessment_of_id',
+          'resolution_note',
+          'source_hash',
+          'snapshot_hash',
+          'snapshot_json',
+          'entry_key',
+          'entry_fingerprint'
+        ]) {
+          if (!lmraColumns.has(column)) throw new Error(`Backup LMRA schema is incomplete: lmra_assessments.${column}.`);
+        }
+        const retainedIndexes = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
+        for (const index of [
+          'idx_lmra_job_worker_assessed',
+          'idx_lmra_plan_worker_assessed',
+          'idx_lmra_outcome_validity',
+          'idx_lmra_reassessment_source'
+        ]) {
+          if (!retainedIndexes.has(index)) throw new Error(`Backup LMRA constraints are incomplete: ${index}.`);
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

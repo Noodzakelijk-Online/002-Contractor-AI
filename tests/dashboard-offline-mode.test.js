@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const dashboardRootSource = fs.readFileSync(path.join(__dirname, '..', 'App.jsx'), 'utf8');
 const fiveSWorkspaceSource = fs.readFileSync(path.join(__dirname, '..', 'components', 'FiveSWorkspace.jsx'), 'utf8');
+const lmraControlSource = fs.readFileSync(path.join(__dirname, '..', 'components', 'LmraControl.jsx'), 'utf8');
 const dashboardSource = [
   dashboardRootSource,
   fs.readFileSync(path.join(__dirname, '..', 'dashboard-format.js'), 'utf8'),
@@ -167,7 +168,7 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(outboxSource, /const MAX_TOTAL_EVIDENCE_BYTES = 50 \* 1024 \* 1024/);
   assert.match(outboxSource, /const MAX_OPERATION_DRAFTS = 100/);
   assert.match(outboxSource, /const MAX_TOTAL_OPERATION_BYTES = 1024 \* 1024/);
-  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return', 'five_s_audit'\]\)/);
+  assert.match(outboxSource, /new Set\(\['progress', 'production_entry', 'daywork_ticket', 'nonconformance', 'daily_huddle', 'daily_cycle_close', 'daily_log', 'inspection_checklist', 'observation', 'incident', 'punch_item', 'attendance_check_in', 'attendance_check_out', 'safety_briefing_acknowledgement', 'work_permit_acknowledgement', 'pre_task_plan_acknowledgement', 'pre_task_plan_suspension', 'lmra_assessment', 'material_receipt', 'expense_receipt', 'environmental_activity', 'equipment_check_out', 'equipment_return', 'five_s_audit'\]\)/);
   assert.match(outboxSource, /operator\.id \|\| operator\.worker\?\.id/);
   assert.match(outboxSource, /draft\.operatorScope === operatorScope/);
   assert.match(outboxSource, /await sendEvidence\(draft\)/);
@@ -288,6 +289,16 @@ test('governed 5S connects approved standards, canonical equipment state, correc
   assert.match(source, /exact approved standard revision/i);
   assert.match(fiveSWorkspaceSource, /Canonical equipment link/);
   assert.match(fiveSWorkspaceSource, /do not change tool custody or status, dispatch a vehicle/i);
+});
+
+test('LMRA control binds exact plan sources, stop-work, reassessment, and offline non-authorization', () => {
+  const source = `${dashboardRootSource}\n${lmraControlSource}`;
+  assert.match(source, /type: 'lmra_assessment'/);
+  assert.match(dashboardRootSource, /type === 'lmra_assessment'/);
+  assert.match(lmraControlSource, /data-testid="lmra-control"/);
+  assert.match(lmraControlSource, /Work is not authorized until the live ledger validates current sources/i);
+  assert.match(lmraControlSource, /reassessmentOfId: needsReassessmentEvidence/);
+  assert.match(lmraControlSource, /no_changed_conditions/);
 });
 
 test('job workspace schedules and completes immutable approval-backed inspection checklists', () => {

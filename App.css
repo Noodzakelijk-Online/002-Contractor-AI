@@ -361,6 +361,47 @@
 .pre-task-step-form textarea { min-height: 70px; }
 .pre-task-create-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #687771; font-size: 11px; }
 
+.lmra-control { min-width: 0; border-bottom: 1px solid #dfe8e4; background: #fff; }
+.lmra-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
+.lmra-selector,.lmra-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.lmra-selector { padding: 16px 22px; border-top: 1px solid #e7eeeb; }
+.lmra-control label { display: grid; min-width: 0; gap: 6px; color: #40564e; font-size: 12px; font-weight: 700; }
+.lmra-control input:not([type="checkbox"]),.lmra-control select,.lmra-control textarea { width: 100%; min-width: 0; max-width: 100%; min-height: 38px; padding: 9px 10px; color: #20312b; background: #fff; border: 1px solid #cfded8; border-radius: 5px; outline: none; }
+.lmra-control textarea { min-height: 76px; resize: vertical; }
+.lmra-control input:not([type="checkbox"]):focus,.lmra-control select:focus,.lmra-control textarea:focus { border-color: #0a7b65; box-shadow: 0 0 0 3px #dff2eb; }
+.lmra-message,.lmra-source-state { display: flex; align-items: flex-start; gap: 10px; padding: 12px 22px; font-size: 12px; line-height: 1.45; }
+.lmra-message svg,.lmra-source-state svg { flex: 0 0 auto; margin-top: 1px; }
+.lmra-message-error { color: #8b271d; background: #fff4f1; border-top: 1px solid #f1d0ca; }
+.lmra-message-warning { color: #83520d; background: #fff8e8; border-top: 1px solid #f0dfba; }
+.lmra-source-state { align-items: center; border-top: 1px solid #e7eeeb; border-bottom: 1px solid #e7eeeb; }
+.lmra-source-state > div { display: grid; min-width: 0; gap: 3px; }
+.lmra-source-state strong { color: #263a31; font-size: 13px; }
+.lmra-source-state span { color: #62766e; font-size: 11px; }
+.lmra-source-ready { color: #0b765d; background: #edf8f3; }
+.lmra-source-blocked { color: #9a3a2e; background: #fff5f2; }
+.lmra-form { display: grid; gap: 16px; padding: 18px 22px; background: #fbfcfc; }
+.lmra-checks { display: grid; gap: 0; min-width: 0; margin: 0; padding: 0; border: 1px solid #dbe6e1; border-radius: 6px; }
+.lmra-checks legend { margin-left: 10px; padding: 0 6px; color: #344c42; font-size: 12px; font-weight: 800; }
+.lmra-check { grid-template-columns: 20px minmax(0, 1fr); align-items: start; gap: 10px !important; min-height: 42px; padding: 11px 13px; font-weight: 500 !important; line-height: 1.45; }
+.lmra-check + .lmra-check { border-top: 1px solid #e8eeeb; }
+.lmra-check input,.lmra-attestation input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: #0a7b65; }
+.lmra-form-span { grid-column: 1 / -1; }
+.lmra-attestation { grid-template-columns: 20px minmax(0, 1fr); align-items: start; padding: 12px 14px; color: #334b42 !important; background: #eef6f2; border: 1px solid #d4e6de; border-radius: 6px; font-weight: 600 !important; line-height: 1.45; }
+.lmra-form > button { justify-self: start; }
+.lmra-register { border-top: 1px solid #dfe8e4; }
+.lmra-register-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 22px; background: #f7faf8; }
+.lmra-register-heading strong { color: #263a31; font-size: 13px; }
+.lmra-register-heading span { color: #708078; font-size: 11px; }
+.lmra-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 66px; padding: 10px 22px; border-top: 1px solid #edf1ef; }
+.lmra-row > div { display: grid; min-width: 0; gap: 3px; }
+.lmra-row strong,.lmra-row span { overflow-wrap: anywhere; }
+.lmra-row strong { color: #263a31; font-size: 13px; }
+.lmra-row small,.lmra-row span { color: #6c7c75; font-size: 11px; }
+.lmra-row-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 5px; }
+.lmra-row-ready { color: #0b765d; background: #e8f5ef; }
+.lmra-row-stop { color: #a1362a; background: #fbeae7; }
+.lmra-row-status { justify-items: end; text-align: right; }
+
 .work-permit-control { min-width: 0; border-bottom: 1px solid #dfe8e4; background: #fff; }
 .work-permit-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .work-permit-selector { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 14px; padding: 16px 22px; border-top: 1px solid #e7eeeb; }
@@ -428,6 +469,14 @@
   .pre-task-step-form .icon-button { grid-column: 3; grid-row: 1; }
   .pre-task-create-actions { align-items: stretch; flex-direction: column; }
   .pre-task-create-actions .primary-button { width: 100%; }
+  .lmra-summary { width: 100%; justify-content: flex-start; }
+  .lmra-selector,.lmra-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .lmra-selector,.lmra-form { padding: 14px 16px; }
+  .lmra-message,.lmra-source-state,.lmra-register-heading,.lmra-row { padding-right: 16px; padding-left: 16px; }
+  .lmra-form-span { grid-column: auto; }
+  .lmra-form > button { width: 100%; min-height: 42px; white-space: normal; }
+  .lmra-row { grid-template-columns: 30px minmax(0, 1fr); align-items: start; }
+  .lmra-row-status { grid-column: 2; justify-items: start; text-align: left; }
   .attendance-summary { width: 100%; justify-content: flex-start; }
   .attendance-form .modal-actions { padding: 0 16px 16px; }
   .attendance-form .primary-button { width: 100%; min-height: 42px; }

@@ -169,6 +169,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
     { key: 'orientation', label: 'Worker orientation', table: 'worker_orientations', detailKey: 'orientations' },
     { key: 'safety_briefing', label: 'Approved safety briefing', table: 'safety_meetings', detailKey: 'safetyMeetings', readyStatuses: ['completed', 'approved', 'client_visible'] },
     { key: 'pre_task_plan', label: 'Approved pre-task plan', table: 'pre_task_plans', detailKey: 'preTaskPlans', readyStatuses: ['active', 'closed'] },
+    { key: 'lmra', label: 'Current last-minute risk assessment', table: 'lmra_assessments', detailKey: 'lmraAssessments', readyStatuses: ['ready'] },
     { key: 'jha', label: 'JHA / risk assessment', table: 'jha_records', detailKey: 'jhas' },
     { key: 'sds', label: 'SDS register', table: 'sds_sheets', detailKey: 'sdsSheets' },
     { key: 'permit', label: 'Permits', table: 'permit_records', detailKey: 'permits' },
@@ -1279,6 +1280,17 @@ const ENVIRONMENTAL_REPORT_FORMAT = 'contractor-ai-environmental-report/v1';
 const SAFETY_BRIEFING_FORMAT = 'contractor-ai-safety-briefing/v1';
 const WORK_PERMIT_FORMAT = 'contractor-ai-work-permit/v1';
 const PRE_TASK_PLAN_FORMAT = 'contractor-ai-pre-task-plan/v1';
+const LMRA_ASSESSMENT_FORMAT = 'contractor-ai-lmra-assessment/v1';
+const LMRA_CHECK_KEYS = Object.freeze([
+  'task_understood',
+  'work_area_safe',
+  'controls_in_place',
+  'ppe_ready',
+  'equipment_ready',
+  'emergency_ready',
+  'no_changed_conditions'
+]);
+const LMRA_CHECK_KEY_SET = new Set(LMRA_CHECK_KEYS);
 const SDS_REVISION_FORMAT = 'contractor-ai-sds-revision/v1';
 const SDS_CURRENT_STATUSES = new Set(['current', 'approved', 'accepted', 'active']);
 const DRAWING_REVISION_FORMAT = 'contractor-ai-drawing-revision/v1';
@@ -5456,6 +5468,51 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           WHERE job_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_five_s_actions_due
           ON five_s_actions(status, due_date, severity);
+      `);
+    }
+  },
+  {
+    version: '063_governed_lmra',
+    description: 'Retain worker-scoped last-minute risk assessments bound to current pre-task plans, permits, explicit checks, stop-work outcomes, and exact replay evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lmra_assessments (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT REFERENCES job_tasks(id) ON DELETE SET NULL,
+          pre_task_plan_id TEXT NOT NULL REFERENCES pre_task_plans(id) ON DELETE RESTRICT,
+          work_permit_id TEXT REFERENCES permit_records(id) ON DELETE SET NULL,
+          worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+          worker_name TEXT NOT NULL,
+          work_area TEXT NOT NULL,
+          activity TEXT NOT NULL,
+          assessed_at TEXT NOT NULL,
+          valid_until TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          checks_json TEXT NOT NULL DEFAULT '[]',
+          observed_hazards_json TEXT NOT NULL DEFAULT '[]',
+          evidence_reference TEXT NOT NULL,
+          stop_work_reason TEXT,
+          reassessment_of_id TEXT REFERENCES lmra_assessments(id) ON DELETE SET NULL,
+          resolution_note TEXT,
+          source_hash TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_lmra_job_worker_assessed
+          ON lmra_assessments(job_id, worker_id, assessed_at DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_lmra_plan_worker_assessed
+          ON lmra_assessments(pre_task_plan_id, worker_id, assessed_at DESC, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_lmra_outcome_validity
+          ON lmra_assessments(outcome, valid_until, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lmra_reassessment_source
+          ON lmra_assessments(reassessment_of_id)
+          WHERE reassessment_of_id IS NOT NULL AND outcome = 'ready';
       `);
     }
   }
@@ -37214,6 +37271,396 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
   }
 
+  normalizeLmraChecks(rawChecks) {
+    const supplied = new Map();
+    if (Array.isArray(rawChecks)) {
+      for (const item of rawChecks) {
+        const key = normalizeStatus(item?.key, '');
+        if (!LMRA_CHECK_KEY_SET.has(key) || supplied.has(key) || typeof item?.passed !== 'boolean') {
+          throw ledgerInputError('lmra_checks_invalid', 'LMRA checks must contain every supported check exactly once with an explicit yes or no answer.');
+        }
+        supplied.set(key, item.passed);
+      }
+    } else if (rawChecks && typeof rawChecks === 'object') {
+      for (const [rawKey, value] of Object.entries(rawChecks)) {
+        const key = normalizeStatus(rawKey, '');
+        if (!LMRA_CHECK_KEY_SET.has(key) || supplied.has(key) || typeof value !== 'boolean') {
+          throw ledgerInputError('lmra_checks_invalid', 'LMRA checks must contain every supported check exactly once with an explicit yes or no answer.');
+        }
+        supplied.set(key, value);
+      }
+    }
+    if (supplied.size !== LMRA_CHECK_KEYS.length || LMRA_CHECK_KEYS.some(key => !supplied.has(key))) {
+      throw ledgerInputError('lmra_checks_incomplete', 'Answer every LMRA check before work can be assessed.', {
+        missing: LMRA_CHECK_KEYS.filter(key => !supplied.has(key))
+      });
+    }
+    return LMRA_CHECK_KEYS.map(key => ({ key, passed: supplied.get(key) }));
+  }
+
+  lmraLinkedSources(jobId, planId, workerId, taskId = null) {
+    const plan = this.getPreTaskPlan(planId, { jobId });
+    const attendee = (plan.attendees || []).find(item => String(item.workerId || '') === String(workerId));
+    if (!attendee) {
+      throw ledgerInputError('lmra_worker_not_expected', 'Only a worker retained in the approved pre-task crew can complete this LMRA.', { workerId }, 403);
+    }
+    const assignment = this.db.prepare(`
+      SELECT id, status, updated_at FROM assignments
+      WHERE job_id = ? AND worker_id = ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(jobId, workerId);
+    if (!assignment || !this.activeAssignmentStatus(assignment.status)) {
+      throw ledgerInputError('lmra_worker_not_assigned', 'The retained worker is no longer actively assigned to this job.', { workerId }, 403);
+    }
+    const task = taskId
+      ? this.db.prepare('SELECT * FROM job_tasks WHERE id = ? AND job_id = ?').get(taskId, jobId)
+      : null;
+    if (taskId && !task) {
+      throw ledgerInputError('lmra_task_not_found', 'The selected task does not belong to this job.', { taskId }, 404);
+    }
+    if (task?.assignee_id && String(task.assignee_id) !== String(workerId)) {
+      throw ledgerInputError('lmra_task_scope_forbidden', 'The selected task is assigned to another crew member.', { taskId }, 403);
+    }
+    let permit = null;
+    let permitAttendee = null;
+    if (plan.workPermitId) {
+      permit = this.getWorkPermit(plan.workPermitId, { jobId });
+      permitAttendee = (permit.attendees || []).find(item => String(item.workerId || '') === String(workerId)) || null;
+    }
+    const blockers = [
+      ...(plan.readyForWork !== true ? plan.blockers.map(blocker => ({ type: blocker.type, message: blocker.message })) : []),
+      ...(attendee.status !== 'acknowledged' || attendee.integrityValid !== true
+        ? [{ type: 'worker_plan_acknowledgement_missing', message: 'This worker has not acknowledged the exact current pre-task plan.' }]
+        : []),
+      ...(permit && permit.readyForWork !== true
+        ? permit.blockers.map(blocker => ({ type: `permit_${blocker.type}`, message: blocker.message }))
+        : []),
+      ...(permit && (!permitAttendee || permitAttendee.status !== 'acknowledged' || permitAttendee.integrityValid !== true)
+        ? [{ type: 'worker_permit_acknowledgement_missing', message: 'This worker has not acknowledged the exact linked work permit.' }]
+        : []),
+      ...(task && !['open', 'in_progress', 'started', 'blocked'].includes(normalizeStatus(task.status, 'open'))
+        ? [{ type: 'task_not_current', message: `Task status is ${task.status}.` }]
+        : [])
+    ];
+    const basis = {
+      format: LMRA_ASSESSMENT_FORMAT,
+      jobId,
+      task: task ? {
+        id: task.id,
+        status: task.status,
+        assigneeId: task.assignee_id || null,
+        updatedAt: task.updated_at
+      } : null,
+      preTaskPlan: {
+        id: plan.id,
+        sourceHash: plan.sourceHash,
+        snapshotHash: plan.snapshotHash,
+        status: plan.status,
+        workDate: plan.workDate,
+        definitionIntegrityValid: plan.definitionIntegrityValid,
+        prerequisitesCurrent: plan.prerequisitesCurrent
+      },
+      planAttendee: {
+        id: attendee.id,
+        workerId: attendee.workerId,
+        status: attendee.status,
+        entryFingerprint: attendee.entryFingerprint,
+        planSourceHash: attendee.planSourceHash,
+        integrityValid: attendee.integrityValid
+      },
+      workPermit: permit ? {
+        id: permit.id,
+        sourceHash: permit.sourceHash,
+        snapshotHash: permit.snapshotHash,
+        status: permit.status,
+        validFrom: permit.validFrom,
+        expiresAt: permit.expiresAt,
+        readyForWork: permit.readyForWork
+      } : null,
+      permitAttendee: permitAttendee ? {
+        id: permitAttendee.id,
+        workerId: permitAttendee.workerId,
+        status: permitAttendee.status,
+        entryFingerprint: permitAttendee.entryFingerprint,
+        definitionSourceHash: permitAttendee.definitionSourceHash,
+        integrityValid: permitAttendee.integrityValid
+      } : null,
+      assignment: {
+        id: assignment.id,
+        status: assignment.status,
+        updatedAt: assignment.updated_at
+      }
+    };
+    return { plan, attendee, permit, permitAttendee, task, blockers, basis, hash: sha256Json(basis) };
+  }
+
+  getLmraAssessment(assessmentId, options = {}) {
+    const row = this.db.prepare(`
+      SELECT assessments.*, jobs.title AS job_title
+      FROM lmra_assessments assessments
+      JOIN jobs ON jobs.id = assessments.job_id
+      WHERE assessments.id = ?
+    `).get(assessmentId);
+    if (!row || (options.jobId && String(row.job_id) !== String(options.jobId))) {
+      throw ledgerInputError('lmra_not_found', 'LMRA assessment not found for this job.', {}, 404);
+    }
+    const assessment = this.mapLmraAssessment(row);
+    let currentSources = null;
+    let sourceCurrent = false;
+    let currentBlockers = [];
+    try {
+      currentSources = this.lmraLinkedSources(row.job_id, row.pre_task_plan_id, row.worker_id, row.task_id || null);
+      sourceCurrent = currentSources.hash === row.source_hash && currentSources.blockers.length === 0;
+      currentBlockers = currentSources.blockers;
+    } catch (error) {
+      currentBlockers = [{ type: error.code || 'lmra_source_unavailable', message: error.message }];
+    }
+    const latest = this.db.prepare(`
+      SELECT id FROM lmra_assessments
+      WHERE pre_task_plan_id = ? AND worker_id = ?
+      ORDER BY assessed_at DESC, created_at DESC, id DESC
+      LIMIT 1
+    `).get(row.pre_task_plan_id, row.worker_id);
+    const expired = Date.parse(row.valid_until || '') <= Date.now();
+    const isLatestForWorkerPlan = latest?.id === row.id;
+    const readyForHazardousWork = assessment.outcome === 'ready'
+      && assessment.integrityValid
+      && sourceCurrent
+      && !expired
+      && isLatestForWorkerPlan;
+    const blockers = [
+      ...(assessment.outcome !== 'ready' ? [{ type: 'lmra_stop_work', message: assessment.stopWorkReason || 'The LMRA outcome requires work to remain stopped.' }] : []),
+      ...(!assessment.integrityValid ? [{ type: 'lmra_integrity_failed', message: 'The retained LMRA no longer matches its immutable snapshot.' }] : []),
+      ...(!sourceCurrent ? currentBlockers.length ? currentBlockers : [{ type: 'lmra_sources_changed', message: 'A linked safety source changed after this LMRA was retained.' }] : []),
+      ...(expired ? [{ type: 'lmra_expired', message: 'The LMRA validity window has expired.' }] : []),
+      ...(!isLatestForWorkerPlan ? [{ type: 'lmra_superseded', message: 'A later LMRA assessment supersedes this record.' }] : [])
+    ];
+    return {
+      ...assessment,
+      jobTitle: row.job_title,
+      sourceCurrent,
+      expired,
+      isLatestForWorkerPlan,
+      readyForHazardousWork,
+      blockers
+    };
+  }
+
+  listLmraAssessments(filters = {}) {
+    const clauses = ['1 = 1'];
+    const params = [];
+    if (filters.jobId || filters.job_id) {
+      clauses.push('job_id = ?');
+      params.push(filters.jobId || filters.job_id);
+    }
+    if (filters.workerId || filters.worker_id) {
+      clauses.push('worker_id = ?');
+      params.push(filters.workerId || filters.worker_id);
+    }
+    if (filters.preTaskPlanId || filters.pre_task_plan_id) {
+      clauses.push('pre_task_plan_id = ?');
+      params.push(filters.preTaskPlanId || filters.pre_task_plan_id);
+    }
+    if (filters.outcome) {
+      clauses.push('outcome = ?');
+      params.push(normalizeStatus(filters.outcome, 'ready'));
+    }
+    const limit = Math.max(1, Math.min(500, Number(filters.limit || 100)));
+    const rows = this.db.prepare(`
+      SELECT id FROM lmra_assessments
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY assessed_at DESC, created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params, limit);
+    return rows.map(row => this.getLmraAssessment(row.id));
+  }
+
+  createLmraAssessment(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const job = this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const workerId = normalizeText(payload.workerId || payload.worker_id, '');
+      const workerName = normalizeText(payload.workerName || payload.worker_name, '');
+      if (!workerId || workerName.length < 2) {
+        throw ledgerInputError('lmra_worker_required', 'LMRA capture requires the authenticated worker identity.');
+      }
+      const worker = this.db.prepare('SELECT id, name FROM workers WHERE id = ?').get(workerId);
+      if (!worker) throw ledgerInputError('lmra_worker_not_found', 'The authenticated worker identity is not retained.', { workerId }, 404);
+      const planId = normalizeText(payload.preTaskPlanId || payload.pre_task_plan_id || payload.planId || payload.plan_id, '');
+      if (!planId) throw ledgerInputError('lmra_pre_task_plan_required', 'Select the exact released pre-task plan before completing an LMRA.');
+      const taskId = normalizeText(payload.taskId || payload.task_id, '') || null;
+      const workArea = normalizeText(payload.workArea || payload.work_area || job.address || job.city, '');
+      const activity = normalizeText(payload.activity || payload.title, '');
+      if (workArea.length < 2 || workArea.length > 240) throw ledgerInputError('lmra_work_area_invalid', 'LMRA work area must contain two to 240 characters.');
+      if (activity.length < 3 || activity.length > 500) throw ledgerInputError('lmra_activity_invalid', 'LMRA activity must contain three to 500 characters.');
+      const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
+      if (evidenceReference.length < 3 || evidenceReference.length > 240) throw ledgerInputError('lmra_evidence_invalid', 'LMRA evidence reference must contain three to 240 characters.');
+      const checks = this.normalizeLmraChecks(payload.checks);
+      if (typeof payload.safeToStart !== 'boolean' && typeof payload.safe_to_start !== 'boolean') {
+        throw ledgerInputError('lmra_attestation_required', 'LMRA capture requires an explicit safe-to-start yes or no answer.');
+      }
+      const safeToStart = payload.safeToStart === true || payload.safe_to_start === true;
+      const observedHazards = [...new Set(normalizeList(payload.observedHazards || payload.observed_hazards)
+        .map(value => normalizeText(value, '')).filter(Boolean))];
+      if (observedHazards.length > 20 || observedHazards.some(value => value.length > 500)) {
+        throw ledgerInputError('lmra_observed_hazards_invalid', 'Retain no more than 20 observed hazards of up to 500 characters each.');
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('lmra_entry_key_invalid', 'LMRA replay key must contain 8 to 200 safe characters.');
+      }
+      const receivedAt = nowIso();
+      const clientCapturedAt = normalizeScheduleTimestamp(payload.clientCapturedAt || payload.client_captured_at || receivedAt, {
+        required: true, label: 'LMRA capture time', code: 'lmra_capture_time_invalid'
+      });
+      const captureAgeMs = Date.parse(receivedAt) - Date.parse(clientCapturedAt);
+      if (captureAgeMs < -5 * 60 * 1000) {
+        throw ledgerInputError('lmra_capture_time_future', 'LMRA capture time cannot be more than five minutes in the future.');
+      }
+      const captureStale = captureAgeMs > 15 * 60 * 1000;
+      const validForMinutes = Math.max(15, Math.min(240, Math.floor(Number(payload.validForMinutes || payload.valid_for_minutes || 120))));
+      const sources = this.lmraLinkedSources(jobId, planId, workerId, taskId);
+      const failedChecks = checks.filter(check => check.passed !== true).map(check => check.key);
+      const sourceBlockers = sources.blockers.map(blocker => blocker.type);
+      const outcome = safeToStart && failedChecks.length === 0 && sourceBlockers.length === 0 && !captureStale ? 'ready' : 'stop_work';
+      const suppliedStopWorkReason = normalizeText(payload.stopWorkReason || payload.stop_work_reason, '');
+      const derivedStopWorkReason = [
+        ...(failedChecks.length ? [`Failed checks: ${failedChecks.join(', ')}`] : []),
+        ...(sourceBlockers.length ? [`Source blockers: ${sourceBlockers.join(', ')}`] : []),
+        ...(captureStale ? ['Offline or delayed capture requires a new live LMRA before work starts.'] : []),
+        ...(!safeToStart && !failedChecks.length ? ['Worker did not attest that work is safe to start.'] : [])
+      ].join(' ');
+      const stopWorkReason = outcome === 'stop_work' ? suppliedStopWorkReason || derivedStopWorkReason : null;
+      if (outcome === 'stop_work' && stopWorkReason.length < 8) {
+        throw ledgerInputError('lmra_stop_work_reason_required', 'A stop-work LMRA requires a retained reason of at least eight characters.');
+      }
+      const reassessmentOfId = normalizeText(payload.reassessmentOfId || payload.reassessment_of_id, '') || null;
+      const resolutionNote = normalizeText(payload.resolutionNote || payload.resolution_note, '') || null;
+      const latestRow = this.db.prepare(`
+        SELECT * FROM lmra_assessments
+        WHERE pre_task_plan_id = ? AND worker_id = ?
+        ORDER BY assessed_at DESC, created_at DESC, id DESC
+        LIMIT 1
+      `).get(planId, workerId);
+      if (reassessmentOfId) {
+        const source = this.db.prepare('SELECT * FROM lmra_assessments WHERE id = ?').get(reassessmentOfId);
+        if (!source || source.outcome !== 'stop_work' || source.job_id !== jobId || source.pre_task_plan_id !== planId || source.worker_id !== workerId || latestRow?.id !== source.id) {
+          throw ledgerInputError('lmra_reassessment_source_invalid', 'A reassessment must reference this worker’s latest stop-work LMRA for the same plan.', { reassessmentOfId }, 409);
+        }
+      }
+      if (outcome === 'ready' && latestRow?.outcome === 'stop_work') {
+        if (reassessmentOfId !== latestRow.id || !resolutionNote || resolutionNote.length < 8) {
+          throw ledgerInputError('lmra_reassessment_evidence_required', 'Clearing a stop-work LMRA requires a linked reassessment and retained resolution note.', { requiredReassessmentOfId: latestRow.id }, 409);
+        }
+      }
+      const workPermitId = sources.permit?.id || null;
+      const entryFingerprint = sha256Json({
+        jobId, taskId, planId, workPermitId, workerId, workerName: worker.name,
+        workArea, activity, clientCapturedAt, validForMinutes, checks, observedHazards,
+        safeToStart, evidenceReference, stopWorkReason, reassessmentOfId, resolutionNote
+      });
+      const replay = this.db.prepare('SELECT * FROM lmra_assessments WHERE entry_key = ?').get(entryKey);
+      if (replay) {
+        if (replay.entry_fingerprint !== entryFingerprint || replay.job_id !== jobId || replay.worker_id !== workerId) {
+          throw ledgerInputError('lmra_entry_key_reused', 'LMRA replay key was already used for different content.', { entryKey }, 409);
+        }
+        return { assessment: this.getLmraAssessment(replay.id, { jobId }), replayed: true, externalCommitments: 0 };
+      }
+      const id = makeId('lmra');
+      const assessedAt = receivedAt;
+      const validityCeiling = new Date(Date.parse(assessedAt) + validForMinutes * 60 * 1000).toISOString();
+      const permitExpiry = sources.permit?.expiresAt && Date.parse(sources.permit.expiresAt) > Date.parse(assessedAt)
+        ? sources.permit.expiresAt
+        : null;
+      const validUntil = outcome === 'ready'
+        ? [validityCeiling, permitExpiry].filter(Boolean).sort()[0]
+        : assessedAt;
+      const sourceHash = sources.hash;
+      const snapshot = {
+        format: LMRA_ASSESSMENT_FORMAT,
+        assessmentId: id,
+        jobId,
+        taskId,
+        preTaskPlanId: planId,
+        workPermitId,
+        workerId,
+        workerName: worker.name,
+        workArea,
+        activity,
+        clientCapturedAt,
+        assessedAt,
+        validUntil,
+        outcome,
+        checks,
+        observedHazards,
+        safeToStart,
+        evidenceReference,
+        stopWorkReason,
+        reassessmentOfId,
+        resolutionNote,
+        sourceHash,
+        linkedSources: sources.basis,
+        retainedAt: receivedAt
+      };
+      const snapshotHash = sha256Json(snapshot);
+      this.db.prepare(`
+        INSERT INTO lmra_assessments (
+          id, job_id, task_id, pre_task_plan_id, work_permit_id, worker_id, worker_name,
+          work_area, activity, assessed_at, valid_until, outcome, checks_json,
+          observed_hazards_json, evidence_reference, stop_work_reason, reassessment_of_id,
+          resolution_note, source_hash, snapshot_hash, snapshot_json, entry_key,
+          entry_fingerprint, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, taskId, planId, workPermitId, workerId, worker.name,
+        workArea, activity, assessedAt, validUntil, outcome, toJson(checks),
+        toJson(observedHazards), evidenceReference, stopWorkReason, reassessmentOfId,
+        resolutionNote, sourceHash, snapshotHash, toJson(snapshot), entryKey,
+        entryFingerprint, toJson({
+          clientCapturedAt,
+          captureStale,
+          validForMinutes,
+          safeToStart,
+          failedChecks,
+          sourceBlockers,
+          externalCommitments: 0,
+          authorizationInferred: false
+        }), receivedAt, receivedAt
+      );
+      const assessment = this.getLmraAssessment(id, { jobId });
+      if (options.audit !== false) {
+        this.audit({
+          entityType: 'lmra_assessment',
+          entityId: id,
+          jobId,
+          action: outcome === 'ready' ? 'record_lmra_ready' : 'record_lmra_stop_work',
+          actor,
+          after: assessment,
+          metadata: {
+            workerId,
+            planId,
+            workPermitId,
+            taskId,
+            entryKey,
+            sourceHash,
+            snapshotHash,
+            outcome,
+            stopWorkImmediate: outcome === 'stop_work',
+            externalCommitments: 0,
+            authorizationInferred: false
+          }
+        });
+      }
+      return {
+        assessment,
+        replayed: false,
+        stopWorkImmediate: outcome === 'stop_work',
+        externalCommitments: 0,
+        authorizationInferred: false
+      };
+    });
+  }
+
   safetyMeetingAttendeeKey({ workerId = null, attendeeName = '', company = '' } = {}) {
     if (workerId) return `worker:${workerId}`;
     return `person:${sha256Json({ name: normalizeText(attendeeName, '').toLowerCase(), company: normalizeText(company, '').toLowerCase() }).slice(0, 24)}`;
@@ -41948,6 +42395,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       ...(detail.safetyChecks || []),
       ...(detail.safetyMeetings || []),
       ...crewEvidence.currentOrientations,
+      ...(detail.preTaskPlans || []),
+      ...(detail.lmraAssessments || []).filter(record => record.isLatestForWorkerPlan),
       ...(detail.jhas || []),
       ...(detail.sdsSheets || [])
     ];
@@ -46517,6 +46966,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             safetyRecords: (detail.safetyChecks || []).length
               + (detail.safetyMeetings || []).length
               + (detail.orientations || []).length
+              + (detail.preTaskPlans || []).length
+              + (detail.lmraAssessments || []).filter(record => record.isLatestForWorkerPlan).length
               + (detail.jhas || []).length
               + (detail.sdsSheets || []).length,
             siteAccessRecords: (detail.siteAccessLogs || []).length,
@@ -48364,6 +48815,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       openObservations: 0,
       openIncidents: 0,
       openSafetyRecords: 0,
+      openLmraAssessments: 0,
+      missingLmraAssessments: 0,
       dueSafetyRecords: 0,
       siteAccessBlocks: 0,
       qualityOpen: 0,
@@ -48395,6 +48848,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       summary.openObservations += normalizeNumber(row.counts?.openObservations, 0);
       summary.openIncidents += normalizeNumber(row.counts?.openIncidents, 0);
       summary.openSafetyRecords += normalizeNumber(row.counts?.openSafetyRecords, 0);
+      summary.openLmraAssessments += normalizeNumber(row.counts?.openLmraAssessments, 0);
+      summary.missingLmraAssessments += normalizeNumber(row.counts?.missingLmraAssessments, 0);
       summary.dueSafetyRecords += normalizeNumber(row.counts?.dueSafetyRecords, 0);
       summary.siteAccessBlocks += normalizeNumber(row.counts?.siteAccessBlocks, 0);
       summary.qualityOpen += normalizeNumber(row.counts?.qualityOpen, 0);
@@ -48500,6 +48955,31 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const safetyOpen = (detail.safetyChecks || []).filter(item =>
           recordOpen(item) || ['high', 'critical'].includes(severityOf(item))
         );
+        const activePreTaskPlans = (detail.preTaskPlans || []).filter(item =>
+          statusOfRecord(item, 'draft') === 'active'
+        );
+        const latestLmraAssessments = (detail.lmraAssessments || []).filter(item =>
+          item.isLatestForWorkerPlan === true
+        );
+        const latestLmraByPlanWorker = new Map(latestLmraAssessments.map(item => [
+          `${item.preTaskPlanId}:${item.workerId}`,
+          item
+        ]));
+        const expectedLmraPairs = activePreTaskPlans.flatMap(plan =>
+          (plan.attendees || [])
+            .filter(attendee => statusOfRecord(attendee, 'expected') === 'acknowledged')
+            .map(attendee => ({
+              preTaskPlanId: plan.id,
+              workerId: attendee.workerId,
+              workerName: attendee.workerName
+            }))
+        );
+        const missingLmraAssessments = expectedLmraPairs.filter(pair =>
+          !latestLmraByPlanWorker.has(`${pair.preTaskPlanId}:${pair.workerId}`)
+        );
+        const openLmraAssessments = expectedLmraPairs
+          .map(pair => latestLmraByPlanWorker.get(`${pair.preTaskPlanId}:${pair.workerId}`))
+          .filter(item => item && item.readyForHazardousWork !== true);
         const punchOpen = (detail.punchItems || []).filter(recordOpen);
         const documentReviews = (detail.documents || []).filter(item =>
           ['needs_review', 'needs_update', 'draft', 'pending_approval', 'expired'].includes(statusOfRecord(item, 'stored'))
@@ -48511,6 +48991,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           ...(detail.jhas || []),
           ...(detail.sdsSheets || []),
           ...(detail.safetyChecks || []),
+          ...(detail.preTaskPlans || []),
+          ...latestLmraAssessments,
           ...(detail.siteAccessLogs || [])
         ];
         const openSafetyRecords = [
@@ -48519,6 +49001,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           ...jhas,
           ...sdsSheets,
           ...safetyOpen,
+          ...openLmraAssessments,
           ...siteAccessBlocks
         ];
         const dueSafetyRecords = openSafetyRecords.filter(item =>
@@ -48526,7 +49009,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         );
         const evidenceRecords = (detail.documents || []).length + (detail.fieldReports || []).length;
         const activeFieldJob = activeJobStatuses.has(jobStatus) || (detail.assignments || []).length > 0 || evidenceRecords > 0;
-        const safetyGap = activeFieldJob && safetyRecords.length === 0;
+        const safetyPackMissing = activeFieldJob && safetyRecords.length === 0;
+        const safetyGap = activeFieldJob && (
+          safetyPackMissing
+          || openLmraAssessments.length > 0
+          || missingLmraAssessments.length > 0
+        );
         const designReview = openRfis.length > 0
           || submittalReviews.length > 0
           || permitReviews.length > 0
@@ -48578,7 +49066,18 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           siteAccessId: siteAccessBlocks[0].id,
           requiresApproval: true
         });
-        if (safetyGap) nextActions.push({ type: 'prepare_safety_pack', label: 'Prepare JHA, SDS, safety talk, and access evidence', requiresApproval: false });
+        if (missingLmraAssessments.length || openLmraAssessments.length) {
+          const lmraPair = missingLmraAssessments[0] || openLmraAssessments[0];
+          nextActions.push({
+            type: 'record_lmra',
+            label: 'Complete a current LMRA before hazardous work proceeds',
+            preTaskPlanId: lmraPair.preTaskPlanId,
+            workerId: lmraPair.workerId,
+            requiresApproval: false,
+            externalCommitments: 0
+          });
+        }
+        if (safetyPackMissing) nextActions.push({ type: 'prepare_safety_pack', label: 'Prepare JHA, SDS, safety talk, and access evidence', requiresApproval: false });
         if (jhas.length) nextActions.push({
           type: 'review_jha',
           label: 'Review JHA and work method controls',
@@ -48717,6 +49216,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             orientations: (detail.orientations || []).length,
             jhas: (detail.jhas || []).length,
             sdsSheets: (detail.sdsSheets || []).length,
+            lmraAssessments: latestLmraAssessments.length,
+            openLmraAssessments: openLmraAssessments.length,
+            missingLmraAssessments: missingLmraAssessments.length,
             openSafetyRecords: openSafetyRecords.length,
             dueSafetyRecords: dueSafetyRecords.length,
             siteAccessBlocks: siteAccessBlocks.length,
@@ -48744,6 +49246,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             orientation: orientations[0] || null,
             jha: jhas[0] || null,
             sdsSheet: sdsSheets[0] || null,
+            lmra: openLmraAssessments[0] || latestLmraAssessments[0] || null,
             siteAccess: siteAccessBlocks[0] || null,
             qualityCheck: qualityOpen[0] || null,
             safetyCheck: safetyOpen[0] || null,
@@ -48850,6 +49353,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       clientSelections: this.db.prepare('SELECT * FROM client_selections WHERE job_id = ? ORDER BY due_at ASC, created_at DESC').all(jobId).map(row => this.mapClientSelection(row)),
       permits: this.db.prepare('SELECT * FROM permit_records WHERE job_id = ? ORDER BY expires_at ASC, created_at DESC').all(jobId).map(row => this.mapPermit(row)),
       preTaskPlans: this.listPreTaskPlans({ jobId, limit: 500 }),
+      lmraAssessments: this.listLmraAssessments({ jobId, limit: 500 }),
       inspections: this.db.prepare('SELECT * FROM inspection_records WHERE job_id = ? ORDER BY scheduled_at DESC, created_at DESC').all(jobId).map(row => this.mapInspection(row)),
       nonconformances: this.listNonconformances({ jobId, limit: 500 }),
       observations: this.db.prepare('SELECT * FROM observation_records WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapObservation(row)),
@@ -49042,6 +49546,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       performance_scorecard_snapshots: 'status',
       production_baselines: 'status',
       production_entries: 'status',
+      lmra_assessments: 'outcome',
       billing_milestones: 'status',
       expenses: 'status',
       purchase_orders: 'status',
@@ -49128,6 +49633,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         openCount,
         covered,
         status: covered ? (openCount ? 'action_required' : 'ready') : 'missing'
+      };
+    }
+    if (requirement.key === 'lmra') {
+      const records = jobDetail
+        ? (jobDetail.lmraAssessments || []).filter(record => record.isLatestForWorkerPlan === true)
+        : this.db.prepare(`
+            SELECT assessments.id
+            FROM lmra_assessments assessments
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM lmra_assessments later
+              WHERE later.pre_task_plan_id = assessments.pre_task_plan_id
+                AND later.worker_id = assessments.worker_id
+                AND (
+                  later.assessed_at > assessments.assessed_at
+                  OR (later.assessed_at = assessments.assessed_at AND later.created_at > assessments.created_at)
+                  OR (
+                    later.assessed_at = assessments.assessed_at
+                    AND later.created_at = assessments.created_at
+                    AND later.id > assessments.id
+                  )
+                )
+            )
+            ORDER BY assessments.assessed_at DESC, assessments.created_at DESC, assessments.id DESC
+          `).all().map(row => this.getLmraAssessment(row.id));
+      const openCount = records.filter(record => record.readyForHazardousWork !== true).length;
+      return {
+        ...requirement,
+        ...automation,
+        count: records.length,
+        openCount,
+        covered: records.length > 0,
+        status: records.length ? (openCount ? 'action_required' : 'ready') : 'missing'
       };
     }
     if (jobDetail) {
@@ -51229,6 +51767,58 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         sourceHash,
         taskId: `task_${sha256Text(`pre-task-plan-readiness:${plan.id}:${sourceHash}`).slice(0, 24)}`,
         message: `${plan.jobTitle}: ${plan.planNumber} is not ready for field reliance (${reasons.join(', ')}).`
+      });
+    }
+
+    const lmraReadinessRows = this.db.prepare(`
+      SELECT plans.id AS plan_id, plans.job_id, plans.plan_number, plans.source_hash AS plan_source_hash,
+        plans.updated_at AS plan_updated_at, attendees.worker_id, attendees.attendee_name, jobs.title AS job_title
+      FROM pre_task_plans plans
+      JOIN pre_task_plan_attendees attendees ON attendees.plan_id = plans.id
+      JOIN jobs ON jobs.id = plans.job_id
+      WHERE jobs.status IN ('scheduled', 'in_progress')
+        AND plans.status = 'active'
+        AND plans.work_date = ?
+        AND attendees.status = 'acknowledged'
+      ORDER BY plans.updated_at, attendees.attendee_name
+      LIMIT 25
+    `).all(nowIso().slice(0, 10));
+    for (const row of lmraReadinessRows) {
+      const latest = this.db.prepare(`
+        SELECT id FROM lmra_assessments
+        WHERE pre_task_plan_id = ? AND worker_id = ?
+        ORDER BY assessed_at DESC, created_at DESC, id DESC
+        LIMIT 1
+      `).get(row.plan_id, row.worker_id);
+      const assessment = latest ? this.getLmraAssessment(latest.id, { jobId: row.job_id }) : null;
+      if (assessment?.readyForHazardousWork) continue;
+      const reasons = assessment
+        ? [...new Set(assessment.blockers.map(blocker => blocker.type))]
+        : ['lmra_missing'];
+      const sourceHash = sha256Json({
+        planId: row.plan_id,
+        planSourceHash: row.plan_source_hash,
+        workerId: row.worker_id,
+        assessmentId: assessment?.id || null,
+        assessmentSnapshotHash: assessment?.snapshotHash || null,
+        outcome: assessment?.outcome || null,
+        validUntil: assessment?.validUntil || null,
+        reasons,
+        planUpdatedAt: row.plan_updated_at
+      });
+      actions.push({
+        type: 'review_lmra_readiness',
+        planId: row.plan_id,
+        planNumber: row.plan_number,
+        jobId: row.job_id,
+        workerId: row.worker_id,
+        workerName: row.attendee_name,
+        assessmentId: assessment?.id || null,
+        severity: assessment?.outcome === 'stop_work' || reasons.some(reason => reason !== 'lmra_missing' && reason !== 'lmra_expired') ? 'high' : 'medium',
+        reasons,
+        sourceHash,
+        taskId: `task_${sha256Text(`lmra-readiness:${row.plan_id}:${row.worker_id}:${sourceHash}`).slice(0, 24)}`,
+        message: `${row.job_title}: ${row.attendee_name} has no current ready LMRA for ${row.plan_number} (${reasons.join(', ')}).`
       });
     }
 
@@ -54405,6 +54995,52 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           });
         }
 
+        const lmraReviews = preview.filter(action => action.type === 'review_lmra_readiness').slice(0, 25);
+        for (const action of lmraReviews) {
+          const existing = this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(action.taskId);
+          if (existing) {
+            applied.push({ ...action, status: 'replayed', externalCommitments: 0, assessmentInferred: false, authorizationInferred: false });
+            continue;
+          }
+          const task = this.addTask(action.jobId, {
+            title: `Review LMRA readiness: ${action.workerName}`,
+            description: `${action.message} The assigned worker must complete a new live LMRA against current sources immediately before hazardous work. Review any stop-work reason and retained evidence. Do not answer checks for the worker, clear stop-work, or authorize work automatically.`,
+            priority: action.severity === 'high' ? 'high' : 'medium',
+            dueAt: futureIsoDate(0),
+            source: 'lmra_monitor',
+            data: {
+              preTaskPlanId: action.planId,
+              planNumber: action.planNumber,
+              workerId: action.workerId,
+              lmraAssessmentId: action.assessmentId,
+              reasons: action.reasons,
+              sourceHash: action.sourceHash,
+              internalOnly: true,
+              externalCommitments: 0,
+              assessmentInferred: false,
+              authorizationInferred: false
+            }
+          }, { id: action.taskId, actor, audit: false });
+          applied.push({ ...action, taskId: task.id, status: 'task_created', externalCommitments: 0, assessmentInferred: false, authorizationInferred: false });
+          this.audit({
+            entityType: 'task',
+            entityId: task.id,
+            jobId: action.jobId,
+            action: 'autonomous_create_lmra_readiness_task',
+            actor,
+            after: task,
+            metadata: {
+              preTaskPlanId: action.planId,
+              workerId: action.workerId,
+              lmraAssessmentId: action.assessmentId,
+              sourceHash: action.sourceHash,
+              externalCommitments: 0,
+              assessmentInferred: false,
+              authorizationInferred: false
+            }
+          });
+        }
+
         const materialReceiptReviews = preview.filter(action => action.type === 'review_material_receipt').slice(0, 10);
         for (const action of materialReceiptReviews) {
           const taskId = action.taskId || `task_${sha256Text(`material-receipt-review:${action.materialReceiptId || action.purchaseOrderId}:${action.sourceHash}`).slice(0, 24)}`;
@@ -55950,6 +56586,44 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         issues.push({ severity: 'error', message: `Pre-task plan attendee ${attendee.id} failed retained acknowledgement verification.` });
       }
     }
+    for (const row of this.db.prepare('SELECT * FROM lmra_assessments ORDER BY created_at').all()) {
+      const retained = this.mapLmraAssessment(row);
+      if (retained.integrityValid !== true) {
+        issues.push({ severity: 'error', message: `LMRA assessment ${retained.id} failed retained snapshot verification.` });
+        continue;
+      }
+      if (!['ready', 'stop_work'].includes(retained.outcome)) {
+        issues.push({ severity: 'error', message: `LMRA assessment ${retained.id} has unsupported outcome ${retained.outcome}.` });
+      }
+      if (retained.outcome === 'ready' && Date.parse(retained.validUntil || '') <= Date.parse(retained.assessedAt || '')) {
+        issues.push({ severity: 'error', message: `Ready LMRA assessment ${retained.id} has no positive validity window.` });
+      }
+      if (retained.outcome === 'stop_work' && normalizeText(retained.stopWorkReason, '').length < 8) {
+        issues.push({ severity: 'error', message: `Stop-work LMRA assessment ${retained.id} lacks a retained reason.` });
+      }
+      if (retained.reassessmentOfId) {
+        const prior = this.db.prepare('SELECT * FROM lmra_assessments WHERE id = ?').get(retained.reassessmentOfId);
+        if (
+          !prior
+          || prior.outcome !== 'stop_work'
+          || prior.job_id !== retained.jobId
+          || prior.pre_task_plan_id !== retained.preTaskPlanId
+          || prior.worker_id !== retained.workerId
+          || normalizeText(retained.resolutionNote, '').length < 8
+        ) {
+          issues.push({ severity: 'error', message: `LMRA reassessment ${retained.id} has invalid stop-work lineage or resolution evidence.` });
+        }
+      }
+      const assessment = this.getLmraAssessment(row.id, { jobId: row.job_id });
+      if (
+        assessment.outcome === 'ready'
+        && assessment.isLatestForWorkerPlan
+        && !assessment.expired
+        && !assessment.sourceCurrent
+      ) {
+        issues.push({ severity: 'warning', message: `Current LMRA assessment ${assessment.id} no longer matches its linked safety sources; work is not authorized.` });
+      }
+    }
     const checklistInspectionRows = this.db.prepare("SELECT * FROM inspection_records WHERE data_json LIKE '%\"checklistSnapshot\"%'").all();
     for (const inspection of checklistInspectionRows) {
       const data = fromJson(inspection.data_json, {});
@@ -56518,6 +57192,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         workPermitAttendees: this.count('work_permit_attendees'),
         preTaskPlans: this.count('pre_task_plans'),
         preTaskPlanAttendees: this.count('pre_task_plan_attendees'),
+        lmraAssessments: this.count('lmra_assessments'),
+        lmraStopWorkAssessments: Number(this.db.prepare("SELECT COUNT(*) AS count FROM lmra_assessments WHERE outcome = 'stop_work'").get().count || 0),
         inspectionTemplates: this.count('inspection_templates'),
         inspectionChecklistSubmissions: this.count('inspection_checklist_submissions'),
         inspectionRecords: this.count('inspection_records'),
@@ -58640,6 +59316,72 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       entryFingerprint: row.entry_fingerprint || null,
       attestation: data.attestation || null,
       planSourceHash: data.planSourceHash || null,
+      integrityValid,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  mapLmraAssessment(row) {
+    if (!row) return null;
+    const checks = fromJson(row.checks_json, []);
+    const observedHazards = fromJson(row.observed_hazards_json, []);
+    const snapshot = fromJson(row.snapshot_json, null);
+    const data = fromJson(row.data_json, {});
+    const retainedMatchesSnapshot = Boolean(
+      snapshot
+      && snapshot.format === LMRA_ASSESSMENT_FORMAT
+      && snapshot.assessmentId === row.id
+      && snapshot.jobId === row.job_id
+      && (snapshot.taskId || null) === (row.task_id || null)
+      && snapshot.preTaskPlanId === row.pre_task_plan_id
+      && (snapshot.workPermitId || null) === (row.work_permit_id || null)
+      && snapshot.workerId === row.worker_id
+      && snapshot.workerName === row.worker_name
+      && snapshot.workArea === row.work_area
+      && snapshot.activity === row.activity
+      && snapshot.assessedAt === row.assessed_at
+      && snapshot.validUntil === row.valid_until
+      && snapshot.outcome === row.outcome
+      && sha256Json(snapshot.checks || []) === sha256Json(checks)
+      && sha256Json(snapshot.observedHazards || []) === sha256Json(observedHazards)
+      && snapshot.evidenceReference === row.evidence_reference
+      && (snapshot.stopWorkReason || null) === (row.stop_work_reason || null)
+      && (snapshot.reassessmentOfId || null) === (row.reassessment_of_id || null)
+      && (snapshot.resolutionNote || null) === (row.resolution_note || null)
+      && snapshot.sourceHash === row.source_hash
+    );
+    const integrityValid = Boolean(
+      retainedMatchesSnapshot
+      && row.snapshot_hash
+      && sha256Json(snapshot) === row.snapshot_hash
+      && row.entry_fingerprint
+    );
+    return {
+      id: row.id,
+      jobId: row.job_id,
+      taskId: row.task_id || null,
+      preTaskPlanId: row.pre_task_plan_id,
+      workPermitId: row.work_permit_id || null,
+      workerId: row.worker_id,
+      workerName: row.worker_name,
+      workArea: row.work_area,
+      activity: row.activity,
+      assessedAt: row.assessed_at,
+      validUntil: row.valid_until,
+      outcome: row.outcome,
+      checks,
+      observedHazards,
+      evidenceReference: row.evidence_reference,
+      stopWorkReason: row.stop_work_reason || null,
+      reassessmentOfId: row.reassessment_of_id || null,
+      resolutionNote: row.resolution_note || null,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
       integrityValid,
       data,
       createdAt: row.created_at,
