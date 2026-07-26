@@ -1404,6 +1404,83 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error('Backup client-feedback constraints are incomplete: idx_client_feedback_portal_survey must be a partial unique index.');
         }
       }
+      if (appliedMigrations.has('067_governed_energy_performance')) {
+        if (!retainedTables.has('energy_performance_records')) {
+          throw new Error('Backup energy-performance schema is incomplete: energy_performance_records.');
+        }
+        const energyPerformanceColumns = new Set(
+          database.prepare('PRAGMA table_info(energy_performance_records)').all().map(row => row.name)
+        );
+        for (const column of [
+          'id',
+          'job_id',
+          'phase',
+          'building_use',
+          'building_scope',
+          'object_reference',
+          'assessment_date',
+          'assessor_name',
+          'assessor_credential',
+          'certified_company',
+          'nta_version',
+          'software_name',
+          'software_version',
+          'ep_online_registration',
+          'label_class',
+          'beng1_value',
+          'beng1_limit',
+          'beng2_value',
+          'beng2_limit',
+          'beng3_value',
+          'beng3_minimum',
+          'tojuli_applicable',
+          'tojuli_value',
+          'tojuli_limit',
+          'tojuli_not_applicable_reason',
+          'evidence_reference',
+          'evidence_document_id',
+          'permit_source_record_id',
+          'supersedes_record_id',
+          'status',
+          'approval_id',
+          'source_hash',
+          'snapshot_json',
+          'snapshot_hash',
+          'entry_key',
+          'entry_fingerprint',
+          'notes',
+          'data_json',
+          'created_at',
+          'updated_at'
+        ]) {
+          if (!energyPerformanceColumns.has(column)) {
+            throw new Error(`Backup energy-performance schema is incomplete: energy_performance_records.${column}.`);
+          }
+        }
+        const energyPerformanceIndexes = new Map(
+          database.prepare(`
+            SELECT name, sql FROM sqlite_master
+            WHERE type = 'index' AND name LIKE 'idx_energy_performance_%'
+          `).all().map(row => [row.name, row.sql || ''])
+        );
+        for (const index of [
+          'idx_energy_performance_job_phase',
+          'idx_energy_performance_pending_scope',
+          'idx_energy_performance_current_scope'
+        ]) {
+          if (!energyPerformanceIndexes.has(index)) {
+            throw new Error(`Backup energy-performance constraints are incomplete: ${index}.`);
+          }
+        }
+        if (!/CREATE\s+UNIQUE\s+INDEX/i.test(energyPerformanceIndexes.get('idx_energy_performance_pending_scope'))
+          || !/WHERE\s+status\s*=\s*'pending_approval'/i.test(energyPerformanceIndexes.get('idx_energy_performance_pending_scope'))) {
+          throw new Error('Backup energy-performance constraints are incomplete: pending scope review must be a partial unique index.');
+        }
+        if (!/CREATE\s+UNIQUE\s+INDEX/i.test(energyPerformanceIndexes.get('idx_energy_performance_current_scope'))
+          || !/WHERE\s+status\s+IN\s*\(\s*'verified_compliant'\s*,\s*'verified_gap'\s*\)/i.test(energyPerformanceIndexes.get('idx_energy_performance_current_scope'))) {
+          throw new Error('Backup energy-performance constraints are incomplete: current scope record must be a partial unique index.');
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

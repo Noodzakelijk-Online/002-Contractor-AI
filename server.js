@@ -1507,6 +1507,11 @@ function dashboardForOperator(req) {
   return { fieldScoped: true, jobCount: jobs.length };
 }
 
+function compactLedgerResponseRequested(req) {
+  if (req.operator?.role === 'field_worker') return false;
+  return ['1', 'true'].includes(String(req.query?.compact || '').trim().toLowerCase());
+}
+
 function timeLogPayloadForOperator(req, payload = {}) {
   if (req.operator?.role !== 'field_worker') return payload;
   const identity = fieldWorkerIdentity(req);
@@ -4039,12 +4044,17 @@ app.post('/api/ledger/jobs/:id/drawing-revisions', (req, res) => {
 });
 
 app.post('/api/ledger/jobs/:id/site-access', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    siteAccessLog: operatingLedger.createSiteAccessLog(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
-    job: operatingLedger.getJobDetail(req.params.id),
-    dashboard: operatingLedger.dashboardSummary()
-  }), 201);
+  return handleLedgerRequest(req, res, () => {
+    const result = {
+      success: true,
+      siteAccessLog: operatingLedger.createSiteAccessLog(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
+    };
+    if (!compactLedgerResponseRequested(req)) {
+      result.job = operatingLedger.getJobDetail(req.params.id);
+      result.dashboard = operatingLedger.dashboardSummary();
+    }
+    return result;
+  }, 201);
 });
 
 app.get('/api/ledger/attendance', (req, res) => {
@@ -4407,14 +4417,17 @@ app.post('/api/ledger/jobs/:id/material-receipts', (req, res) => {
     const result = operatingLedger.createMaterialReceipt(req.params.id, payload, {
       actor: actorFromRequest(req, payload.actor || 'dashboard')
     });
-    return {
+    const response = {
       success: true,
       receipt: recordForOperator(req, result.receipt),
-      replayed: result.replayed,
-      job: jobForOperator(req, req.params.id),
-      materialReceiving: req.operator?.role === 'field_worker' ? null : operatingLedger.listMaterialReceivingRegister(),
-      dashboard: dashboardForOperator(req)
+      replayed: result.replayed
     };
+    if (!compactLedgerResponseRequested(req)) {
+      response.job = jobForOperator(req, req.params.id);
+      response.materialReceiving = req.operator?.role === 'field_worker' ? null : operatingLedger.listMaterialReceivingRegister();
+      response.dashboard = dashboardForOperator(req);
+    }
+    return response;
   }, 201);
 });
 
@@ -5255,6 +5268,32 @@ app.get('/api/ledger/environmental-reports/:reportId/content', (req, res) => {
   } catch (error) {
     return sendError(req, res, error.statusCode || 500, error.code || 'environmental_report_download_failed', error.statusCode ? error.message : 'Unable to retrieve the retained environmental report.', serializeError(error));
   }
+});
+
+app.get('/api/ledger/jobs/:id/energy-performance', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    energyPerformance: operatingLedger.energyPerformanceForJob(req.params.id)
+  }));
+});
+
+app.post('/api/ledger/jobs/:id/energy-performance', (req, res) => {
+  return handleLedgerRequest(req, res, () => {
+    const result = operatingLedger.createEnergyPerformanceRecord(req.params.id, req.body || {}, {
+      actor: actorFromRequest(req, 'dashboard')
+    });
+    return {
+      success: true,
+      ...result,
+      energyPerformance: operatingLedger.energyPerformanceForJob(req.params.id),
+      job: jobForOperator(req, req.params.id),
+      dashboard: dashboardForOperator(req),
+      calculationEngine: false,
+      certificationClaimed: false,
+      externalRegistration: false,
+      externalCommitments: 0
+    };
+  }, 201);
 });
 
 app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
@@ -6860,6 +6899,7 @@ function operationalExport() {
     performanceScorecardTargets: operatingLedger.listPerformanceScorecardTargets({ includeHistory: true }).revisions,
     performanceScorecardSnapshots: operatingLedger.listPerformanceScorecardSnapshots({ limit: 5_000 }),
     clientFeedback: operatingLedger.listClientFeedback({ limit: 10_000 }),
+    energyPerformanceRecords: operatingLedger.listEnergyPerformanceRecords({ limit: 10_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
     productionEntries: operatingLedger.listAllProductionEntries({ limit: 10_000 }),
     dayworkTickets: operatingLedger.listDayworkTickets({ limit: 5_000 }),
@@ -6978,6 +7018,7 @@ function validateOperationalExport(snapshot) {
     'installationQcControls',
     'photoEvidenceSets',
     'photoEvidenceCaptures',
+    'energyPerformanceRecords',
     'dayworkTickets',
     'nonconformances'
   ]) {
@@ -7043,6 +7084,7 @@ function validateOperationalExport(snapshot) {
       performanceScorecardTargets: Array.isArray(snapshot.performanceScorecardTargets) ? snapshot.performanceScorecardTargets.length : 0,
       performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
       clientFeedback: snapshot.clientFeedback.length,
+      energyPerformanceRecords: Array.isArray(snapshot.energyPerformanceRecords) ? snapshot.energyPerformanceRecords.length : 0,
       marketFitProfiles: Array.isArray(snapshot.marketFitProfiles) ? snapshot.marketFitProfiles.length : 0,
       opportunityFitAssessments: Array.isArray(snapshot.opportunityFitAssessments) ? snapshot.opportunityFitAssessments.length : 0,
       bidDecisionPolicies: Array.isArray(snapshot.bidDecisionPolicies) ? snapshot.bidDecisionPolicies.length : 0,
@@ -7918,6 +7960,14 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         clientFeedbackAutonomy: 'internal_service_recovery_only',
         clientFeedbackExternalReviewRequest: false,
         clientFeedbackReferralRequest: false,
+        energyPerformanceEntryKey: 'durable_exact_replay',
+        energyPerformanceEvidenceIntegrity: 'retained_pdf_sha256_and_immutable_snapshot',
+        energyPerformanceApproval: 'source_current_independent_review',
+        energyPerformancePermitContinuity: 'same_attested_software_version',
+        energyPerformanceThresholds: 'operator_retained_server_compared',
+        energyPerformanceCalculationEngine: false,
+        energyPerformanceLegalCertification: false,
+        energyPerformanceExternalRegistration: false,
         sdsRevisionEntryKey: 'durable',
         sdsRevisionSourceIntegrity: 'product_document_snapshot_sha256',
         sdsRevisionApproval: 'source_current_approval_gated',

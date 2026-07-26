@@ -136,7 +136,7 @@ test('crew-capacity API governs profiles, allocations, approval, export, and rea
   assert.equal(operationalExport.body.crewLookaheadPlans.length, 1);
   const diagnostics = await request(baseUrl, '/api/ledger/debug');
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '066_governed_client_feedback');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '067_governed_energy_performance');
   assert.equal(diagnostics.body.diagnostics.counts.crewCapacityProfiles, 1);
   assert.equal(diagnostics.body.diagnostics.counts.crewCapacityAllocations, 1);
   assert.equal(diagnostics.body.diagnostics.counts.crewLookaheadPlans, 1);

@@ -213,6 +213,7 @@ const LEDGER_CAPABILITY_REQUIREMENTS = {
   ],
   'eu-compliance': [
     { key: 'permit', label: 'Permit evidence', table: 'permit_records', detailKey: 'permits' },
+    { key: 'energy_performance', label: 'Verified BENG and energy-performance evidence', table: 'energy_performance_records', detailKey: 'energyPerformanceRecords', readyStatuses: ['verified_compliant'] },
     { key: 'wkb', label: 'Wkb-style handover dossier', table: 'documents', detailKey: 'documents', recordType: 'handover_issue_package', readyStatuses: ['prepared'] },
     { key: 'invoice', label: 'VAT/UBL invoice signal', table: 'invoices', detailKey: 'invoices' },
     { key: 'credit_note', label: 'Invoice correction signal', table: 'credit_notes', detailKey: 'creditNotes' },
@@ -234,6 +235,15 @@ const PHOTO_EVIDENCE_CAPTURE_FORMAT = 'contractor.ai/photo-evidence-capture/v1';
 const PHOTO_EVIDENCE_REVIEW_FORMAT = 'contractor.ai/photo-evidence-review/v1';
 const PHOTO_EVIDENCE_PHASES = ['before', 'during', 'after'];
 const PHOTO_EVIDENCE_PHASE_SET = new Set(PHOTO_EVIDENCE_PHASES);
+const ENERGY_PERFORMANCE_FORMAT = 'contractor.ai/energy-performance-record/v1';
+const ENERGY_PERFORMANCE_PHASES = new Set([
+  'permit_application',
+  'wkb_notification',
+  'completion_verification',
+  'final_label'
+]);
+const ENERGY_PERFORMANCE_BUILDING_USES = new Set(['residential', 'utility', 'mixed_use']);
+const ENERGY_PERFORMANCE_SCOPES = new Set(['building', 'dwelling_unit']);
 
 const BUILT_IN_INSPECTION_TEMPLATES = [
   {
@@ -5860,6 +5870,64 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         CREATE UNIQUE INDEX IF NOT EXISTS idx_client_feedback_portal_survey
           ON client_feedback(portal_access_id, survey_type)
           WHERE portal_access_id IS NOT NULL;
+      `);
+    }
+  },
+  {
+    version: '067_governed_energy_performance',
+    description: 'Retain source-bound BENG 1, BENG 2, BENG 3, TOjuli, adviser, software, and EP-Online evidence without calculating, certifying, or registering a legal energy performance.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS energy_performance_records (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+          phase TEXT NOT NULL,
+          building_use TEXT NOT NULL,
+          building_scope TEXT NOT NULL,
+          object_reference TEXT NOT NULL,
+          assessment_date TEXT NOT NULL,
+          assessor_name TEXT NOT NULL,
+          assessor_credential TEXT NOT NULL,
+          certified_company TEXT NOT NULL,
+          nta_version TEXT NOT NULL,
+          software_name TEXT NOT NULL,
+          software_version TEXT NOT NULL,
+          ep_online_registration TEXT,
+          label_class TEXT,
+          beng1_value DOUBLE PRECISION NOT NULL,
+          beng1_limit DOUBLE PRECISION NOT NULL,
+          beng2_value DOUBLE PRECISION NOT NULL,
+          beng2_limit DOUBLE PRECISION NOT NULL,
+          beng3_value DOUBLE PRECISION NOT NULL,
+          beng3_minimum DOUBLE PRECISION NOT NULL,
+          tojuli_applicable INTEGER NOT NULL DEFAULT 0,
+          tojuli_value DOUBLE PRECISION,
+          tojuli_limit DOUBLE PRECISION,
+          tojuli_not_applicable_reason TEXT,
+          evidence_reference TEXT NOT NULL,
+          evidence_document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE RESTRICT,
+          permit_source_record_id TEXT REFERENCES energy_performance_records(id) ON DELETE RESTRICT,
+          supersedes_record_id TEXT REFERENCES energy_performance_records(id) ON DELETE RESTRICT,
+          status TEXT NOT NULL DEFAULT 'pending_approval',
+          approval_id TEXT REFERENCES approvals(id) ON DELETE RESTRICT,
+          source_hash TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          notes TEXT,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_energy_performance_job_phase
+          ON energy_performance_records(job_id, phase, assessment_date DESC, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_energy_performance_pending_scope
+          ON energy_performance_records(job_id, phase, building_scope, object_reference)
+          WHERE status = 'pending_approval';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_energy_performance_current_scope
+          ON energy_performance_records(job_id, phase, building_scope, object_reference)
+          WHERE status IN ('verified_compliant', 'verified_gap');
       `);
     }
   }
@@ -21429,7 +21497,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         progressPercent: job.progressPercent
       };
       try {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
         const control = detail.scheduleControl || {};
         const activeBaseline = control.activeBaseline || null;
         const pendingBaseline = control.pendingBaseline || null;
@@ -42574,6 +42642,601 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     `).all(...values, limit).map(row => this.mapClientFeedback(row));
   }
 
+  energyPerformanceOutcome(input = {}) {
+    const checks = [
+      {
+        key: 'beng_1',
+        label: 'BENG 1 energy need',
+        value: roundMeasurement(input.beng1Value),
+        threshold: roundMeasurement(input.beng1Limit),
+        comparison: 'maximum',
+        passes: roundMeasurement(input.beng1Value) <= roundMeasurement(input.beng1Limit)
+      },
+      {
+        key: 'beng_2',
+        label: 'BENG 2 primary fossil energy use',
+        value: roundMeasurement(input.beng2Value),
+        threshold: roundMeasurement(input.beng2Limit),
+        comparison: 'maximum',
+        passes: roundMeasurement(input.beng2Value) <= roundMeasurement(input.beng2Limit)
+      },
+      {
+        key: 'beng_3',
+        label: 'BENG 3 renewable energy share',
+        value: roundMeasurement(input.beng3Value),
+        threshold: roundMeasurement(input.beng3Minimum),
+        comparison: 'minimum',
+        passes: roundMeasurement(input.beng3Value) >= roundMeasurement(input.beng3Minimum)
+      }
+    ];
+    if (input.tojuliApplicable) {
+      checks.push({
+        key: 'tojuli',
+        label: 'TOjuli overheating indicator',
+        value: roundMeasurement(input.tojuliValue),
+        threshold: roundMeasurement(input.tojuliLimit),
+        comparison: 'maximum',
+        applicable: true,
+        passes: roundMeasurement(input.tojuliValue) <= roundMeasurement(input.tojuliLimit)
+      });
+    } else {
+      checks.push({
+        key: 'tojuli',
+        label: 'TOjuli overheating indicator',
+        value: null,
+        threshold: null,
+        comparison: 'not_applicable',
+        applicable: false,
+        passes: true,
+        reason: input.tojuliNotApplicableReason
+      });
+    }
+    return {
+      overallCompliant: checks.every(check => check.passes),
+      checks,
+      failedChecks: checks.filter(check => !check.passes).map(check => check.key)
+    };
+  }
+
+  energyPerformanceInputFromRow(row) {
+    return {
+      jobId: row.job_id,
+      phase: row.phase,
+      buildingUse: row.building_use,
+      buildingScope: row.building_scope,
+      objectReference: row.object_reference,
+      assessmentDate: row.assessment_date,
+      assessorName: row.assessor_name,
+      assessorCredential: row.assessor_credential,
+      certifiedCompany: row.certified_company,
+      ntaVersion: row.nta_version,
+      softwareName: row.software_name,
+      softwareVersion: row.software_version,
+      epOnlineRegistration: row.ep_online_registration || null,
+      labelClass: row.label_class || null,
+      beng1Value: roundMeasurement(row.beng1_value),
+      beng1Limit: roundMeasurement(row.beng1_limit),
+      beng2Value: roundMeasurement(row.beng2_value),
+      beng2Limit: roundMeasurement(row.beng2_limit),
+      beng3Value: roundMeasurement(row.beng3_value),
+      beng3Minimum: roundMeasurement(row.beng3_minimum),
+      tojuliApplicable: normalizeBoolean(row.tojuli_applicable),
+      tojuliValue: row.tojuli_value === null || row.tojuli_value === undefined ? null : roundMeasurement(row.tojuli_value),
+      tojuliLimit: row.tojuli_limit === null || row.tojuli_limit === undefined ? null : roundMeasurement(row.tojuli_limit),
+      tojuliNotApplicableReason: row.tojuli_not_applicable_reason || null,
+      evidenceReference: row.evidence_reference,
+      evidenceDocumentId: row.evidence_document_id,
+      permitSourceRecordId: row.permit_source_record_id || null,
+      supersedesRecordId: row.supersedes_record_id || null,
+      notes: row.notes || null
+    };
+  }
+
+  energyPerformanceEvidenceDocument(jobId, documentId) {
+    const row = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(documentId, jobId);
+    const data = fromJson(row?.data_json, {});
+    const checksum = normalizeText(data.analysis?.upload?.sha256 || data.contentHash, '').toLowerCase();
+    if (
+      !row
+      || !['stored', 'needs_review', 'approved', 'current'].includes(normalizeStatus(row.status, ''))
+      || normalizeStatus(row.mime_type, '') !== 'application/pdf'
+      || !row.storage_ref
+      || !/^[a-f0-9]{64}$/.test(checksum)
+      || normalizeNumber(row.size_bytes, 0) <= 0
+    ) {
+      throw ledgerInputError(
+        'energy_performance_evidence_document_invalid',
+        'Energy-performance evidence must be a retained PDF upload with an intact SHA-256 checksum on the same job.',
+        { jobId, documentId },
+        409
+      );
+    }
+    return {
+      id: row.id,
+      title: row.title,
+      filename: row.filename,
+      mimeType: row.mime_type,
+      sizeBytes: normalizeNumber(row.size_bytes, 0),
+      checksum
+    };
+  }
+
+  getEnergyPerformanceRecord(recordId) {
+    const row = this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ?').get(String(recordId || ''));
+    if (!row) {
+      throw ledgerInputError('energy_performance_record_not_found', 'Energy-performance record not found.', { recordId }, 404);
+    }
+    return this.mapEnergyPerformanceRecord(row);
+  }
+
+  listEnergyPerformanceRecords(options = {}) {
+    const jobId = normalizeText(options.jobId || options.job_id, '');
+    const phase = normalizeStatus(options.phase, '');
+    const status = normalizeStatus(options.status, '');
+    const limit = safeLimit(options.limit, 500, 10_000);
+    return this.db.prepare(`
+      SELECT * FROM energy_performance_records
+      WHERE (? = '' OR job_id = ?)
+        AND (? = '' OR phase = ?)
+        AND (? = '' OR status = ?)
+      ORDER BY assessment_date DESC, created_at DESC
+      LIMIT ?
+    `).all(jobId, jobId, phase, phase, status, status, limit).map(row => this.mapEnergyPerformanceRecord(row));
+  }
+
+  energyPerformanceForJob(jobId) {
+    this.requireJob(jobId);
+    const records = this.listEnergyPerformanceRecords({ jobId, limit: 1_000 });
+    const current = records.filter(record => ['verified_compliant', 'verified_gap'].includes(record.status));
+    const pending = records.filter(record => record.status === 'pending_approval');
+    return {
+      records,
+      current,
+      pending,
+      ready: current.length > 0 && current.every(record => record.outcome.overallCompliant && record.integrityValid),
+      blockers: [
+        ...current.filter(record => !record.outcome.overallCompliant).map(record => ({
+          code: 'energy_performance_threshold_gap',
+          recordId: record.id,
+          phase: record.phase,
+          objectReference: record.objectReference,
+          failedChecks: record.outcome.failedChecks
+        })),
+        ...current.filter(record => !record.integrityValid).map(record => ({
+          code: 'energy_performance_integrity_failed',
+          recordId: record.id,
+          phase: record.phase,
+          objectReference: record.objectReference
+        })),
+        ...pending.map(record => ({
+          code: 'energy_performance_review_pending',
+          recordId: record.id,
+          phase: record.phase,
+          objectReference: record.objectReference
+        }))
+      ],
+      policy: {
+        calculationEngine: false,
+        legalCertification: false,
+        externalRegistration: false,
+        certifiedAdviserEvidenceRequired: true,
+        retainedPdfChecksumRequired: true,
+        completionSoftwareVersionBoundToPermit: true,
+        approvalRequired: true,
+        externalCommitments: 0
+      }
+    };
+  }
+
+  createEnergyPerformanceRecord(jobId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      this.requireJob(jobId);
+      const actor = options.actor || 'Contractor.AI';
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,200}$/.test(entryKey)) {
+        throw ledgerInputError('energy_performance_entry_key_invalid', 'Energy-performance evidence requires an entryKey containing 8 to 200 safe characters.');
+      }
+      const phase = normalizeStatus(payload.phase, '');
+      if (!ENERGY_PERFORMANCE_PHASES.has(phase)) {
+        throw ledgerInputError('energy_performance_phase_invalid', `Energy-performance phase must be one of: ${[...ENERGY_PERFORMANCE_PHASES].join(', ')}.`);
+      }
+      const buildingUse = normalizeStatus(payload.buildingUse || payload.building_use, '');
+      if (!ENERGY_PERFORMANCE_BUILDING_USES.has(buildingUse)) {
+        throw ledgerInputError('energy_performance_building_use_invalid', 'Building use must be residential, utility, or mixed use.');
+      }
+      const buildingScope = normalizeStatus(payload.buildingScope || payload.building_scope, '');
+      if (!ENERGY_PERFORMANCE_SCOPES.has(buildingScope)) {
+        throw ledgerInputError('energy_performance_scope_invalid', 'Assessment scope must be building or dwelling unit.');
+      }
+      if (buildingScope === 'dwelling_unit' && buildingUse === 'utility') {
+        throw ledgerInputError('energy_performance_scope_use_conflict', 'A dwelling-unit assessment cannot use the utility-only building classification.');
+      }
+      const boundedText = (value, label, minimum, maximum, code) => {
+        const normalized = normalizeText(value, '');
+        if (normalized.length < minimum || normalized.length > maximum) {
+          throw ledgerInputError(code, `${label} must contain between ${minimum} and ${maximum} characters.`);
+        }
+        return normalized;
+      };
+      const objectReference = boundedText(
+        payload.objectReference || payload.object_reference,
+        'Building, BAG, provisional, or dwelling-unit reference',
+        2,
+        160,
+        'energy_performance_object_reference_invalid'
+      );
+      const assessmentDate = normalizeRetainedDate(payload.assessmentDate || payload.assessment_date, {
+        required: true,
+        label: 'Assessment date',
+        code: 'energy_performance_assessment_date_required'
+      }).slice(0, 10);
+      if (Date.parse(`${assessmentDate}T23:59:59.999Z`) > Date.now() + 24 * 60 * 60 * 1_000) {
+        throw ledgerInputError('energy_performance_assessment_date_future', 'Assessment date cannot be in the future.');
+      }
+      const assessorName = boundedText(payload.assessorName || payload.assessor_name, 'EP adviser name', 2, 160, 'energy_performance_assessor_invalid');
+      const assessorCredential = boundedText(payload.assessorCredential || payload.assessor_credential, 'EP adviser credential', 3, 120, 'energy_performance_assessor_credential_invalid');
+      const certifiedCompany = boundedText(payload.certifiedCompany || payload.certified_company, 'Certified company', 2, 200, 'energy_performance_company_invalid');
+      const ntaVersion = boundedText(payload.ntaVersion || payload.nta_version, 'NTA 8800 version', 2, 80, 'energy_performance_nta_version_invalid');
+      const softwareName = boundedText(payload.softwareName || payload.software_name, 'Attested software name', 2, 120, 'energy_performance_software_name_invalid');
+      const softwareVersion = boundedText(payload.softwareVersion || payload.software_version, 'Attested software version', 1, 80, 'energy_performance_software_version_invalid');
+      const epOnlineRegistration = normalizeText(payload.epOnlineRegistration || payload.ep_online_registration, '') || null;
+      if (['permit_application', 'wkb_notification', 'final_label'].includes(phase) && (!epOnlineRegistration || epOnlineRegistration.length > 120)) {
+        throw ledgerInputError('energy_performance_ep_online_registration_required', 'This phase requires the retained EP-Online registration number.');
+      }
+      const labelClass = normalizeText(payload.labelClass || payload.label_class, '').toUpperCase() || null;
+      if (phase === 'final_label' && (!labelClass || labelClass.length > 24)) {
+        throw ledgerInputError('energy_performance_label_class_required', 'Final-label evidence requires the retained energy-label class.');
+      }
+      const requiredNumber = (value, label, code, minimum = -1_000_000, maximum = 1_000_000) => {
+        if (value === null || value === undefined || value === '') throw ledgerInputError(code, `${label} is required.`);
+        const number = Number(value);
+        if (!Number.isFinite(number) || number < minimum || number > maximum) {
+          throw ledgerInputError(code, `${label} must be a finite number between ${minimum} and ${maximum}.`);
+        }
+        return roundMeasurement(number);
+      };
+      const beng1Value = requiredNumber(payload.beng1Value ?? payload.beng1_value, 'BENG 1 value', 'energy_performance_beng1_value_invalid', 0);
+      const beng1Limit = requiredNumber(payload.beng1Limit ?? payload.beng1_limit, 'BENG 1 maximum', 'energy_performance_beng1_limit_invalid', 0);
+      const beng2Value = requiredNumber(payload.beng2Value ?? payload.beng2_value, 'BENG 2 value', 'energy_performance_beng2_value_invalid');
+      const beng2Limit = requiredNumber(payload.beng2Limit ?? payload.beng2_limit, 'BENG 2 maximum', 'energy_performance_beng2_limit_invalid');
+      const beng3Value = requiredNumber(payload.beng3Value ?? payload.beng3_value, 'BENG 3 value', 'energy_performance_beng3_value_invalid', -1_000, 10_000);
+      const beng3Minimum = requiredNumber(payload.beng3Minimum ?? payload.beng3_minimum, 'BENG 3 minimum', 'energy_performance_beng3_minimum_invalid', -1_000, 10_000);
+      const tojuliApplicable = normalizeBoolean(payload.tojuliApplicable ?? payload.tojuli_applicable);
+      const tojuliValue = tojuliApplicable
+        ? requiredNumber(payload.tojuliValue ?? payload.tojuli_value, 'TOjuli value', 'energy_performance_tojuli_value_invalid', 0)
+        : null;
+      const tojuliLimit = tojuliApplicable
+        ? requiredNumber(payload.tojuliLimit ?? payload.tojuli_limit, 'TOjuli maximum', 'energy_performance_tojuli_limit_invalid', 0)
+        : null;
+      const tojuliNotApplicableReason = tojuliApplicable
+        ? null
+        : boundedText(
+            payload.tojuliNotApplicableReason || payload.tojuli_not_applicable_reason,
+            'TOjuli not-applicable reason',
+            8,
+            500,
+            'energy_performance_tojuli_reason_required'
+          );
+      const evidenceReference = boundedText(
+        payload.evidenceReference || payload.evidence_reference,
+        'Evidence reference',
+        4,
+        500,
+        'energy_performance_evidence_reference_invalid'
+      );
+      const evidenceDocumentId = normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '');
+      const evidenceDocument = this.energyPerformanceEvidenceDocument(jobId, evidenceDocumentId);
+      const notes = normalizeText(payload.notes, '');
+      if (notes.length > 2_000) throw ledgerInputError('energy_performance_notes_invalid', 'Energy-performance notes must be 2,000 characters or fewer.');
+
+      const scopeValues = [jobId, phase, buildingScope, objectReference];
+      const currentRow = this.db.prepare(`
+        SELECT * FROM energy_performance_records
+        WHERE job_id = ? AND phase = ? AND building_scope = ? AND object_reference = ?
+          AND status IN ('verified_compliant', 'verified_gap')
+        LIMIT 1
+      `).get(...scopeValues);
+      const supersedesRecordId = normalizeText(payload.supersedesRecordId || payload.supersedes_record_id, '') || null;
+      if (currentRow && supersedesRecordId !== currentRow.id) {
+        throw ledgerInputError(
+          'energy_performance_supersedes_current_required',
+          'A new record for this phase and object must supersede the exact current verified record.',
+          { currentRecordId: currentRow.id },
+          409
+        );
+      }
+      if (!currentRow && supersedesRecordId) {
+        throw ledgerInputError('energy_performance_supersedes_invalid', 'No current verified record exists for the supplied supersedes identifier.', { supersedesRecordId }, 409);
+      }
+      const pending = this.db.prepare(`
+        SELECT id FROM energy_performance_records
+        WHERE job_id = ? AND phase = ? AND building_scope = ? AND object_reference = ? AND status = 'pending_approval'
+        LIMIT 1
+      `).get(...scopeValues);
+
+      const permitSourceRecordId = normalizeText(payload.permitSourceRecordId || payload.permit_source_record_id, '') || null;
+      let permitSource = null;
+      if (phase === 'completion_verification') {
+        if (!permitSourceRecordId) {
+          throw ledgerInputError('energy_performance_permit_source_required', 'Completion verification requires the exact approved permit or Wkb assessment source.');
+        }
+        const permitRow = this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ? AND job_id = ?').get(permitSourceRecordId, jobId);
+        if (
+          !permitRow
+          || !['permit_application', 'wkb_notification'].includes(permitRow.phase)
+          || permitRow.status !== 'verified_compliant'
+          || permitRow.building_scope !== buildingScope
+          || permitRow.object_reference !== objectReference
+        ) {
+          throw ledgerInputError('energy_performance_permit_source_invalid', 'Completion verification requires a compliant permit or Wkb assessment for the same retained object.', { permitSourceRecordId }, 409);
+        }
+        permitSource = this.mapEnergyPerformanceRecord(permitRow);
+        if (!permitSource.integrityValid || permitSource.softwareVersion !== softwareVersion) {
+          throw ledgerInputError(
+            'energy_performance_permit_software_mismatch',
+            'Completion verification must retain the same attested software version used for the approved permit or Wkb assessment.',
+            { permitSourceRecordId, expectedSoftwareVersion: permitSource.softwareVersion },
+            409
+          );
+        }
+      } else if (permitSourceRecordId) {
+        throw ledgerInputError('energy_performance_permit_source_not_allowed', 'A permit source record is only used for completion verification.');
+      }
+
+      const input = {
+        jobId,
+        phase,
+        buildingUse,
+        buildingScope,
+        objectReference,
+        assessmentDate,
+        assessorName,
+        assessorCredential,
+        certifiedCompany,
+        ntaVersion,
+        softwareName,
+        softwareVersion,
+        epOnlineRegistration,
+        labelClass,
+        beng1Value,
+        beng1Limit,
+        beng2Value,
+        beng2Limit,
+        beng3Value,
+        beng3Minimum,
+        tojuliApplicable,
+        tojuliValue,
+        tojuliLimit,
+        tojuliNotApplicableReason,
+        evidenceReference,
+        evidenceDocumentId,
+        permitSourceRecordId,
+        supersedesRecordId,
+        notes: notes || null
+      };
+      const entryFingerprint = sha256Json(input);
+      const replayRow = this.db.prepare('SELECT * FROM energy_performance_records WHERE entry_key = ?').get(entryKey);
+      if (replayRow) {
+        if (replayRow.entry_fingerprint !== entryFingerprint) {
+          throw ledgerInputError('energy_performance_replay_conflict', 'This energy-performance entryKey is already bound to different retained evidence.', { recordId: replayRow.id }, 409);
+        }
+        return {
+          record: this.mapEnergyPerformanceRecord(replayRow),
+          approval: replayRow.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(replayRow.approval_id)) : null,
+          replayed: true,
+          externalCommitments: 0,
+          certificationClaimed: false
+        };
+      }
+      if (pending) {
+        throw ledgerInputError('energy_performance_review_already_pending', 'Resolve the pending record for this phase and object before retaining another revision.', { pendingRecordId: pending.id }, 409);
+      }
+
+      const id = makeId('energy_performance');
+      const outcome = this.energyPerformanceOutcome(input);
+      const source = {
+        evidenceDocument: {
+          id: evidenceDocument.id,
+          checksum: evidenceDocument.checksum,
+          mimeType: evidenceDocument.mimeType,
+          sizeBytes: evidenceDocument.sizeBytes
+        },
+        permitSource: permitSource ? {
+          id: permitSource.id,
+          snapshotHash: permitSource.snapshotHash,
+          softwareVersion: permitSource.softwareVersion
+        } : null,
+        supersedes: currentRow ? {
+          id: currentRow.id,
+          snapshotHash: currentRow.snapshot_hash
+        } : null
+      };
+      const sourceHash = sha256Json({ input, source });
+      const timestamp = nowIso();
+      const snapshot = {
+        format: ENERGY_PERFORMANCE_FORMAT,
+        id,
+        jobId,
+        input,
+        source,
+        sourceHash,
+        outcome,
+        retainedAt: timestamp,
+        retainedBy: actor,
+        safeguards: {
+          calculationEngine: false,
+          legalCertification: false,
+          externalRegistration: false,
+          approvalRequired: true,
+          externalCommitments: 0
+        }
+      };
+      const snapshotJson = canonicalJson(snapshot);
+      const snapshotHash = sha256Text(snapshotJson);
+      this.db.prepare(`
+        INSERT INTO energy_performance_records (
+          id, job_id, phase, building_use, building_scope, object_reference, assessment_date,
+          assessor_name, assessor_credential, certified_company, nta_version, software_name, software_version,
+          ep_online_registration, label_class, beng1_value, beng1_limit, beng2_value, beng2_limit,
+          beng3_value, beng3_minimum, tojuli_applicable, tojuli_value, tojuli_limit,
+          tojuli_not_applicable_reason, evidence_reference, evidence_document_id, permit_source_record_id,
+          supersedes_record_id, status, approval_id, source_hash, snapshot_json, snapshot_hash,
+          entry_key, entry_fingerprint, notes, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, jobId, phase, buildingUse, buildingScope, objectReference, assessmentDate,
+        assessorName, assessorCredential, certifiedCompany, ntaVersion, softwareName, softwareVersion,
+        epOnlineRegistration, labelClass, beng1Value, beng1Limit, beng2Value, beng2Limit,
+        beng3Value, beng3Minimum, tojuliApplicable ? 1 : 0, tojuliValue, tojuliLimit,
+        tojuliNotApplicableReason, evidenceReference, evidenceDocumentId, permitSourceRecordId,
+        supersedesRecordId, sourceHash, snapshotJson, snapshotHash, entryKey, entryFingerprint,
+        notes || null,
+        toJson({
+          governedEnergyPerformance: true,
+          thresholdOutcome: outcome.overallCompliant ? 'declared_thresholds_met' : 'declared_threshold_gap',
+          failedChecks: outcome.failedChecks,
+          calculationEngine: false,
+          legalCertification: false,
+          externalRegistration: false,
+          externalCommitments: 0
+        }),
+        timestamp,
+        timestamp
+      );
+      const approval = this.createApproval({
+        targetType: 'energy_performance_record',
+        targetId: id,
+        jobId,
+        approvalType: 'energy_performance_evidence_review',
+        summary: `Verify ${phase.replaceAll('_', ' ')} energy-performance evidence for ${objectReference}`,
+        reason: 'The retained adviser identity, attested software, EP-Online reference where applicable, declared thresholds, and source PDF require independent review.',
+        data: {
+          recordId: id,
+          phase,
+          buildingScope,
+          objectReference,
+          outcome,
+          sourceHash,
+          snapshotHash,
+          entryFingerprint,
+          evidenceDocumentId,
+          permitSourceRecordId,
+          supersedesRecordId,
+          calculationEngine: false,
+          legalCertification: false,
+          externalRegistration: false,
+          externalCommitments: 0
+        }
+      }, { actor, audit: false });
+      this.db.prepare('UPDATE energy_performance_records SET approval_id = ?, updated_at = ? WHERE id = ?').run(approval.id, nowIso(), id);
+      const record = this.getEnergyPerformanceRecord(id);
+      this.audit({
+        entityType: 'energy_performance_record',
+        entityId: id,
+        jobId,
+        action: 'submit_energy_performance_evidence',
+        actor,
+        after: record,
+        metadata: {
+          approvalId: approval.id,
+          phase,
+          objectReference,
+          declaredThresholdsMet: outcome.overallCompliant,
+          certificationClaimed: false,
+          externalRegistration: false,
+          externalCommitments: 0
+        }
+      });
+      return { record, approval, replayed: false, externalCommitments: 0, certificationClaimed: false };
+    });
+  }
+
+  applyEnergyPerformanceApproval(recordId) {
+    const row = this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ?').get(recordId);
+    if (!row) throw ledgerInputError('energy_performance_record_not_found', 'Energy-performance record not found.', { recordId }, 404);
+    if (['verified_compliant', 'verified_gap'].includes(row.status)) return this.mapEnergyPerformanceRecord(row);
+    if (row.status !== 'pending_approval') {
+      throw ledgerInputError('energy_performance_approval_state_conflict', `Energy-performance evidence cannot be verified from ${row.status}.`, { recordId }, 409);
+    }
+    const before = this.mapEnergyPerformanceRecord(row);
+    if (!before.integrityValid || !before.sourceCurrent) {
+      throw ledgerInputError('energy_performance_integrity_failed', 'Energy-performance approval requires an intact source PDF and immutable retained snapshot.', { recordId }, 409);
+    }
+    const approvalRow = row.approval_id
+      ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND target_type = 'energy_performance_record' AND target_id = ? AND status = 'approved'").get(row.approval_id, recordId)
+      : null;
+    const approvalData = fromJson(approvalRow?.data_json, {});
+    if (
+      !approvalRow
+      || approvalData.sourceHash !== row.source_hash
+      || approvalData.snapshotHash !== row.snapshot_hash
+      || approvalData.entryFingerprint !== row.entry_fingerprint
+    ) {
+      throw ledgerInputError('energy_performance_approval_invalid', 'The approved decision does not match the immutable energy-performance record.', { recordId }, 409);
+    }
+    const currentRow = this.db.prepare(`
+      SELECT * FROM energy_performance_records
+      WHERE job_id = ? AND phase = ? AND building_scope = ? AND object_reference = ?
+        AND status IN ('verified_compliant', 'verified_gap')
+      LIMIT 1
+    `).get(row.job_id, row.phase, row.building_scope, row.object_reference);
+    if (row.supersedes_record_id) {
+      if (!currentRow || currentRow.id !== row.supersedes_record_id) {
+        throw ledgerInputError('energy_performance_current_source_changed', 'The verified record being replaced is no longer current.', { recordId, expectedCurrentRecordId: row.supersedes_record_id }, 409);
+      }
+      const supersededBefore = this.mapEnergyPerformanceRecord(currentRow);
+      this.db.prepare("UPDATE energy_performance_records SET status = 'superseded', updated_at = ? WHERE id = ?")
+        .run(nowIso(), currentRow.id);
+      this.audit({
+        entityType: 'energy_performance_record',
+        entityId: currentRow.id,
+        jobId: row.job_id,
+        action: 'supersede_energy_performance_record',
+        actor: approvalRow.resolved_by || approvalRow.requested_by || 'approval',
+        before: supersededBefore,
+        after: this.mapEnergyPerformanceRecord(this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ?').get(currentRow.id)),
+        metadata: { supersededByRecordId: recordId, approvalId: approvalRow.id, externalCommitments: 0 }
+      });
+    } else if (currentRow) {
+      throw ledgerInputError('energy_performance_current_source_changed', 'Another verified record became current after this review was requested.', { recordId, currentRecordId: currentRow.id }, 409);
+    }
+    const nextStatus = before.outcome.overallCompliant ? 'verified_compliant' : 'verified_gap';
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE energy_performance_records
+      SET status = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending_approval'
+    `).run(nextStatus, toJson({
+      ...fromJson(row.data_json, {}),
+      approvalDecision: {
+        status: 'approved',
+        approvalId: approvalRow.id,
+        resolvedAt: approvalRow.resolved_at || timestamp,
+        resolvedBy: approvalRow.resolved_by || null,
+        reason: approvalRow.reason || null
+      }
+    }), timestamp, recordId);
+    const after = this.getEnergyPerformanceRecord(recordId);
+    this.audit({
+      entityType: 'energy_performance_record',
+      entityId: recordId,
+      jobId: row.job_id,
+      action: 'verify_energy_performance_evidence',
+      actor: approvalRow.resolved_by || approvalRow.requested_by || 'approval',
+      before,
+      after,
+      metadata: {
+        approvalId: approvalRow.id,
+        declaredThresholdsMet: after.outcome.overallCompliant,
+        failedChecks: after.outcome.failedChecks,
+        certificationClaimed: false,
+        externalRegistration: false,
+        externalCommitments: 0
+      }
+    });
+    return after;
+  }
+
   transitionLifecycleRecord(jobId, recordType, recordId, payload = {}, options = {}) {
     this.requireJob(jobId);
     const actor = options.actor || 'Contractor.AI';
@@ -45874,6 +46537,24 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             }
           }), timestamp, before.target_id);
         }
+      } else if (before.target_type === 'energy_performance_record') {
+        const row = this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ?').get(before.target_id);
+        if (row && row.status === 'pending_approval') {
+          this.db.prepare(`
+            UPDATE energy_performance_records
+            SET status = ?, data_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending_approval'
+          `).run(status, toJson({
+            ...fromJson(row.data_json, {}),
+            approvalDecision: {
+              status,
+              approvalId,
+              resolvedAt: timestamp,
+              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              reason: payload.reason || payload.notes || null
+            }
+          }), timestamp, before.target_id);
+        }
       } else if (before.target_type === 'document_transmittal') {
         const transmittalData = fromJson(
           this.db.prepare('SELECT data_json FROM document_transmittals WHERE id = ?').get(before.target_id)?.data_json,
@@ -47603,6 +48284,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.applyEnvironmentalActivityReversal(targetId);
     } else if (targetType === 'environmental_report') {
       this.applyEnvironmentalReportApproval(targetId);
+    } else if (targetType === 'energy_performance_record') {
+      this.applyEnergyPerformanceApproval(targetId);
     } else if (targetType === 'invoice') {
       this.db.prepare("UPDATE invoices SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, targetId);
     } else if (targetType === 'billing_milestone') {
@@ -49286,8 +49969,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       .filter(job => includeClosed || !closedStatuses.has(normalizeStatus(job.status, 'open')))
       .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
-        const recommendation = this.recommendSchedule(job.id, {}, { actor: 'Contractor.AI', audit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
+        const recommendation = this.recommendSchedule(job.id, {}, { actor: 'Contractor.AI', audit: false, detail });
         const pendingApprovals = (detail.approvals || []).filter(approval => normalizeStatus(approval.status, 'pending') === 'pending');
         const activeAssignments = (detail.assignments || []).filter(assignment => this.activeAssignmentStatus(assignment.status));
         const blockers = Array.isArray(recommendation.blockers) ? recommendation.blockers : [];
@@ -49612,7 +50295,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
         const costForecast = this.calculateCostForecast(job.id, { detail });
         const jobStatus = normalizeStatus(detail.status, 'open');
         const financeApprovals = (detail.approvals || []).filter(approval =>
@@ -50250,7 +50933,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
         const pendingApprovals = (detail.approvals || []).filter(approval =>
           normalizeStatus(approval.status, 'pending') === 'pending'
@@ -50585,7 +51268,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
         const progressPercent = normalizeNumber(detail.progressPercent, 0);
         const scheduledForCrew = crewJobStatuses.has(jobStatus) || Boolean(detail.scheduledStart || detail.targetCompletion);
@@ -50966,7 +51649,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
         const scheduledForInventory = inventoryJobStatuses.has(jobStatus) || Boolean(detail.scheduledStart || detail.targetCompletion);
         const pendingApprovals = (detail.approvals || []).filter(approval =>
@@ -51325,7 +52008,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       .filter(job => !excludedStatuses.has(normalizeStatus(job.status, 'open')))
       .filter(job => !jobFilter.size || jobFilter.has(job.id))
       .map(job => {
-        const detail = this.getJobDetail(job.id, { includeAudit: false });
+        const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
         const jobStatus = normalizeStatus(detail.status, 'open');
         const pendingApprovals = (detail.approvals || []).filter(approval =>
           normalizeStatus(approval.status, 'pending') === 'pending'
@@ -51809,6 +52492,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       expenses: this.db.prepare('SELECT * FROM expenses WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapExpense(row)),
       environmentalActivities: this.listEnvironmentalActivities({ jobId, limit: 1000 }),
       environmentalReports: this.listEnvironmentalReports({ jobId, limit: 100, includeSourceCurrent: false }),
+      energyPerformanceRecords: this.listEnergyPerformanceRecords({ jobId, limit: 1_000 }),
       billingMilestones: this.db.prepare('SELECT * FROM billing_milestones WHERE job_id = ? ORDER BY sequence_number ASC, created_at ASC').all(jobId).map(row => this.mapBillingMilestone(row)),
       invoices: this.db.prepare('SELECT * FROM invoices WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapInvoice(row)),
       creditNotes: this.db.prepare('SELECT * FROM credit_notes WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map(row => this.mapCreditNote(row)),
@@ -51893,9 +52577,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (options.includeAudit) {
       detail.audit = this.listAudit({ jobId, limit: 50 });
     }
-    const capabilityMap = this.ledgerCapabilityCoverage({ jobDetail: detail });
-    detail.capabilities = capabilityMap.capabilities;
-    detail.capabilitySummary = capabilityMap.summary;
+    if (options.includeCapabilities !== false) {
+      const capabilityMap = this.ledgerCapabilityCoverage({ jobDetail: detail });
+      detail.capabilities = capabilityMap.capabilities;
+      detail.capabilitySummary = capabilityMap.summary;
+    }
     return detail;
   }
 
@@ -53061,6 +53747,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       environmentalReports: activeCount('environmental_reports'),
       approvedEnvironmentalReports: activeCount('environmental_reports', "records.status = 'approved'"),
       environmentalKgCo2e: activeSum('environmental_activities', 'emissions_kg_co2e', "records.status IN ('approved', 'pending_reversal')"),
+      energyPerformanceRecords: activeCount('energy_performance_records'),
+      verifiedEnergyPerformanceRecords: activeCount('energy_performance_records', "records.status IN ('verified_compliant', 'verified_gap')"),
+      energyPerformanceThresholdGaps: activeCount('energy_performance_records', "records.status = 'verified_gap'"),
       siteAccessLogs: activeCount('site_access_logs'),
       blockedSiteAccess: activeCount('site_access_logs', "records.status = 'blocked' OR records.orientation_valid = 0"),
       openMobilizationApprovals: activeCount('approvals', "records.status = 'pending' AND records.approval_type IN ('worker_orientation_completion', 'jha_approval', 'sds_current_review', 'site_access_clearance')"),
@@ -55170,7 +55859,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       LIMIT 10
     `).all();
     for (const job of completedHandoverCandidates) {
-      const detail = this.getJobDetail(job.id, { includeAudit: false });
+      const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
       const readiness = this.assessHandoverReadiness(job.id, { detail });
       if (!readiness.ready || readiness.currentPackageId) continue;
       const existingTask = this.db.prepare(`
@@ -55461,7 +56150,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       && actionableJobIds.has(job.id)
     ));
     for (const job of crewJobs) {
-      const detail = this.getJobDetail(job.id, { includeAudit: false });
+      const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
       const crewEvidence = this.crewEvidenceReadiness(detail);
       for (const item of crewEvidence.items) {
         if (!item.orientation) {
@@ -59855,6 +60544,29 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
     }
+    const energyPerformanceRows = this.db.prepare('SELECT * FROM energy_performance_records ORDER BY created_at').all();
+    for (const recordRow of energyPerformanceRows) {
+      const record = this.mapEnergyPerformanceRecord(recordRow);
+      if (!record.integrityValid) {
+        issues.push({ severity: 'error', message: `Energy-performance record ${record.id} failed retained source or snapshot integrity verification.` });
+      }
+      if (record.status === 'pending_approval') {
+        const approval = record.approvalId
+          ? this.db.prepare("SELECT status FROM approvals WHERE id = ? AND target_type = 'energy_performance_record' AND target_id = ?").get(record.approvalId, record.id)
+          : null;
+        if (!approval || approval.status !== 'pending') {
+          issues.push({ severity: 'error', message: `Energy-performance record ${record.id} is pending without its matching review approval.` });
+        }
+      }
+      if (['verified_compliant', 'verified_gap'].includes(record.status)) {
+        const approval = record.approvalId
+          ? this.db.prepare("SELECT status FROM approvals WHERE id = ? AND target_type = 'energy_performance_record' AND target_id = ?").get(record.approvalId, record.id)
+          : null;
+        if (!approval || approval.status !== 'approved') {
+          issues.push({ severity: 'error', message: `Verified energy-performance record ${record.id} lacks its approved decision.` });
+        }
+      }
+    }
     const instructionWithoutApproval = Number(this.db.prepare("SELECT COUNT(*) AS count FROM worker_instructions WHERE status IN ('approved', 'sent', 'published', 'dispatched') AND approval_id IS NULL").get().count || 0);
     if (instructionWithoutApproval) issues.push({ severity: 'warning', message: `${instructionWithoutApproval} published worker instruction(s) have no approval gate.` });
     return {
@@ -59961,6 +60673,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         expenses: this.count('expenses'),
         environmentalActivities: this.count('environmental_activities'),
         environmentalReports: this.count('environmental_reports'),
+        energyPerformanceRecords: this.count('energy_performance_records'),
         purchaseOrders: this.count('purchase_orders'),
         supplierInvoices: this.count('supplier_invoices'),
         supplierInvoicePayments: this.count('supplier_invoice_payments'),
@@ -63985,6 +64698,115 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     };
   }
 
+  mapEnergyPerformanceRecord(row) {
+    if (!row) return null;
+    const input = this.energyPerformanceInputFromRow(row);
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    const data = fromJson(row.data_json, {});
+    const documentRow = this.db.prepare('SELECT * FROM documents WHERE id = ? AND job_id = ?').get(row.evidence_document_id, row.job_id);
+    const documentData = fromJson(documentRow?.data_json, {});
+    const documentChecksum = normalizeText(documentData.analysis?.upload?.sha256 || documentData.contentHash, '').toLowerCase();
+    const documentCurrent = Boolean(
+      documentRow
+      && ['stored', 'needs_review', 'approved', 'current'].includes(normalizeStatus(documentRow.status, ''))
+      && normalizeStatus(documentRow.mime_type, '') === 'application/pdf'
+      && documentRow.storage_ref
+      && /^[a-f0-9]{64}$/.test(documentChecksum)
+      && normalizeNumber(documentRow.size_bytes, 0) > 0
+    );
+    const permitSourceRow = row.permit_source_record_id
+      ? this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ? AND job_id = ?').get(row.permit_source_record_id, row.job_id)
+      : null;
+    const permitSourceSnapshotValid = !row.permit_source_record_id || Boolean(
+      permitSourceRow
+      && ['permit_application', 'wkb_notification'].includes(permitSourceRow.phase)
+      && ['verified_compliant', 'superseded'].includes(permitSourceRow.status)
+      && permitSourceRow.building_scope === row.building_scope
+      && permitSourceRow.object_reference === row.object_reference
+      && permitSourceRow.software_version === row.software_version
+      && sha256Text(String(permitSourceRow.snapshot_json || '')) === permitSourceRow.snapshot_hash
+    );
+    const supersededRow = row.supersedes_record_id
+      ? this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ? AND job_id = ?').get(row.supersedes_record_id, row.job_id)
+      : null;
+    const source = {
+      evidenceDocument: documentRow ? {
+        id: documentRow.id,
+        checksum: documentChecksum,
+        mimeType: documentRow.mime_type,
+        sizeBytes: normalizeNumber(documentRow.size_bytes, 0)
+      } : null,
+      permitSource: permitSourceRow ? {
+        id: permitSourceRow.id,
+        snapshotHash: permitSourceRow.snapshot_hash,
+        softwareVersion: permitSourceRow.software_version
+      } : null,
+      supersedes: supersededRow ? {
+        id: supersededRow.id,
+        snapshotHash: supersededRow.snapshot_hash
+      } : null
+    };
+    const outcome = this.energyPerformanceOutcome(input);
+    const sourceHashValid = sha256Json({ input, source }) === row.source_hash;
+    const snapshotHashValid = Boolean(
+      snapshot
+      && snapshot.format === ENERGY_PERFORMANCE_FORMAT
+      && snapshot.id === row.id
+      && snapshot.jobId === row.job_id
+      && canonicalJson(snapshot.input) === canonicalJson(input)
+      && canonicalJson(snapshot.source) === canonicalJson(source)
+      && snapshot.sourceHash === row.source_hash
+      && canonicalJson(snapshot.outcome) === canonicalJson(outcome)
+      && snapshot.safeguards?.calculationEngine === false
+      && snapshot.safeguards?.legalCertification === false
+      && snapshot.safeguards?.externalRegistration === false
+      && Number(snapshot.safeguards?.externalCommitments) === 0
+      && sha256Text(snapshotJson) === row.snapshot_hash
+    );
+    const entryFingerprintValid = sha256Json(input) === row.entry_fingerprint;
+    const integrityValid = Boolean(
+      documentCurrent
+      && permitSourceSnapshotValid
+      && sourceHashValid
+      && snapshotHashValid
+      && entryFingerprintValid
+    );
+    return {
+      id: row.id,
+      ...input,
+      status: row.status,
+      approvalId: row.approval_id || null,
+      outcome,
+      sourceHash: row.source_hash,
+      snapshotHash: row.snapshot_hash,
+      snapshot,
+      entryKey: row.entry_key,
+      entryFingerprint: row.entry_fingerprint,
+      integrityValid,
+      sourceCurrent: documentCurrent && (!permitSourceRow || permitSourceRow.status === 'verified_compliant'),
+      evidenceDocument: documentRow ? {
+        id: documentRow.id,
+        title: documentRow.title,
+        filename: documentRow.filename,
+        mimeType: documentRow.mime_type,
+        sizeBytes: normalizeNumber(documentRow.size_bytes, 0),
+        checksum: documentChecksum,
+        status: documentRow.status
+      } : null,
+      permitSource: permitSourceRow ? {
+        id: permitSourceRow.id,
+        phase: permitSourceRow.phase,
+        status: permitSourceRow.status,
+        softwareVersion: permitSourceRow.software_version,
+        snapshotHash: permitSourceRow.snapshot_hash
+      } : null,
+      data,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   mapPunchItem(row) {
     return {
       id: row.id,
@@ -64588,6 +65410,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
       preview.csvChecksum = mapped?.csvChecksum || data.csvChecksum || null;
       preview.integrityValid = mapped?.integrityValid ?? null;
+    } else if (targetType === 'energy_performance_record') {
+      const row = this.db.prepare('SELECT * FROM energy_performance_records WHERE id = ?').get(approval.targetId || approval.target_id);
+      const mapped = row ? this.mapEnergyPerformanceRecord(row) : null;
+      const meetsThresholds = mapped?.outcome?.overallCompliant ?? data.outcome?.overallCompliant;
+      primaryEffect = `Verify ${String(mapped?.phase || data.phase || 'energy performance').replaceAll('_', ' ')} evidence for ${mapped?.objectReference || data.objectReference || 'the retained object'}.`;
+      addEffect(meetsThresholds
+        ? 'Recognize the source-bound record as meeting the adviser-declared BENG and applicable TOjuli thresholds.'
+        : 'Recognize the source-bound record as a verified threshold gap that remains visible as a compliance blocker.');
+      if (mapped?.supersedesRecordId || data.supersedesRecordId) addEffect('Supersede the exact current record for this phase and object.');
+      addSafeguard('Approval rechecks the retained PDF checksum, adviser identity, attested software, EP-Online reference where applicable, threshold values, and immutable snapshot.');
+      addSafeguard('Contractor.AI does not perform the NTA 8800 calculation, certify compliance, register an energielabel, submit to EP-Online, or contact an authority.');
+      riskLevel = 'high';
+      preview.phase = mapped?.phase || data.phase || null;
+      preview.buildingUse = mapped?.buildingUse || null;
+      preview.buildingScope = mapped?.buildingScope || data.buildingScope || null;
+      preview.objectReference = mapped?.objectReference || data.objectReference || null;
+      preview.assessorName = mapped?.assessorName || null;
+      preview.assessorCredential = mapped?.assessorCredential || null;
+      preview.ntaVersion = mapped?.ntaVersion || null;
+      preview.softwareName = mapped?.softwareName || null;
+      preview.softwareVersion = mapped?.softwareVersion || null;
+      preview.epOnlineRegistration = mapped?.epOnlineRegistration || null;
+      preview.outcome = mapped?.outcome || data.outcome || null;
+      preview.evidenceReference = mapped?.evidenceReference || null;
+      preview.sourceHash = mapped?.sourceHash || data.sourceHash || null;
+      preview.snapshotHash = mapped?.snapshotHash || data.snapshotHash || null;
+      preview.integrityValid = mapped?.integrityValid ?? null;
+      preview.sourceCurrent = mapped?.sourceCurrent ?? null;
     } else if (targetType === 'supplier_invoice') {
       const row = this.db.prepare('SELECT * FROM supplier_invoices WHERE id = ?').get(approval.targetId || approval.target_id);
       const mapped = row ? this.mapSupplierInvoice(row) : null;

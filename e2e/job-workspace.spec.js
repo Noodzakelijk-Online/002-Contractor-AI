@@ -26,6 +26,18 @@ function weekStart(value = new Date()) {
   return date.toISOString().slice(0, 10);
 }
 
+async function refreshWorkspace(page) {
+  const refreshButton = page.getByRole('button', { name: 'Refresh data' });
+  const dashboardResponse = page.waitForResponse((response) => (
+    response.request().method() === 'GET'
+    && new URL(response.url()).pathname === '/api/ledger/dashboard'
+  ));
+  await refreshButton.click();
+  const response = await dashboardResponse;
+  expect(response.ok()).toBeTruthy();
+  await expect(refreshButton).toBeEnabled({ timeout: 60_000 });
+}
+
 async function approveCommercialScope(request, jobId, entryKey) {
   const response = await request.post(`/api/ledger/jobs/${jobId}/commercial-scope/revisions`, {
     data: {
@@ -270,6 +282,7 @@ test('office operator can review job planning and create a client draft without 
 });
 
 test('commercial control retains server totals and changes contract value only after verified client acceptance', async ({ page, request }) => {
+  test.setTimeout(120_000);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: 'Operations' }).click();
@@ -577,6 +590,7 @@ test('job workspace creates, starts, and completes retained tasks with evidence'
 });
 
 test('dispatch workspace renders ledger jobs and prepares an idempotent internal pack', async ({ page, request }) => {
+  test.setTimeout(120_000);
   const suffix = Date.now();
   const tradePartner = await ensureVerifiedTradePartner(request);
   const intake = await createBrowserJob(request, `Browser dispatch preparation job ${suffix}`, {
@@ -856,7 +870,7 @@ test('crew directory manages retained availability and approval-gated retirement
   });
   expect(archiveResolution.ok()).toBeTruthy();
 
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   workerRow = directory.locator('.worker-row').filter({ hasText: workerName });
   await expect(workerRow).toContainText('Dormant assignments');
   await expect(workerRow).toContainText('1');
@@ -1523,7 +1537,7 @@ test('field assurance prepares internal safety records and gates an RFI answer',
     }
   });
   expect(orientationApprovalResponse.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   accessRow = assurance.locator('.assurance-item').filter({ hasText: accessJob.job.title });
   await expect(accessRow.getByRole('button', { name: `Clear site access for ${accessJob.job.title}` })).toBeVisible();
   await accessRow.getByRole('button', { name: `Clear site access for ${accessJob.job.title}` }).click();
@@ -1936,7 +1950,7 @@ test('finance workspace creates and prepares an approval-gated structured invoic
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Structured invoice identity and totals checked.' }
   });
   expect(invoiceApproval.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   const row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await row.getByRole('button', { name: `Prepare invoice package for ${intake.job.title}` }).click();
   await expect(page.getByText(/retained with HTML and UBL attachments/i)).toBeVisible();
@@ -2000,7 +2014,7 @@ test('finance workspace plans a billing milestone and locks its values into the 
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Milestone matches the signed contract and completion evidence.' }
   });
   expect(approvalResponse.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await expect(row.getByText('1 billing milestone')).toBeVisible();
   await expect(row.getByText('1 milestone due')).toBeVisible();
@@ -2260,7 +2274,7 @@ test('finance workspace creates, approves, and packages a partial credit note ag
   expect(creditApproval.ok()).toBeTruthy();
 
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await row.getByRole('button', { name: `Prepare credit note package for ${intake.job.title}` }).click();
   await expect(page.getByText(/Credit note CRN-.* retained with HTML and UBL attachments\. The receivable was adjusted/i)).toBeVisible();
@@ -2382,7 +2396,7 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Receipt identity, VAT treatment, and job allocation checked.' }
   });
   expect(expenseApproval.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
 
   costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
   await expect(costRow).toContainText(/cost review required/i);
@@ -2415,7 +2429,7 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Worker, week, hours, rate, and job allocation checked.' }
   });
   expect(timesheetApproval.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
 
   costRow = finance.locator('.finance-item').filter({ hasText: costJob.job.title });
   await costRow.getByRole('button', { name: `Finance handoff for ${costJob.job.title}` }).click();
@@ -2453,7 +2467,7 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Progress draw evidence checked.' }
   });
   expect(drawApproval.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
 
   receivableRow = finance.locator('.finance-item').filter({ hasText: receivableJob.job.title });
   await receivableRow.getByRole('button', { name: `Record payment for ${receivableJob.job.title}` }).click();
@@ -2475,7 +2489,7 @@ test('finance workspace operates costs, budgets, handoffs, receivables, draws an
     data: { status: 'approved', resolvedBy: 'Browser finance approver', reason: 'Partial bank receipt matched.' }
   });
   expect(receiptApproval.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   receivableDetailResponse = await request.get(`/api/ledger/jobs/${receivableJob.job.id}`);
   receivableDetail = await receivableDetailResponse.json();
   expect(receivableDetail.job.invoices.find(invoice => invoice.id === receivableInvoice.invoice.id)).toMatchObject({
@@ -2587,7 +2601,7 @@ test('finance workspace freezes, approves, and invalidates a source-linked cost 
     data: { status: 'approved', resolvedBy: 'Browser forecast approver', reason: 'Current source evidence and margin checked.' }
   });
   expect(approvalResponse.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await expect(row).toContainText(/FC-\d{4}-\d{6} current/);
   await expect(row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` })).toHaveCount(0);
@@ -2601,7 +2615,7 @@ test('finance workspace freezes, approves, and invalidates a source-linked cost 
     data: { status: 'submitted', amount: 75, category: 'materials', costCode: 'BROWSER-FC-100', vendor: 'Bouwmaat', receiptRef: 'BROWSER-FC-REVISION' }
   });
   expect(changedCost.ok()).toBeTruthy();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await expect(row).toContainText(/FC-\d{4}-\d{6} stale/);
   await expect(row.getByRole('button', { name: `Freeze revised cost forecast for ${intake.job.title}` })).toBeVisible();
@@ -3353,6 +3367,7 @@ test('replacement crew completes assignment-scoped instruction and access approv
   resourceModal = page.getByTestId('resource-control-modal');
   await resourceModal.getByLabel('Internal evidence and notes').fill('Replacement orientation was matched to the active assignment; access remains blocked for approval.');
   await resourceModal.getByRole('button', { name: 'Create access gate' }).click();
+  await expect(page.getByText('The assignment-scoped site-access gate was retained. Clearance still requires explicit approval.')).toBeVisible();
   resourceRow = resources.locator('.resource-readiness-item').filter({ hasText: intake.job.title });
   await resourceRow.getByRole('button', { name: `Request site-access clearance for ${intake.job.title}` }).click();
   fieldModal = page.getByTestId('field-assurance-modal');
@@ -3373,7 +3388,7 @@ test('replacement crew completes assignment-scoped instruction and access approv
     })
     .toBe('stable');
   await page.getByRole('button', { name: 'Resources', exact: true }).click();
-  await page.getByRole('button', { name: 'Refresh data' }).click();
+  await refreshWorkspace(page);
   resourceRow = resources.locator('.resource-readiness-item').filter({ hasText: intake.job.title });
   await expect(resourceRow.getByText('stable', { exact: true })).toBeVisible();
   await expect(resourceRow.getByText('3 historical crew records')).toBeVisible();

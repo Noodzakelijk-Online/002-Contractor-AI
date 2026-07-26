@@ -201,6 +201,54 @@ function createBackupFixture(t, suffix = 'success') {
     reason: 'Migration drawing PDF, title block, revision, and issue purpose verified.'
   });
   const drawingRevision = source.getDrawingRevision(drawingRequest.id);
+  const energyEvidenceBytes = Buffer.from(`%PDF-1.7\nGoverned hosted migration NTA 8800 assessment ${suffix}\n%%EOF`);
+  const energyStorageRef = `data/uploads/${suffix}-energy-performance.pdf`;
+  const energyDocument = source.addDocument(job.id, {
+    type: 'energy_performance_assessment',
+    title: 'Migration energy-performance assessment',
+    filename: `${suffix}-energy-performance.pdf`,
+    mimeType: 'application/pdf',
+    size: energyEvidenceBytes.length,
+    storageRef: energyStorageRef,
+    status: 'stored',
+    analysis: {
+      upload: {
+        sha256: crypto.createHash('sha256').update(energyEvidenceBytes).digest('hex'),
+        signatureVerified: true
+      }
+    }
+  }, { actor: 'migration_fixture' });
+  const energyRequest = source.createEnergyPerformanceRecord(job.id, {
+    entryKey: `migration-energy-performance-${suffix}`,
+    phase: 'permit_application',
+    buildingUse: 'residential',
+    buildingScope: 'building',
+    objectReference: `MIGRATION-BAG-${suffix}`,
+    assessmentDate: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10),
+    assessorName: 'Migration qualified EP adviser',
+    assessorCredential: 'EP-W/D-MIGRATION-001',
+    certifiedCompany: 'Migration Certified Energy BV',
+    ntaVersion: 'NTA 8800:2026',
+    softwareName: 'Migration attested EP software',
+    softwareVersion: '2026.1',
+    epOnlineRegistration: `EP-ONLINE-MIGRATION-${suffix}`,
+    beng1Value: 42,
+    beng1Limit: 55,
+    beng2Value: 26,
+    beng2Limit: 30,
+    beng3Value: 64,
+    beng3Minimum: 50,
+    tojuliApplicable: false,
+    tojuliNotApplicableReason: 'The retained adviser report states that TOjuli does not apply.',
+    evidenceReference: `migration-energy-report-${suffix}`,
+    evidenceDocumentId: energyDocument.id
+  }, { actor: 'migration_fixture' });
+  source.resolveApproval(energyRequest.approval.id, {
+    status: 'approved',
+    resolvedBy: 'migration_fixture_approver',
+    reason: 'Migration adviser, method, registration, declared thresholds, and source PDF verified.'
+  });
+  const energyPerformance = source.getEnergyPerformanceRecord(energyRequest.record.id);
   const controlledDocument = source.createControlledDocumentRevision(job.id, {
     documentNumber: 'MIG-A-101',
     revision: 'P01',
@@ -970,16 +1018,19 @@ function createBackupFixture(t, suffix = 'success') {
   const backupEvidence = path.join(backupDir, 'evidence', `${suffix}-site-proof.jpg`);
   const backupSdsEvidence = path.join(backupDir, 'evidence', `${suffix}-manufacturer-sds.pdf`);
   const backupDrawingEvidence = path.join(backupDir, 'evidence', `${suffix}-drawing-A-201-C01.pdf`);
+  const backupEnergyEvidence = path.join(backupDir, 'evidence', `${suffix}-energy-performance.pdf`);
   fs.mkdirSync(path.dirname(backupEvidence), { recursive: true });
   fs.copyFileSync(sourceFile, backupLedger);
   fs.writeFileSync(backupEvidence, evidenceBytes);
   fs.writeFileSync(backupSdsEvidence, sdsEvidenceBytes);
   fs.writeFileSync(backupDrawingEvidence, drawingEvidenceBytes);
+  fs.writeFileSync(backupEnergyEvidence, energyEvidenceBytes);
   const files = [
     { file: 'contractor-ledger.sqlite', target: backupLedger },
     { file: `evidence/${suffix}-site-proof.jpg`, target: backupEvidence },
     { file: `evidence/${suffix}-manufacturer-sds.pdf`, target: backupSdsEvidence },
-    { file: `evidence/${suffix}-drawing-A-201-C01.pdf`, target: backupDrawingEvidence }
+    { file: `evidence/${suffix}-drawing-A-201-C01.pdf`, target: backupDrawingEvidence },
+    { file: `evidence/${suffix}-energy-performance.pdf`, target: backupEnergyEvidence }
   ].map(entry => ({
     file: entry.file,
     bytes: fs.statSync(entry.target).size,
@@ -990,10 +1041,10 @@ function createBackupFixture(t, suffix = 'success') {
     backupId,
     createdAt: '2026-07-13T12:00:00.000Z',
     databaseMode: 'sqlite',
-    evidence: { included: true, fileCount: 3 },
+    evidence: { included: true, fileCount: 4 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, energyDocument, energyEvidenceBytes, energyPerformance, energyStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1028,7 +1079,7 @@ test('backup verifier requires an intact v2 SQLite ledger and evidence set', t =
   const fixture = createBackupFixture(t, 'verify');
   const verified = verifyBackupDirectory(fixture.backupDir);
   assert.equal(verified.manifest.backupId, fixture.backupId);
-  assert.equal(verified.evidenceFiles.length, 3);
+  assert.equal(verified.evidenceFiles.length, 4);
   fs.appendFileSync(path.join(fixture.backupDir, 'evidence', 'verify-site-proof.jpg'), 'tampered');
   assert.throws(() => verifyBackupDirectory(fixture.backupDir), /checksum failed/i);
 });
@@ -1117,19 +1168,20 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
 
   assert.equal(migration.success, true);
   assert.equal(migration.backupId, fixture.backupId);
-  assert.equal(migration.evidenceFiles, 3);
+  assert.equal(migration.evidenceFiles, 4);
   assert.equal(migration.invalidatedOperatorSessions, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '066_governed_client_feedback');
+  assert.equal(migration.migrationVersion, '067_governed_energy_performance');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
   assert.equal(migration.diagnostics.valid, true);
-  assert.equal(storage.objects.size, 3);
+  assert.equal(storage.objects.size, 4);
   assert.ok([...storage.objects.values()].some(value => value.equals(fixture.evidenceBytes)));
   assert.ok([...storage.objects.values()].some(value => value.equals(fixture.sdsEvidenceBytes)));
   assert.ok([...storage.objects.values()].some(value => value.equals(fixture.drawingEvidenceBytes)));
+  assert.ok([...storage.objects.values()].some(value => value.equals(fixture.energyEvidenceBytes)));
 
   const hosted = new ContractorOperatingLedger({ databaseUrl: targetUrl });
   try {
@@ -1159,6 +1211,16 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedDrawing.sourceHash, fixture.drawingRevision.sourceHash);
     assert.equal(migratedDrawing.snapshotHash, fixture.drawingRevision.snapshotHash);
     assert.equal(migratedDrawing.sourceDocumentId, fixture.drawingDocument.id);
+    const migratedEnergy = detail.energyPerformanceRecords.find(item => item.id === fixture.energyPerformance.id);
+    assert.equal(migratedEnergy.status, 'verified_compliant');
+    assert.equal(migratedEnergy.integrityValid, true);
+    assert.equal(migratedEnergy.sourceHash, fixture.energyPerformance.sourceHash);
+    assert.equal(migratedEnergy.snapshotHash, fixture.energyPerformance.snapshotHash);
+    assert.equal(migratedEnergy.evidenceDocumentId, fixture.energyDocument.id);
+    assert.equal(migratedEnergy.outcome.overallCompliant, true);
+    const migratedEnergyDocument = detail.documents.find(item => item.id === fixture.energyDocument.id);
+    assert.match(migratedEnergyDocument.storageRef, /^s3:\/\/migration-test\/migrated-\d+-/);
+    assert.notEqual(migratedEnergyDocument.storageRef, fixture.energyStorageRef);
     assert.equal(detail.estimatedHours, 123.123456789);
     const migratedTakeoff = detail.takeoffs.find(item => item.id === fixture.takeoff.id);
     assert.equal(migratedTakeoff.status, 'converted');
@@ -1381,7 +1443,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     migrateLocalBackupToHosted({ backupDir: fixture.backupDir, databaseUrl: targetUrl, storage }),
     /target is not empty/i
   );
-  assert.equal(storage.objects.size, 3);
+  assert.equal(storage.objects.size, 4);
 });
 
 test('failed evidence verification rolls back PostgreSQL and removes uploaded objects', { skip: !connectionString }, async t => {

@@ -89,6 +89,7 @@ const PreTaskPlanControl = lazy(() => import('./components/PreTaskPlanControl'))
 const LmraControl = lazy(() => import('./components/LmraControl'))
 const SdsRegisterControl = lazy(() => import('./components/SdsRegisterControl'))
 const DrawingRegisterControl = lazy(() => import('./components/DrawingRegisterControl'))
+const EnergyPerformanceControl = lazy(() => import('./components/EnergyPerformanceControl'))
 const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
 const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
@@ -1977,7 +1978,7 @@ function DispatchWorkspace({
             id: item.jobId,
             title: item.jobTitle || item.title || 'Ledger job',
           }
-          const controlActions = (item.nextActions || []).filter((action) => action.recordType && action.recordId).slice(0, 4)
+          const controlActions = (item.nextActions || []).filter((action) => action.recordType && action.recordId)
           const workforceBlocker = (item.blockers || []).find((blocker) =>
             ['worker_record_missing', 'worker_retirement_pending', 'worker_unavailable', 'worker_conflict'].includes(blocker.type),
           )
@@ -3052,6 +3053,7 @@ function App() {
   const commercialDialogReturnFocusRef = useRef(false)
   const noticeSequenceRef = useRef(0)
   const hasLoadedDataRef = useRef(false)
+  const fullLoadSequenceRef = useRef(0)
   const sectionRef = useRef('today')
   const resourceViewRef = useRef('workforce')
   const sectionLoadSequenceRef = useRef(0)
@@ -3073,10 +3075,12 @@ function App() {
   }, [])
 
   const refresh = useCallback(async () => {
-    if (!hasLoadedDataRef.current) setLoading(true)
+    const sequence = ++fullLoadSequenceRef.current
+    setLoading(true)
     setError('')
     try {
       const sessionResult = await api('/api/session')
+      if (sequence !== fullLoadSequenceRef.current) return
       if (sessionResult.authentication?.required && !sessionResult.authentication.authenticated) {
         setData(null)
         setAuthState('required')
@@ -3091,6 +3095,7 @@ function App() {
         api('/api/health'),
         api('/api/readiness').catch(() => null),
       ])
+      if (sequence !== fullLoadSequenceRef.current) return
       if (fieldScoped) {
         const scopedJobs = jobsResult.jobs || []
         hasLoadedDataRef.current = true
@@ -3199,14 +3204,16 @@ function App() {
               lastPlannerWeekStart: lastPlannerWeekRef.current,
             }),
       ])
-      if (sectionPatch.lastPlanner?.week?.weekStart) {
-        lastPlannerWeekRef.current = sectionPatch.lastPlanner.week.weekStart
+      if (sequence !== fullLoadSequenceRef.current) return
+      const currentSectionPatch = sectionRef.current === currentSection ? sectionPatch : {}
+      if (currentSectionPatch.lastPlanner?.week?.weekStart) {
+        lastPlannerWeekRef.current = currentSectionPatch.lastPlanner.week.weekStart
       }
-      if (sectionPatch.organization) setOrganizationProfileDraft(organizationDraft(sectionPatch.organization))
+      if (currentSectionPatch.organization) setOrganizationProfileDraft(organizationDraft(currentSectionPatch.organization))
       hasLoadedDataRef.current = true
       setData((current) => ({
         ...current,
-        ...sectionPatch,
+        ...currentSectionPatch,
         session: sessionResult,
         dashboard: dashboardResult.dashboard,
         jobs: jobsResult.jobs || [],
@@ -3215,6 +3222,7 @@ function App() {
         readiness: readinessResult,
       }))
     } catch (requestError) {
+      if (sequence !== fullLoadSequenceRef.current) return
       if (requestError.status === 401 || requestError.code === 'authentication_required') {
         setData(null)
         setAuthState('required')
@@ -3225,7 +3233,7 @@ function App() {
         else setError(requestError.message)
       }
     } finally {
-      setLoading(false)
+      if (sequence === fullLoadSequenceRef.current) setLoading(false)
     }
   }, [])
 
@@ -6650,8 +6658,10 @@ function App() {
         body: JSON.stringify(payload),
       })
       setSelectedJob(result.job)
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       setCommercialDraftMode(null)
-      await refresh()
       restoreCommercialDialogFocus()
       notify(
         mode === 'quote'
@@ -6677,7 +6687,9 @@ function App() {
         },
       )
       setSelectedJob(result.job)
-      await refresh()
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       notify(
         result.replayed
           ? `Quote package ${result.issueReference} is already retained with its delivery approval.`
@@ -6700,7 +6712,9 @@ function App() {
         body: JSON.stringify(payload),
       })
       setSelectedJob(result.job)
-      await refresh()
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       notify(`${formatStatus(result.decision.selectedModel)} pricing basis v${result.decision.versionNumber} retained. Estimates now bind to this exact decision.`)
       return result
     } catch (requestError) {
@@ -6721,7 +6735,9 @@ function App() {
         body: JSON.stringify(payload),
       })
       setSelectedJob(result.job)
-      await refresh()
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       notify(`Commercial scope v${result.revision.versionNumber} retained for approval. Pricing remains blocked until review.`)
       return result
     } catch (requestError) {
@@ -6742,7 +6758,9 @@ function App() {
         body: JSON.stringify(payload),
       })
       setSelectedJob(result.job)
-      await refresh()
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       notify(`Project risk register v${result.revision.versionNumber} retained for approval. Pricing remains blocked until review.`)
       return result
     } catch (requestError) {
@@ -6765,7 +6783,9 @@ function App() {
         },
       )
       setSelectedJob(result.job)
-      await refresh()
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       notify(
         result.replayed
           ? `Change-order package ${result.issueReference} is already retained with its delivery approval.`
@@ -6856,9 +6876,11 @@ function App() {
         }),
       })
       setSelectedJob(result.job)
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
       setCommercialAcceptance(null)
       setCommercialAcceptanceDraft(emptyCommercialAcceptanceDraft())
-      await refresh()
       restoreCommercialDialogFocus()
       notify(
         result.replayed
@@ -7086,6 +7108,34 @@ function App() {
           ? `${record.title} is retained for explicit approval. No field or external reliance was created.`
           : `${record.title} is now ${formatStatus(payload.status)}.`,
       )
+      return result
+    } catch (requestError) {
+      setError(requestError.message)
+      return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function submitEnergyPerformanceRecord(payload) {
+    if (!selectedJobId || !canCoordinate) return null
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(selectedJobId)}/energy-performance`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      setSelectedJob(result.job)
+      setData((current) => current
+        ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job)
+        : current)
+      notify(
+        result.replayed
+          ? 'The exact energy-performance evidence was already retained.'
+          : 'Energy-performance evidence retained for independent review. Contractor.AI did not calculate, certify, or register it.',
+      )
+      await refresh()
       return result
     } catch (requestError) {
       setError(requestError.message)
@@ -8402,7 +8452,7 @@ function App() {
     setSubmitting(true)
     setError('')
     try {
-      const result = await api(`/api/ledger/jobs/${encodeURIComponent(materialReceiptDraft.jobId)}/material-receipts`, {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(materialReceiptDraft.jobId)}/material-receipts?compact=true`, {
         method: 'POST',
         body: JSON.stringify({
           entryKey: materialReceiptDraft.entryKey,
@@ -8420,8 +8470,30 @@ function App() {
       })
       setMaterialReceiptEditor(false)
       setMaterialReceiptDraft(emptyMaterialReceiptDraft())
-      setData((current) => current ? { ...current, materialReceiving: result.materialReceiving || current.materialReceiving, dashboard: result.dashboard || current.dashboard } : current)
+      setData((current) => {
+        if (!current) return current
+        const materialReceiving = current.materialReceiving || { receipts: [], purchaseOrders: [], actions: [], summary: {} }
+        const receipts = [
+          result.receipt,
+          ...(materialReceiving.receipts || []).filter((receipt) => receipt.id !== result.receipt.id),
+        ]
+        return {
+          ...current,
+          materialReceiving: {
+            ...materialReceiving,
+            receipts,
+            summary: {
+              ...materialReceiving.summary,
+              total: receipts.length,
+              received: receipts.filter((receipt) => receipt.status === 'received').length,
+              discrepancies: receipts.filter((receipt) => receipt.status === 'discrepancy').length,
+              pendingReversal: receipts.filter((receipt) => receipt.status === 'pending_reversal').length,
+            },
+          },
+        }
+      })
       notify(result.replayed ? 'The matching delivery ticket was already retained; no duplicate was created.' : `Delivery ${result.receipt.receiptReference} retained as ${formatStatus(result.receipt.status)}.`)
+      void refreshSection('resources', 'receiving')
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -8909,7 +8981,7 @@ function App() {
         setError('A current worker and approved orientation are required before preparing site access.')
         return
       }
-      route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/site-access`
+      route = `/api/ledger/jobs/${encodeURIComponent(jobId)}/site-access?compact=true`
       body = {
         assignmentId: resourceAction.action.assignmentId || null,
         workerId: resourceAction.action.workerId || null,
@@ -8988,23 +9060,25 @@ function App() {
     setSubmitting(true)
     try {
       const result = await api(route, { method, body: JSON.stringify({ ...body, actor: 'office_operator' }) })
+      let successMessage = ''
       if (type === 'complete_worker_orientation') {
-        notify('Orientation completion evidence retained for approval. Site access remains blocked until review.')
+        successMessage = 'Orientation completion evidence retained for approval. Site access remains blocked until review.'
       } else if (type === 'prepare_site_access') {
-        notify('The assignment-scoped site-access gate was retained. Clearance still requires explicit approval.')
+        successMessage = 'The assignment-scoped site-access gate was retained. Clearance still requires explicit approval.'
       } else if (type === 'request_procurement_approval') {
-        notify(
-          `Procurement approval requested for ${currency.format(result.procurementOrder?.amount || 0)}. No supplier order or spend commitment was made.`,
-        )
+        successMessage = `Procurement approval requested for ${currency.format(result.procurementOrder?.amount || 0)}. No supplier order or spend commitment was made.`
       } else if (type === 'record_time_log') {
-        notify('Worker time was recorded in the retained job ledger.')
+        successMessage = 'Worker time was recorded in the retained job ledger.'
       } else {
-        notify(
-          `${formatStatus(result.materialRequirement?.status)} material evidence retained. No supplier order or spend commitment was made.`,
-        )
+        successMessage = `${formatStatus(result.materialRequirement?.status)} material evidence retained. No supplier order or spend commitment was made.`
       }
       closeResourceControl()
-      await refresh()
+      const originatingSection = sectionRef.current
+      await refreshSection(
+        originatingSection === 'dispatch' ? 'dispatch' : 'resources',
+        resourceViewRef.current,
+      )
+      notify(successMessage)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -15214,6 +15288,16 @@ function App() {
                     onCreateMeetingFollowUp={createProjectMeetingFollowUp}
                     onOpenApprovals={openApprovals}
                   />
+                  {!fieldScoped ? (
+                    <EnergyPerformanceControl
+                      job={selectedJob}
+                      canCoordinate={canCoordinate}
+                      canApprove={capabilities.approvals === true}
+                      submitting={submitting}
+                      onSubmit={submitEnergyPerformanceRecord}
+                      onOpenApprovals={openApprovals}
+                    />
+                  ) : null}
                   <PhotoEvidenceControl
                     job={selectedJob}
                     canCoordinate={canCoordinate}

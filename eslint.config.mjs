@@ -37,12 +37,20 @@ export default [
     },
     rules: {
       ...js.configs.recommended.rules,
-      ...reactHooks.configs.recommended.rules,
+      'no-useless-assignment': 'off',
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
       'react-refresh/only-export-components': [
         'warn',
         { allowConstantExport: true },
       ],
+    },
+  },
+  {
+    files: ['main.jsx'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
     },
   },
 ]

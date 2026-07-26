@@ -165,7 +165,7 @@ test('NCR flows through replay-safe capture, corrective-action approval, and ind
 
   const diagnostics = ledger.diagnose();
   assert.equal(diagnostics.valid, true, JSON.stringify(diagnostics.issues));
-  assert.equal(diagnostics.migrations.currentVersion, '066_governed_client_feedback');
+  assert.equal(diagnostics.migrations.currentVersion, '067_governed_energy_performance');
   assert.equal(diagnostics.counts.nonconformanceRecords, 1);
   assert.equal(diagnostics.counts.openNonconformances, 0);
   assert.equal(ledger.dashboardSummary().metrics.nonconformances, 1);

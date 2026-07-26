@@ -228,6 +228,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '066_governed_client_feedback'")) {
     failures.push('Canonical governed client-feedback migration is missing.');
   }
+  if (!ledgerSource.includes("version: '067_governed_energy_performance'")) {
+    failures.push('Canonical governed energy-performance migration is missing.');
+  }
   if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
     failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
   }
@@ -245,6 +248,14 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes('photoEvidenceReleaseInference: false')) {
     failures.push('Photo-evidence capability does not explicitly block inferred release.');
+  }
+  if (!serverSource.includes("energyPerformanceEvidenceIntegrity: 'retained_pdf_sha256_and_immutable_snapshot'")) {
+    failures.push('Energy-performance capability does not bind evidence to an immutable retained PDF checksum.');
+  }
+  if (!serverSource.includes('energyPerformanceCalculationEngine: false')
+    || !serverSource.includes('energyPerformanceLegalCertification: false')
+    || !serverSource.includes('energyPerformanceExternalRegistration: false')) {
+    failures.push('Energy-performance capability does not preserve the no-calculation, no-certification, and no-registration boundary.');
   }
   if (!serverSource.includes("clientFeedbackIntegrity: 'immutable_snapshot_and_entry_fingerprint'")) {
     failures.push('Client feedback does not advertise immutable snapshot and replay integrity.');

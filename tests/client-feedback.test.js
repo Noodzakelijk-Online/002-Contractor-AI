@@ -5,7 +5,10 @@ const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
 
-const TEST_CLOCK = () => new Date('2026-07-23T12:00:00.000Z');
+const TEST_NOW = new Date();
+const TEST_DATE = TEST_NOW.toISOString().slice(0, 10);
+const TEST_SUBMITTED_AT = new Date(TEST_NOW.getTime() - 24 * 60 * 60 * 1_000).toISOString();
+const TEST_CLOCK = () => new Date(TEST_NOW);
 
 function temporaryLedger(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-client-feedback-'));
@@ -41,8 +44,8 @@ function feedbackPayload(entryKey, overrides = {}) {
     comment: 'The result is acceptable, but coordination took too much effort.',
     followUpConsent: false,
     testimonialConsent: false,
-    evidenceReference: 'signed-survey-2026-07-22',
-    submittedAt: '2026-07-22T10:00:00.000Z',
+    evidenceReference: 'signed-survey-current-period',
+    submittedAt: TEST_SUBMITTED_AT,
     ...overrides
   };
 }
@@ -83,7 +86,7 @@ test('governed client feedback is replay-safe, measurable, and creates internal-
     evidenceReference: 'aftercare-call-2026-07-22'
   }), { actor: 'office' });
 
-  const scorecard = ledger.calculatePerformanceScorecard({ periodEnd: '2026-07-23', weeks: 13 });
+  const scorecard = ledger.calculatePerformanceScorecard({ periodEnd: TEST_DATE, weeks: 13 });
   assert.equal(scorecard.summary.metricCount, 23);
   assert.equal(scorecard.metrics.find(metric => metric.key === 'net_promoter_score').value, 0);
   assert.equal(scorecard.metrics.find(metric => metric.key === 'customer_satisfaction_pct').value, 66.7);
@@ -123,7 +126,7 @@ test('governed client feedback is replay-safe, measurable, and creates internal-
     notes: 'The internal recovery review was completed without an external commitment.'
   }, { actor: 'office' });
   assert.equal(ledger.dashboardSummary().metrics.clientFeedbackRecoveryRequired, 0);
-  assert.equal(ledger.migrationStatus().currentVersion, '066_governed_client_feedback');
+  assert.equal(ledger.migrationStatus().currentVersion, '067_governed_energy_performance');
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
 });
 
@@ -148,7 +151,7 @@ test('NPS uses its bipolar range when an approved target is zero or negative', t
   });
 
   const metric = ledger.calculatePerformanceScorecard({
-    periodEnd: '2026-07-23',
+    periodEnd: TEST_DATE,
     weeks: 13
   }).metrics.find(item => item.key === 'net_promoter_score');
   assert.equal(metric.value, -100);

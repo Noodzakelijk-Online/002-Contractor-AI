@@ -4,6 +4,10 @@ Contractor.AI is a local-first operating system for Dutch and European contracto
 
 The Node application is the sole product runtime. The dashboard is a React/Vite client that uses only the ledger API. Python prototypes, simulated dashboards and separate mock databases are retired.
 
+The manifest-level comparison of the supplied legacy archives and the decisions
+to port, retain, or exclude their capability families are recorded in the
+[archive port audit](docs/ARCHIVE_PORT_AUDIT.md).
+
 ## Local Use
 
 Requirements: Node.js 22 and npm.
@@ -197,6 +201,7 @@ The supported surface is `/api/ledger/*`, including opportunities, intake, jobs,
 - `POST /api/ledger/jobs/:id/expense-receipts/:expenseId/reversal` requests an office-controlled compensating reversal while preserving the original receipt and recognized cost until approval.
 - `GET` and `POST /api/ledger/jobs/:id/environmental-activities` expose the scoped environmental register and retain replay-safe measured activity with factor provenance. Field workers see only their own projected records; approval is required before kg CO2e enters the recognized job total.
 - `POST /api/ledger/jobs/:id/environmental-activities/:activityId/reversal` requests an office-controlled compensating correction. `POST /api/ledger/jobs/:id/environmental-reports` freezes a decision-clean period into an approval-backed source and snapshot hash plus CSV checksum; approved content is available from `GET /api/ledger/environmental-reports/:reportId/content` without performing external submission or claiming certification.
+- `GET` and `POST /api/ledger/jobs/:id/energy-performance` expose the office-controlled BENG and energy-performance evidence register. Each record binds the declared BENG 1, BENG 2, BENG 3, and TOjuli values and limits to a checksummed adviser-issued PDF, adviser and certified-company identity, NTA 8800 version, attested software version, EP-Online reference where applicable, and an immutable approval snapshot. Completion evidence must reference the exact compliant permit/Wkb record and retain the same software version. Contractor.AI only compares retained values with retained thresholds; it does not perform an NTA 8800 calculation, certify legal compliance, register an energy label, or submit to EP-Online. See the current [RVO BENG indicators](https://www.rvo.nl/onderwerpen/wetten-en-regels-gebouwen/beng/indicatoren), [RVO EP adviser process](https://www.rvo.nl/onderwerpen/wetten-en-regels-gebouwen/informatie-epa), and [IPLO new-build energy rules](https://iplo.nl/regelgeving/regels-voor-activiteiten/technische-bouwactiviteit/nieuwbouw/rijksregels/energiezuinigheid/).
 - `POST /api/ledger/jobs/:id/invoices/:invoiceId/payments`
 - `POST /api/ledger/jobs/:id/payments/follow-up`
 - `POST /api/ledger/jobs/:id/payments/:paymentId/follow-up`
