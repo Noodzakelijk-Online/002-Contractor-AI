@@ -35,6 +35,9 @@ Rotate the role key to invalidate its sessions after suspected disclosure.
   and status checks for evidence.
 - Stored evidence is read through authenticated ledger routes, never public static
   paths or object URLs.
+- Request bodies cannot select an audit identity. The server binds every parsed
+  object body to `local:owner`, the authenticated role principal, or the scoped
+  `client_portal` identity and keeps that field out of retained business payloads.
 - SHA-256 chained audit events are committed with the underlying mutation.
 - Exact idempotency and lease ownership prevent changed retries and stale workers.
 - External commitments require a separate approval and an allowlisted verified

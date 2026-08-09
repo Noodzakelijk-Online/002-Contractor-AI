@@ -76,6 +76,10 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Security
 
+- Local and hosted request bodies can no longer choose their retained audit actor.
+  The server assigns `local:owner`, the authenticated role principal, or the
+  token-scoped `client_portal` identity and excludes submitted actor labels from
+  retained business payloads.
 - Prevented repeat standalone starts and redirected runtime logs from disclosing
   the retained owner access key.
 - Managed account credentials are retained only as domain-separated SHA-256 hashes;

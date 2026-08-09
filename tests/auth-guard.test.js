@@ -73,6 +73,46 @@ test('production auth guard fails closed when auth is required without a strong 
   });
 });
 
+test('local mode assigns a trusted audit actor and does not retain a submitted actor label', async () => {
+  const app = loadServerWithEnv({
+    NODE_ENV: 'test',
+    CONTRACTOR_AI_REQUIRE_AUTH: 'false'
+  });
+
+  await withServer(app, async baseUrl => {
+    const intake = await request(baseUrl, '/api/ledger/intake', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Local actor integrity job',
+        client: { name: 'Local actor integrity client' },
+        service: 'maintenance',
+        description: 'Caller-supplied actor labels must not enter the ledger.',
+        assignAutomatically: false,
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(intake.response.status, 201);
+
+    const detail = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}`);
+    assert.equal(detail.response.status, 200);
+    assert.ok(detail.body.job.audit.some(event => (
+      event.action === 'create_intake_job' && event.actor === 'local:owner'
+    )));
+    assert.equal(detail.body.job.audit.some(event => event.actor === 'role:owner:spoofed'), false);
+
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(process.env.LEDGER_DB_FILE, { readOnly: true });
+    try {
+      const retained = db.prepare('SELECT data_json FROM job_requests WHERE id = ?').get(intake.body.job.requestId);
+      assert.ok(retained);
+      assert.equal(JSON.parse(retained.data_json).raw.actor, undefined);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 test('dashboard auth guard accepts bearer, API-key, contractor token, and browser basic auth', async () => {
   const token = 'contractor-ai-test-token-at-least-32-characters';
   const app = loadServerWithEnv({

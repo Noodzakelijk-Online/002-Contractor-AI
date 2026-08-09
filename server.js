@@ -1221,6 +1221,20 @@ function actorFromRequest(req, fallback = 'Contractor.AI') {
   return id && id !== role ? `role:${role}:${id}` : `role:${role}`;
 }
 
+function trustedRequestActor(req) {
+  if (isClientPortalApiPath(req.path)) return 'client_portal';
+  return actorFromRequest(req, 'local:owner');
+}
+
+function bindTrustedRequestActor(req) {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return;
+  Object.defineProperty(req.body, 'actor', {
+    value: trustedRequestActor(req),
+    enumerable: false,
+    configurable: true
+  });
+}
+
 function requireDashboardAuth(req, res, next) {
   const clientPortalRoute = isClientPortalApiPath(req.path);
   const publicAuthRoute = req.path === '/api/session' || req.path === '/api/auth/login' || req.path === '/api/auth/logout';
@@ -1994,25 +2008,12 @@ app.use((req, res, next) => (
     : standardJsonParser(req, res, next)
 ));
 app.use((req, res, next) => {
-  if (
-    req.operator?.authenticated
-    && req.body
-    && typeof req.body === 'object'
-    && !Array.isArray(req.body)
-  ) {
-    req.body.actor = actorFromRequest(req);
-  }
+  bindTrustedRequestActor(req);
   next();
 });
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use((req, res, next) => {
-  if (req.operator?.authenticated && req.body && typeof req.body === 'object') {
-    Object.defineProperty(req.body, 'actor', {
-      value: actorFromRequest(req),
-      enumerable: false,
-      configurable: true
-    });
-  }
+  bindTrustedRequestActor(req);
   next();
 });
 

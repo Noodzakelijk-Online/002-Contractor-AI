@@ -1,5 +1,14 @@
 # Codex Worklog
 
+- Closed the remaining local-mode audit identity gap at the shared Express request
+  boundary. Parsed object bodies now receive only `local:owner`, the authenticated
+  role principal, or `client_portal`; submitted labels are non-enumerably replaced
+  before any current or future ledger mutation route can consume them.
+- Added an API and persisted-database regression proving a spoofed owner label does
+  not enter either chained audit history or raw intake source JSON. Lint, dependency
+  audit, release contract, production build, bundle/HAI contracts, all 526 Node
+  tests, all 89 Chromium workflows, container runtime, Windows standalone, and the
+  smoke performance profile pass.
 - Replaced the final browser-native confirmation in the canonical dashboard with
   a lazy-loaded QA-maintenance dialog that previews exact server-derived counts and
   samples, requires a retained reason and exact phrase, traps focus, restores the

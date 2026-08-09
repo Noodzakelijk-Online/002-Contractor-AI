@@ -3,6 +3,18 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-14 Trusted request actors
+
+- Boundary: every parsed object body receives a non-enumerable server-selected
+  actor before a ledger route can use or retain it
+- Identity: local work is `local:owner`, authenticated work uses the exact role and
+  managed-account principal, and public portal mutations use `client_portal`
+- Persistence: submitted actor labels are excluded from retained business payloads,
+  including raw intake source data
+- Verification: focused authentication/API persistence coverage plus the complete
+  526-test Node gate passed with zero failures; release/browser/package gates are
+  recorded in `FINAL_VERIFICATION_REPORT.md`
+
 ## CP-13 Previewed QA maintenance
 
 - UI: dedicated lazy-loaded Operations dialog with exact record counts, bounded
