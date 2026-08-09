@@ -57,14 +57,14 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
 | 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 87 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility flows plus API vertical slices |
-| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 31 release outcomes |
+| 043 | End-to-end workflow tests | Implemented | 88 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety-control flows plus API vertical slices |
+| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 32 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
 | 049 | Accessibility review | Partial | pinned axe gate reports zero selected WCAG A/AA violations across sign-in, all primary workspaces, representative dialogs, mobile navigation, and the mobile/desktop client portal; independent assistive-technology and user audit remains external |
-| 050 | Responsive and browser compatibility | Implemented | 87 desktop/mobile operator, client and field Chromium tests in isolated batches |
+| 050 | Responsive and browser compatibility | Implemented | 88 desktop/mobile operator, client and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
@@ -118,7 +118,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 101 | Support/debug bundle design | Implemented | owner-only privacy-minimized v1 support bundle and doctor CLI |
 | 102 | Data retention and archival policy | Partial | hosted policy reference required and archive/export exist; periods need counsel decision |
 | 103 | Migration from prototype to production | Implemented | Python/mock runtimes retired; Node ledger sole runtime and historical 410s guarded |
-| 104 | Operator safety stop and emergency controls | Implemented | audited durable suspend/resume; explicitly not a physical emergency system |
+| 104 | Operator safety stop and emergency controls | Implemented | audited durable suspend/resume with an accessible reason-and-acknowledgement dialog; explicitly not a physical emergency system |
 | 105 | User onboarding and first-run wizard | Implemented | owner-only four-step identity, contact, billing and readiness flow persists each step to the canonical ledger and is mobile/browser tested |
 | 106 | Role-based settings and team permissions | Implemented | owner-managed named accounts, field scope, one-time hashed keys, rotation/deactivation, session revocation, protected deployment principals, recovery invalidation and desktop/mobile tests |
 | 107 | Quality scoring and confidence display | Partial | fit/scorecard/quality/confidence evidence exists but is not universal across predictions |

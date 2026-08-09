@@ -1,5 +1,15 @@
 # Codex Worklog
 
+- Replaced the owner automation-stop browser prompt/confirm sequence with a
+  lazy-loaded reason-and-acknowledgement dialog that traps focus, supports Escape,
+  restores initiating focus, shows retained control context, and keeps API errors
+  inside the decision surface.
+- Added a complete browser workflow proving suspend persistence, scheduler refusal,
+  command-plan refusal, cancellation focus restoration, accessible resume, and
+  mobile containment. The browser inventory is now 88 workflows.
+- The populated-state dialog scan exposed low-contrast secondary text in retained
+  automation and audit rows behind the modal. Those dynamic row palettes now meet
+  the same axe gate as empty-state Operations.
 - Added a pinned axe WCAG A/AA release gate for production sign-in, all twelve
   owner workspaces, representative dialogs, mobile navigation, and the client
   portal at mobile and desktop widths.

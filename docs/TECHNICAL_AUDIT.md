@@ -10,7 +10,7 @@ Contractor.AI is a mature local-first contractor operating ledger, not a greenfi
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
 S3-compatible evidence storage. The audit found 376 declared HTTP routes, 71
-append-only migrations, 162 Node test files, 50 browser spec files, and 81 direct
+append-only migrations, 162 Node test files, 51 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
@@ -86,6 +86,11 @@ external-provider engines.
     mobile navigation, and the client portal at mobile and desktop widths. Shared
     compact-text palettes were corrected wherever the selected WCAG A/AA rules
     identified insufficient contrast.
+12. The owner automation stop used browser-native prompt and confirmation surfaces,
+    which hid retained decision context and provided weak validation feedback. A
+    lazy-loaded, focus-trapped decision dialog now retains the reason, requires an
+    explicit acknowledgement, restores initiating focus, and is covered across
+    API blocking, axe, keyboard, desktop, and mobile behavior.
 
 ### Residual technical debt
 

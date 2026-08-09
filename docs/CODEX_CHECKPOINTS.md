@@ -3,6 +3,18 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-12 Owner automation decision dialog
+
+- UI: dedicated lazy-loaded suspend/resume dialog with retained status, revision,
+  prior reason, new decision reason, and explicit acknowledgement
+- Keyboard: heading focus on open, trapped Tab/Shift+Tab, Escape cancellation, and
+  initiating-control focus restoration
+- Safety: existing owner-only audited API remains authoritative; suspended state
+  blocks durable scheduler and command-plan application while external commitments
+  remain approval-gated in both states
+- Verification: isolated Chromium workflow covers axe, persistence, API blocking,
+  cancellation, resume, and 390x844 containment
+
 ## CP-10 Maintained HAI parser contract
 
 - HAI input schema: `accountfeed.GenericItem` root array

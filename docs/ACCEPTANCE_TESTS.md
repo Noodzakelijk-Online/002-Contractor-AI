@@ -36,6 +36,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A29 | Privacy-rights requests retain minimized identity evidence, deadlines, source-current assessments, independent approvals, restrictions, corrections, exports, and only supportable erasure outcomes | privacy ledger, API, recovery, PostgreSQL, and browser tests |
 | A30 | Contractor.AI emits HAI `accountfeed.GenericItem` records that the maintained HAI parser accepts and normalizes to read-only `review_document` work with zero external commitments | HAI unit, release, Windows package, and maintained-parser verification |
 | A31 | Sign-in, all primary owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces have zero axe violations for the selected WCAG 2.0/2.1 A/AA and WCAG 2.2 AA rules | pinned accessibility browser gate and `ACCESSIBILITY.md` |
+| A32 | Owner suspension and resumption use a focus-trapped reason-and-acknowledgement dialog, restore initiating focus, persist the decision, and prove scheduler/command blocking at desktop and mobile widths | operations-safety Node and browser tests |
 
 ## Manual provider acceptance
 

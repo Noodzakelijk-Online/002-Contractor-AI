@@ -95,6 +95,7 @@ const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
 const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
 const OrganizationOnboarding = lazy(() => import('./components/OrganizationOnboarding'))
+const AutomationSafetyDialog = lazy(() => import('./components/AutomationSafetyDialog'))
 const TeamAccessControl = lazy(() => import('./components/TeamAccessControl'))
 const PrivacyRequestsControl = lazy(() => import('./components/PrivacyRequestsControl'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
@@ -2983,6 +2984,9 @@ function App() {
   const [resourceView, setResourceView] = useState('workforce')
   const [commandPlanView, setCommandPlanView] = useState('all')
   const [selectedCommandIds, setSelectedCommandIds] = useState([])
+  const [automationControlDialog, setAutomationControlDialog] = useState(null)
+  const [automationControlError, setAutomationControlError] = useState('')
+  const automationControlOpenerRef = useRef(null)
   const [resourceAction, setResourceAction] = useState(null)
   const [resourceActionDraft, setResourceActionDraft] = useState(emptyResourceActionDraft)
   const [workerEditor, setWorkerEditor] = useState(null)
@@ -4560,28 +4564,30 @@ function App() {
     }
   }
 
-  async function changeAutomationControl(suspend) {
+  function openAutomationControlDialog(suspend, opener) {
+    automationControlOpenerRef.current = opener || document.activeElement
+    setAutomationControlError('')
+    setAutomationControlDialog({ suspend })
+  }
+
+  function closeAutomationControlDialog() {
+    if (submitting) return
+    setAutomationControlDialog(null)
+    setAutomationControlError('')
+    window.setTimeout(() => automationControlOpenerRef.current?.focus(), 0)
+  }
+
+  async function changeAutomationControl(reason) {
+    const suspend = automationControlDialog?.suspend === true
     const action = suspend ? 'suspend' : 'resume'
-    const reason = window.prompt(
-      suspend
-        ? 'Record why autonomous drafting must stop. Direct operator work and approvals remain available.'
-        : 'Record why autonomous drafting is safe to resume.',
-      suspend ? 'Owner safety stop requested.' : 'Owner verified readiness to resume autonomous drafting.',
-    )
-    if (reason === null) return
-    if (reason.trim().length < 8) {
-      setError('Record at least 8 characters explaining the operational control decision.')
-      return
-    }
-    if (!window.confirm(`${suspend ? 'Suspend' : 'Resume'} manual and scheduled autonomous drafting?`)) return
     setSubmitting(true)
-    setError('')
+    setAutomationControlError('')
     try {
       const result = await api(`/api/operations/control/${action}`, {
         method: 'POST',
         body: JSON.stringify({
           confirmation: suspend ? 'SUSPEND_AUTOMATION' : 'RESUME_AUTOMATION',
-          reason: reason.trim(),
+          reason,
         }),
       })
       setData((current) => current ? {
@@ -4603,8 +4609,12 @@ function App() {
           ? 'Autonomous drafting suspended. Direct operator work, evidence capture, and approvals remain available.'
           : 'Autonomous drafting resumed. External commitments remain approval-gated.',
       )
+      setAutomationControlDialog(null)
+      window.setTimeout(() => automationControlOpenerRef.current?.focus(), 0)
+      return true
     } catch (requestError) {
-      setError(requestError.message)
+      setAutomationControlError(requestError.message)
+      return false
     } finally {
       setSubmitting(false)
     }
@@ -10962,7 +10972,11 @@ function App() {
               approvals remain available.
             </span>
             {capabilities.maintenance ? (
-              <button className="secondary-button" disabled={submitting} onClick={() => changeAutomationControl(false)}>
+              <button
+                className="secondary-button"
+                disabled={submitting}
+                onClick={(event) => openAutomationControlDialog(false, event.currentTarget)}
+              >
                 Resume
               </button>
             ) : null}
@@ -13484,7 +13498,7 @@ function App() {
                     <button
                       className={automationSuspended ? 'primary-button' : 'danger-button'}
                       disabled={submitting}
-                      onClick={() => changeAutomationControl(!automationSuspended)}
+                      onClick={(event) => openAutomationControlDialog(!automationSuspended, event.currentTarget)}
                     >
                       {automationSuspended ? <Activity size={16} /> : <Ban size={16} />}
                       {automationSuspended ? 'Resume autonomous drafting' : 'Suspend autonomous drafting'}
@@ -19490,6 +19504,18 @@ function App() {
             </form>
           </section>
         </div>
+      ) : null}
+      {automationControlDialog ? (
+        <Suspense fallback={null}>
+          <AutomationSafetyDialog
+            suspend={automationControlDialog.suspend}
+            control={automationControl}
+            busy={submitting}
+            error={automationControlError}
+            onClose={closeAutomationControlDialog}
+            onSubmit={changeAutomationControl}
+          />
+        </Suspense>
       ) : null}
       {showResourcePlanner && selectedJob ? (
         <div className="modal-backdrop resource-backdrop" role="presentation">

@@ -2,7 +2,7 @@
 
 Report date: 2026-08-09
 Release candidate: `1.1.0`
-Starting revision: `3e10801a2759e81afff06a9cb6bc38ec6599447a`
+Starting revision: `649344f0448f03331a9a1afae363fe5536f286ed`
 Release revision: the Git commit containing this report; record the resulting SHA
 in the release or deployment record.
 
@@ -18,16 +18,16 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 56 canonical paths, 12 retired paths, 16 hosted keys, 314 canonical source files; generated release/runtime/artifact directories excluded |
+| Release contract | Passed | `npm run verify:release`: 59 canonical paths, 12 retired paths, 16 hosted keys, 317 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier passed; maintained HAI `ParseGenericFeed` accepted the generated fixture in an isolated Docker Go runtime and derived read-only `review_document` work |
-| Node tests | Passed | `npm test`: 525 tests, 489 passed, 36 PostgreSQL/environment skips, 0 failed, 250.4 s on a busy Windows host |
-| Production build | Passed | `npm run build`: main application JS 524.93 kB and CSS 274.38 kB before gzip; privacy operations load separately as 20.83 kB JS |
-| Bundle budget | Passed | `npm run verify:bundle`: 364,536 total gzip bytes across 33 assets |
-| Production-scale ledger | Passed | Packaged Node 22.23.2 with the deterministic 63,500-row fixture: seed 1,500.07 ms; cold start 677.52 ms; reopen 4.74 ms; dashboard p95 406.60 ms; intake p95 49.35 ms; audit verification 209.60 ms; all thresholds passed |
-| Browser tests | Passed | `npm run test:browser`: 87 Playwright Chromium workflows in 22 isolated batches, 640.0 s |
+| Node tests | Passed | `npm test`: 525 tests, 489 passed, 36 PostgreSQL/environment skips, 0 failed, 165.1 s |
+| Production build | Passed | `npm run build`: main application JS 525.12 kB and CSS 274.38 kB before gzip; the automation decision dialog loads separately as 4.38 kB JS and 2.03 kB CSS |
+| Bundle budget | Passed | `npm run verify:bundle`: 367,022 total gzip bytes across 35 assets |
+| Production-scale ledger | Passed | Packaged Node 22.23.2 with the deterministic 63,500-row fixture under concurrent host load: seed 5,732.14 ms; cold start 1,129.51 ms; reopen 81.69 ms; dashboard p95 737.43 ms; intake p95 99.09 ms; audit verification 315.43 ms; all thresholds passed |
+| Browser tests | Passed with host-contention note | All 88 Playwright Chromium workflows passed on current source across bounded isolated and retained-runtime completion groups. One repeated default 22-batch invocation was interrupted by Chrome `ERR_NO_BUFFER_SPACE` while an unrelated checkout launched more than 20 development servers; the affected Last Planner batch and every remaining workflow passed in isolation afterward. |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart-persistent session, graceful shutdown and migration 071 smoke |
-| Local runtime | Passed | Rebuilt standalone is ready at `127.0.0.1:4175` against the retained local ledger; migration 071 is current, zero migrations are pending, public readiness returns 200, the retained audit chain is valid, and the live HAI manifest exposes the corrected generic-item contract |
+| Local runtime | Passed | Rebuilt standalone PID 7600 is ready at `127.0.0.1:4175` against the retained local ledger; migration 071 is current, zero migrations are pending, public readiness returns 200, the retained audit chain is valid, and the live HAI manifest exposes the corrected generic-item contract |
 | Windows standalone | Passed | `npm run test:windows-package`: bundled Node 22.23.2 x64 runtime passed authenticated isolated-profile startup, migration 071/zero pending, redacted owner register, available privacy register, `accountfeed.GenericItem` HAI manifest, credential-safe logs, shutdown and fixture cleanup |
 | PostgreSQL parity | CI service gate | The migration 071 privacy lifecycle and shared ledger contract tests are present; 36 PostgreSQL/environment tests were skipped without local provider services |
 
@@ -38,14 +38,14 @@ decisions outside this repository.
 | Desktop owner critical-path rendering | Passed in automated Chromium workflow suite |
 | Mobile field workflow rendering | Passed in automated Chromium workflow suite |
 | Four-step owner onboarding | Passed from a fresh ledger at 390x844 through persistent server readiness and retained desktop Operations values |
-| Safety stop visible and controls disabled | Passed in automated Chromium and Node tests |
+| Safety stop visible and controls disabled | Passed in automated Chromium and Node tests; packaged UI verifies focused heading, decision context, disabled incomplete submission, Escape close, and initiating-focus restoration |
 | Support bundle and doctor | Passed against an isolated local production runtime |
 | Local backup/restore UX | Passed in browser and backend contract tests |
 | Governed framework lifecycle | Passed across catalog, 23 family playbooks, guarded starters, API, SQLite, restore, export, HAI, desktop and mobile tests |
 | Privacy rights lifecycle | Passed for request registration, minimal identity reference, deadline extension, source-current assessment, independent approval, restriction/objection guards, rectification, partial pseudonymisation, private JSON export, recovery, and desktop/mobile layout |
 | Material, safety, permit and LMRA load races | Passed with job-scoped sequence guards and disabled form controls |
-| In-app Browser QA | Passed against the rebuilt packaged runtime: the Today and fully loaded Performance workspaces rendered with one main landmark and one page heading, visible controls were labelled, ids were unique, images retained alt attributes, the mobile navigation opened correctly, desktop/mobile page geometry had no page-level overflow, and the console was clean; automated Chromium remains the retained authority |
-| Responsive evidence | Desktop and mobile geometry were inspected in the in-app browser; 87 automated workflows retain the repeatable interaction evidence |
+| In-app Browser QA | Passed against the rebuilt packaged runtime: Operations and the owner safety dialog rendered with the correct landmarks, active-state context, disabled incomplete submission, Escape/focus restoration, desktop containment, and a clean error log; automated Chromium remains the retained authority for mobile and repeatable interaction evidence |
+| Responsive evidence | Packaged desktop geometry was inspected in the in-app browser; 88 automated workflows retain repeatable desktop/mobile interaction evidence |
 
 ## Confirmed limitations
 
@@ -69,9 +69,9 @@ decisions outside this repository.
 
 The performance gate retains a disposable deterministic production-scale fixture,
 historical-search and full-aggregate correctness checks, resource and latency
-thresholds, and a CI report artifact. The packaged Node 22.23.2 production profile
-completed the representative dashboard at 406.60 ms p95 while preserving the prior query and
-assembly optimizations.
+thresholds, and a CI report artifact. Under concurrent host load, the packaged
+Node 22.23.2 production profile completed the representative dashboard at
+737.43 ms p95 while preserving the prior query and assembly optimizations.
 
 The publication record must add the pushed commit SHA and GitHub Actions run URL.
 No repository-only test can replace provider, infrastructure, DPA, recovery, or

@@ -32,13 +32,18 @@ Versioning for the application contract; database migrations remain append-only.
 - A pinned axe browser gate covering selected WCAG 2.0/2.1 A/AA and WCAG 2.2 AA
   rules across sign-in, every primary workspace, representative dialogs, mobile
   navigation, and the mobile/desktop client portal.
+- A dedicated owner automation suspend/resume dialog with retained control context,
+  explicit acknowledgement, keyboard focus management, and responsive layout.
 
 ### Changed
 
+- Owner automation control no longer relies on browser-native prompt and confirm
+  surfaces; validation and API failures remain inside the auditable decision flow.
 - Compact supporting text and control palettes now meet the automated contrast
   gate across planning, finance, resources, field assurance, analytics, onboarding,
   Operations, and client-facing project facts. The Operations restore-file input
-  and empty audit-history register also expose correct accessible semantics.
+  and empty audit-history register also expose correct accessible semantics;
+  populated automation and audit rows retain compliant secondary-text contrast.
 - The HAI export now emits the maintained `accountfeed.GenericItem` input shape
   (`generic_json_feed` provider and `document` item type), which HAI normalizes to
   read-only `review_document` work. A native CI gate and optional maintained-parser

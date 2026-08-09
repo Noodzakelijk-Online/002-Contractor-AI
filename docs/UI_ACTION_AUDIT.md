@@ -35,14 +35,16 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - A pinned axe gate blocks release on selected WCAG 2.0/2.1 A/AA and WCAG 2.2 AA
   violations across sign-in, all primary workspaces, representative dialogs,
   mobile navigation, and the client portal at mobile and desktop widths.
-- Operations contains one explicit safety-control panel with reason display,
-  suspend/resume confirmation, and privacy-minimized support-bundle download.
+- Operations contains one explicit safety-control panel with retained reason display,
+  a dedicated owner decision dialog, and privacy-minimized support-bundle download.
+- Suspension and resumption require a new reason and explicit acknowledgement in a
+  focus-trapped dialog. Escape/cancel restores focus to the initiating control.
 - Autonomous cycle and command-apply actions are disabled and relabelled while
   suspension is active; diagnostic dry run remains available.
 - Business identity, material receiving, safety briefing, work permit, LMRA,
   environmental, expense, and daily-cycle forms keep the active job/draft stable
   during background refreshes and disable affected controls while loading.
-- The responsive production UI is exercised by 87 isolated Chromium tests across
+- The responsive production UI is exercised by 88 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised
@@ -73,8 +75,6 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Large lists do not all offer the same advanced filters and pagination.
 - Team/role settings are environment-administered in production instead of being a
   full identity-provider and invitation UI.
-- The safety reason uses a native prompt/confirm sequence. It is accessible and
-  functional, but a dedicated focus-trapped dialog is a future polish item.
 
 These gaps do not create fake product actions; they are tracked as partial phases
 in `GOAL_COMPLETION_MATRIX.md`.
