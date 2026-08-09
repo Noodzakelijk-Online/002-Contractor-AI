@@ -9,8 +9,8 @@ Starting revision: `d1a89fbc73be714b6cb05bb7fbf554309c3387ea`
 Contractor.AI is a mature local-first contractor operating ledger, not a greenfield
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
-S3-compatible evidence storage. The audit found 363 declared HTTP routes, 68
-append-only migrations, 156 Node test files, 45 browser spec files, and 81 direct
+S3-compatible evidence storage. The audit found 365 declared HTTP routes, 69
+append-only migrations, 159 Node test files, 46 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
@@ -25,6 +25,13 @@ first-run business-identity visibility. It also delivers the portable Windows
 runtime, loopback-only ngrok launcher, read-only HAI connector, compressed and
 budgeted production assets, isolated browser runner, phase evidence, and refreshed
 dependency lockfile.
+
+The governed framework pass adds the complete 23-family source inventory as a
+deterministic checked-in catalog, migration 069, role-scoped APIs, immutable
+implementation revisions, backup/export/diagnostic coverage, PostgreSQL parity,
+due-review command/HAI integration, and a lazy-loaded searchable Performance
+workspace. This is a governed method register, not 671 separate certification or
+external-provider engines.
 
 ## Runtime map
 
@@ -64,8 +71,11 @@ dependency lockfile.
    Job-scoped sequence guards and native disabled loading controls now close those
    races, including programmatic browser interaction during loading.
 8. The previous browser runner reused runtime state between specs. It now discovers
-   all 79 tests from the Playwright AST and runs bounded isolated batches against
+   all 80 tests from the Playwright AST and runs bounded isolated batches against
    separate ports and databases after one production build.
+9. The broad framework inventory was documentation-only. Migration 069 and the
+   framework workspace now retain every family membership and provide scoped,
+   replay-safe, checksum-protected implementation records with due-review triage.
 
 ### Residual technical debt
 

@@ -1481,6 +1481,63 @@ function verifySqliteBackupDatabase(ledgerFile) {
           throw new Error('Backup energy-performance constraints are incomplete: current scope record must be a partial unique index.');
         }
       }
+      if (appliedMigrations.has('069_governed_framework_workspace')) {
+        for (const table of ['framework_implementations', 'framework_implementation_revisions']) {
+          if (!retainedTables.has(table)) {
+            throw new Error(`Backup framework workspace schema is incomplete: ${table}.`);
+          }
+        }
+        const implementationColumns = new Set(
+          database.prepare('PRAGMA table_info(framework_implementations)').all().map(row => row.name)
+        );
+        for (const column of [
+          'framework_id',
+          'scope_type',
+          'scope_id',
+          'status',
+          'objective',
+          'owner_name',
+          'review_due_at',
+          'evidence_json',
+          'measures_json',
+          'revision'
+        ]) {
+          if (!implementationColumns.has(column)) {
+            throw new Error(`Backup framework workspace schema is incomplete: framework_implementations.${column}.`);
+          }
+        }
+        const revisionColumns = new Set(
+          database.prepare('PRAGMA table_info(framework_implementation_revisions)').all().map(row => row.name)
+        );
+        for (const column of [
+          'implementation_id',
+          'revision_number',
+          'entry_key',
+          'entry_fingerprint',
+          'reason',
+          'snapshot_json',
+          'snapshot_hash',
+          'actor'
+        ]) {
+          if (!revisionColumns.has(column)) {
+            throw new Error(`Backup framework workspace schema is incomplete: framework_implementation_revisions.${column}.`);
+          }
+        }
+        const frameworkIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_framework_%'")
+            .all()
+            .map(row => row.name)
+        );
+        for (const index of [
+          'idx_framework_implementations_status_review',
+          'idx_framework_implementations_scope',
+          'idx_framework_revisions_implementation'
+        ]) {
+          if (!frameworkIndexes.has(index)) {
+            throw new Error(`Backup framework workspace constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

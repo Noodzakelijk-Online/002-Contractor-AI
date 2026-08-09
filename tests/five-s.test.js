@@ -154,7 +154,7 @@ test('approved 5S standards drive replay-safe audits and evidence-backed correct
   assert.equal(ledger.dailyPlanningSource(job.id, new Date().toISOString().slice(0, 10)).fiveS.ready, true);
   assert.equal(ledger.getJobDetail(job.id).fiveSAudits.length, 2);
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '068_operational_safety_controls');
+  assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
 });
 
 test('5S approval and audit reject stale or contradictory canonical equipment state', t => {

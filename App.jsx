@@ -82,6 +82,7 @@ const ResourcesWorkspace = lazy(() => import('./components/ResourcesWorkspace'))
 const AuditHistory = lazy(() => import('./components/AuditHistory'))
 const CashFlowForecastControl = lazy(() => import('./components/CashFlowForecastControl'))
 const PerformanceScorecard = lazy(() => import('./components/PerformanceScorecard'))
+const FrameworkWorkspace = lazy(() => import('./components/FrameworkWorkspace'))
 const MarketFitControl = lazy(() => import('./components/MarketFitControl'))
 const BidDecisionControl = lazy(() => import('./components/BidDecisionControl'))
 const SiteSurveyControl = lazy(() => import('./components/SiteSurveyControl'))
@@ -1216,8 +1217,16 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'performance') {
-    const result = await api('/api/ledger/performance-scorecard')
-    return { performanceScorecard: result.scorecard }
+    const [result, catalog, frameworks] = await Promise.all([
+      api('/api/ledger/performance-scorecard'),
+      api('/api/ledger/frameworks/catalog?limit=1000'),
+      api('/api/ledger/frameworks?limit=2000'),
+    ])
+    return {
+      performanceScorecard: result.scorecard,
+      frameworkCatalog: catalog.catalog,
+      frameworkWorkspace: frameworks.workspace,
+    }
   }
   if (section === 'clients') {
     const [clientSuccess, directory] = await Promise.all([
@@ -3167,6 +3176,9 @@ function App() {
           bidDecisions: null,
           bidPackages: [],
           bidPackageSummary: {},
+          performanceScorecard: null,
+          frameworkCatalog: null,
+          frameworkWorkspace: null,
         })
         return
       }
@@ -3216,6 +3228,9 @@ function App() {
           bidDecisions: null,
           bidPackages: [],
           bidPackageSummary: {},
+          performanceScorecard: null,
+          frameworkCatalog: null,
+          frameworkWorkspace: null,
         })
       }
       const currentSection = sectionRef.current
@@ -11417,16 +11432,28 @@ function App() {
             ) : null}
 
             {section === 'performance' && capabilities.performance ? (
-              <LazyControlBoundary label="performance scorecard">
-                <PerformanceScorecard
-                  scorecard={data.performanceScorecard}
-                  request={api}
-                  canCoordinate={canCoordinate}
-                  canApprove={capabilities.approvals === true}
-                  onChange={(performanceScorecard) => setData((current) => ({ ...current, performanceScorecard }))}
-                  onOpenApprovals={openApprovals}
-                />
-              </LazyControlBoundary>
+              <>
+                <LazyControlBoundary label="performance scorecard">
+                  <PerformanceScorecard
+                    scorecard={data.performanceScorecard}
+                    request={api}
+                    canCoordinate={canCoordinate}
+                    canApprove={capabilities.approvals === true}
+                    onChange={(performanceScorecard) => setData((current) => ({ ...current, performanceScorecard }))}
+                    onOpenApprovals={openApprovals}
+                  />
+                </LazyControlBoundary>
+                <LazyControlBoundary label="operating frameworks">
+                  <FrameworkWorkspace
+                    catalog={data.frameworkCatalog}
+                    workspace={data.frameworkWorkspace}
+                    jobs={jobs}
+                    request={api}
+                    canCoordinate={canCoordinate}
+                    onChange={(frameworkWorkspace) => setData((current) => ({ ...current, frameworkWorkspace }))}
+                  />
+                </LazyControlBoundary>
+              </>
             ) : null}
 
             {section === 'clients' && capabilities.clientSuccess ? (

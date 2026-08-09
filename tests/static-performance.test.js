@@ -55,7 +55,7 @@ test('browser runner discovers isolated bounded batches without duplicate workfl
   const batchSize = configuredBatchSize();
   const batches = chunkBrowserTests(files, batchSize);
   assert.equal(batchSize, 4);
-  assert.equal(files.length, 79);
+  assert.equal(files.length, 80);
   assert.equal(new Set(files).size, files.length);
   assert.equal(batches.flat().length, files.length);
   assert.ok(batches.every(batch => batch.length >= 1 && batch.length <= batchSize));

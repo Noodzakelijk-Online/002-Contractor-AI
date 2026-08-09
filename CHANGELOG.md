@@ -3,6 +3,34 @@
 All notable changes to Contractor.AI are recorded here. Versions follow Semantic
 Versioning for the application contract; database migrations remain append-only.
 
+## Unreleased
+
+### Added
+
+- A checked-in catalog of 23 contractor operating families, 671 unique
+  frameworks, and all 700 source family memberships.
+- Migration `069_governed_framework_workspace` with organization/project scope,
+  guarded lifecycle transitions, exact replay, optimistic concurrency, immutable
+  revision snapshots, backup validation, hosted PostgreSQL parity, and diagnostics.
+- A responsive searchable framework register under Performance with family/status
+  filters, bounded pagination, evidence, measures, review dates, and revision history.
+- Due framework reviews in the internal command queue and read-only HAI feed with
+  no execution authority or external commitment.
+
+### Changed
+
+- Operational exports and support diagnostics now include governed framework
+  records and revision counts.
+- Long framework lists and summaries use bounded database filtering and aggregate
+  queries in SQLite and PostgreSQL.
+- Windows standalone starts only display the owner key when the protected runtime
+  configuration is first created; later starts report the configuration path.
+
+### Security
+
+- Prevented repeat standalone starts and redirected runtime logs from disclosing
+  the retained owner access key.
+
 ## 1.1.0 - 2026-08-09
 
 ### Added

@@ -5,7 +5,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 
 | ID | Acceptance outcome | Evidence |
 | --- | --- | --- |
-| A01 | Fresh local startup applies all 68 migrations and reports ready | startup/readiness and migration tests |
+| A01 | Fresh local startup applies all 69 migrations and reports ready | startup/readiness and migration tests |
 | A02 | Production startup fails without auth and hosted durability declarations | auth and startup-readiness tests |
 | A03 | Owner can complete business identity and it appears on governed packages | operations and issue-package tests |
 | A04 | Opportunity intake, qualification, survey, conversion, and follow-up persist | opportunity, market-fit, bid, survey tests |
@@ -24,12 +24,13 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A17 | Support bundle and doctor expose diagnostics without records or secrets | operations-safety test and doctor smoke |
 | A18 | Backup verifies DB/evidence hashes; restore revokes sessions and preserves integrity | backup/restore tests |
 | A19 | Local backup migrates into an empty PostgreSQL/S3 target with parity | hosted migration contract test |
-| A20 | Desktop/mobile navigation, loading, error, empty, offline, and field flows render | 79-test isolated Chromium browser suite |
+| A20 | Desktop/mobile navigation, loading, error, empty, offline, and field flows render | 80-test isolated Chromium browser suite |
 | A21 | Build output is served by the production Node runtime with no legacy app | release-contract and container tests |
 | A22 | Container runs non-root/read-only, handles signals, and retains state | container verification script |
 | A23 | CORS, CSRF origin, proxy trust, rate limiting, sessions, and role boundaries hold | security integration tests |
 | A24 | Hosted mode refuses non-EU/non-TLS/non-private/non-backed-up configuration | startup-readiness tests |
 | A25 | Lint, dependency audit, release contract, Node tests, build, browser, and container gates pass | CI and final report |
+| A26 | All 23 framework families and 700 memberships are searchable; scoped records retain guarded immutable revisions and surface due reviews without execution authority | catalog, framework workspace, PostgreSQL, backup, HAI, and browser tests |
 
 ## Manual provider acceptance
 

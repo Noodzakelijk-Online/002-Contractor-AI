@@ -6,7 +6,9 @@ const root = path.resolve(__dirname, '..');
 const releaseRoot = path.join(root, 'release');
 const target = path.join(releaseRoot, 'ContractorAI-windows-x64');
 const runtimeFiles = [
+  'contractor-framework-catalog.json',
   'evidence-storage.js',
+  'framework-catalog.js',
   'hai-connector.js',
   'operating-ledger.js',
   'package.json',

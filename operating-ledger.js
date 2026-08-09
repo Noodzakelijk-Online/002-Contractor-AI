@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { Graph, alg: graphAlgorithms } = require('@dagrejs/graphlib');
 const { PostgresSyncDatabase } = require('./postgres-sync-database');
+const { getFrameworkDefinition, listFrameworkCatalog } = require('./framework-catalog');
 
 const LEDGER_CAPABILITY_BLUEPRINT = [
   {
@@ -5950,6 +5951,58 @@ const LEDGER_SCHEMA_MIGRATIONS = [
         );
         CREATE INDEX IF NOT EXISTS idx_operational_controls_status
           ON operational_controls(status, updated_at DESC);
+      `);
+    }
+  },
+  {
+    version: '069_governed_framework_workspace',
+    description: 'Retain versioned organization and project implementation records for the complete contractor framework catalog.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS framework_implementations (
+          id TEXT PRIMARY KEY,
+          framework_id TEXT NOT NULL,
+          scope_type TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          objective TEXT NOT NULL,
+          owner_name TEXT NOT NULL,
+          review_due_at TEXT,
+          current_state TEXT,
+          target_state TEXT,
+          decision TEXT,
+          evidence_json TEXT NOT NULL DEFAULT '[]',
+          measures_json TEXT NOT NULL DEFAULT '[]',
+          revision INTEGER NOT NULL DEFAULT 1,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(framework_id, scope_type, scope_id),
+          CHECK(scope_type IN ('organization', 'job')),
+          CHECK(status IN ('draft', 'active', 'paused', 'retired')),
+          CHECK(revision >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS idx_framework_implementations_status_review
+          ON framework_implementations(status, review_due_at, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_framework_implementations_scope
+          ON framework_implementations(scope_type, scope_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS framework_implementation_revisions (
+          id TEXT PRIMARY KEY,
+          implementation_id TEXT NOT NULL REFERENCES framework_implementations(id) ON DELETE CASCADE,
+          revision_number INTEGER NOT NULL,
+          entry_key TEXT NOT NULL UNIQUE,
+          entry_fingerprint TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          snapshot_hash TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(implementation_id, revision_number),
+          CHECK(revision_number >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS idx_framework_revisions_implementation
+          ON framework_implementation_revisions(implementation_id, revision_number DESC);
       `);
     }
   }
@@ -33395,6 +33448,537 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return after;
   }
 
+  frameworkCatalog(options = {}) {
+    return listFrameworkCatalog(options);
+  }
+
+  normalizeFrameworkImplementation(payload = {}, current = null) {
+    const field = (camel, snake, fallback = '') => {
+      if (Object.prototype.hasOwnProperty.call(payload, camel)) return payload[camel];
+      if (snake && Object.prototype.hasOwnProperty.call(payload, snake)) return payload[snake];
+      return fallback;
+    };
+    const frameworkId = normalizeText(field('frameworkId', 'framework_id', current?.frameworkId), '').toLowerCase();
+    const framework = getFrameworkDefinition(frameworkId);
+    if (!framework) {
+      throw ledgerInputError('framework_not_supported', 'Select a framework from the retained Contractor.AI catalog.', { frameworkId }, 400);
+    }
+    const scopeType = normalizeStatus(field('scopeType', 'scope_type', current?.scopeType || 'organization'), 'organization');
+    if (!['organization', 'job'].includes(scopeType)) {
+      throw ledgerInputError('framework_scope_invalid', 'Framework scope must be organization or job.');
+    }
+    const suppliedScopeId = normalizeText(field('scopeId', 'scope_id', current?.scopeId), '');
+    const scopeId = scopeType === 'organization' ? 'primary' : suppliedScopeId;
+    if (scopeType === 'job') {
+      const job = this.db.prepare('SELECT id, status FROM jobs WHERE id = ?').get(scopeId);
+      if (!job) throw ledgerInputError('framework_scope_job_not_found', 'Framework project scope was not found.', { scopeId }, 404);
+    }
+    const status = normalizeStatus(field('status', null, current?.status || 'draft'), 'draft');
+    if (!['draft', 'active', 'paused', 'retired'].includes(status)) {
+      throw ledgerInputError('framework_status_invalid', 'Framework status must be draft, active, paused, or retired.');
+    }
+    const text = (camel, snake, fallback, label, minimum, maximum) => {
+      const value = normalizeText(field(camel, snake, fallback), '');
+      if (value.length < minimum || value.length > maximum) {
+        throw ledgerInputError(
+          'framework_field_invalid',
+          `${label} must contain between ${minimum} and ${maximum} characters.`,
+          { field: camel, minimum, maximum }
+        );
+      }
+      return value;
+    };
+    const objective = text('objective', null, current?.objective, 'Framework objective', 8, 1_000);
+    const ownerName = text('ownerName', 'owner_name', current?.ownerName, 'Framework owner', 2, 120);
+    const currentState = text('currentState', 'current_state', current?.currentState, 'Current state', status === 'active' ? 8 : 0, 4_000);
+    const targetState = text('targetState', 'target_state', current?.targetState, 'Target state', status === 'active' ? 8 : 0, 4_000);
+    const decision = text('decision', null, current?.decision, 'Decision', status === 'active' ? 8 : 0, 4_000);
+    const reviewDueAtRaw = normalizeText(field('reviewDueAt', 'review_due_at', current?.reviewDueAt), '').slice(0, 10);
+    const parsedReviewDate = reviewDueAtRaw ? new Date(`${reviewDueAtRaw}T00:00:00.000Z`) : null;
+    if (
+      reviewDueAtRaw
+      && (
+        !/^\d{4}-\d{2}-\d{2}$/.test(reviewDueAtRaw)
+        || Number.isNaN(parsedReviewDate.getTime())
+        || parsedReviewDate.toISOString().slice(0, 10) !== reviewDueAtRaw
+      )
+    ) {
+      throw ledgerInputError('framework_review_date_invalid', 'Framework review date must use YYYY-MM-DD.');
+    }
+    const normalizeEntries = (value, label, maximumItems) => {
+      const entries = normalizeList(value).map(item => normalizeText(item, ''));
+      if (entries.length > maximumItems || entries.some(item => item.length < 3 || item.length > 500)) {
+        throw ledgerInputError(
+          'framework_list_invalid',
+          `${label} must contain no more than ${maximumItems} entries of 3 to 500 characters.`,
+          { field: label, maximumItems }
+        );
+      }
+      return [...new Set(entries)];
+    };
+    const evidenceRefs = normalizeEntries(
+      field('evidenceRefs', 'evidence_refs', current?.evidenceRefs || []),
+      'Evidence references',
+      40
+    );
+    const successMeasures = normalizeEntries(
+      field('successMeasures', 'success_measures', current?.successMeasures || []),
+      'Success measures',
+      30
+    );
+    if (status === 'active' && successMeasures.length === 0) {
+      throw ledgerInputError('framework_measure_required', 'An active framework requires at least one success measure.');
+    }
+    return {
+      framework,
+      frameworkId,
+      scopeType,
+      scopeId,
+      status,
+      objective,
+      ownerName,
+      reviewDueAt: reviewDueAtRaw || null,
+      currentState,
+      targetState,
+      decision,
+      evidenceRefs,
+      successMeasures,
+    };
+  }
+
+  mapFrameworkImplementation(row) {
+    if (!row) return null;
+    const framework = getFrameworkDefinition(row.framework_id);
+    if (!framework) {
+      throw ledgerInputError(
+        'framework_catalog_integrity_failed',
+        'A retained framework implementation no longer exists in the catalog.',
+        { implementationId: row.id, frameworkId: row.framework_id },
+        409
+      );
+    }
+    return {
+      id: row.id,
+      frameworkId: row.framework_id,
+      framework,
+      scopeType: row.scope_type,
+      scopeId: row.scope_id,
+      status: row.status,
+      objective: row.objective,
+      ownerName: row.owner_name,
+      reviewDueAt: row.review_due_at || null,
+      currentState: row.current_state || '',
+      targetState: row.target_state || '',
+      decision: row.decision || '',
+      evidenceRefs: fromJson(row.evidence_json, []),
+      successMeasures: fromJson(row.measures_json, []),
+      revision: Number(row.revision),
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  mapFrameworkImplementationRevision(row) {
+    if (!row) return null;
+    const snapshotJson = normalizeText(row.snapshot_json, '');
+    const snapshot = fromJson(snapshotJson, null);
+    if (!snapshot || snapshot.format !== 'contractor-ai/framework-implementation-v1' || sha256Text(snapshotJson) !== row.snapshot_hash) {
+      throw ledgerInputError(
+        'framework_revision_integrity_failed',
+        'A retained framework revision failed integrity verification.',
+        { revisionId: row.id, implementationId: row.implementation_id },
+        409
+      );
+    }
+    return {
+      id: row.id,
+      implementationId: row.implementation_id,
+      revisionNumber: Number(row.revision_number),
+      entryKey: row.entry_key,
+      reason: row.reason,
+      snapshot,
+      snapshotHash: row.snapshot_hash,
+      actor: row.actor,
+      createdAt: row.created_at,
+    };
+  }
+
+  frameworkImplementationSnapshot(implementation) {
+    return {
+      format: 'contractor-ai/framework-implementation-v1',
+      implementationId: implementation.id,
+      frameworkId: implementation.frameworkId,
+      scopeType: implementation.scopeType,
+      scopeId: implementation.scopeId,
+      status: implementation.status,
+      objective: implementation.objective,
+      ownerName: implementation.ownerName,
+      reviewDueAt: implementation.reviewDueAt,
+      currentState: implementation.currentState,
+      targetState: implementation.targetState,
+      decision: implementation.decision,
+      evidenceRefs: implementation.evidenceRefs,
+      successMeasures: implementation.successMeasures,
+      revision: implementation.revision,
+    };
+  }
+
+  getFrameworkImplementation(implementationId) {
+    const row = this.db.prepare('SELECT * FROM framework_implementations WHERE id = ?').get(String(implementationId || ''));
+    if (!row) {
+      throw ledgerInputError('framework_implementation_not_found', 'Framework implementation not found.', { implementationId }, 404);
+    }
+    return this.mapFrameworkImplementation(row);
+  }
+
+  listFrameworkImplementationRevisions(implementationId, options = {}) {
+    this.getFrameworkImplementation(implementationId);
+    const limit = safeLimit(options.limit, 100, 500);
+    return this.db.prepare(`
+      SELECT * FROM framework_implementation_revisions
+      WHERE implementation_id = ?
+      ORDER BY revision_number DESC
+      LIMIT ?
+    `).all(String(implementationId), limit).map(row => this.mapFrameworkImplementationRevision(row));
+  }
+
+  listAllFrameworkImplementationRevisions(options = {}) {
+    const limit = safeLimit(options.limit, 2_000, 10_000);
+    return this.db.prepare(`
+      SELECT * FROM framework_implementation_revisions
+      ORDER BY created_at DESC, id
+      LIMIT ?
+    `).all(limit).map(row => this.mapFrameworkImplementationRevision(row));
+  }
+
+  listFrameworkImplementations(options = {}) {
+    const limit = safeLimit(options.limit, 500, 2_000);
+    const status = normalizeStatus(options.status, 'all');
+    const scopeType = normalizeStatus(options.scopeType || options.scope_type, 'all');
+    const scopeId = normalizeText(options.scopeId || options.scope_id, '');
+    const query = normalizeText(options.query || options.q, '').toLowerCase();
+    const clauses = [];
+    const parameters = [];
+    if (status !== 'all') {
+      clauses.push('status = ?');
+      parameters.push(status);
+    }
+    if (scopeType !== 'all') {
+      clauses.push('scope_type = ?');
+      parameters.push(scopeType);
+    }
+    if (scopeId) {
+      clauses.push('scope_id = ?');
+      parameters.push(scopeId);
+    }
+    if (query) {
+      const matchingFrameworkIds = this.frameworkCatalog({ query, limit: 1_000 }).frameworks.map(framework => framework.id);
+      const searchClauses = ['LOWER(objective) LIKE ?', 'LOWER(owner_name) LIKE ?'];
+      parameters.push(`%${query}%`, `%${query}%`);
+      if (matchingFrameworkIds.length) {
+        searchClauses.push(`framework_id IN (${matchingFrameworkIds.map(() => '?').join(', ')})`);
+        parameters.push(...matchingFrameworkIds);
+      }
+      clauses.push(`(${searchClauses.join(' OR ')})`);
+    }
+    const rows = this.db.prepare(`
+      SELECT * FROM framework_implementations
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY updated_at DESC, id
+      LIMIT ?
+    `).all(...parameters, limit);
+    const implementations = rows.map(row => this.mapFrameworkImplementation(row));
+    if (query) {
+      return implementations.filter(item => (
+        item.framework.name.toLowerCase().includes(query)
+        || item.objective.toLowerCase().includes(query)
+        || item.ownerName.toLowerCase().includes(query)
+      ));
+    }
+    return implementations;
+  }
+
+  getFrameworkWorkspace(options = {}) {
+    const catalog = this.frameworkCatalog({ limit: 1 });
+    const implementations = this.listFrameworkImplementations(options);
+    const today = this.currentTimeIso().slice(0, 10);
+    const dueReviews = this.db.prepare(`
+      SELECT * FROM framework_implementations
+      WHERE status IN ('active', 'paused')
+        AND review_due_at IS NOT NULL
+        AND review_due_at <= ?
+      ORDER BY review_due_at ASC, updated_at ASC
+      LIMIT 2_000
+    `).all(today).map(row => this.mapFrameworkImplementation(row));
+    const statusRows = this.db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM framework_implementations
+      GROUP BY status
+    `).all();
+    const statuses = Object.fromEntries(['draft', 'active', 'paused', 'retired'].map(value => [value, 0]));
+    for (const row of statusRows) statuses[row.status] = Number(row.count || 0);
+    const coveredFamilies = new Set();
+    const coveredFrameworkIds = this.db.prepare(`
+      SELECT DISTINCT framework_id FROM framework_implementations
+      WHERE status <> 'retired'
+    `).all();
+    for (const row of coveredFrameworkIds) {
+      const framework = getFrameworkDefinition(row.framework_id);
+      for (const familyId of framework?.familyIds || []) coveredFamilies.add(familyId);
+    }
+    return {
+      implementations,
+      dueReviews,
+      summary: {
+        catalogFrameworks: catalog.counts.frameworks,
+        catalogFamilies: catalog.counts.families,
+        retained: Object.values(statuses).reduce((total, count) => total + count, 0),
+        statuses,
+        dueReviews: dueReviews.length,
+        coveredFamilies: coveredFamilies.size,
+        uncoveredFamilies: catalog.counts.families - coveredFamilies.size,
+      },
+    };
+  }
+
+  createFrameworkImplementation(payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const normalized = this.normalizeFrameworkImplementation(payload);
+      if (!['draft', 'active'].includes(normalized.status)) {
+        throw ledgerInputError(
+          'framework_transition_invalid',
+          'A new framework implementation must begin as draft or active.',
+          { requestedStatus: normalized.status },
+          409
+        );
+      }
+      if (normalized.scopeType === 'job' && normalized.status === 'active') {
+        const job = this.db.prepare('SELECT status FROM jobs WHERE id = ?').get(normalized.scopeId);
+        if (['archived', 'cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(job?.status, ''))) {
+          throw ledgerInputError('framework_inactive_job', 'An active framework cannot be assigned to an inactive job.', { scopeId: normalized.scopeId }, 409);
+        }
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('framework_entry_key_invalid', 'A framework implementation requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('framework_reason_invalid', 'A framework implementation requires a reason between 8 and 500 characters.');
+      }
+      const fingerprint = sha256Json({ ...normalized, framework: undefined, reason });
+      const replayRow = this.db.prepare('SELECT * FROM framework_implementation_revisions WHERE entry_key = ?').get(entryKey);
+      if (replayRow) {
+        if (replayRow.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('framework_replay_conflict', 'This framework entryKey was already used with different values.', { entryKey }, 409);
+        }
+        return {
+          implementation: this.getFrameworkImplementation(replayRow.implementation_id),
+          revision: this.mapFrameworkImplementationRevision(replayRow),
+          replayed: true,
+        };
+      }
+      const existing = this.db.prepare(`
+        SELECT id FROM framework_implementations
+        WHERE framework_id = ? AND scope_type = ? AND scope_id = ?
+      `).get(normalized.frameworkId, normalized.scopeType, normalized.scopeId);
+      if (existing) {
+        throw ledgerInputError(
+          'framework_scope_conflict',
+          'This framework is already retained for the selected scope.',
+          { implementationId: existing.id },
+          409
+        );
+      }
+      const timestamp = this.currentTimeIso();
+      const id = makeId('framework');
+      this.db.prepare(`
+        INSERT INTO framework_implementations (
+          id, framework_id, scope_type, scope_id, status, objective, owner_name,
+          review_due_at, current_state, target_state, decision, evidence_json,
+          measures_json, revision, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(
+        id,
+        normalized.frameworkId,
+        normalized.scopeType,
+        normalized.scopeId,
+        normalized.status,
+        normalized.objective,
+        normalized.ownerName,
+        normalized.reviewDueAt,
+        normalized.currentState || null,
+        normalized.targetState || null,
+        normalized.decision || null,
+        toJson(normalized.evidenceRefs),
+        toJson(normalized.successMeasures),
+        toJson({ createdBy: actor }),
+        timestamp,
+        timestamp
+      );
+      const implementation = this.getFrameworkImplementation(id);
+      const snapshot = this.frameworkImplementationSnapshot(implementation);
+      const snapshotJson = toJson(snapshot);
+      const revisionId = makeId('frameworkrev');
+      this.db.prepare(`
+        INSERT INTO framework_implementation_revisions (
+          id, implementation_id, revision_number, entry_key, entry_fingerprint,
+          reason, snapshot_json, snapshot_hash, actor, created_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+      `).run(revisionId, id, entryKey, fingerprint, reason, snapshotJson, sha256Text(snapshotJson), actor, timestamp);
+      const revision = this.mapFrameworkImplementationRevision(
+        this.db.prepare('SELECT * FROM framework_implementation_revisions WHERE id = ?').get(revisionId)
+      );
+      this.audit({
+        entityType: 'framework_implementation',
+        entityId: id,
+        action: 'create_framework_implementation',
+        actor,
+        after: implementation,
+        metadata: {
+          frameworkId: normalized.frameworkId,
+          scopeType: normalized.scopeType,
+          scopeId: normalized.scopeId,
+          revision: 1,
+          snapshotHash: revision.snapshotHash,
+          externalCommitments: 0,
+        },
+      });
+      return { implementation, revision, replayed: false };
+    });
+  }
+
+  updateFrameworkImplementation(implementationId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const actor = options.actor || payload.actor || 'Contractor.AI';
+      const before = this.getFrameworkImplementation(implementationId);
+      const expectedRevision = Number(payload.expectedRevision ?? payload.expected_revision);
+      if (!Number.isInteger(expectedRevision) || expectedRevision !== before.revision) {
+        throw ledgerInputError(
+          'framework_revision_conflict',
+          'The framework record changed after it was opened. Reload before saving.',
+          { expectedRevision, currentRevision: before.revision },
+          409
+        );
+      }
+      const normalized = this.normalizeFrameworkImplementation(payload, before);
+      if (normalized.frameworkId !== before.frameworkId || normalized.scopeType !== before.scopeType || normalized.scopeId !== before.scopeId) {
+        throw ledgerInputError('framework_identity_immutable', 'Framework and scope cannot be changed after creation.', {}, 409);
+      }
+      const transitions = {
+        draft: new Set(['draft', 'active', 'retired']),
+        active: new Set(['active', 'paused', 'retired']),
+        paused: new Set(['paused', 'active', 'retired']),
+        retired: new Set(['retired', 'draft']),
+      };
+      if (!transitions[before.status].has(normalized.status)) {
+        throw ledgerInputError(
+          'framework_transition_invalid',
+          `Framework status cannot move from ${before.status} to ${normalized.status}.`,
+          { currentStatus: before.status, requestedStatus: normalized.status },
+          409
+        );
+      }
+      if (normalized.scopeType === 'job' && normalized.status === 'active') {
+        const job = this.db.prepare('SELECT status FROM jobs WHERE id = ?').get(normalized.scopeId);
+        if (['archived', 'cancelled', 'canceled', 'rejected', 'void'].includes(normalizeStatus(job?.status, ''))) {
+          throw ledgerInputError('framework_inactive_job', 'An active framework cannot be assigned to an inactive job.', { scopeId: normalized.scopeId }, 409);
+        }
+      }
+      const entryKey = normalizeText(payload.entryKey || payload.entry_key, '');
+      if (!/^[A-Za-z0-9._:-]{8,160}$/.test(entryKey)) {
+        throw ledgerInputError('framework_entry_key_invalid', 'A framework revision requires an entryKey containing 8 to 160 safe characters.');
+      }
+      const reason = normalizeText(payload.reason, '');
+      if (reason.length < 8 || reason.length > 500) {
+        throw ledgerInputError('framework_reason_invalid', 'A framework revision requires a reason between 8 and 500 characters.');
+      }
+      const fingerprint = sha256Json({ implementationId: before.id, expectedRevision, ...normalized, framework: undefined, reason });
+      const replayRow = this.db.prepare('SELECT * FROM framework_implementation_revisions WHERE entry_key = ?').get(entryKey);
+      if (replayRow) {
+        if (replayRow.implementation_id !== before.id || replayRow.entry_fingerprint !== fingerprint) {
+          throw ledgerInputError('framework_replay_conflict', 'This framework entryKey was already used with different values.', { entryKey }, 409);
+        }
+        return {
+          implementation: this.getFrameworkImplementation(before.id),
+          revision: this.mapFrameworkImplementationRevision(replayRow),
+          replayed: true,
+        };
+      }
+      const nextRevision = before.revision + 1;
+      const timestamp = this.currentTimeIso();
+      const update = this.db.prepare(`
+        UPDATE framework_implementations
+        SET status = ?, objective = ?, owner_name = ?, review_due_at = ?,
+            current_state = ?, target_state = ?, decision = ?, evidence_json = ?,
+            measures_json = ?, revision = ?, data_json = ?, updated_at = ?
+        WHERE id = ? AND revision = ?
+      `).run(
+        normalized.status,
+        normalized.objective,
+        normalized.ownerName,
+        normalized.reviewDueAt,
+        normalized.currentState || null,
+        normalized.targetState || null,
+        normalized.decision || null,
+        toJson(normalized.evidenceRefs),
+        toJson(normalized.successMeasures),
+        nextRevision,
+        toJson({ ...before.data, updatedBy: actor }),
+        timestamp,
+        before.id,
+        expectedRevision
+      );
+      if (Number(update.changes || 0) !== 1) {
+        throw ledgerInputError('framework_revision_conflict', 'The framework record changed while it was being saved.', {}, 409);
+      }
+      const implementation = this.getFrameworkImplementation(before.id);
+      const snapshot = this.frameworkImplementationSnapshot(implementation);
+      const snapshotJson = toJson(snapshot);
+      const revisionId = makeId('frameworkrev');
+      this.db.prepare(`
+        INSERT INTO framework_implementation_revisions (
+          id, implementation_id, revision_number, entry_key, entry_fingerprint,
+          reason, snapshot_json, snapshot_hash, actor, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        revisionId,
+        before.id,
+        nextRevision,
+        entryKey,
+        fingerprint,
+        reason,
+        snapshotJson,
+        sha256Text(snapshotJson),
+        actor,
+        timestamp
+      );
+      const revision = this.mapFrameworkImplementationRevision(
+        this.db.prepare('SELECT * FROM framework_implementation_revisions WHERE id = ?').get(revisionId)
+      );
+      this.audit({
+        entityType: 'framework_implementation',
+        entityId: before.id,
+        action: 'revise_framework_implementation',
+        actor,
+        before,
+        after: implementation,
+        metadata: {
+          frameworkId: before.frameworkId,
+          previousStatus: before.status,
+          status: implementation.status,
+          revision: nextRevision,
+          reason,
+          snapshotHash: revision.snapshotHash,
+          externalCommitments: 0,
+        },
+      });
+      return { implementation, revision, replayed: false };
+    });
+  }
+
   performanceScorecardMetric(metricKey) {
     const key = normalizeText(metricKey, '').toLowerCase();
     const definition = PERFORMANCE_SCORECARD_METRICS.find(metric => metric.key === key);
@@ -56223,6 +56807,33 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({ type: 'recurring_job_due', recurringPlanId: plan.id, jobId: plan.job_id, severity: 'medium', message: `${plan.service} recurring plan is due ${plan.next_due_at ? plan.next_due_at.slice(0, 10) : 'now'}.` });
     }
 
+    const dueFrameworkReviews = this.db.prepare(`
+      SELECT implementations.*, jobs.title AS job_title
+      FROM framework_implementations implementations
+      LEFT JOIN jobs ON jobs.id = implementations.scope_id AND implementations.scope_type = 'job'
+      WHERE implementations.status IN ('active', 'paused')
+        AND implementations.review_due_at IS NOT NULL
+        AND implementations.review_due_at <= ?
+      ORDER BY implementations.review_due_at ASC, implementations.updated_at ASC
+      LIMIT 20
+    `).all(this.currentTimeIso().slice(0, 10));
+    for (const row of dueFrameworkReviews) {
+      const framework = getFrameworkDefinition(row.framework_id);
+      if (!framework) continue;
+      const overdueDays = Math.max(0, Math.floor((Date.parse(this.currentTimeIso()) - Date.parse(`${row.review_due_at}T00:00:00.000Z`)) / 86_400_000));
+      actions.push({
+        type: 'review_framework_implementation',
+        idempotencyKey: `framework-review:${row.id}:${row.review_due_at}:${row.revision}`,
+        frameworkImplementationId: row.id,
+        jobId: row.scope_type === 'job' ? row.scope_id : null,
+        title: framework.name,
+        severity: overdueDays >= 30 ? 'high' : 'medium',
+        dueAt: row.review_due_at,
+        requiresApproval: false,
+        message: `${framework.name} is due for ${row.scope_type === 'job' ? `${row.job_title || 'project'} ` : 'organization '}review. Retain the decision and evidence in Contractor.AI; no external action is authorized.`
+      });
+    }
+
     const productionJobs = this.db.prepare(`
       SELECT DISTINCT baselines.job_id, jobs.title, jobs.updated_at
       FROM production_baselines baselines
@@ -56515,7 +57126,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         stream: this.commandPlanStreamForAction(action.type),
         actionType: action.type,
         source: 'next_action_monitor',
-        sourceId: action.approvalId || action.communicationId || action.assignmentId || action.reservationId || action.materialRequirementId || action.paymentId || action.aftercareId || action.recurringPlanId || action.jobType || action.jobId,
+        sourceId: action.approvalId || action.communicationId || action.assignmentId || action.reservationId || action.materialRequirementId || action.paymentId || action.aftercareId || action.recurringPlanId || action.frameworkImplementationId || action.jobType || action.jobId,
         safeDraftable: safeActionTypes.has(normalizeStatus(action.type, '')),
         requiresApproval: normalizeBoolean(action.requiresApproval, false)
       });
@@ -58774,6 +59385,53 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         });
       }
     }
+    const frameworkRevisionRows = this.db.prepare('SELECT * FROM framework_implementation_revisions ORDER BY implementation_id, revision_number').all();
+    for (const revisionRow of frameworkRevisionRows) {
+      try {
+        this.mapFrameworkImplementationRevision(revisionRow);
+      } catch (error) {
+        issues.push({
+          severity: 'error',
+          message: `Framework revision ${revisionRow.id} failed retained checksum verification: ${error.message}`
+        });
+      }
+    }
+    const invalidFrameworkHeads = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM framework_implementations implementations
+      LEFT JOIN (
+        SELECT implementation_id, MAX(revision_number) AS revision_number
+        FROM framework_implementation_revisions
+        GROUP BY implementation_id
+      ) revisions ON revisions.implementation_id = implementations.id
+      WHERE revisions.revision_number IS NULL OR revisions.revision_number <> implementations.revision
+    `).get().count || 0);
+    if (invalidFrameworkHeads) {
+      issues.push({ severity: 'error', message: `${invalidFrameworkHeads} framework implementation(s) do not match their latest retained revision.` });
+    }
+    const frameworkHeads = this.db.prepare(`
+      SELECT implementations.*, revisions.snapshot_json AS head_snapshot_json
+      FROM framework_implementations implementations
+      JOIN framework_implementation_revisions revisions
+        ON revisions.implementation_id = implementations.id
+        AND revisions.revision_number = implementations.revision
+      ORDER BY implementations.id
+    `).all();
+    for (const frameworkHead of frameworkHeads) {
+      const currentSnapshotJson = toJson(this.frameworkImplementationSnapshot(this.mapFrameworkImplementation(frameworkHead)));
+      if (currentSnapshotJson !== frameworkHead.head_snapshot_json) {
+        issues.push({ severity: 'error', message: `Framework implementation ${frameworkHead.id} differs from its immutable head revision.` });
+      }
+    }
+    const orphanFrameworkScopes = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM framework_implementations implementations
+      LEFT JOIN jobs ON jobs.id = implementations.scope_id
+      WHERE implementations.scope_type = 'job' AND jobs.id IS NULL
+    `).get().count || 0);
+    if (orphanFrameworkScopes) {
+      issues.push({ severity: 'error', message: `${orphanFrameworkScopes} project-scoped framework implementation(s) reference a missing job.` });
+    }
     const orphanTasks = Number(this.db.prepare('SELECT COUNT(*) AS count FROM job_tasks LEFT JOIN jobs ON jobs.id = job_tasks.job_id WHERE jobs.id IS NULL').get().count || 0);
     if (orphanTasks) issues.push({ severity: 'error', message: `${orphanTasks} task(s) are orphaned.` });
     const invalidDependencies = Number(this.db.prepare(`
@@ -60792,6 +61450,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         cashFlowForecastSnapshots: this.count('cash_flow_forecast_snapshots'),
         performanceScorecardTargets: this.count('performance_scorecard_targets'),
         performanceScorecardSnapshots: this.count('performance_scorecard_snapshots'),
+        frameworkImplementations: this.count('framework_implementations'),
+        frameworkImplementationRevisions: this.count('framework_implementation_revisions'),
         productionBaselines: this.count('production_baselines'),
         productionEntries: this.count('production_entries'),
         attendanceSessions: this.count('attendance_sessions'),

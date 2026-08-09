@@ -8,6 +8,11 @@ JSON feed format. Every item has a stable `externalId`, title, bounded body,
 privacy-minimized metadata. Every item declares `canExecute: false` and
 `externalCommitments: 0`.
 
+Active or paused framework implementations whose review date is due appear as
+`review_framework_implementation` items. Their stable identity includes the
+implementation, due date, and revision. HAI can surface the review but cannot
+revise the framework record or execute any resulting decision.
+
 The API is owner-only:
 
 - `GET /api/integrations/hai/manifest`

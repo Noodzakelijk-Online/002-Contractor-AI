@@ -1,5 +1,27 @@
 # Codex Worklog
 
+## 2026-08-09 - Governed framework implementation pass
+
+- Parsed goal sections 1-23 into a deterministic ASCII-safe catalog containing
+  23 families, 671 unique frameworks, and 700 family memberships.
+- Added migration 069, scoped implementation records, immutable checksum-protected
+  revisions, guarded transitions, exact replay, concurrency checks, diagnostics,
+  backup validation, export, role APIs, and PostgreSQL parity coverage.
+- Added the lazy-loaded Performance framework register with bounded pagination,
+  search, family/status filters, evidence, measures, decisions, review dates, and
+  revision history on desktop and mobile.
+- Routed due framework reviews into the internal command plan and read-only HAI
+  feed without adding autonomous execution or external commitment authority.
+- The complete release gate passed: zero-vulnerability audit, lint, release
+  contract, 509 Node tests, 80 isolated Chromium workflows, production build,
+  bundle budget, Docker runtime migration 069, and Node 22.23.2 Windows package
+  runtime/catalog smoke. Exact results and external boundaries are retained in
+  `FINAL_VERIFICATION_REPORT.md`.
+- Hardened the Windows launcher after runtime verification showed that repeat
+  starts could retain the owner key in redirected logs. The key is now displayed
+  only on first run, later starts report the protected configuration path, the
+  exposed key was rotated, and the key-bearing local logs were cleared.
+
 ## 2026-08-08 - Giant prompt implementation pass
 
 ### Discovery

@@ -2048,6 +2048,7 @@ app.get('/api/session', (req, res) => {
         resources: !fieldWorker,
         finance: !fieldWorker,
         performance: !fieldWorker,
+        frameworks: !fieldWorker,
         clientSuccess: !fieldWorker,
         fieldEvidence: role === 'owner' || role === 'office_operator' || fieldWorker,
         maintenance: role === 'owner'
@@ -2126,6 +2127,7 @@ const operatingLedger = new ContractorOperatingLedger({
 // The legacy JSON file is only an import source during construction. All live
 // reads and writes are ledger-backed after the synchronous migration completes.
 legacyStateForMigration = { jobs: [], workers: [], tools: [] };
+const frameworkCatalogCapability = operatingLedger.frameworkCatalog({ limit: 1 });
 function autonomousSchedulerStatus() {
   return {
     enabled: autonomousSchedulerEnabled,
@@ -4638,6 +4640,49 @@ app.post('/api/ledger/performance-scorecard/snapshots', (req, res) => {
   }), 201);
 });
 
+app.get('/api/ledger/frameworks/catalog', (req, res) => {
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    catalog: operatingLedger.frameworkCatalog(req.query || {})
+  }));
+});
+
+app.get('/api/ledger/frameworks', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    workspace: operatingLedger.getFrameworkWorkspace(req.query || {})
+  }));
+});
+
+app.get('/api/ledger/frameworks/:implementationId/revisions', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    implementation: operatingLedger.getFrameworkImplementation(req.params.implementationId),
+    revisions: operatingLedger.listFrameworkImplementationRevisions(req.params.implementationId, req.query || {})
+  }));
+});
+
+app.post('/api/ledger/frameworks', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.createFrameworkImplementation(req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    workspace: operatingLedger.getFrameworkWorkspace()
+  }), 201);
+});
+
+app.patch('/api/ledger/frameworks/:implementationId', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.updateFrameworkImplementation(req.params.implementationId, req.body || {}, {
+      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+    }),
+    workspace: operatingLedger.getFrameworkWorkspace()
+  }));
+});
+
 app.get('/api/ledger/client-success', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -6954,6 +6999,8 @@ function operationalExport() {
     cashFlowForecastSnapshots: operatingLedger.listCashFlowForecastSnapshots({ limit: 5_000 }),
     performanceScorecardTargets: operatingLedger.listPerformanceScorecardTargets({ includeHistory: true }).revisions,
     performanceScorecardSnapshots: operatingLedger.listPerformanceScorecardSnapshots({ limit: 5_000 }),
+    frameworkImplementations: operatingLedger.listFrameworkImplementations({ limit: 2_000 }),
+    frameworkImplementationRevisions: operatingLedger.listAllFrameworkImplementationRevisions({ limit: 10_000 }),
     clientFeedback: operatingLedger.listClientFeedback({ limit: 10_000 }),
     energyPerformanceRecords: operatingLedger.listEnergyPerformanceRecords({ limit: 10_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
@@ -7043,6 +7090,8 @@ function validateOperationalExport(snapshot) {
     'cashFlowForecastSnapshots',
     'performanceScorecardTargets',
     'performanceScorecardSnapshots',
+    'frameworkImplementations',
+    'frameworkImplementationRevisions',
     'marketFitProfiles',
     'opportunityFitAssessments',
     'bidDecisionPolicies',
@@ -7139,6 +7188,8 @@ function validateOperationalExport(snapshot) {
       cashFlowForecastSnapshots: Array.isArray(snapshot.cashFlowForecastSnapshots) ? snapshot.cashFlowForecastSnapshots.length : 0,
       performanceScorecardTargets: Array.isArray(snapshot.performanceScorecardTargets) ? snapshot.performanceScorecardTargets.length : 0,
       performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
+      frameworkImplementations: Array.isArray(snapshot.frameworkImplementations) ? snapshot.frameworkImplementations.length : 0,
+      frameworkImplementationRevisions: Array.isArray(snapshot.frameworkImplementationRevisions) ? snapshot.frameworkImplementationRevisions.length : 0,
       clientFeedback: snapshot.clientFeedback.length,
       energyPerformanceRecords: Array.isArray(snapshot.energyPerformanceRecords) ? snapshot.energyPerformanceRecords.length : 0,
       marketFitProfiles: Array.isArray(snapshot.marketFitProfiles) ? snapshot.marketFitProfiles.length : 0,
@@ -8179,6 +8230,18 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         targetCurrentApprovalRequired: true,
         fundsMoved: false,
         messagesSent: false,
+        externalCommitments: 0
+      },
+      operatingFrameworks: {
+        catalogFormat: frameworkCatalogCapability.format,
+        familyCount: frameworkCatalogCapability.counts.families,
+        frameworkCount: frameworkCatalogCapability.counts.frameworks,
+        familyMembershipCount: frameworkCatalogCapability.counts.familyMemberships,
+        scopes: ['organization', 'job'],
+        statuses: ['draft', 'active', 'paused', 'retired'],
+        immutableRevisions: true,
+        optimisticConcurrency: true,
+        exactReplay: true,
         externalCommitments: 0
       },
       marketFit: {

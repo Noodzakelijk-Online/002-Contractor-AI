@@ -18,15 +18,15 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 43 canonical paths, 12 retired paths, 16 hosted keys, 544 source files |
-| Node tests | Passed | `npm test`: 501 tests, 468 passed, 33 skipped, 0 failed, 287.8 s |
-| Production build | Passed | `npm run build`: application JS 522.09 kB and CSS 265.23 kB before gzip |
-| Bundle budget | Passed | `npm run verify:bundle`: 342,557 total gzip bytes across 27 assets |
-| Browser tests | Passed | `npm run test:browser`: 79 Playwright Chromium tests in 20 isolated batches |
-| Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, auth, persistence, shutdown and migration smoke |
-| Runtime doctor | Passed | isolated local runtime returned ready configuration, DB/storage, migration 068, ledger/audit integrity and support bundle v1 |
-| Windows standalone | Passed | Node 22 x64 portable package build and isolated launcher/runtime smoke |
-| PostgreSQL parity | CI service gate | Contract tests are present; 33 environment-dependent tests were skipped without a local PostgreSQL service |
+| Release contract | Passed | `npm run verify:release`: 48 canonical paths, 12 retired paths, 16 hosted keys, 296 canonical source files; generated release/runtime directories excluded |
+| Node tests | Passed | `npm test`: 509 tests, 475 passed, 34 skipped, 0 failed, 86.5 s |
+| Production build | Passed | `npm run build`: application JS 522.85 kB and CSS 265.23 kB before gzip |
+| Bundle budget | Passed | `npm run verify:bundle`: 348,382 total gzip bytes across 29 assets |
+| Browser tests | Passed | `npm run test:browser`: 80 Playwright Chromium tests in 20 isolated batches |
+| Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, auth, persistence, shutdown and migration 069 smoke |
+| Runtime doctor | Passed | Latest local runtime returned ready configuration, verified DB/storage, migration 069, zero pending migrations, ledger/audit integrity, support bundle v1 and no owner key in startup logs |
+| Windows standalone | Passed | Node 22.23.2 x64 portable package build and isolated authenticated runtime/catalog smoke |
+| PostgreSQL parity | CI service gate | Contract tests are present; 34 environment-dependent tests were skipped without a local PostgreSQL service |
 
 ## Manual results
 
@@ -38,6 +38,7 @@ decisions outside this repository.
 | Safety stop visible and controls disabled | Passed in automated Chromium and Node tests |
 | Support bundle and doctor | Passed against an isolated local production runtime |
 | Local backup/restore UX | Passed in browser and backend contract tests |
+| Governed framework lifecycle | Passed across catalog, API, SQLite, restore, export, HAI, desktop and mobile tests |
 | Material, safety, permit and LMRA load races | Passed with job-scoped sequence guards and disabled form controls |
 | In-app Browser attachment | Not available: the browser webview repeatedly failed to attach; the release suite used real Playwright Chromium instead |
 | Screenshot evidence | No separate screenshot set retained; assertions and traces were used during debugging, then the complete suite passed |

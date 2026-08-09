@@ -10,6 +10,9 @@ const REQUIRED_PATHS = [
   'components/BidDecisionControl.jsx',
   'components/MarketFitControl.jsx',
   'components/PerformanceScorecard.jsx',
+  'components/FrameworkWorkspace.css',
+  'components/FrameworkWorkspace.jsx',
+  'contractor-framework-catalog.json',
   'CHANGELOG.md',
   'Dockerfile',
   'docs/ACCEPTANCE_TESTS.md',
@@ -29,6 +32,7 @@ const REQUIRED_PATHS = [
   'docs/WINDOWS_STANDALONE.md',
   'docker-compose.hosted.yml',
   'evidence-storage.js',
+  'framework-catalog.js',
   'hai-connector.js',
   'operating-ledger.js',
   'postgres-sync-database.js',
@@ -38,6 +42,7 @@ const REQUIRED_PATHS = [
   'standalone-runtime.js',
   'scripts/build-windows-standalone.js',
   'scripts/export-hai-feed.js',
+  'scripts/generate-framework-catalog.js',
   'scripts/migrate-local-backup-to-hosted.js',
   'scripts/doctor.js',
   'scripts/restore-local-backup.js',
@@ -84,7 +89,7 @@ const REQUIRED_HOSTED_ENV_KEYS = [
 function walkFiles(root, relative = '', unreadableDirectories = []) {
   const excluded = new Set([
     '.git', '.pytest_cache', '.vite', 'coverage', 'data', 'dist', 'node_modules',
-    'playwright-report', 'storage', 'test-results', 'uploads'
+    'playwright-report', 'release', 'storage', 'test-results', 'tmp', 'uploads'
   ]);
   const directory = path.join(root, relative);
   const files = [];
@@ -156,6 +161,11 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.get('/api/ledger/performance-scorecard'",
     "app.post('/api/ledger/performance-scorecard/targets'",
     "app.post('/api/ledger/performance-scorecard/snapshots'",
+    "app.get('/api/ledger/frameworks/catalog'",
+    "app.get('/api/ledger/frameworks'",
+    "app.get('/api/ledger/frameworks/:implementationId/revisions'",
+    "app.post('/api/ledger/frameworks'",
+    "app.patch('/api/ledger/frameworks/:implementationId'",
     "app.get('/api/ledger/market-fit'",
     "app.post('/api/ledger/market-fit/profiles'",
     "app.post('/api/ledger/opportunities/:id/market-fit-assessments'",
@@ -201,6 +211,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     if (!serverSource.includes(canonicalRoute)) failures.push(`Canonical ledger route is missing: ${canonicalRoute}`);
   }
   const ledgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
+  const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+  const windowsPackageSource = fs.readFileSync(path.join(root, 'scripts', 'build-windows-standalone.js'), 'utf8');
+  for (const runtimePath of ['framework-catalog.js', 'contractor-framework-catalog.json']) {
+    if (!dockerSource.includes(runtimePath)) failures.push(`Docker runtime is missing framework dependency: ${runtimePath}`);
+    if (!windowsPackageSource.includes(`'${runtimePath}'`)) failures.push(`Windows runtime is missing framework dependency: ${runtimePath}`);
+  }
   if (!ledgerSource.includes("version: '048_thirteen_week_cash_flow_forecast'")) {
     failures.push('Canonical cash-flow forecast migration is missing.');
   }
@@ -263,6 +279,18 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!ledgerSource.includes("version: '068_operational_safety_controls'")) {
     failures.push('Canonical operational safety-control migration is missing.');
+  }
+  if (!ledgerSource.includes("version: '069_governed_framework_workspace'")) {
+    failures.push('Canonical governed framework workspace migration is missing.');
+  }
+  const frameworkCatalog = JSON.parse(fs.readFileSync(path.join(root, 'contractor-framework-catalog.json'), 'utf8'));
+  if (
+    frameworkCatalog.format !== 'contractor-ai/framework-catalog-v1'
+    || frameworkCatalog.counts?.families !== 23
+    || frameworkCatalog.counts?.frameworks !== 671
+    || frameworkCatalog.counts?.familyMemberships !== 700
+  ) {
+    failures.push('Checked-in framework catalog does not retain all 23 families and 700 memberships.');
   }
   if (!ledgerSource.includes('this.assertAutomationActive();')) {
     failures.push('Autonomous command application does not enforce the durable owner safety stop.');

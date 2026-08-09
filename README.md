@@ -16,6 +16,14 @@ The current stabilization evidence is indexed by the
 release evidence from provider-, legal-, and infrastructure-dependent production
 work.
 
+The Performance screen includes the complete retained operating-framework catalog:
+23 families, 671 unique frameworks, and 700 family memberships. Operators can
+search and filter the catalog, retain organization- or project-scoped objectives,
+owners, evidence, measures, decisions, review dates, and inspect immutable revision
+history. A framework record governs the team's use of a method; it does not claim
+legal certification, replace a method-specific qualified professional, or authorize
+an external action.
+
 ## Local Use
 
 Requirements: Node.js 22 and npm.
@@ -175,6 +183,7 @@ The supported surface is `/api/ledger/*`, including opportunities, intake, jobs,
 - `GET /api/ledger/schedule` returns the active portfolio look-ahead with current task windows, critical and overdue work, approved or pending schedule baselines, stale-plan evidence, and revalidated crew/equipment conflicts. Filters cover risk, conflict, overdue, unscheduled, baseline, look-ahead, search, and a bounded 1-180 day horizon. One invalid job plan is isolated as an explicit row instead of failing the portfolio response. Owner and office operators can coordinate through the linked job workspace, approvers have read-only portfolio access, and field workers remain limited to their assigned job schedules.
 - `GET /api/ledger/clients` returns the retained client directory with contact, basic invoice, and Peppol/UBL buyer-profile readiness plus linked job, opportunity, contract-value, and receivable context. Owner and office operators can create and update validated client identities, while approvers have read-only access and field workers have none. Duplicate email, company, registration, and electronic-address identities are rejected. Dutch KVK records can derive the `0106` buyer endpoint used by future invoice drafts; existing commercial snapshots remain immutable and no client mutation sends a message or creates work.
 - `GET /api/ledger/command-plan` previews prioritized ledger work; owner-only `POST /api/ledger/command-plan` applies selected safe action IDs without external commitment.
+- `GET /api/ledger/frameworks/catalog` returns the bounded, cacheable 23-family framework catalog. `GET /api/ledger/frameworks` returns database-filtered implementation records, status summaries, family coverage, and due reviews. Owner and office operators create and revise records through `POST /api/ledger/frameworks` and `PATCH /api/ledger/frameworks/:implementationId`; approvers have read-only access and field workers have none. Every revision is replay-safe, checksum-protected, concurrency-guarded, exportable, and backup-verified. Due reviews enter the internal command queue and read-only HAI feed but cannot execute or make an external commitment.
 - Owner-only `POST /api/ledger/autonomous-cycle` preserves dry-run inspection while routing every bounded mutating request through the durable scheduler lease; callers can scope work with `actionTypes`, `jobIds`, and `maxActions`.
 - Overdue open opportunities enter the command queue as `draft_opportunity_follow_up`. An autonomous cycle can retain one idempotent internal follow-up draft per opportunity/due timestamp, but cannot send it or create any external commitment.
 - `GET /api/ledger/scheduler` exposes the durable lease and last outcome; owner-only `POST /api/ledger/scheduler/run` claims and completes a due cycle idempotently.

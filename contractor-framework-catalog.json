@@ -1,0 +1,4855 @@
+{
+  "format": "contractor-ai/framework-catalog-v1",
+  "version": 1,
+  "source": "Goal objective sections 1 through 23",
+  "families": [
+    {
+      "id": "family-01-business-model-frameworks",
+      "number": 1,
+      "name": "Business-model frameworks"
+    },
+    {
+      "id": "family-02-strategy-frameworks",
+      "number": 2,
+      "name": "Strategy frameworks"
+    },
+    {
+      "id": "family-03-market-and-customer-selection-frameworks",
+      "number": 3,
+      "name": "Market and customer-selection frameworks"
+    },
+    {
+      "id": "family-04-sales-and-tendering-frameworks",
+      "number": 4,
+      "name": "Sales and tendering frameworks"
+    },
+    {
+      "id": "family-05-project-delivery-frameworks",
+      "number": 5,
+      "name": "Project-delivery frameworks"
+    },
+    {
+      "id": "family-06-contract-suites-and-sector-systems",
+      "number": 6,
+      "name": "Contract suites and sector systems"
+    },
+    {
+      "id": "family-07-pricing-and-payment-frameworks",
+      "number": 7,
+      "name": "Pricing and payment frameworks"
+    },
+    {
+      "id": "family-08-estimating-frameworks",
+      "number": 8,
+      "name": "Estimating frameworks"
+    },
+    {
+      "id": "family-09-project-management-frameworks",
+      "number": 9,
+      "name": "Project-management frameworks"
+    },
+    {
+      "id": "family-10-lean-construction-and-productivity-frameworks",
+      "number": 10,
+      "name": "Lean-construction and productivity frameworks"
+    },
+    {
+      "id": "family-11-quality-management-frameworks",
+      "number": 11,
+      "name": "Quality-management frameworks"
+    },
+    {
+      "id": "family-12-health-and-safety-frameworks",
+      "number": 12,
+      "name": "Health and safety frameworks"
+    },
+    {
+      "id": "family-13-risk-management-frameworks",
+      "number": 13,
+      "name": "Risk-management frameworks"
+    },
+    {
+      "id": "family-14-procurement-and-subcontracting-frameworks",
+      "number": 14,
+      "name": "Procurement and subcontracting frameworks"
+    },
+    {
+      "id": "family-15-financial-control-frameworks",
+      "number": 15,
+      "name": "Financial-control frameworks"
+    },
+    {
+      "id": "family-16-workforce-and-organisational-frameworks",
+      "number": 16,
+      "name": "Workforce and organisational frameworks"
+    },
+    {
+      "id": "family-17-customer-experience-frameworks",
+      "number": 17,
+      "name": "Customer-experience frameworks"
+    },
+    {
+      "id": "family-18-tools-machinery-and-asset-management-frameworks",
+      "number": 18,
+      "name": "Tools, machinery and asset-management frameworks"
+    },
+    {
+      "id": "family-19-sustainability-frameworks",
+      "number": 19,
+      "name": "Sustainability frameworks"
+    },
+    {
+      "id": "family-20-bim-information-and-digital-frameworks",
+      "number": 20,
+      "name": "BIM, information and digital frameworks"
+    },
+    {
+      "id": "family-21-governance-and-compliance-frameworks",
+      "number": 21,
+      "name": "Governance and compliance frameworks"
+    },
+    {
+      "id": "family-22-decision-making-and-problem-solving-frameworks",
+      "number": 22,
+      "name": "Decision-making and problem-solving frameworks"
+    },
+    {
+      "id": "family-23-contractor-performance-frameworks",
+      "number": 23,
+      "name": "Contractor performance frameworks"
+    }
+  ],
+  "frameworks": [
+    {
+      "id": "asset-heavy-versus-asset-light-model",
+      "name": "Asset-heavy versus asset-light model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "availability-based-contracting",
+      "name": "Availability-based contracting",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "bundled-versus-unbundled-services",
+      "name": "Bundled versus unbundled services",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "business-model-canvas",
+      "name": "Business Model Canvas",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "emergency-maintenance-replacement-improvement-service-matrix",
+      "name": "Emergency-maintenance-replacement-improvement service matrix",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "franchise-model",
+      "name": "Franchise model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "general-contractor-versus-specialist-contractor-model",
+      "name": "General contractor versus specialist contractor model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "geographic-density-or-route-density-model",
+      "name": "Geographic-density or route-density model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "good-better-best-service-packaging",
+      "name": "Good-better-best service packaging",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "hub-and-spoke-branch-model",
+      "name": "Hub-and-spoke branch model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "jobs-to-be-done",
+      "name": "Jobs to Be Done",
+      "familyIds": [
+        "family-01-business-model-frameworks",
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "lean-canvas",
+      "name": "Lean Canvas",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "licensing-model",
+      "name": "Licensing model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "loss-leader-plus-follow-on-work-model",
+      "name": "Loss-leader plus follow-on-work model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "make-buy-rent-subcontract-matrix",
+      "name": "Make-buy-rent-subcontract matrix",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "marketplace-platform-model",
+      "name": "Marketplace/platform model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "one-off-project-versus-service-agreement-model",
+      "name": "One-off project versus service-agreement model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "outcome-based-contracting",
+      "name": "Outcome-based contracting",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "performance-based-maintenance",
+      "name": "Performance-based maintenance",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "product-service-continuum",
+      "name": "Product-Service Continuum",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "project-work-versus-recurring-maintenance-portfolio",
+      "name": "Project work versus recurring-maintenance portfolio",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "razor-and-blades-model-for-equipment-and-consumables",
+      "name": "Razor-and-blades model for equipment and consumables",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "self-perform-versus-subcontract-model",
+      "name": "Self-perform versus subcontract model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "service-profit-chain",
+      "name": "Service-Profit Chain",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "servitisation-model",
+      "name": "Servitisation model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "value-proposition-canvas",
+      "name": "Value Proposition Canvas",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "vertical-integration-model",
+      "name": "Vertical-integration model",
+      "familyIds": [
+        "family-01-business-model-frameworks"
+      ]
+    },
+    {
+      "id": "adjacent-market-expansion",
+      "name": "Adjacent-market expansion",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "ansoff-matrix",
+      "name": "Ansoff Matrix",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "balanced-scorecard",
+      "name": "Balanced Scorecard",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "bcg-growth-share-matrix",
+      "name": "BCG Growth-Share Matrix",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "blue-ocean-strategy",
+      "name": "Blue Ocean Strategy",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "build-partner-acquire-framework",
+      "name": "Build-partner-acquire framework",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "core-competence-framework",
+      "name": "Core Competence framework",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "customer-service-geography-profitability-cube",
+      "name": "Customer-service-geography profitability cube",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "flywheel-model",
+      "name": "Flywheel model",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "four-actions-framework",
+      "name": "Four Actions Framework",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "ge-mckinsey-portfolio-matrix",
+      "name": "GE-McKinsey Portfolio Matrix",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "greiner-growth-model",
+      "name": "Greiner Growth Model",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "hoshin-kanri",
+      "name": "Hoshin Kanri",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "kpi-trees",
+      "name": "KPI trees",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "mckinsey-7s",
+      "name": "McKinsey 7S",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "north-star-metric",
+      "name": "North Star Metric",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "ogsm",
+      "name": "OGSM",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "okrs",
+      "name": "OKRs",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "organic-versus-acquisition-led-growth",
+      "name": "Organic versus acquisition-led growth",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "pestel",
+      "name": "PESTEL",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "playing-to-win",
+      "name": "Playing to Win",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "porter-s-five-forces",
+      "name": "Porter's Five Forces",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "porter-s-generic-strategies",
+      "name": "Porter's Generic Strategies",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "porter-s-value-chain",
+      "name": "Porter's Value Chain",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "resource-based-view",
+      "name": "Resource-Based View",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "scenario-planning",
+      "name": "Scenario Planning",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "service-line-portfolio-matrix",
+      "name": "Service-line portfolio matrix",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "strategic-group-mapping",
+      "name": "Strategic Group Mapping",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "strategy-canvas",
+      "name": "Strategy Canvas",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "strategy-map",
+      "name": "Strategy Map",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "swot",
+      "name": "SWOT",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "territory-attractiveness-matrix",
+      "name": "Territory attractiveness matrix",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "theory-of-change",
+      "name": "Theory of Change",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "three-horizons",
+      "name": "Three Horizons",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "tows",
+      "name": "TOWS",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "vrio",
+      "name": "VRIO",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "war-gaming",
+      "name": "War-gaming",
+      "familyIds": [
+        "family-02-strategy-frameworks"
+      ]
+    },
+    {
+      "id": "buyer-personas",
+      "name": "Buyer personas",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "conjoint-analysis",
+      "name": "Conjoint analysis",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "customer-concentration-analysis",
+      "name": "Customer concentration analysis",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "customer-lifetime-value-segmentation",
+      "name": "Customer lifetime value segmentation",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "customer-profitability-segmentation",
+      "name": "Customer profitability segmentation",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "homeowner-landlord-housing-association-business-government-segmentation",
+      "name": "Homeowner-landlord-housing association-business-government segmentation",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "ideal-customer-profile",
+      "name": "Ideal Customer Profile",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "job-size-bands",
+      "name": "Job-size bands",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "kano-model",
+      "name": "Kano Model",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks",
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "market-attractiveness-versus-competitive-strength",
+      "name": "Market attractiveness versus competitive strength",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "pareto-customer-analysis",
+      "name": "Pareto customer analysis",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "planned-versus-reactive-work-segmentation",
+      "name": "Planned versus reactive work segmentation",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "price-sensitivity-analysis",
+      "name": "Price sensitivity analysis",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "problem-frequency-urgency-value-matrix",
+      "name": "Problem-frequency-urgency-value matrix",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "residential-commercial-institutional-customer-matrix",
+      "name": "Residential-commercial-institutional customer matrix",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "rfm-segmentation",
+      "name": "RFM segmentation",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "route-density-analysis",
+      "name": "Route-density analysis",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "segmentation-targeting-positioning",
+      "name": "Segmentation-Targeting-Positioning",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "service-area-heat-mapping",
+      "name": "Service-area heat mapping",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "tam-sam-som",
+      "name": "TAM-SAM-SOM",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "van-westendorp-price-sensitivity-meter",
+      "name": "Van Westendorp Price Sensitivity Meter",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks"
+      ]
+    },
+    {
+      "id": "voice-of-the-customer",
+      "name": "Voice of the Customer",
+      "familyIds": [
+        "family-03-market-and-customer-selection-frameworks",
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "7ps-of-services-marketing",
+      "name": "7Ps of services marketing",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "account-based-selling",
+      "name": "Account-Based Selling",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "aida",
+      "name": "AIDA",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "bant",
+      "name": "BANT",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "best-and-final-offer-process",
+      "name": "Best-and-final-offer process",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "bid-no-bid-matrix",
+      "name": "Bid/no-bid matrix",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "cac-ltv-framework",
+      "name": "CAC-LTV framework",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "capture-planning",
+      "name": "Capture planning",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "challenger-sale",
+      "name": "Challenger Sale",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "competitor-win-loss-analysis",
+      "name": "Competitor win-loss analysis",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "consultative-selling",
+      "name": "Consultative Selling",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "customer-journey",
+      "name": "Customer journey",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "estimate-conversion-funnel",
+      "name": "Estimate conversion funnel",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "go-no-go-review",
+      "name": "Go/no-go review",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "lead-scoring",
+      "name": "Lead scoring",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "lead-source-attribution",
+      "name": "Lead-source attribution",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "lost-quote-reason-coding",
+      "name": "Lost-quote reason coding",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "marketing-funnel",
+      "name": "Marketing funnel",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "meddic-meddicc",
+      "name": "MEDDIC/MEDDICC",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "opportunity-qualification-scorecard",
+      "name": "Opportunity qualification scorecard",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "pink-team-red-team-and-gold-team-proposal-reviews",
+      "name": "Pink-team, red-team and gold-team proposal reviews",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "price-to-win-analysis",
+      "name": "Price-to-win analysis",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "quote-follow-up-cadence",
+      "name": "Quote follow-up cadence",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "race-marketing-framework",
+      "name": "RACE marketing framework",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "reference-project-matching",
+      "name": "Reference-project matching",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "referral-loop",
+      "name": "Referral loop",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "review-generation-flywheel",
+      "name": "Review-generation flywheel",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "sales-flywheel",
+      "name": "Sales flywheel",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "solution-selling",
+      "name": "Solution Selling",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "spin-selling",
+      "name": "SPIN Selling",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "tender-compliance-matrix",
+      "name": "Tender compliance matrix",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "tender-pursuit-plan",
+      "name": "Tender pursuit plan",
+      "familyIds": [
+        "family-04-sales-and-tendering-frameworks"
+      ]
+    },
+    {
+      "id": "construction-management-as-agent",
+      "name": "Construction Management as Agent",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "construction-management-at-risk",
+      "name": "Construction Management at Risk",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "construction-as-a-service",
+      "name": "Construction-as-a-Service",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "dbf",
+      "name": "DBF",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "dbfm",
+      "name": "DBFM",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "dbfmo",
+      "name": "DBFMO",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "design-bid-build",
+      "name": "Design-Bid-Build",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "design-build",
+      "name": "Design-Build",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "direct-labour-delivery",
+      "name": "Direct-labour delivery",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "early-contractor-involvement",
+      "name": "Early Contractor Involvement",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "epc",
+      "name": "EPC",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "epcm",
+      "name": "EPCM",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "framework-agreement",
+      "name": "Framework agreement",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "general-contracting",
+      "name": "General contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "indefinite-delivery-indefinite-quantity-contracting",
+      "name": "Indefinite-delivery/indefinite-quantity contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "integrated-project-delivery",
+      "name": "Integrated Project Delivery",
+      "familyIds": [
+        "family-05-project-delivery-frameworks",
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "job-order-contracting",
+      "name": "Job Order Contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "management-contracting",
+      "name": "Management contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "measured-term-contracting",
+      "name": "Measured-term contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "multi-prime-contracting",
+      "name": "Multi-prime contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "owner-builder",
+      "name": "Owner-builder",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "p3",
+      "name": "P3",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "partnering",
+      "name": "Partnering",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "programme-alliance",
+      "name": "Programme alliance",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "progressive-design-build",
+      "name": "Progressive design-build",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "project-alliance",
+      "name": "Project alliance",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "public-private-partnership",
+      "name": "Public-Private Partnership",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "relational-contracting",
+      "name": "Relational contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "term-maintenance-contracting",
+      "name": "Term-maintenance contracting",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "turnkey-delivery",
+      "name": "Turnkey delivery",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "two-stage-design-and-build",
+      "name": "Two-stage design and build",
+      "familyIds": [
+        "family-05-project-delivery-frameworks"
+      ]
+    },
+    {
+      "id": "aia-contract-documents",
+      "name": "AIA contract documents",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "ava-consumer-construction-conditions",
+      "name": "AVA consumer construction conditions",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "bouwteam-agreements",
+      "name": "Bouwteam agreements",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "consensusdocs",
+      "name": "ConsensusDocs",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "dnr",
+      "name": "DNR",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "fac-1",
+      "name": "FAC-1",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "fidic-red-yellow-silver-green-and-gold-books",
+      "name": "FIDIC Red, Yellow, Silver, Green and Gold Books",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "framework-and-call-off-agreements",
+      "name": "Framework and call-off agreements",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "icc-model-contracts",
+      "name": "ICC model contracts",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "jct-contracts",
+      "name": "JCT contracts",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "modelovereenkomsten-for-subcontracting",
+      "name": "Modelovereenkomsten for subcontracting",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "nec4-contract-suite",
+      "name": "NEC4 contract suite",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "ppc2000",
+      "name": "PPC2000",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "raw-systematiek",
+      "name": "RAW-systematiek",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "stabu-systematiek",
+      "name": "STABU-systematiek",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "uav-2012",
+      "name": "UAV 2012",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "uav-gc-2025",
+      "name": "UAV-GC 2025",
+      "familyIds": [
+        "family-06-contract-suites-and-sector-systems"
+      ]
+    },
+    {
+      "id": "allowances",
+      "name": "Allowances",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "availability-payment",
+      "name": "Availability payment",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "call-out-fee-plus-hourly-rate",
+      "name": "Call-out fee plus hourly rate",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "contingency-allowances",
+      "name": "Contingency allowances",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "cost-plus-award-fee",
+      "name": "Cost-plus award fee",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "cost-plus-fixed-fee",
+      "name": "Cost-plus fixed fee",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "cost-plus-incentive-fee",
+      "name": "Cost-plus incentive fee",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "cost-plus-percentage",
+      "name": "Cost-plus percentage",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "cost-reimbursable-contract",
+      "name": "Cost-reimbursable contract",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "crew-day-pricing",
+      "name": "Crew-day pricing",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "daywork",
+      "name": "Daywork",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "deposit-plus-staged-payments",
+      "name": "Deposit plus staged payments",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "early-payment-discount",
+      "name": "Early-payment discount",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "escalation-and-indexation-clauses",
+      "name": "Escalation and indexation clauses",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "fixed-price-or-lump-sum",
+      "name": "Fixed price or lump sum",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "guaranteed-maximum-price",
+      "name": "Guaranteed Maximum Price",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "machine-surcharge",
+      "name": "Machine surcharge",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "material-handling-markup",
+      "name": "Material handling markup",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "milestone-payments",
+      "name": "Milestone payments",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "minimum-charge-model",
+      "name": "Minimum-charge model",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "mobilisation-demobilisation-charge",
+      "name": "Mobilisation/demobilisation charge",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "open-book-pricing",
+      "name": "Open-book pricing",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "pain-gain-sharing",
+      "name": "Pain/gain sharing",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "pay-per-visit",
+      "name": "Pay-per-visit",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "performance-based-payment",
+      "name": "Performance-based payment",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "progress-billing",
+      "name": "Progress billing",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "provisional-sums",
+      "name": "Provisional sums",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "retainer",
+      "name": "Retainer",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "retention-retainage",
+      "name": "Retention/retainage",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "schedule-of-values",
+      "name": "Schedule of Values",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks",
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "schedule-of-rates-contract",
+      "name": "Schedule-of-rates contract",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "service-level-agreement",
+      "name": "Service-level agreement",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "shared-savings-agreement",
+      "name": "Shared-savings agreement",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "subcontractor-markup",
+      "name": "Subcontractor markup",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "subscription-maintenance",
+      "name": "Subscription maintenance",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "success-fee",
+      "name": "Success fee",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "target-cost-contract",
+      "name": "Target-cost contract",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "time-and-materials",
+      "name": "Time and materials",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "unit-price-contract",
+      "name": "Unit-price contract",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "warranty-reserve",
+      "name": "Warranty reserve",
+      "familyIds": [
+        "family-07-pricing-and-payment-frameworks"
+      ]
+    },
+    {
+      "id": "aace-estimate-classification",
+      "name": "AACE estimate classification",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "activity-based-costing",
+      "name": "Activity-Based Costing",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "analogous-estimating",
+      "name": "Analogous estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "bill-of-quantities",
+      "name": "Bill of Quantities",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "bottom-up-estimating",
+      "name": "Bottom-up estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "contribution-margin-pricing",
+      "name": "Contribution-margin pricing",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "cost-breakdown-structure",
+      "name": "Cost Breakdown Structure",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "cost-code-structure",
+      "name": "Cost-code structure",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "cost-loaded-scheduling",
+      "name": "Cost-loaded scheduling",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "crew-production-rate-estimating",
+      "name": "Crew-production-rate estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "equipment-ownership-and-operating-cost",
+      "name": "Equipment ownership-and-operating cost",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "escalation-forecasting",
+      "name": "Escalation forecasting",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "estimate-to-actual-feedback-loop",
+      "name": "Estimate-to-actual feedback loop",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "fast-function-analysis",
+      "name": "FAST function analysis",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "fully-burdened-hourly-rate",
+      "name": "Fully burdened hourly rate",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "job-costing",
+      "name": "Job costing",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "labour-burden-calculation",
+      "name": "Labour-burden calculation",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "learning-curve-estimating",
+      "name": "Learning-curve estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "life-cycle-costing",
+      "name": "Life-cycle costing",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "markup-versus-margin-calculation",
+      "name": "Markup-versus-margin calculation",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "monte-carlo-cost-simulation",
+      "name": "Monte Carlo cost simulation",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "overhead-absorption",
+      "name": "Overhead absorption",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "parametric-estimating",
+      "name": "Parametric estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "pert-estimating",
+      "name": "PERT estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "probabilistic-estimating",
+      "name": "Probabilistic estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "productivity-factor-estimating",
+      "name": "Productivity-factor estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "quantity-take-off",
+      "name": "Quantity take-off",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "reference-class-forecasting",
+      "name": "Reference-class forecasting",
+      "familyIds": [
+        "family-08-estimating-frameworks",
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "rent-buy-lease-analysis",
+      "name": "Rent-buy-lease analysis",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "resource-loaded-estimating",
+      "name": "Resource-loaded estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "risk-adjusted-margin",
+      "name": "Risk-adjusted margin",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "should-cost-analysis",
+      "name": "Should-cost analysis",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "standard-costing",
+      "name": "Standard costing",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "target-costing",
+      "name": "Target costing",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "three-point-estimating",
+      "name": "Three-point estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "top-down-estimating",
+      "name": "Top-down estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "total-cost-of-ownership",
+      "name": "Total Cost of Ownership",
+      "familyIds": [
+        "family-08-estimating-frameworks",
+        "family-14-procurement-and-subcontracting-frameworks",
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "unit-rate-build-up",
+      "name": "Unit-rate build-up",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "value-engineering",
+      "name": "Value engineering",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "value-methodology",
+      "name": "Value methodology",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "waste-factor-calculation",
+      "name": "Waste-factor calculation",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "weather-allowance",
+      "name": "Weather allowance",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "work-breakdown-structure",
+      "name": "Work Breakdown Structure",
+      "familyIds": [
+        "family-08-estimating-frameworks",
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "zero-based-estimating",
+      "name": "Zero-based estimating",
+      "familyIds": [
+        "family-08-estimating-frameworks"
+      ]
+    },
+    {
+      "id": "agile",
+      "name": "Agile",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "assumption-log",
+      "name": "Assumption log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "constraint-log",
+      "name": "Constraint log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "critical-chain-project-management",
+      "name": "Critical Chain Project Management",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "critical-path-method",
+      "name": "Critical Path Method",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "daily-site-report",
+      "name": "Daily site report",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "decision-log",
+      "name": "Decision log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "earned-schedule",
+      "name": "Earned Schedule",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "earned-value-management",
+      "name": "Earned Value Management",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "gantt-planning",
+      "name": "Gantt planning",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "hybrid-project-management",
+      "name": "Hybrid project management",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "integrated-baseline-management",
+      "name": "Integrated baseline management",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "iso-21502",
+      "name": "ISO 21502",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "kanban",
+      "name": "Kanban",
+      "familyIds": [
+        "family-09-project-management-frameworks",
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "lessons-learned-process",
+      "name": "Lessons-learned process",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "line-of-balance",
+      "name": "Line of Balance",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "location-based-management-system",
+      "name": "Location-Based Management System",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "look-ahead-planning",
+      "name": "Look-ahead planning",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "milestone-planning",
+      "name": "Milestone planning",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "milestone-trend-analysis",
+      "name": "Milestone Trend Analysis",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "organisational-breakdown-structure",
+      "name": "Organisational Breakdown Structure",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "pert",
+      "name": "PERT",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "pmbok",
+      "name": "PMBOK",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "prince2",
+      "name": "PRINCE2",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "pull-planning",
+      "name": "Pull planning",
+      "familyIds": [
+        "family-09-project-management-frameworks",
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "raci",
+      "name": "RACI",
+      "familyIds": [
+        "family-09-project-management-frameworks",
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "raid-log",
+      "name": "RAID log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "resource-breakdown-structure",
+      "name": "Resource Breakdown Structure",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "resource-levelling",
+      "name": "Resource levelling",
+      "familyIds": [
+        "family-09-project-management-frameworks",
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "resource-smoothing",
+      "name": "Resource smoothing",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "responsibility-assignment-matrix",
+      "name": "Responsibility Assignment Matrix",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "rfi-log",
+      "name": "RFI log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "riba-plan-of-work",
+      "name": "RIBA Plan of Work",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "rolling-wave-planning",
+      "name": "Rolling-wave planning",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "s-curves",
+      "name": "S-curves",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "schedule-risk-analysis",
+      "name": "Schedule-risk analysis",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "scrum",
+      "name": "Scrum",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "stage-gate",
+      "name": "Stage-Gate",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "submittal-log",
+      "name": "Submittal log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "takt-planning",
+      "name": "Takt planning",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "variation-change-order-log",
+      "name": "Variation/change-order log",
+      "familyIds": [
+        "family-09-project-management-frameworks"
+      ]
+    },
+    {
+      "id": "5s",
+      "name": "5S",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "a3-problem-solving",
+      "name": "A3 problem-solving",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "big-room",
+      "name": "Big Room",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "choosing-by-advantages",
+      "name": "Choosing by Advantages",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "constraint-removal",
+      "name": "Constraint removal",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "continuous-flow",
+      "name": "Continuous Flow",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "drum-buffer-rope",
+      "name": "Drum-Buffer-Rope",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "eight-wastes-downtime",
+      "name": "Eight Wastes/DOWNTIME",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "five-focusing-steps",
+      "name": "Five Focusing Steps",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "gemba-walks",
+      "name": "Gemba walks",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "heijunka",
+      "name": "Heijunka",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "jidoka",
+      "name": "Jidoka",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "just-in-time",
+      "name": "Just-in-Time",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "kaizen",
+      "name": "Kaizen",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "last-planner-system",
+      "name": "Last Planner System",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "lean-construction",
+      "name": "Lean Construction",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "obeya",
+      "name": "Obeya",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "one-piece-flow",
+      "name": "One-Piece Flow",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "pdca",
+      "name": "PDCA",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "percent-plan-complete",
+      "name": "Percent Plan Complete",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks",
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "poka-yoke",
+      "name": "Poka-yoke",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "reasons-for-variance-analysis",
+      "name": "Reasons-for-variance analysis",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "set-based-design",
+      "name": "Set-Based Design",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "smed",
+      "name": "SMED",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "standard-work",
+      "name": "Standard Work",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "takt-production",
+      "name": "Takt production",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "target-value-delivery",
+      "name": "Target Value Delivery",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "target-value-design",
+      "name": "Target Value Design",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "theory-of-constraints",
+      "name": "Theory of Constraints",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "transformation-flow-value-theory",
+      "name": "Transformation-Flow-Value theory",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "value-stream-mapping",
+      "name": "Value Stream Mapping",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "visual-management",
+      "name": "Visual Management",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "work-packaging",
+      "name": "Work packaging",
+      "familyIds": [
+        "family-10-lean-construction-and-productivity-frameworks"
+      ]
+    },
+    {
+      "id": "8d",
+      "name": "8D",
+      "familyIds": [
+        "family-11-quality-management-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "commissioning",
+      "name": "Commissioning",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "corrective-and-preventive-action",
+      "name": "Corrective and Preventive Action",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "cost-of-quality",
+      "name": "Cost of Quality",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "critical-to-quality-trees",
+      "name": "Critical-to-Quality trees",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "defects-liability-management",
+      "name": "Defects-liability management",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "dmadv",
+      "name": "DMADV",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "dmaic",
+      "name": "DMAIC",
+      "familyIds": [
+        "family-11-quality-management-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "first-article-inspection",
+      "name": "First-article inspection",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "first-run-study",
+      "name": "First-run study",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "five-whys",
+      "name": "Five Whys",
+      "familyIds": [
+        "family-11-quality-management-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "fmea",
+      "name": "FMEA",
+      "familyIds": [
+        "family-11-quality-management-frameworks",
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "handover-dossier",
+      "name": "Handover dossier",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "hold-points-and-witness-points",
+      "name": "Hold points and witness points",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "house-of-quality",
+      "name": "House of Quality",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "inspection-and-test-plan",
+      "name": "Inspection and Test Plan",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "installation-checklists",
+      "name": "Installation checklists",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "ishikawa-fishbone-analysis",
+      "name": "Ishikawa/fishbone analysis",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "iso-10002-complaint-handling",
+      "name": "ISO 10002 complaint handling",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "iso-9001",
+      "name": "ISO 9001",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "mock-up-sample-approval",
+      "name": "Mock-up/sample approval",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "non-conformance-report",
+      "name": "Non-Conformance Report",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "pareto-analysis",
+      "name": "Pareto analysis",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "practical-completion-process",
+      "name": "Practical-completion process",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "prevention-appraisal-failure-model",
+      "name": "Prevention-Appraisal-Failure model",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "project-quality-plan",
+      "name": "Project Quality Plan",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "punch-list-snag-list",
+      "name": "Punch list/snag list",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "quality-assurance-versus-quality-control",
+      "name": "Quality Assurance versus Quality Control",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "quality-function-deployment",
+      "name": "Quality Function Deployment",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "quality-management-system",
+      "name": "Quality Management System",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "sipoc",
+      "name": "SIPOC",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "soft-landings",
+      "name": "Soft Landings",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "statistical-process-control",
+      "name": "Statistical Process Control",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "systems-completion",
+      "name": "Systems completion",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "warranty-management",
+      "name": "Warranty management",
+      "familyIds": [
+        "family-11-quality-management-frameworks"
+      ]
+    },
+    {
+      "id": "alarp",
+      "name": "ALARP",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "behaviour-based-safety",
+      "name": "Behaviour-Based Safety",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "bow-tie-analysis",
+      "name": "Bow-Tie analysis",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks",
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "construction-phase-safety-plan",
+      "name": "Construction Phase Safety Plan",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "contractor-safety-prequalification",
+      "name": "Contractor safety prequalification",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "emergency-response-plan",
+      "name": "Emergency Response Plan",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "hazid",
+      "name": "HAZID",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "hazop",
+      "name": "HAZOP",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "hierarchy-of-controls",
+      "name": "Hierarchy of Controls",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "human-and-organisational-performance",
+      "name": "Human and Organisational Performance",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "iso-45001",
+      "name": "ISO 45001",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "job-hazard-analysis",
+      "name": "Job Hazard Analysis",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "job-safety-analysis",
+      "name": "Job Safety Analysis",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "just-culture",
+      "name": "Just Culture",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks",
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "last-minute-risk-analysis-lmra",
+      "name": "Last-Minute Risk Analysis/LMRA",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "leading-and-lagging-safety-indicators",
+      "name": "Leading and lagging safety indicators",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "lockout-tagout",
+      "name": "Lockout/Tagout",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "near-miss-reporting",
+      "name": "Near-miss reporting",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "permit-to-work",
+      "name": "Permit to Work",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "ri-e",
+      "name": "RI&E",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "root-cause-incident-investigation",
+      "name": "Root-cause incident investigation",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "safety-management-system",
+      "name": "Safety Management System",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "safety-i-and-safety-ii",
+      "name": "Safety-I and Safety-II",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "stop-work-authority",
+      "name": "Stop Work Authority",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "swiss-cheese-model",
+      "name": "Swiss Cheese Model",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "take-five",
+      "name": "Take Five",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "task-risk-analysis-tra",
+      "name": "Task Risk Analysis/TRA",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "toolbox-talks",
+      "name": "Toolbox talks",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "vca",
+      "name": "VCA",
+      "familyIds": [
+        "family-12-health-and-safety-frameworks"
+      ]
+    },
+    {
+      "id": "avoid-mitigate-transfer-accept",
+      "name": "Avoid-mitigate-transfer-accept",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "business-continuity-planning",
+      "name": "Business continuity planning",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "contingency-versus-management-reserve",
+      "name": "Contingency versus management reserve",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "contractual-risk-allocation-matrix",
+      "name": "Contractual risk-allocation matrix",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "coso-enterprise-risk-management",
+      "name": "COSO Enterprise Risk Management",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "crisis-management-framework",
+      "name": "Crisis-management framework",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "decision-trees",
+      "name": "Decision trees",
+      "familyIds": [
+        "family-13-risk-management-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "expected-monetary-value",
+      "name": "Expected Monetary Value",
+      "familyIds": [
+        "family-13-risk-management-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "four-ts-tolerate-treat-transfer-terminate",
+      "name": "Four Ts: tolerate, treat, transfer, terminate",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "insurance-and-bonding-matrix",
+      "name": "Insurance and bonding matrix",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "iso-31000",
+      "name": "ISO 31000",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "monte-carlo-simulation",
+      "name": "Monte Carlo simulation",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "premortem",
+      "name": "Premortem",
+      "familyIds": [
+        "family-13-risk-management-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "probability-impact-matrix",
+      "name": "Probability-impact matrix",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "red-teaming",
+      "name": "Red teaming",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "risk-appetite-and-tolerance",
+      "name": "Risk appetite and tolerance",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "risk-breakdown-structure",
+      "name": "Risk Breakdown Structure",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "risk-heat-map",
+      "name": "Risk heat map",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "risk-register",
+      "name": "Risk register",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "risk-velocity-and-proximity",
+      "name": "Risk velocity and proximity",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "scenario-analysis",
+      "name": "Scenario analysis",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "sensitivity-analysis",
+      "name": "Sensitivity analysis",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "stress-testing",
+      "name": "Stress testing",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "three-lines-model",
+      "name": "Three Lines Model",
+      "familyIds": [
+        "family-13-risk-management-frameworks",
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "tornado-diagram",
+      "name": "Tornado diagram",
+      "familyIds": [
+        "family-13-risk-management-frameworks"
+      ]
+    },
+    {
+      "id": "abc-inventory-analysis",
+      "name": "ABC inventory analysis",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "approved-vendor-list",
+      "name": "Approved Vendor List",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "best-value-procurement",
+      "name": "Best-value procurement",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "bid-levelling",
+      "name": "Bid levelling",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "bpkv-meat-evaluation",
+      "name": "BPKV/MEAT evaluation",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "category-management",
+      "name": "Category management",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "cips-procurement-cycle",
+      "name": "CIPS Procurement Cycle",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "consignment-stock",
+      "name": "Consignment stock",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "early-supplier-involvement",
+      "name": "Early Supplier Involvement",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "eoq",
+      "name": "EOQ",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "framework-call-offs",
+      "name": "Framework call-offs",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "itt",
+      "name": "ITT",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "just-in-time-supply",
+      "name": "Just-in-Time supply",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "kraljic-purchasing-portfolio-matrix",
+      "name": "Kraljic Purchasing Portfolio Matrix",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "make-or-buy-analysis",
+      "name": "Make-or-buy analysis",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "negotiated-tender",
+      "name": "Negotiated tender",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "open-tender",
+      "name": "Open tender",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "pqq",
+      "name": "PQQ",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "purchase-order-controls",
+      "name": "Purchase-order controls",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "reorder-point-system",
+      "name": "Reorder-point system",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "rfp",
+      "name": "RFP",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "rfq",
+      "name": "RFQ",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "safety-stock-calculation",
+      "name": "Safety-stock calculation",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "scope-gap-analysis",
+      "name": "Scope-gap analysis",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "selective-tender",
+      "name": "Selective tender",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "should-cost-modelling",
+      "name": "Should-cost modelling",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "single-dual-and-multi-sourcing",
+      "name": "Single-, dual- and multi-sourcing",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "subcontract-or-self-perform-analysis",
+      "name": "Subcontract-or-self-perform analysis",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "subcontractor-flow-down-requirements",
+      "name": "Subcontractor flow-down requirements",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "supplier-corrective-action-process",
+      "name": "Supplier corrective-action process",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "supplier-prequalification",
+      "name": "Supplier prequalification",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "supplier-scorecards",
+      "name": "Supplier scorecards",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "three-quote-comparison",
+      "name": "Three-quote comparison",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "two-stage-tender",
+      "name": "Two-stage tender",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "vendor-managed-inventory",
+      "name": "Vendor-Managed Inventory",
+      "familyIds": [
+        "family-14-procurement-and-subcontracting-frameworks"
+      ]
+    },
+    {
+      "id": "backlog-and-backlog-burn-analysis",
+      "name": "Backlog and backlog-burn analysis",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "break-even-analysis",
+      "name": "Break-even analysis",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "cash-conversion-cycle",
+      "name": "Cash Conversion Cycle",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "cash-flow-s-curve",
+      "name": "Cash-flow S-curve",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "committed-cost-reporting",
+      "name": "Committed-cost reporting",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "completed-contract-accounting",
+      "name": "Completed-contract accounting",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "contract-asset-liability-tracking",
+      "name": "Contract asset/liability tracking",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "contribution-margin",
+      "name": "Contribution margin",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "cost-to-complete",
+      "name": "Cost-to-complete",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "cost-volume-profit-analysis",
+      "name": "Cost-volume-profit analysis",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "cpi-and-spi",
+      "name": "CPI and SPI",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "driver-based-budgeting",
+      "name": "Driver-based budgeting",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "dso-dpo-and-dio",
+      "name": "DSO, DPO and DIO",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "dupont-analysis",
+      "name": "DuPont analysis",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "equipment-replacement-analysis",
+      "name": "Equipment replacement analysis",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "estimate-at-completion",
+      "name": "Estimate at Completion",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "estimate-to-complete",
+      "name": "Estimate to Complete",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "gross-margin-bridge",
+      "name": "Gross-margin bridge",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "irr",
+      "name": "IRR",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "labour-material-equipment-variance-analysis",
+      "name": "Labour/material/equipment variance analysis",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "npv",
+      "name": "NPV",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "payback-period",
+      "name": "Payback period",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "percentage-of-completion-accounting",
+      "name": "Percentage-of-completion accounting",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "retention-tracking",
+      "name": "Retention tracking",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "revenue-per-crew-day",
+      "name": "Revenue-per-crew-day",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "roic",
+      "name": "ROIC",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "rolling-forecast",
+      "name": "Rolling forecast",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "scenario-and-stress-testing",
+      "name": "Scenario and stress testing",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "thirteen-week-cash-flow-forecast",
+      "name": "Thirteen-week cash-flow forecast",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "unit-economics",
+      "name": "Unit economics",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "variance-at-completion",
+      "name": "Variance at Completion",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "work-in-progress-schedule",
+      "name": "Work-in-Progress schedule",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "zero-based-budgeting",
+      "name": "Zero-based budgeting",
+      "familyIds": [
+        "family-15-financial-control-frameworks"
+      ]
+    },
+    {
+      "id": "adkar",
+      "name": "ADKAR",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "apprenticeship-model",
+      "name": "Apprenticeship model",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "bpmn-process-mapping",
+      "name": "BPMN/process mapping",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "bridges-transition-model",
+      "name": "Bridges Transition Model",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "capacity-planning",
+      "name": "Capacity planning",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "competency-framework",
+      "name": "Competency framework",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "crew-composition-matrix",
+      "name": "Crew-composition matrix",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "daci",
+      "name": "DACI",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "daily-crew-huddles",
+      "name": "Daily crew huddles",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "delegation-of-authority-matrix",
+      "name": "Delegation-of-authority matrix",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "grow-coaching",
+      "name": "GROW coaching",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "job-instruction",
+      "name": "Job Instruction",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "kotter-eight-steps",
+      "name": "Kotter Eight Steps",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "lewin-change-model",
+      "name": "Lewin Change Model",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "nine-box-talent-grid",
+      "name": "Nine-box talent grid",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "psychological-safety",
+      "name": "Psychological Safety",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "rapid",
+      "name": "RAPID",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks",
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "situational-leadership",
+      "name": "Situational Leadership",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "skills-matrix",
+      "name": "Skills matrix",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "span-of-control",
+      "name": "Span of control",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "standard-operating-procedures",
+      "name": "Standard Operating Procedures",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "succession-planning",
+      "name": "Succession planning",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "tiered-daily-management",
+      "name": "Tiered daily management",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "train-the-trainer",
+      "name": "Train-the-trainer",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "training-within-industry",
+      "name": "Training Within Industry",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "tuckman-team-development-model",
+      "name": "Tuckman team-development model",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "utilisation-analysis",
+      "name": "Utilisation analysis",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "workforce-planning",
+      "name": "Workforce planning",
+      "familyIds": [
+        "family-16-workforce-and-organisational-frameworks"
+      ]
+    },
+    {
+      "id": "complaint-resolution-ladder",
+      "name": "Complaint-resolution ladder",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "csat",
+      "name": "CSAT",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "customer-effort-score",
+      "name": "Customer Effort Score",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "customer-journey-mapping",
+      "name": "Customer Journey Mapping",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "customer-lifecycle-management",
+      "name": "Customer lifecycle management",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "daily-progress-update",
+      "name": "Daily progress update",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "expectation-delivery-gap-analysis",
+      "name": "Expectation-delivery gap analysis",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "handover-and-customer-training",
+      "name": "Handover and customer training",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "iso-10002",
+      "name": "ISO 10002",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "moments-of-truth",
+      "name": "Moments of Truth",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "neighbour-impact-plan",
+      "name": "Neighbour-impact plan",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "nps",
+      "name": "NPS",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "pre-start-communication-plan",
+      "name": "Pre-start communication plan",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "rater",
+      "name": "RATER",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "repeat-maintenance-conversion",
+      "name": "Repeat-maintenance conversion",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "review-and-referral-loop",
+      "name": "Review and referral loop",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "selection-and-finish-sign-off",
+      "name": "Selection and finish sign-off",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "service-blueprinting",
+      "name": "Service Blueprinting",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "service-recovery-framework",
+      "name": "Service-recovery framework",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "servqual",
+      "name": "SERVQUAL",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "variation-authorisation-process",
+      "name": "Variation-authorisation process",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "warranty-triage",
+      "name": "Warranty triage",
+      "familyIds": [
+        "family-17-customer-experience-frameworks"
+      ]
+    },
+    {
+      "id": "asset-lifecycle-management",
+      "name": "Asset lifecycle management",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "asset-criticality-matrix",
+      "name": "Asset-criticality matrix",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "condition-based-maintenance",
+      "name": "Condition-based maintenance",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "corrective-maintenance",
+      "name": "Corrective maintenance",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "equipment-fmea",
+      "name": "Equipment FMEA",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "equipment-utilisation-tracking",
+      "name": "Equipment-utilisation tracking",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "fleet-replacement-planning",
+      "name": "Fleet replacement planning",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "fuel-and-idle-time-management",
+      "name": "Fuel and idle-time management",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "inspection-and-calibration-system",
+      "name": "Inspection and calibration system",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "iso-55000",
+      "name": "ISO 55000",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "mobilisation-planning",
+      "name": "Mobilisation planning",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "overall-equipment-effectiveness",
+      "name": "Overall Equipment Effectiveness",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "predictive-maintenance",
+      "name": "Predictive maintenance",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "preventive-maintenance",
+      "name": "Preventive maintenance",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "reliability-centred-maintenance",
+      "name": "Reliability-Centred Maintenance",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "rent-buy-lease-matrix",
+      "name": "Rent-buy-lease matrix",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "repair-versus-replace-model",
+      "name": "Repair-versus-replace model",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "spare-parts-abc-analysis",
+      "name": "Spare-parts ABC analysis",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "tool-control-system",
+      "name": "Tool-control system",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "total-productive-maintenance",
+      "name": "Total Productive Maintenance",
+      "familyIds": [
+        "family-18-tools-machinery-and-asset-management-frameworks"
+      ]
+    },
+    {
+      "id": "beng",
+      "name": "BENG",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "breeam",
+      "name": "BREEAM",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "circular-economy",
+      "name": "Circular Economy",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "construction-waste-management-plan",
+      "name": "Construction waste-management plan",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "cradle-to-cradle",
+      "name": "Cradle to Cradle",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "design-for-disassembly",
+      "name": "Design for Disassembly",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "dgnb",
+      "name": "DGNB",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "do-no-significant-harm",
+      "name": "Do No Significant Harm",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "embodied-versus-operational-carbon",
+      "name": "Embodied-versus-operational carbon",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "esg",
+      "name": "ESG",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "eu-taxonomy",
+      "name": "EU Taxonomy",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "ghg-protocol-scopes-1-2-and-3",
+      "name": "GHG Protocol Scopes 1, 2 and 3",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "iso-14001",
+      "name": "ISO 14001",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "iso-14040-14044-life-cycle-assessment",
+      "name": "ISO 14040/14044 Life-Cycle Assessment",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "leed",
+      "name": "LEED",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "local-and-responsible-sourcing",
+      "name": "Local and responsible sourcing",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "material-passports",
+      "name": "Material passports",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "mpg",
+      "name": "MPG",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "r-ladder-9r-framework",
+      "name": "R-ladder/9R framework",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "science-based-targets",
+      "name": "Science Based Targets",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "social-value-framework",
+      "name": "Social Value framework",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "triple-bottom-line",
+      "name": "Triple Bottom Line",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "un-sustainable-development-goals",
+      "name": "UN Sustainable Development Goals",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "waste-hierarchy",
+      "name": "Waste hierarchy",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "well",
+      "name": "WELL",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "whole-life-carbon",
+      "name": "Whole-Life Carbon",
+      "familyIds": [
+        "family-19-sustainability-frameworks"
+      ]
+    },
+    {
+      "id": "3-2-1-backup-framework",
+      "name": "3-2-1 backup framework",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "3d-bim",
+      "name": "3D BIM",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "4d-scheduling",
+      "name": "4D scheduling",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "5d-costing",
+      "name": "5D costing",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "6d-sustainability",
+      "name": "6D sustainability",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "7d-facilities-management",
+      "name": "7D facilities management",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "asset-information-requirements",
+      "name": "Asset Information Requirements",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "bim-execution-plan",
+      "name": "BIM Execution Plan",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "cobie",
+      "name": "COBie",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "common-data-environment",
+      "name": "Common Data Environment",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "data-governance-framework",
+      "name": "Data-governance framework",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "digital-twins",
+      "name": "Digital twins",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "digital-maturity-model",
+      "name": "Digital-maturity model",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "document-control-framework",
+      "name": "Document-control framework",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "exchange-information-requirements",
+      "name": "Exchange Information Requirements",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "gis-bim-integration",
+      "name": "GIS-BIM integration",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "ifc",
+      "name": "IFC",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "information-delivery-planning",
+      "name": "Information-delivery planning",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "iso-19650",
+      "name": "ISO 19650",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "iso-27001",
+      "name": "ISO 27001",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "nist-cybersecurity-framework",
+      "name": "NIST Cybersecurity Framework",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "openbim",
+      "name": "openBIM",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "organisational-information-requirements",
+      "name": "Organisational Information Requirements",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "project-information-requirements",
+      "name": "Project Information Requirements",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "role-based-access-control",
+      "name": "Role-based access control",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "scan-to-bim",
+      "name": "Scan-to-BIM",
+      "familyIds": [
+        "family-20-bim-information-and-digital-frameworks"
+      ]
+    },
+    {
+      "id": "approval-matrix",
+      "name": "Approval matrix",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "audit-programme",
+      "name": "Audit programme",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "change-authorisation-matrix",
+      "name": "Change-authorisation matrix",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "claims-management-framework",
+      "name": "Claims-management framework",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "conflict-of-interest-controls",
+      "name": "Conflict-of-interest controls",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "contract-lifecycle-management",
+      "name": "Contract Lifecycle Management",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "coso-internal-control",
+      "name": "COSO Internal Control",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "delegation-of-authority",
+      "name": "Delegation of Authority",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "dispute-escalation-ladder",
+      "name": "Dispute escalation ladder",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "document-control",
+      "name": "Document control",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "gdpr-avg-privacy-framework",
+      "name": "GDPR/AVG privacy framework",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "iso-22301-business-continuity",
+      "name": "ISO 22301 business continuity",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "iso-37001-anti-bribery-management",
+      "name": "ISO 37001 anti-bribery management",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "iso-37301-compliance-management",
+      "name": "ISO 37301 compliance management",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "negotiation-mediation-adjudication-arbitration-litigation-ladder",
+      "name": "Negotiation-mediation-adjudication-arbitration-litigation ladder",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "records-retention-schedule",
+      "name": "Records-retention schedule",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "segregation-of-duties",
+      "name": "Segregation of Duties",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "whistleblowing-framework",
+      "name": "Whistleblowing framework",
+      "familyIds": [
+        "family-21-governance-and-compliance-frameworks"
+      ]
+    },
+    {
+      "id": "a3",
+      "name": "A3",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "cost-benefit-analysis",
+      "name": "Cost-benefit analysis",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "cynefin",
+      "name": "Cynefin",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "decision-journal",
+      "name": "Decision journal",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "devil-s-advocate-review",
+      "name": "Devil's-advocate review",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "ice",
+      "name": "ICE",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "ishikawa-diagram",
+      "name": "Ishikawa diagram",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "kepner-tregoe",
+      "name": "Kepner-Tregoe",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "moscow",
+      "name": "MoSCoW",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "multi-criteria-decision-analysis",
+      "name": "Multi-Criteria Decision Analysis",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "npv-and-irr",
+      "name": "NPV and IRR",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "ooda-loop",
+      "name": "OODA Loop",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "pareto-principle",
+      "name": "Pareto principle",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "red-team-review",
+      "name": "Red-team review",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "rice",
+      "name": "RICE",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "weighted-decision-matrix",
+      "name": "Weighted Decision Matrix",
+      "familyIds": [
+        "family-22-decision-making-and-problem-solving-frameworks"
+      ]
+    },
+    {
+      "id": "asset-productivity",
+      "name": "Asset productivity",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "backlog",
+      "name": "Backlog",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "bid-hit-rate",
+      "name": "Bid-hit rate",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "cash-conversion",
+      "name": "Cash conversion",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "change-order-recovery",
+      "name": "Change-order recovery",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "commercial-pipeline",
+      "name": "Commercial pipeline",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "compliance",
+      "name": "Compliance",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "crew-utilisation",
+      "name": "Crew utilisation",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "customer-acquisition-cost",
+      "name": "Customer acquisition cost",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "customer-lifetime-value",
+      "name": "Customer lifetime value",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "customer-satisfaction",
+      "name": "Customer satisfaction",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "defect-frequency",
+      "name": "Defect frequency",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "delivery-reliability",
+      "name": "Delivery reliability",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "dso",
+      "name": "DSO",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "employee-capacity",
+      "name": "Employee capacity",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "equipment-utilisation",
+      "name": "Equipment utilisation",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "financial-performance",
+      "name": "Financial performance",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "gross-margin-per-project",
+      "name": "Gross margin per project",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "gross-margin-fade-or-gain",
+      "name": "Gross-margin fade or gain",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "labour-productivity",
+      "name": "Labour productivity",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "nps-csat",
+      "name": "NPS/CSAT",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "on-time-completion",
+      "name": "On-time completion",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "quality",
+      "name": "Quality",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "quote-conversion",
+      "name": "Quote conversion",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "referral-rate",
+      "name": "Referral rate",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "repeat-customer-rate",
+      "name": "Repeat-customer rate",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "revenue-per-crew-day-09552bb0",
+      "name": "Revenue per crew-day",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "revenue-per-field-employee",
+      "name": "Revenue per field employee",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "rework-rate",
+      "name": "Rework rate",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "safety",
+      "name": "Safety",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "safety-observations-and-incidents",
+      "name": "Safety observations and incidents",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "schedule-adherence",
+      "name": "Schedule adherence",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "sustainability",
+      "name": "Sustainability",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    },
+    {
+      "id": "warranty-cost",
+      "name": "Warranty cost",
+      "familyIds": [
+        "family-23-contractor-performance-frameworks"
+      ]
+    }
+  ],
+  "counts": {
+    "families": 23,
+    "frameworks": 671,
+    "familyMemberships": 700
+  }
+}

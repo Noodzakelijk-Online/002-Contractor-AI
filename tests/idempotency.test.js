@@ -29,7 +29,7 @@ test('completed idempotent requests survive a local restart and reject changed p
     const conflict = restartedLedger.claimIdempotentRequest({ keyHash, scope, requestHash: 'changed-request-hash' });
     assert.equal(conflict.claimed, false);
     assert.equal(conflict.reason, 'request_conflict');
-    assert.equal(restartedLedger.migrationStatus().currentVersion, '068_operational_safety_controls');
+    assert.equal(restartedLedger.migrationStatus().currentVersion, '069_governed_framework_workspace');
   } finally {
     restartedLedger.close();
   }

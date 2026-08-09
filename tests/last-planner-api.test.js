@@ -204,6 +204,6 @@ test('Last Planner API joins make-ready, approval, daily actuals, PPC, export, a
   assert.equal(operationalExport.body.lastPlannerOutcomes.length, 1);
   const diagnostics = await request(baseUrl, '/api/ledger/debug');
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '068_operational_safety_controls');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '069_governed_framework_workspace');
   assert.equal(diagnostics.body.diagnostics.counts.lastPlannerWeeklyPlans, 1);
 });

@@ -46,6 +46,20 @@ the repository rather than treating these statements as current by assumption.
 - Before trusting this checkpoint, verify the pushed commit and GitHub Actions result.
 - Do not reinterpret source-compatible ngrok/HAI contracts as live-provider proof.
 
+## CP-05 Governed framework workspace
+
+- Catalog: 23 families, 671 unique frameworks, 700 family memberships
+- Migration: `069_governed_framework_workspace`
+- UI: searchable/paginated framework register under Performance
+- Governance: organization/project scope, guarded statuses, exact replay,
+  optimistic concurrency, immutable revision hashes, due-review triage
+- Integration: export, backup verification, diagnostics, PostgreSQL contract,
+  internal command plan, read-only HAI, desktop/mobile browser flow
+- Verification: 509 Node tests, 80 Chromium workflows, release/build/bundle,
+  container migration 069, and the Node 22.23.2 Windows package passed
+- External boundary: no method certification, provider execution, spend, message,
+  schedule commitment, or financial action is inferred from a framework record
+
 ## Resume procedure
 
 1. Read the newest user request and `git status --short`.

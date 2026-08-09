@@ -22,10 +22,13 @@ The launcher creates these local-user resources:
 ```
 
 `runtime.json` contains a random 256-bit owner access key. The launcher applies
-current-user file permissions where Windows permits it, prints the key in the
-local terminal, binds the server to `127.0.0.1`, and opens
+current-user file permissions where Windows permits it, prints the key once on
+first run, binds the server to `127.0.0.1`, and opens
 `http://127.0.0.1:3000`. The key is never written into the application folder,
 browser storage, a URL, or the repository.
+
+Later starts report only the protected configuration path and do not repeat the
+key in terminal output or redirected logs.
 
 Keep `%LOCALAPPDATA%\ContractorAI` on an encrypted Windows volume. Use the
 in-product verified backup workflow and retain copies away from the computer.
