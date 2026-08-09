@@ -3,7 +3,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { verifyReleaseContract, walkFiles } = require('../scripts/verify-release-contract');
+const {
+  findRequestDerivedActorExpressions,
+  verifyReleaseContract,
+  walkFiles
+} = require('../scripts/verify-release-contract');
 
 test('release contract retains only the canonical runtime and mandatory delivery gates', () => {
   const result = verifyReleaseContract();
@@ -21,4 +25,18 @@ test('release source inventory excludes generated runtime and browser-report dir
     fs.writeFileSync(path.join(root, directory, 'marker.js'), directory);
   }
   assert.deepEqual(walkFiles(root), ['src/marker.js']);
+});
+
+test('release actor guard rejects request-derived identities and accepts the trusted boundary', () => {
+  const unsafe = findRequestDerivedActorExpressions(`
+    operation({ actor: req.body?.actor || 'dashboard' });
+    operation({ actor: actorFromRequest(req, payload.actor || 'dashboard') });
+    const actor = input.actor || 'dashboard';
+  `);
+  assert.equal(unsafe.length, 3);
+  assert.deepEqual(unsafe.map(finding => finding.line), [2, 3, 4]);
+  assert.deepEqual(findRequestDerivedActorExpressions(`
+    operation({ actor: trustedRequestActor(req) });
+    const actor = trustedRequestActor(req);
+  `), []);
 });

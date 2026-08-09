@@ -101,6 +101,94 @@ test('local mode assigns a trusted audit actor and does not retain a submitted a
     )));
     assert.equal(detail.body.job.audit.some(event => event.actor === 'role:owner:spoofed'), false);
 
+    const jsonHeaders = { 'Content-Type': 'application/json' };
+    const worker = await request(baseUrl, '/api/ledger/workers', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        name: 'Local actor equipment operator',
+        role: 'Equipment operator',
+        status: 'available',
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(worker.response.status, 201);
+    const assignment = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/assignments`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        workerId: worker.body.worker.id,
+        workerName: worker.body.worker.name,
+        role: worker.body.worker.role,
+        status: 'assigned',
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(assignment.response.status, 201);
+    if (assignment.body.approval?.id) {
+      const approval = await request(baseUrl, `/api/ledger/approvals/${assignment.body.approval.id}/resolve`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          status: 'approved',
+          resolvedBy: 'Local owner',
+          reason: 'The equipment operator assignment and job scope were checked.',
+          actor: 'role:owner:spoofed'
+        })
+      });
+      assert.equal(approval.response.status, 200);
+    }
+    const tool = await request(baseUrl, '/api/ledger/tools', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        name: 'Local actor custody lift',
+        category: 'access',
+        status: 'available',
+        homeLocation: 'Local depot',
+        currentLocation: 'Local depot',
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(tool.response.status, 201);
+    const reservation = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/tools`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        toolId: tool.body.tool.id,
+        toolName: tool.body.tool.name,
+        status: 'reserved',
+        neededFrom: new Date(Date.now() - 60_000).toISOString(),
+        neededUntil: new Date(Date.now() + 86_400_000).toISOString(),
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(reservation.response.status, 201);
+    const checkout = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/equipment-custody/check-out`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        reservationId: reservation.body.toolReservation.id,
+        workerId: worker.body.worker.id,
+        checkedOutAt: new Date().toISOString(),
+        dueBackAt: new Date(Date.now() + 86_400_000).toISOString(),
+        checkedOutBy: worker.body.worker.name,
+        condition: 'good',
+        location: 'Local project gate',
+        evidenceReference: 'handoff:local-actor-integrity',
+        entryKey: 'local-actor-integrity-checkout',
+        notes: 'Keys and visible condition checked with the assigned operator.',
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(checkout.response.status, 201);
+
+    const custodyDetail = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}`);
+    assert.ok(custodyDetail.body.job.audit.some(event => (
+      event.action === 'checkout_equipment' && event.actor === 'local:owner'
+    )));
+    assert.equal(custodyDetail.body.job.audit.some(event => event.actor === 'role:owner:spoofed'), false);
+
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(process.env.LEDGER_DB_FILE, { readOnly: true });
     try {

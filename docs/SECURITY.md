@@ -38,6 +38,8 @@ Rotate the role key to invalidate its sessions after suspected disclosure.
 - Request bodies cannot select an audit identity. The server binds every parsed
   object body to `local:owner`, the authenticated role principal, or the scoped
   `client_portal` identity and keeps that field out of retained business payloads.
+  Mutation routes use that trusted request principal directly, including handlers
+  that clone or reshape input; the release verifier rejects body-derived actors.
 - SHA-256 chained audit events are committed with the underlying mutation.
 - Exact idempotency and lease ownership prevent changed retries and stale workers.
 - External commitments require a separate approval and an allowlisted verified

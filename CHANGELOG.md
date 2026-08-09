@@ -40,6 +40,9 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Changed
 
+- Governed work-permit creation, readiness, and approval expiry checks now use the
+  ledger clock consistently. Expired permits still fail closed, while deterministic
+  lifecycle tests no longer depend on sub-second wall-clock timing.
 - Owner automation control no longer relies on browser-native prompt and confirm
   surfaces; validation and API failures remain inside the auditable decision flow.
 - QA/demo cleanup no longer relies on a browser-native confirmation or a bounded
@@ -78,8 +81,10 @@ Versioning for the application contract; database migrations remain append-only.
 
 - Local and hosted request bodies can no longer choose their retained audit actor.
   The server assigns `local:owner`, the authenticated role principal, or the
-  token-scoped `client_portal` identity and excludes submitted actor labels from
-  retained business payloads.
+  token-scoped `client_portal` identity; every explicit mutation route consumes
+  that trusted principal directly, and submitted actor labels are excluded from
+  retained business payloads. The release contract rejects new request-derived
+  actor expressions.
 - Prevented repeat standalone starts and redirected runtime logs from disclosing
   the retained owner access key.
 - Managed account credentials are retained only as domain-separated SHA-256 hashes;

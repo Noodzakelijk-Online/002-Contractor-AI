@@ -124,6 +124,19 @@ function walkFiles(root, relative = '', unreadableDirectories = []) {
   return files;
 }
 
+function findRequestDerivedActorExpressions(source = '') {
+  const patterns = [
+    /\bactor\s*:\s*(?:req\.body|payload|input|body)\??\.actor\b/,
+    /actorFromRequest\(\s*req\s*,\s*(?:req\.body|payload|input|body)\??\.actor\b/,
+    /\b(?:const|let|var)\s+actor\s*=\s*(?:req\.body|payload|input|body)\??\.actor\b/
+  ];
+  return String(source).split(/\r?\n/).flatMap((line, index) => (
+    patterns.some(pattern => pattern.test(line))
+      ? [{ line: index + 1, source: line.trim() }]
+      : []
+  ));
+}
+
 function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const failures = [];
   const unreadableDirectories = [];
@@ -164,6 +177,18 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  for (const requiredActorBoundary of [
+    'function trustedRequestActor(req)',
+    'function bindTrustedRequestActor(req)',
+    'bindTrustedRequestActor(req);'
+  ]) {
+    if (!serverSource.includes(requiredActorBoundary)) {
+      failures.push(`Server is missing trusted request actor boundary: ${requiredActorBoundary}`);
+    }
+  }
+  for (const finding of findRequestDerivedActorExpressions(serverSource)) {
+    failures.push(`Server route derives its audit actor from request data at server.js:${finding.line}: ${finding.source}`);
+  }
   for (const liveFacade of ["app.get('/api/dashboard'", "app.post('/api/upload'"]) {
     if (serverSource.includes(liveFacade)) failures.push(`Live non-ledger facade is still present: ${liveFacade}`);
   }
@@ -670,4 +695,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { verifyReleaseContract, walkFiles };
+module.exports = { findRequestDerivedActorExpressions, verifyReleaseContract, walkFiles };

@@ -72,7 +72,7 @@ external-provider engines.
    Job-scoped sequence guards and native disabled loading controls now close those
    races, including programmatic browser interaction during loading.
 8. The previous browser runner reused runtime state between specs. It now discovers
-   all 81 tests from the Playwright AST and runs bounded isolated batches against
+   all 89 tests from the Playwright AST and runs bounded isolated batches against
    separate ports and databases after one production build.
 9. The broad framework inventory was documentation-only. Migration 069 and the
    framework workspace now retain every family membership and provide scoped,
@@ -98,6 +98,15 @@ external-provider engines.
     requires a source-current plan hash and retained reason, independently verifies
     the recovery package, and performs approval rejection plus archive/retirement
     in one transaction. Empty and changed plans fail without partial mutation.
+14. Request-body actor labels were replaced at the parser boundary, but explicit
+    route fallbacks still read the bound body field and cloned bodies could lose
+    its non-enumerable value. All 164 explicit mutation sites now consume the
+    canonical trusted request principal directly, and a release source guard plus
+    API persistence tests prevent body-derived audit identities from returning.
+15. An archived-work-permit regression used a 500 ms live expiry window and a
+    600 ms sleep, which failed under full-suite load before approval could finish.
+    Permit creation, readiness, and approval expiry now use the ledger's injectable
+    clock consistently, preserving strict expiry rejection with deterministic tests.
 
 ### Residual technical debt
 

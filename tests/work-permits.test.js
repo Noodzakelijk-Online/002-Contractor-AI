@@ -5,9 +5,12 @@ const path = require('node:path');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
 
-function fixture(t, suffix = 'governed') {
+function fixture(t, suffix = 'governed', options = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-work-permit-'));
-  const ledger = new ContractorOperatingLedger({ dbFile: path.join(directory, 'ledger.sqlite') });
+  const ledger = new ContractorOperatingLedger({
+    dbFile: path.join(directory, 'ledger.sqlite'),
+    ...options
+  });
   const job = ledger.createIntake({
     title: `Work permit ${suffix}`,
     client: { name: `Permit client ${suffix}` },
@@ -153,12 +156,15 @@ test('work permits require approval and every assigned worker acknowledgement be
   assert.equal(diagnostics.counts.workPermitAttendees, 2);
 });
 
-test('archived jobs retain permit integrity without operational expiry warnings', async t => {
-  const { ledger, job } = fixture(t, 'archived-diagnostics');
+test('archived jobs retain permit integrity without operational expiry warnings', t => {
+  let currentTime = Date.now();
+  const { ledger, job } = fixture(t, 'archived-diagnostics', {
+    clock: () => new Date(currentTime)
+  });
   const created = ledger.createWorkPermit(job.id, {
     ...permitPayload('archived-diagnostics-001'),
-    validFrom: new Date(Date.now() - 60 * 1000).toISOString(),
-    expiresAt: new Date(Date.now() + 500).toISOString()
+    validFrom: new Date(currentTime - 60 * 1000).toISOString(),
+    expiresAt: new Date(currentTime + 500).toISOString()
   }, { actor: 'office_operator' });
 
   ledger.resolveApproval(created.approval.id, {
@@ -166,7 +172,7 @@ test('archived jobs retain permit integrity without operational expiry warnings'
     resolvedBy: 'permit_approver',
     reason: 'Retained expired permit approved for archived diagnostics coverage.'
   });
-  await new Promise(resolve => setTimeout(resolve, 600));
+  currentTime += 600;
   const operationalIssues = ledger.diagnose().issues;
   assert.equal(operationalIssues.some(issue => issue.message.includes('retained expiry time')), true);
   assert.equal(operationalIssues.some(issue => issue.message.includes('outstanding worker acknowledgement')), true);

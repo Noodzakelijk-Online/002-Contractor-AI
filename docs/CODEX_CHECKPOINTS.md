@@ -3,6 +3,19 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-15 Route-level audit principals
+
+- Coverage: all 164 explicit mutation actor sites in the HTTP layer consume
+  `trustedRequestActor(req)` instead of an enumerable or cloned request field
+- Boundary: body binding still removes submitted actor labels from retained input;
+  direct principal use also protects handlers that clone or reshape request bodies
+- Prevention: the release contract scans canonical source and fails when a route
+  assigns an actor from `req.body`, `payload`, `input`, or `body`
+- Verification: focused API coverage proves both intake and cloned-body equipment
+  custody events retain `local:owner` and never the submitted spoofed label
+- Delivery: 527 Node tests, 89 Chromium workflows, dependency/release/build/bundle,
+  maintained HAI parser, production benchmark, container, and Windows gates pass
+
 ## CP-14 Trusted request actors
 
 - Boundary: every parsed object body receives a non-enumerable server-selected
@@ -12,7 +25,7 @@ the repository rather than treating these statements as current by assumption.
 - Persistence: submitted actor labels are excluded from retained business payloads,
   including raw intake source data
 - Verification: focused authentication/API persistence coverage plus the complete
-  526-test Node gate passed with zero failures; release/browser/package gates are
+  527-test Node gate passed with zero failures; release/browser/package gates are
   recorded in `FINAL_VERIFICATION_REPORT.md`
 
 ## CP-13 Previewed QA maintenance

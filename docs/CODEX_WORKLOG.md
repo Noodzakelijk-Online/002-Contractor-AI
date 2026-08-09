@@ -1,12 +1,26 @@
 # Codex Worklog
 
+- Normalized all 164 explicit HTTP mutation actor sites to the canonical trusted
+  request principal. This closes the residual consistency gap in handlers that
+  clone or reshape a parsed body before invoking the ledger.
+- Extended the release contract to reject future request-body-derived actors and
+  added API evidence that both intake and cloned-body equipment custody mutations
+  ignore a spoofed owner label while retaining `local:owner` in chained history.
+- The complete regression run exposed a sub-second work-permit fixture race under
+  load. Permit creation, readiness, and approval expiry now honor the injected
+  ledger clock; deterministic expiry coverage replaced the sleep, and all 527 Node
+  tests pass with 491 local passes, 36 environment skips, and zero failures.
+- The exact-source release gates pass: zero dependency vulnerabilities, 89 Chromium
+  workflows in 23 isolated batches, production build and bundle budgets, native and
+  maintained-parser HAI contracts, the 63,500-row benchmark, hardened container,
+  Node 22.23.2 Windows standalone, and the smoke performance profile.
 - Closed the remaining local-mode audit identity gap at the shared Express request
   boundary. Parsed object bodies now receive only `local:owner`, the authenticated
   role principal, or `client_portal`; submitted labels are non-enumerably replaced
   before any current or future ledger mutation route can consume them.
 - Added an API and persisted-database regression proving a spoofed owner label does
   not enter either chained audit history or raw intake source JSON. Lint, dependency
-  audit, release contract, production build, bundle/HAI contracts, all 526 Node
+  audit, release contract, production build, bundle/HAI contracts, all 527 Node
   tests, all 89 Chromium workflows, container runtime, Windows standalone, and the
   smoke performance profile pass.
 - Replaced the final browser-native confirmation in the canonical dashboard with

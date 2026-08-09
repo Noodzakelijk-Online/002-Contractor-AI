@@ -2661,7 +2661,7 @@ app.put('/api/ledger/organization', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     organization: operatingLedger.updateOrganizationProfile(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     })
   }));
 });
@@ -2819,7 +2819,7 @@ app.post('/api/ledger/command-plan', (req, res) => {
     const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
     const result = mode === 'preview'
       ? operatingLedger.buildTodayCommandPlan(payload)
-      : operatingLedger.applyTodayCommandPlan(payload, { actor: payload.actor || 'dashboard' });
+      : operatingLedger.applyTodayCommandPlan(payload, { actor: trustedRequestActor(req) });
     return {
       success: true,
       ...result,
@@ -3128,7 +3128,7 @@ app.post('/api/ledger/bid-packages/:id/commitment', (req, res) => {
 app.post('/api/ledger/intake', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    job: operatingLedger.createIntake(req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    job: operatingLedger.createIntake(req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -3143,7 +3143,7 @@ app.get('/api/ledger/jobs/:id', (req, res) => {
 app.put('/api/ledger/jobs/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }));
 });
@@ -3151,7 +3151,7 @@ app.put('/api/ledger/jobs/:id', (req, res) => {
 app.patch('/api/ledger/jobs/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.updateJobWithApproval(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }));
 });
@@ -3159,7 +3159,7 @@ app.patch('/api/ledger/jobs/:id', (req, res) => {
 app.post('/api/ledger/jobs/:id/archive', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.requestJobArchive(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.requestJobArchive(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: String(req.query.includeDashboard ?? req.query.include_dashboard ?? 'true').toLowerCase() !== 'false'
       ? operatingLedger.dashboardSummary()
       : null
@@ -3169,7 +3169,7 @@ app.post('/api/ledger/jobs/:id/archive', (req, res) => {
 app.post('/api/ledger/jobs/:id/restore', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.requestJobRestore(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.requestJobRestore(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: String(req.query.includeDashboard ?? req.query.include_dashboard ?? 'true').toLowerCase() !== 'false'
       ? operatingLedger.dashboardSummary()
       : null
@@ -3190,7 +3190,7 @@ app.post('/api/ledger/jobs/:id/playbook', (req, res) => {
     const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
     const result = mode === 'preview'
       ? operatingLedger.buildJobPlaybookPlan(req.params.id, payload)
-      : operatingLedger.applyJobPlaybook(req.params.id, payload, { actor: payload.actor || 'dashboard' });
+      : operatingLedger.applyJobPlaybook(req.params.id, payload, { actor: trustedRequestActor(req) });
     return {
       success: true,
       ...result,
@@ -3213,7 +3213,7 @@ app.post('/api/ledger/jobs/:id/capability-plan', (req, res) => {
     const mode = String(payload.mode || payload.action || 'apply').trim().toLowerCase().replace(/[\s-]+/g, '_');
     const result = mode === 'preview'
       ? operatingLedger.buildJobCapabilityPlan(req.params.id, payload)
-      : operatingLedger.applyJobCapabilityPlan(req.params.id, payload, { actor: actorFromRequest(req, payload.actor || 'dashboard') });
+      : operatingLedger.applyJobCapabilityPlan(req.params.id, payload, { actor: trustedRequestActor(req) });
     return {
       success: true,
       ...result,
@@ -3225,7 +3225,7 @@ app.post('/api/ledger/jobs/:id/capability-plan', (req, res) => {
 app.post('/api/ledger/jobs/:id/tasks', (req, res) => {
   return handleLedgerRequest(req, res, () => operatingLedger.transaction(() => {
     const payload = req.body || {};
-    const actor = actorFromRequest(req, payload.actor || 'dashboard');
+    const actor = trustedRequestActor(req);
     const task = operatingLedger.addTask(req.params.id, payload, { actor });
     const predecessorTaskId = payload.predecessorTaskId || payload.predecessor_task_id || null;
     const dependency = predecessorTaskId
@@ -3249,7 +3249,7 @@ app.patch('/api/ledger/jobs/:id/tasks/:taskId/schedule', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     task: operatingLedger.updateTaskSchedule(req.params.id, req.params.taskId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }));
@@ -3266,7 +3266,7 @@ app.post('/api/ledger/jobs/:id/task-dependencies', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     dependency: operatingLedger.addTaskDependency(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
@@ -3276,7 +3276,7 @@ app.post('/api/ledger/jobs/:id/task-dependencies/:dependencyId/cancel', (req, re
   return handleLedgerRequest(req, res, () => ({
     success: true,
     dependency: operatingLedger.cancelTaskDependency(req.params.id, req.params.dependencyId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }));
@@ -3286,7 +3286,7 @@ app.post('/api/ledger/jobs/:id/schedule-baselines', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestScheduleBaseline(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
@@ -3434,7 +3434,7 @@ app.post('/api/ledger/jobs/:id/pricing-decisions', (req, res) => {
 app.post('/api/ledger/jobs/:id/quote', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    quote: operatingLedger.createQuote(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    quote: operatingLedger.createQuote(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
 });
@@ -3444,7 +3444,7 @@ app.post('/api/ledger/jobs/:id/quotes/:quoteId/issue-package', (req, res) => {
     const issuePackage = operatingLedger.prepareQuoteIssuePackage(
       req.params.id,
       req.params.quoteId,
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3460,7 +3460,7 @@ app.post('/api/ledger/jobs/:id/quotes/:quoteId/acceptance', (req, res) => {
       req.params.id,
       req.params.quoteId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3473,7 +3473,7 @@ app.post('/api/ledger/jobs/:id/quotes/:quoteId/acceptance', (req, res) => {
 app.post('/api/ledger/jobs/:id/site-visits', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    siteVisit: operatingLedger.createSiteVisit(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    siteVisit: operatingLedger.createSiteVisit(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -3482,7 +3482,7 @@ app.post('/api/ledger/jobs/:id/site-visits', (req, res) => {
 app.post('/api/ledger/jobs/:id/change-orders', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    changeOrder: operatingLedger.createChangeOrder(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    changeOrder: operatingLedger.createChangeOrder(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -3494,7 +3494,7 @@ app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/issue-package', (req
       req.params.id,
       req.params.changeOrderId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3511,7 +3511,7 @@ app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/acceptance', (req, r
       req.params.id,
       req.params.changeOrderId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3548,7 +3548,7 @@ app.post('/api/ledger/jobs/:id/daywork-tickets', (req, res) => {
     const result = operatingLedger.createDayworkTicket(
       req.params.id,
       dayworkTicketPayloadForOperator(req, req.body || {}),
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3568,7 +3568,7 @@ app.post('/api/ledger/jobs/:id/daywork-tickets/:ticketId/acknowledgement', (req,
       req.params.id,
       req.params.ticketId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3588,7 +3588,7 @@ app.post('/api/ledger/jobs/:id/daywork-tickets/:ticketId/convert', (req, res) =>
       req.params.id,
       req.params.ticketId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3620,7 +3620,7 @@ app.post('/api/ledger/jobs/:id/nonconformances', (req, res) => {
     const result = operatingLedger.createNonconformance(
       req.params.id,
       nonconformancePayloadForOperator(req, req.body || {}),
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3639,7 +3639,7 @@ app.post('/api/ledger/jobs/:id/nonconformances/:recordId/corrective-action', (re
       req.params.id,
       req.params.recordId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3657,7 +3657,7 @@ app.post('/api/ledger/jobs/:id/nonconformances/:recordId/closure', (req, res) =>
       req.params.id,
       req.params.recordId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3672,7 +3672,7 @@ app.post('/api/ledger/jobs/:id/nonconformances/:recordId/closure', (req, res) =>
 app.post('/api/ledger/jobs/:id/field-reports', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    fieldReport: recordForOperator(req, operatingLedger.createFieldReport(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    fieldReport: recordForOperator(req, operatingLedger.createFieldReport(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -3681,7 +3681,7 @@ app.post('/api/ledger/jobs/:id/field-reports', (req, res) => {
 app.post('/api/ledger/jobs/:id/rfis', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    rfi: recordForOperator(req, operatingLedger.createRfi(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    rfi: recordForOperator(req, operatingLedger.createRfi(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -3690,7 +3690,7 @@ app.post('/api/ledger/jobs/:id/rfis', (req, res) => {
 app.post('/api/ledger/jobs/:id/submittals', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    submittal: recordForOperator(req, operatingLedger.createSubmittalRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    submittal: recordForOperator(req, operatingLedger.createSubmittalRecord(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -3699,7 +3699,7 @@ app.post('/api/ledger/jobs/:id/submittals', (req, res) => {
 app.post('/api/ledger/jobs/:id/client-selections', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    clientSelection: operatingLedger.createClientSelection(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    clientSelection: operatingLedger.createClientSelection(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -3708,7 +3708,7 @@ app.post('/api/ledger/jobs/:id/client-selections', (req, res) => {
 app.post('/api/ledger/jobs/:id/permits', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    permit: operatingLedger.createPermitRecord(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    permit: operatingLedger.createPermitRecord(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -3752,7 +3752,7 @@ app.get('/api/ledger/jobs/:id/pre-task-plans', (req, res) => {
 app.post('/api/ledger/jobs/:id/pre-task-plans', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.createPreTaskPlan(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -3772,7 +3772,7 @@ app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/acknowledgments', (req, re
       req.params.id,
       req.params.planId,
       preTaskPlanAcknowledgementPayloadForOperator(req, req.body || {}),
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3790,7 +3790,7 @@ app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/suspend', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const identity = req.operator?.role === 'field_worker' ? fieldWorkerIdentity(req) : { workerId: null };
     const result = operatingLedger.suspendPreTaskPlan(req.params.id, req.params.planId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard'),
+      actor: trustedRequestActor(req),
       workerId: identity.workerId
     });
     return {
@@ -3808,7 +3808,7 @@ app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/suspend', (req, res) => {
 app.post('/api/ledger/jobs/:id/pre-task-plans/:planId/close', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.closePreTaskPlan(req.params.id, req.params.planId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -3912,7 +3912,7 @@ app.get('/api/ledger/jobs/:id/work-permits', (req, res) => {
 app.post('/api/ledger/jobs/:id/work-permits', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.createWorkPermit(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -3932,7 +3932,7 @@ app.post('/api/ledger/jobs/:id/work-permits/:permitId/acknowledgments', (req, re
       req.params.id,
       req.params.permitId,
       workPermitAcknowledgementPayloadForOperator(req, req.body || {}),
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -3950,7 +3950,7 @@ app.post('/api/ledger/jobs/:id/work-permits/:permitId/suspend', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.suspendWorkPermit(req.params.id, req.params.permitId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -3961,7 +3961,7 @@ app.post('/api/ledger/jobs/:id/work-permits/:permitId/close', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.closeWorkPermit(req.params.id, req.params.permitId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -4052,7 +4052,7 @@ app.post('/api/ledger/jobs/:id/photo-evidence', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     photoEvidenceSet: operatingLedger.createPhotoEvidenceSet(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -4063,7 +4063,7 @@ app.post('/api/ledger/jobs/:id/photo-evidence/:setId/review', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestPhotoEvidenceReview(req.params.id, req.params.setId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -4074,7 +4074,7 @@ app.post('/api/ledger/inspection-templates', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     template: operatingLedger.createInspectionTemplate(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     })
   }), 201);
 });
@@ -4083,7 +4083,7 @@ app.post('/api/ledger/jobs/:id/inspection-checklists', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     inspection: operatingLedger.createInspectionFromTemplate(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -4094,7 +4094,7 @@ app.post('/api/ledger/jobs/:id/inspections', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     inspection: operatingLedger.createInspectionRecord(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -4110,7 +4110,7 @@ app.post('/api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions',
       requireWorkerIdentity: Boolean(installationQc)
     });
     const result = operatingLedger.submitInspectionChecklist(req.params.id, req.params.inspectionId, payload, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard'),
+      actor: trustedRequestActor(req),
       workerId: installationQc && req.operator?.role === 'field_worker' ? req.operator.scope?.workerId : null,
       enforceWorkerScope: Boolean(installationQc && req.operator?.authenticated === true)
     });
@@ -4130,7 +4130,7 @@ app.post('/api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions',
 app.post('/api/ledger/jobs/:id/observations', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const observation = operatingLedger.createObservationRecord(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4145,7 +4145,7 @@ app.post('/api/ledger/jobs/:id/observations', (req, res) => {
 app.post('/api/ledger/jobs/:id/incidents', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const incident = operatingLedger.createIncidentRecord(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4160,7 +4160,7 @@ app.post('/api/ledger/jobs/:id/incidents', (req, res) => {
 app.post('/api/ledger/jobs/:id/safety-meetings', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const safetyMeeting = operatingLedger.createSafetyMeeting(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4194,7 +4194,7 @@ app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/acknowledgments', (req
       req.params.id,
       req.params.meetingId,
       safetyAcknowledgementPayloadForOperator(req, req.body || {}),
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -4210,7 +4210,7 @@ app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/acknowledgments', (req
 app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/signoff', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.signOffSafetyMeeting(req.params.id, req.params.meetingId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4230,7 +4230,7 @@ app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/attendees/:attendeeId/
       req.params.meetingId,
       req.params.attendeeId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -4246,7 +4246,7 @@ app.post('/api/ledger/jobs/:id/safety-meetings/:meetingId/attendees/:attendeeId/
 app.post('/api/ledger/jobs/:id/orientations', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    orientation: operatingLedger.createWorkerOrientation(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    orientation: operatingLedger.createWorkerOrientation(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4255,7 +4255,7 @@ app.post('/api/ledger/jobs/:id/orientations', (req, res) => {
 app.post('/api/ledger/jobs/:id/jhas', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    jha: operatingLedger.createJhaRecord(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    jha: operatingLedger.createJhaRecord(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -4264,7 +4264,7 @@ app.post('/api/ledger/jobs/:id/jhas', (req, res) => {
 app.post('/api/ledger/jobs/:id/sds-sheets', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    sdsSheet: operatingLedger.createSdsSheet(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    sdsSheet: operatingLedger.createSdsSheet(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -4292,7 +4292,7 @@ app.get('/api/ledger/jobs/:id/sds-sheets', (req, res) => {
 app.post('/api/ledger/jobs/:id/sds-revisions', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const revision = operatingLedger.createSdsRevision(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4327,7 +4327,7 @@ app.get('/api/ledger/jobs/:id/drawings', (req, res) => {
 app.post('/api/ledger/jobs/:id/drawing-revisions', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const revision = operatingLedger.createDrawingRevision(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4344,7 +4344,7 @@ app.post('/api/ledger/jobs/:id/site-access', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = {
       success: true,
-      siteAccessLog: operatingLedger.createSiteAccessLog(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
+      siteAccessLog: operatingLedger.createSiteAccessLog(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })
     };
     if (!compactLedgerResponseRequested(req)) {
       result.job = operatingLedger.getJobDetail(req.params.id);
@@ -4388,7 +4388,7 @@ app.post('/api/ledger/jobs/:id/attendance/check-in', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = attendancePayloadForOperator(req, req.body || {});
     const result = operatingLedger.recordAttendanceCheckIn(req.params.id, payload, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4405,7 +4405,7 @@ app.post('/api/ledger/jobs/:id/attendance/:sessionId/check-out', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = attendancePayloadForOperator(req, req.body || {});
     const result = operatingLedger.recordAttendanceCheckOut(req.params.id, req.params.sessionId, payload, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4422,7 +4422,7 @@ app.post('/api/ledger/jobs/:id/attendance/:sessionId/adjustments', (req, res) =>
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestAttendanceAdjustment(req.params.id, req.params.sessionId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     attendance: operatingLedger.listAttendanceBoard({ jobId: req.params.id }),
     job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
@@ -4452,7 +4452,7 @@ app.post('/api/ledger/workers/:id/timesheets', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestWeeklyTimesheet(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     timesheets: operatingLedger.listTimesheetBoard({ periodStart: req.body?.periodStart || req.body?.period_start })
   }), 201);
@@ -4462,7 +4462,7 @@ app.post('/api/ledger/timesheet-exports', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.prepareTimesheetExport(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     timesheets: operatingLedger.listTimesheetBoard({ periodStart: req.body?.periodStart || req.body?.period_start })
   }), 201);
@@ -4494,7 +4494,7 @@ app.get('/api/ledger/timesheet-exports/:id/content', (req, res) => {
 app.post('/api/ledger/jobs/:id/assignments', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    assignment: operatingLedger.addAssignment(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard', optional: false }),
+    assignment: operatingLedger.addAssignment(req.params.id, req.body || {}, { actor: trustedRequestActor(req), optional: false }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4503,7 +4503,7 @@ app.post('/api/ledger/jobs/:id/assignments', (req, res) => {
 app.post('/api/ledger/jobs/:id/assignments/:assignmentId/release', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    assignment: operatingLedger.releaseAssignment(req.params.id, req.params.assignmentId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    assignment: operatingLedger.releaseAssignment(req.params.id, req.params.assignmentId, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -4524,7 +4524,7 @@ app.post('/api/ledger/jobs/:id/qualification-requirements', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createQualificationRequirement(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id),
     qualificationRegister: operatingLedger.listQualificationRegister(),
@@ -4539,7 +4539,7 @@ app.post('/api/ledger/jobs/:id/qualification-requirements/:requirementId/retirem
       req.params.id,
       req.params.requirementId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: operatingLedger.getJobDetail(req.params.id),
     qualificationRegister: operatingLedger.listQualificationRegister(),
@@ -4550,7 +4550,7 @@ app.post('/api/ledger/jobs/:id/qualification-requirements/:requirementId/retirem
 app.post('/api/ledger/jobs/:id/tools', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    toolReservation: operatingLedger.reserveTool(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    toolReservation: operatingLedger.reserveTool(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4559,7 +4559,7 @@ app.post('/api/ledger/jobs/:id/tools', (req, res) => {
 app.post('/api/ledger/jobs/:id/tools/:reservationId/release', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    toolReservation: operatingLedger.releaseToolReservation(req.params.id, req.params.reservationId, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    toolReservation: operatingLedger.releaseToolReservation(req.params.id, req.params.reservationId, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -4601,7 +4601,7 @@ app.post('/api/ledger/jobs/:id/equipment-custody/check-out', (req, res) => {
   }
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.checkoutEquipment(req.params.id, payload, {
-      actor: actorFromRequest(req, payload.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4619,7 +4619,7 @@ app.post('/api/ledger/jobs/:id/equipment-custody/:custodySessionId/return', (req
   if (req.operator?.role === 'field_worker') payload.returnedBy = fieldWorkerIdentity(req).workerName;
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.returnEquipment(req.params.id, req.params.custodySessionId, payload, {
-      actor: actorFromRequest(req, payload.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -4635,7 +4635,7 @@ app.post('/api/ledger/jobs/:id/equipment-custody/:custodySessionId/return', (req
 app.post('/api/ledger/jobs/:id/materials', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    materialRequirement: operatingLedger.addMaterialRequirement(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    materialRequirement: operatingLedger.addMaterialRequirement(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4648,7 +4648,7 @@ app.patch('/api/ledger/jobs/:id/materials/:materialId/status', (req, res) => {
       req.params.id,
       req.params.materialId,
       req.body || {},
-      { actor: req.body?.actor || 'dashboard' }
+      { actor: trustedRequestActor(req) }
     ),
     deliveryMode: 'record_only',
     externalCommitments: 0,
@@ -4712,7 +4712,7 @@ app.post('/api/ledger/jobs/:id/material-receipts', (req, res) => {
   }
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.createMaterialReceipt(req.params.id, payload, {
-      actor: actorFromRequest(req, payload.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     const response = {
       success: true,
@@ -4732,7 +4732,7 @@ app.post('/api/ledger/jobs/:id/material-receipts/:receiptId/reversal', (req, res
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestMaterialReceiptReversal(req.params.id, req.params.receiptId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id),
     materialReceiving: operatingLedger.listMaterialReceivingRegister(),
@@ -4743,7 +4743,7 @@ app.post('/api/ledger/jobs/:id/material-receipts/:receiptId/reversal', (req, res
 app.post('/api/ledger/jobs/:id/route-plans', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    routePlan: operatingLedger.createRoutePlan(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    routePlan: operatingLedger.createRoutePlan(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4752,7 +4752,7 @@ app.post('/api/ledger/jobs/:id/route-plans', (req, res) => {
 app.post('/api/ledger/jobs/:id/loading-plans', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    loadingPlan: operatingLedger.createLoadingPlan(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    loadingPlan: operatingLedger.createLoadingPlan(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4761,7 +4761,7 @@ app.post('/api/ledger/jobs/:id/loading-plans', (req, res) => {
 app.post('/api/ledger/jobs/:id/procurement-orders', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    procurementOrder: operatingLedger.createProcurementOrder(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    procurementOrder: operatingLedger.createProcurementOrder(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4770,7 +4770,7 @@ app.post('/api/ledger/jobs/:id/procurement-orders', (req, res) => {
 app.post('/api/ledger/jobs/:id/procurement-orders/:orderId/request-approval', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.requestProcurementApproval(req.params.id, req.params.orderId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.requestProcurementApproval(req.params.id, req.params.orderId, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -4779,7 +4779,7 @@ app.post('/api/ledger/jobs/:id/procurement-orders/:orderId/request-approval', (r
 app.post('/api/ledger/jobs/:id/worker-instructions', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    workerInstruction: operatingLedger.createWorkerInstruction(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    workerInstruction: operatingLedger.createWorkerInstruction(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4788,7 +4788,7 @@ app.post('/api/ledger/jobs/:id/worker-instructions', (req, res) => {
 app.post('/api/ledger/jobs/:id/dispatch', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    dispatch: operatingLedger.createDispatchPack(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    dispatch: operatingLedger.createDispatchPack(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -4829,7 +4829,7 @@ app.get('/api/ledger/field-assurance', (req, res) => {
 app.post('/api/ledger/jobs/:id/field-assurance-pack', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    pack: operatingLedger.prepareFieldAssurancePack(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    pack: operatingLedger.prepareFieldAssurancePack(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -4853,7 +4853,7 @@ app.post('/api/ledger/cash-flow/items', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createCashFlowItem(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     cashFlow: operatingLedger.calculateCashFlowForecast()
   }), 201);
@@ -4863,7 +4863,7 @@ app.post('/api/ledger/cash-flow/items/:itemId/archive', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.archiveCashFlowItem(req.params.itemId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     cashFlow: operatingLedger.calculateCashFlowForecast()
   }));
@@ -4873,7 +4873,7 @@ app.post('/api/ledger/cash-flow/snapshots', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestCashFlowForecastSnapshot(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     })
   }), 201);
 });
@@ -4889,7 +4889,7 @@ app.post('/api/ledger/performance-scorecard/targets', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestPerformanceScorecardTarget(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     scorecard: operatingLedger.calculatePerformanceScorecard(req.body || {})
   }), 201);
@@ -4899,7 +4899,7 @@ app.post('/api/ledger/performance-scorecard/snapshots', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestPerformanceScorecardSnapshot(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     })
   }), 201);
 });
@@ -4931,7 +4931,7 @@ app.post('/api/ledger/frameworks', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createFrameworkImplementation(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     workspace: operatingLedger.getFrameworkWorkspace()
   }), 201);
@@ -4941,7 +4941,7 @@ app.patch('/api/ledger/frameworks/:implementationId', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.updateFrameworkImplementation(req.params.implementationId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     workspace: operatingLedger.getFrameworkWorkspace()
   }));
@@ -4962,7 +4962,7 @@ app.post('/api/ledger/jobs/:id/progress', (req, res) => {
   }
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    progress: recordForOperator(req, operatingLedger.addProgressUpdate(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    progress: recordForOperator(req, operatingLedger.addProgressUpdate(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -4979,7 +4979,7 @@ app.post('/api/ledger/jobs/:id/production-baselines', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestProductionBaseline(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id, { includeAudit: true }),
     field: operatingLedger.listFieldAssurance({ limit: 100 }),
@@ -4991,7 +4991,7 @@ app.post('/api/ledger/jobs/:id/production-entries', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
     const result = operatingLedger.recordProductionEntry(req.params.id, payload, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5008,7 +5008,7 @@ app.post('/api/ledger/jobs/:id/production-entries/:entryId/reversal', (req, res)
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestProductionEntryReversal(req.params.id, req.params.entryId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id, { includeAudit: true }),
     field: operatingLedger.listFieldAssurance({ limit: 100 }),
@@ -5024,7 +5024,7 @@ app.post('/api/ledger/jobs/:id/communication', (req, res) => {
     const outbound = direction !== 'inbound';
     const communication = operatingLedger.addCommunication(req.params.id, outbound
       ? { ...payload, direction: 'outbound', status: 'draft', sentAt: null, sent_at: null, requiresApproval: true }
-      : { ...payload, direction: 'inbound', status: 'received', requiresApproval: false }, { actor: payload.actor || 'dashboard' });
+      : { ...payload, direction: 'inbound', status: 'received', requiresApproval: false }, { actor: trustedRequestActor(req) });
     return {
       success: true,
       communication,
@@ -5057,7 +5057,7 @@ app.get('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
 app.post('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    access: operatingLedger.createClientPortalAccess(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    access: operatingLedger.createClientPortalAccess(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5066,7 +5066,7 @@ app.post('/api/ledger/jobs/:id/client-portal-access', (req, res) => {
 app.post('/api/ledger/client-portal-access/:id/revoke', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    access: operatingLedger.revokeClientPortalAccess(req.params.id, { actor: req.body?.actor || 'dashboard' })
+    access: operatingLedger.revokeClientPortalAccess(req.params.id, { actor: trustedRequestActor(req) })
   }));
 });
 
@@ -5082,7 +5082,7 @@ app.post('/api/ledger/jobs/:id/client-feedback', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createClientFeedback(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5182,7 +5182,7 @@ app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses', (re
 app.post('/api/ledger/jobs/:id/documents', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    document: recordForOperator(req, operatingLedger.addDocument(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    document: recordForOperator(req, operatingLedger.addDocument(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -5191,7 +5191,7 @@ app.post('/api/ledger/jobs/:id/documents', (req, res) => {
 app.post('/api/ledger/jobs/:id/controlled-document-revisions', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.createControlledDocumentRevision(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.createControlledDocumentRevision(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -5314,7 +5314,7 @@ app.post('/api/ledger/jobs/:id/time-logs', (req, res) => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
     return {
       success: true,
-      timeLog: recordForOperator(req, operatingLedger.addTimeLog(req.params.id, payload, { actor: req.body?.actor || 'dashboard' })),
+      timeLog: recordForOperator(req, operatingLedger.addTimeLog(req.params.id, payload, { actor: trustedRequestActor(req) })),
       job: jobForOperator(req, req.params.id),
       dashboard: dashboardForOperator(req)
     };
@@ -5400,7 +5400,7 @@ app.post('/api/ledger/jobs/:id/daily-cycles/:cycleId/end-of-day', (req, res) => 
 app.post('/api/ledger/jobs/:id/daily-logs', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
-    const dailyLog = operatingLedger.recordFieldDailyLog(req.params.id, payload, { actor: req.body?.actor || 'dashboard' });
+    const dailyLog = operatingLedger.recordFieldDailyLog(req.params.id, payload, { actor: trustedRequestActor(req) });
     return {
       success: true,
       dailyLog: req.operator?.role === 'field_worker'
@@ -5657,7 +5657,7 @@ app.post('/api/ledger/jobs/:id/finance-costs', (req, res) => {
 app.post('/api/ledger/jobs/:id/invoices', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    invoice: operatingLedger.createInvoice(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    invoice: operatingLedger.createInvoice(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5668,7 +5668,7 @@ app.post('/api/ledger/jobs/:id/invoices/:invoiceId/issue-package', (req, res) =>
     const issuePackage = operatingLedger.prepareInvoiceIssuePackage(
       req.params.id,
       req.params.invoiceId,
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -5686,7 +5686,7 @@ app.post('/api/ledger/jobs/:id/invoices/:invoiceId/credit-notes', (req, res) => 
       req.params.id,
       req.params.invoiceId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: operatingLedger.getJobDetail(req.params.id),
     finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
@@ -5699,7 +5699,7 @@ app.post('/api/ledger/jobs/:id/credit-notes/:creditNoteId/issue-package', (req, 
     const issuePackage = operatingLedger.prepareCreditNoteIssuePackage(
       req.params.id,
       req.params.creditNoteId,
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -5714,7 +5714,7 @@ app.post('/api/ledger/jobs/:id/credit-notes/:creditNoteId/issue-package', (req, 
 app.post('/api/ledger/jobs/:id/quality-checks', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    qualityCheck: operatingLedger.addQualityCheck(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    qualityCheck: operatingLedger.addQualityCheck(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5723,7 +5723,7 @@ app.post('/api/ledger/jobs/:id/quality-checks', (req, res) => {
 app.post('/api/ledger/jobs/:id/safety-checks', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    safetyCheck: recordForOperator(req, operatingLedger.addSafetyCheck(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' })),
+    safetyCheck: recordForOperator(req, operatingLedger.addSafetyCheck(req.params.id, req.body || {}, { actor: trustedRequestActor(req) })),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -5732,7 +5732,7 @@ app.post('/api/ledger/jobs/:id/safety-checks', (req, res) => {
 app.post('/api/ledger/jobs/:id/payments', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    payment: operatingLedger.recordPayment(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    payment: operatingLedger.recordPayment(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5744,7 +5744,7 @@ app.post('/api/ledger/jobs/:id/invoices/:invoiceId/payments', (req, res) => {
     payment: operatingLedger.recordPayment(req.params.id, {
       ...(req.body || {}),
       invoiceId: req.params.invoiceId
-    }, { actor: req.body?.actor || 'dashboard' }),
+    }, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     finance: operatingLedger.listFinanceReadiness({ mode: 'payment', limit: 100 }),
     dashboard: operatingLedger.dashboardSummary()
@@ -5754,7 +5754,7 @@ app.post('/api/ledger/jobs/:id/invoices/:invoiceId/payments', (req, res) => {
 app.post('/api/ledger/jobs/:id/payments/follow-up', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    payment: operatingLedger.recordPaymentFollowUp(req.params.id, null, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    payment: operatingLedger.recordPaymentFollowUp(req.params.id, null, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5763,7 +5763,7 @@ app.post('/api/ledger/jobs/:id/payments/follow-up', (req, res) => {
 app.post('/api/ledger/jobs/:id/payments/:paymentId/follow-up', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    payment: operatingLedger.recordPaymentFollowUp(req.params.id, req.params.paymentId, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    payment: operatingLedger.recordPaymentFollowUp(req.params.id, req.params.paymentId, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5772,7 +5772,7 @@ app.post('/api/ledger/jobs/:id/payments/:paymentId/follow-up', (req, res) => {
 app.post('/api/ledger/jobs/:id/budget-lines', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    budgetLine: operatingLedger.createBudgetLine(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    budgetLine: operatingLedger.createBudgetLine(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5796,7 +5796,7 @@ app.post('/api/ledger/jobs/:id/cost-forecast/snapshots', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestCostForecastSnapshot(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id),
     finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
@@ -5808,7 +5808,7 @@ app.post('/api/ledger/jobs/:id/billing-milestones', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     billingMilestone: operatingLedger.createBillingMilestone(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id),
     finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
@@ -5819,7 +5819,7 @@ app.post('/api/ledger/jobs/:id/billing-milestones', (req, res) => {
 app.post('/api/ledger/jobs/:id/purchase-orders', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    purchaseOrder: operatingLedger.createPurchaseOrder(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    purchaseOrder: operatingLedger.createPurchaseOrder(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5850,7 +5850,7 @@ app.post('/api/ledger/jobs/:id/supplier-invoices', (req, res) => {
     supplierInvoice: operatingLedger.createSupplierInvoice(
       req.params.id,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: operatingLedger.getJobDetail(req.params.id),
     finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
@@ -5866,7 +5866,7 @@ app.post('/api/ledger/jobs/:id/supplier-invoices/:supplierInvoiceId/payments', (
       req.params.id,
       req.params.supplierInvoiceId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: operatingLedger.getJobDetail(req.params.id),
     finance: operatingLedger.listFinanceReadiness({ limit: 100 }),
@@ -5878,7 +5878,7 @@ app.post('/api/ledger/jobs/:id/supplier-invoices/:supplierInvoiceId/payments', (
 app.post('/api/ledger/jobs/:id/draw-requests', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    drawRequest: operatingLedger.createDrawRequest(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    drawRequest: operatingLedger.createDrawRequest(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5887,7 +5887,7 @@ app.post('/api/ledger/jobs/:id/draw-requests', (req, res) => {
 app.post('/api/ledger/jobs/:id/lien-waivers', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    lienWaiver: operatingLedger.createLienWaiver(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    lienWaiver: operatingLedger.createLienWaiver(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5896,7 +5896,7 @@ app.post('/api/ledger/jobs/:id/lien-waivers', (req, res) => {
 app.post('/api/ledger/jobs/:id/finance-handoffs', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    financeHandoff: operatingLedger.createFinanceHandoff(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    financeHandoff: operatingLedger.createFinanceHandoff(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5905,7 +5905,7 @@ app.post('/api/ledger/jobs/:id/finance-handoffs', (req, res) => {
 app.post('/api/ledger/jobs/:id/finance-handoffs/prepare', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    financeHandoff: operatingLedger.prepareFinanceHandoff(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    financeHandoff: operatingLedger.prepareFinanceHandoff(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5914,7 +5914,7 @@ app.post('/api/ledger/jobs/:id/finance-handoffs/prepare', (req, res) => {
 app.post('/api/ledger/jobs/:id/punch-items', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const punchItem = operatingLedger.createPunchItem(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5929,7 +5929,7 @@ app.post('/api/ledger/jobs/:id/punch-items', (req, res) => {
 app.post('/api/ledger/jobs/:id/warranty-claims', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    warrantyClaim: operatingLedger.createWarrantyClaim(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    warrantyClaim: operatingLedger.createWarrantyClaim(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -5938,7 +5938,7 @@ app.post('/api/ledger/jobs/:id/warranty-claims', (req, res) => {
 app.post('/api/ledger/jobs/:id/aftercare', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    aftercare: operatingLedger.addAftercareItem(req.params.id, req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    aftercare: operatingLedger.addAftercareItem(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
   }), 201);
@@ -5952,7 +5952,7 @@ app.patch('/api/ledger/jobs/:id/lifecycle/:recordType/:recordId', (req, res) => 
       req.params.recordType,
       req.params.recordId,
       payload,
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -5968,7 +5968,7 @@ app.patch('/api/ledger/jobs/:id/lifecycle/:recordType/:recordId', (req, res) => 
 app.post('/api/ledger/jobs/:id/recurring-plans', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    recurringPlan: operatingLedger.createRecurringPlan(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    recurringPlan: operatingLedger.createRecurringPlan(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5977,7 +5977,7 @@ app.post('/api/ledger/jobs/:id/recurring-plans', (req, res) => {
 app.post('/api/ledger/jobs/:id/closeout', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    closeout: operatingLedger.createCloseoutPackage(req.params.id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    closeout: operatingLedger.createCloseoutPackage(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id, { includeAudit: true }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5994,7 +5994,7 @@ app.post('/api/ledger/jobs/:id/handover-packages', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     package: operatingLedger.prepareHandoverIssuePackage(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id, { includeAudit: true }),
     dashboard: dashboardForOperator(req)
@@ -6010,7 +6010,7 @@ app.get('/api/ledger/approvals', (req, res) => {
 
 app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
-    const actor = actorFromRequest(req, req.body?.actor || 'dashboard');
+    const actor = trustedRequestActor(req);
     const payload = req.operator?.authenticated
       ? { ...(req.body || {}), actor, resolvedBy: actor }
       : (req.body || {});
@@ -6071,7 +6071,7 @@ app.post('/api/ledger/learning/rebuild', (req, res) => {
     success: true,
     profile: operatingLedger.rebuildLearningProfile(
       req.body?.jobType || req.body?.job_type || req.body?.service,
-      { actor: req.body?.actor || 'dashboard' }
+      { actor: trustedRequestActor(req) }
     ),
     profiles: operatingLedger.listLearningProfiles({ limit: 100 }),
     dashboard: operatingLedger.dashboardSummary()
@@ -6177,7 +6177,7 @@ app.get('/api/ledger/workers/:id', (req, res) => {
 app.post('/api/ledger/workers', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    worker: operatingLedger.upsertWorker(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    worker: operatingLedger.upsertWorker(req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -6187,7 +6187,7 @@ app.put('/api/ledger/workers/:id', (req, res) => {
     success: true,
     worker: operatingLedger.upsertWorker(
       { ...(req.body || {}), id: req.params.id },
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -6210,7 +6210,7 @@ app.post('/api/ledger/workers/:id/credentials', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestWorkerCredential(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     worker: operatingLedger.getWorker(req.params.id),
     qualificationRegister: operatingLedger.listQualificationRegister(),
@@ -6235,7 +6235,7 @@ app.post('/api/ledger/workers/:id/availability', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createWorkerAvailabilityPeriod(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     worker: operatingLedger.getWorker(req.params.id),
     availabilityRegister: operatingLedger.listWorkerAvailabilityRegister(),
@@ -6247,7 +6247,7 @@ app.post('/api/ledger/workers/:id/availability/:periodId/cancellation', (req, re
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestWorkerAvailabilityCancellation(req.params.id, req.params.periodId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     worker: operatingLedger.getWorker(req.params.id),
     availabilityRegister: operatingLedger.listWorkerAvailabilityRegister(),
@@ -6258,7 +6258,7 @@ app.post('/api/ledger/workers/:id/availability/:periodId/cancellation', (req, re
 function requestWorkerRetirement(req, res) {
   return handleLedgerRequest(req, res, () => {
     const retirement = operatingLedger.requestWorkerRetirement(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     if (!retirement) {
       const error = new Error('Worker not found');
@@ -6308,7 +6308,7 @@ app.get('/api/ledger/equipment-custody', (req, res) => {
 app.post('/api/ledger/tools', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    tool: operatingLedger.upsertTool(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    tool: operatingLedger.upsertTool(req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -6318,7 +6318,7 @@ app.put('/api/ledger/tools/:id', (req, res) => {
     success: true,
     tool: operatingLedger.upsertTool(
       { ...(req.body || {}), id: req.params.id },
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -6327,7 +6327,7 @@ app.put('/api/ledger/tools/:id', (req, res) => {
 app.post('/api/ledger/tools/:id/inspections', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.recordToolInspection(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     if (!result) {
       const error = new Error('Tool not found');
@@ -6346,7 +6346,7 @@ app.post('/api/ledger/tools/:id/inspections', (req, res) => {
 app.post('/api/ledger/tools/:id/maintenance', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.recordToolMaintenance(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     if (!result) {
       const error = new Error('Tool not found');
@@ -6365,7 +6365,7 @@ app.post('/api/ledger/tools/:id/maintenance', (req, res) => {
 function requestToolRetirement(req, res) {
   return handleLedgerRequest(req, res, () => {
     const retirement = operatingLedger.requestToolRetirement(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     if (!retirement) {
       const error = new Error('Tool not found');
@@ -6406,7 +6406,7 @@ app.post('/api/ledger/clients', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     client: operatingLedger.createClient(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     })
   }), 201);
 });
@@ -6415,7 +6415,7 @@ app.put('/api/ledger/clients/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     client: operatingLedger.updateClient(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     })
   }));
 });
@@ -6443,7 +6443,7 @@ app.get('/api/ledger/trade-partners/:id', (req, res) => {
 app.post('/api/ledger/trade-partners', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    partner: operatingLedger.upsertTradePartner(req.body || {}, { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }),
+    partner: operatingLedger.upsertTradePartner(req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -6453,7 +6453,7 @@ app.put('/api/ledger/trade-partners/:id', (req, res) => {
     success: true,
     partner: operatingLedger.upsertTradePartner(
       { ...(req.body || {}), id: req.params.id },
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -6465,7 +6465,7 @@ app.post('/api/ledger/trade-partners/:id/retirement', (req, res) => {
     ...operatingLedger.requestTradePartnerRetirement(
       req.params.id,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     dashboard: operatingLedger.dashboardSummary()
   }));
@@ -6497,7 +6497,7 @@ app.use('/api/communication', retiredLedgerFacadeRoute);
 app.post('/api/ledger/weather/assess', (req, res) => {
   return handleLedgerRequest(req, res, async () => {
     const jobId = req.body?.jobId || req.body?.job_id;
-    const actor = req.body?.actor || 'dashboard';
+    const actor = trustedRequestActor(req);
     let job = operatingLedger.getJobDetail(jobId, { includeAudit: true });
     const input = req.body || {};
     const liveRequested = input.live === true || input.useLiveWeather === true || input.use_live_weather === true;
@@ -6575,7 +6575,7 @@ app.put('/api/ledger/workers/:workerId/capacity-profile', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.setCrewCapacityProfile(req.params.workerId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.listCrewCapacityBoard({
       referenceDate: req.body?.referenceDate || req.body?.reference_date
@@ -6587,7 +6587,7 @@ app.post('/api/ledger/crew-capacity/allocations', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createCrewCapacityAllocation(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.listCrewCapacityBoard({
       referenceDate: req.body?.referenceDate || req.body?.reference_date || req.body?.workDate || req.body?.work_date
@@ -6599,7 +6599,7 @@ app.post('/api/ledger/crew-capacity/allocations/:allocationId/cancel', (req, res
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.cancelCrewCapacityAllocation(req.params.allocationId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.listCrewCapacityBoard({
       referenceDate: req.body?.referenceDate || req.body?.reference_date
@@ -6617,7 +6617,7 @@ app.get('/api/ledger/crew-lookahead/plans', (req, res) => {
 app.post('/api/ledger/crew-lookahead/plans', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.requestCrewLookaheadPlan(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -6647,7 +6647,7 @@ app.post('/api/ledger/jobs/:id/last-planner/constraints', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createLastPlannerConstraint(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.getLastPlannerBoard({
       weekStart: req.body?.weekStart || req.body?.week_start || req.body?.dueDate || req.body?.due_date
@@ -6659,7 +6659,7 @@ app.post('/api/ledger/jobs/:id/last-planner/constraints/:constraintId/release', 
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.releaseLastPlannerConstraint(req.params.id, req.params.constraintId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.getLastPlannerBoard({
       weekStart: req.body?.weekStart || req.body?.week_start
@@ -6677,7 +6677,7 @@ app.get('/api/ledger/last-planner/plans', (req, res) => {
 app.post('/api/ledger/jobs/:id/last-planner/plans', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.requestLastPlannerWeeklyPlan(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -6702,7 +6702,7 @@ app.post('/api/ledger/jobs/:id/last-planner/plans/:planId/commitments/:commitmen
       req.params.planId,
       req.params.commitmentId,
       req.body || {},
-      { actor: actorFromRequest(req, req.body?.actor || 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     board: operatingLedger.getLastPlannerBoard({ weekStart: req.body?.weekStart || req.body?.week_start })
   }), 201);
@@ -6739,7 +6739,7 @@ app.post('/api/ledger/five-s/locations', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createFiveSLocation(req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.getFiveSBoard()
   }), 201);
@@ -6749,7 +6749,7 @@ app.post('/api/ledger/five-s/locations/:locationId/standards', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestFiveSStandard(req.params.locationId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.getFiveSBoard()
   }), 201);
@@ -6758,7 +6758,7 @@ app.post('/api/ledger/five-s/locations/:locationId/standards', (req, res) => {
 app.post('/api/ledger/five-s/locations/:locationId/audits', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.recordFiveSAudit(req.params.locationId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -6781,7 +6781,7 @@ app.post('/api/ledger/jobs/:id/five-s/locations/:locationId/audits', (req, res) 
       throw error;
     }
     const result = operatingLedger.recordFiveSAudit(req.params.locationId, payload, {
-      actor: actorFromRequest(req, payload.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -6795,7 +6795,7 @@ app.post('/api/ledger/five-s/actions/:actionId/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.resolveFiveSAction(req.params.actionId, req.body || {}, {
-      actor: actorFromRequest(req, req.body?.actor || 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     board: operatingLedger.getFiveSBoard()
   }));
@@ -6804,14 +6804,14 @@ app.post('/api/ledger/five-s/actions/:actionId/resolve', (req, res) => {
 app.post('/api/ledger/schedule/recommend', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    recommendation: operatingLedger.recommendSchedule(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' })
+    recommendation: operatingLedger.recommendSchedule(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: trustedRequestActor(req) })
   }));
 });
 
 app.post('/api/ledger/schedule/prepare-dispatch', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.prepareScheduleDispatch(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.prepareScheduleDispatch(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -6819,7 +6819,7 @@ app.post('/api/ledger/schedule/prepare-dispatch', (req, res) => {
 app.post('/api/ledger/schedule/request-approval', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.requestScheduleApproval(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: req.body?.actor || 'dashboard' }),
+    ...operatingLedger.requestScheduleApproval(req.body?.jobId || req.body?.job_id, req.body || {}, { actor: trustedRequestActor(req) }),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
 });
@@ -6901,7 +6901,7 @@ app.post('/api/ledger/communications/:id/delivery-receipt', (req, res) => {
       providerMessageId: payload.providerMessageId || payload.provider_message_id || null,
       sentAt: payload.sentAt || payload.sent_at || null,
       receipt: payload.receipt || null
-    }, { actor: payload.actor || actorFromRequest(req, 'delivery_receipt_api') });
+    }, { actor: trustedRequestActor(req) });
     const purchaseOrder = communication.data?.source === 'purchase_order_issue_package'
       ? operatingLedger.getPurchaseOrder(communication.data.sourceRecordId)
       : null;

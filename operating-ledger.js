@@ -40103,7 +40103,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       && sha256Json(snapshot) === row.snapshot_hash
       && sourceCurrentHash === row.source_hash
     );
-    const timestamp = Date.now();
+    const timestamp = Date.parse(this.currentTimeIso());
     const startsAt = Date.parse(row.valid_from || '');
     const expiresAt = Date.parse(row.expires_at || '');
     const notStarted = Number.isFinite(startsAt) && startsAt > timestamp;
@@ -40175,7 +40175,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return this.transaction(() => {
       const job = this.requireJob(jobId);
       const actor = options.actor || 'Contractor.AI';
-      const timestamp = nowIso();
+      const timestamp = this.currentTimeIso();
       const permitType = normalizeStatus(payload.permitType || payload.permit_type, 'general_work');
       const allowedTypes = new Set(['general_work', 'hot_work', 'confined_space', 'electrical_isolation', 'excavation', 'lifting', 'work_at_height']);
       if (!allowedTypes.has(permitType)) {
@@ -40197,7 +40197,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (Date.parse(expiresAt) <= Date.parse(validFrom)) {
         throw ledgerInputError('work_permit_validity_invalid', 'Work permit expiry must be after its valid-from time.');
       }
-      if (Date.parse(expiresAt) <= Date.now()) {
+      if (Date.parse(expiresAt) <= Date.parse(timestamp)) {
         throw ledgerInputError('work_permit_already_expired', 'A new work permit must expire in the future.');
       }
       const evidenceReference = normalizeText(payload.evidenceReference || payload.evidence_reference, '');
@@ -49833,7 +49833,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           409
         );
       }
-      if (Date.parse(permit.expires_at || '') <= Date.now()) {
+      if (Date.parse(permit.expires_at || '') <= Date.parse(this.currentTimeIso())) {
         throw ledgerInputError('work_permit_expired_before_approval', 'Work permit expired before approval. Prepare a current permit with a valid work window.', {}, 409);
       }
       const approval = permit.approval_id ? this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(permit.approval_id) : null;
