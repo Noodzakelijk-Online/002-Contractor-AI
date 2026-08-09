@@ -18,6 +18,9 @@ Versioning for the application contract; database migrations remain append-only.
   and measure starters that never retain suggested evidence as proof.
 - Due framework reviews in the internal command queue and read-only HAI feed with
   no execution authority or external commitment.
+- A four-step first-run owner wizard for legal identity, office/contact details,
+  billing defaults, and server-validated readiness, with durable step saves and
+  responsive keyboard-accessible interaction.
 
 ### Changed
 
@@ -30,6 +33,7 @@ Versioning for the application contract; database migrations remain append-only.
   compatibility and keeps family playbooks available once per family.
 - Windows standalone starts only display the owner key when the protected runtime
   configuration is first created; later starts report the configuration path.
+- Owner onboarding JS and CSS load only when the guided first-run flow is opened.
 
 ### Security
 

@@ -94,6 +94,7 @@ const EnergyPerformanceControl = lazy(() => import('./components/EnergyPerforman
 const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
 const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
+const OrganizationOnboarding = lazy(() => import('./components/OrganizationOnboarding'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -3007,6 +3008,8 @@ function App() {
   const [tradePartnerRetirement, setTradePartnerRetirement] = useState(null)
   const [tradePartnerRetirementReason, setTradePartnerRetirementReason] = useState('')
   const [organizationProfileDraft, setOrganizationProfileDraft] = useState(() => organizationDraft())
+  const [showOrganizationOnboarding, setShowOrganizationOnboarding] = useState(false)
+  const organizationOnboardingOpenerRef = useRef(null)
   const [invoiceJob, setInvoiceJob] = useState(null)
   const [invoiceDraft, setInvoiceDraft] = useState(() => emptyInvoiceDraft())
   const [financeAction, setFinanceAction] = useState(null)
@@ -4655,8 +4658,7 @@ function App() {
     }
   }
 
-  async function saveOrganizationProfile(event) {
-    event.preventDefault()
+  async function persistOrganizationProfile({ announce = true } = {}) {
     setSubmitting(true)
     try {
       const result = await api('/api/ledger/organization', {
@@ -4669,16 +4671,25 @@ function App() {
       })
       setOrganizationProfileDraft(organizationDraft(result.organization))
       setData((current) => current ? { ...current, organization: result.organization } : current)
-      notify(
-        result.organization.readiness.ready
-          ? 'Business identity retained and ready for controlled commercial packages.'
-          : `Business identity retained. ${result.organization.readiness.missing.length} required item(s) remain.`,
-      )
+      if (announce) {
+        notify(
+          result.organization.readiness.ready
+            ? 'Business identity retained and ready for controlled commercial packages.'
+            : `Business identity retained. ${result.organization.readiness.missing.length} required item(s) remain.`,
+        )
+      }
+      return result.organization
     } catch (requestError) {
       setError(requestError.message)
+      return null
     } finally {
       setSubmitting(false)
     }
+  }
+
+  async function saveOrganizationProfile(event) {
+    event.preventDefault()
+    await persistOrganizationProfile()
   }
 
   async function validateExport(file) {
@@ -5008,6 +5019,31 @@ function App() {
 
   function updateOrganizationProfile(field, value) {
     setOrganizationProfileDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  function updateOrganizationVatExemption(vatExempt) {
+    setOrganizationProfileDraft((current) => ({
+      ...current,
+      vatExempt,
+      vatNumber: vatExempt ? '' : current.vatNumber,
+    }))
+  }
+
+  function openOrganizationOnboarding(event) {
+    organizationOnboardingOpenerRef.current = event.currentTarget
+    setOrganizationProfileDraft(organizationDraft(data?.organization))
+    setShowOrganizationOnboarding(true)
+  }
+
+  function closeOrganizationOnboarding() {
+    if (submitting) return
+    setOrganizationProfileDraft(organizationDraft(data?.organization))
+    setShowOrganizationOnboarding(false)
+    const opener = organizationOnboardingOpenerRef.current
+    organizationOnboardingOpenerRef.current = null
+    requestAnimationFrame(() => {
+      if (opener?.isConnected && !opener.disabled) opener.focus()
+    })
   }
 
   async function selectFieldExpenseJob(jobId) {
@@ -10947,7 +10983,7 @@ function App() {
                         item(s) are retained.
                       </p>
                     </div>
-                    <button className="primary-button" onClick={() => selectSection('operations')}>
+                    <button className="primary-button" onClick={openOrganizationOnboarding}>
                       <Building2 size={16} />
                       Finish setup
                     </button>
@@ -13243,14 +13279,7 @@ function App() {
                         <input
                           type="checkbox"
                           checked={organizationProfileDraft.vatExempt}
-                          onChange={(event) => {
-                            const vatExempt = event.target.checked
-                            setOrganizationProfileDraft((current) => ({
-                              ...current,
-                              vatExempt,
-                              vatNumber: vatExempt ? '' : current.vatNumber,
-                            }))
-                          }}
+                          onChange={(event) => updateOrganizationVatExemption(event.target.checked)}
                         />
                         This legal entity is VAT exempt
                       </label>
@@ -13721,6 +13750,20 @@ function App() {
           </>
         ) : null}
       </main>
+
+      {showOrganizationOnboarding ? (
+        <Suspense fallback={<div className="modal-backdrop" role="status"><div className="loading"><LoaderCircle className="spin" size={20} /> Loading business setup</div></div>}>
+          <OrganizationOnboarding
+            draft={organizationProfileDraft}
+            organization={data?.organization}
+            busy={submitting}
+            onChange={updateOrganizationProfile}
+            onVatExemptChange={updateOrganizationVatExemption}
+            onSave={() => persistOrganizationProfile({ announce: false })}
+            onClose={closeOrganizationOnboarding}
+          />
+        </Suspense>
+      ) : null}
 
       {jobLifecycleAction ? (
         <div className="modal-backdrop job-lifecycle-backdrop" role="presentation">

@@ -10,7 +10,7 @@ Contractor.AI is a mature local-first contractor operating ledger, not a greenfi
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
 S3-compatible evidence storage. The audit found 365 declared HTTP routes, 69
-append-only migrations, 159 Node test files, 46 browser spec files, and 81 direct
+append-only migrations, 159 Node test files, 47 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical

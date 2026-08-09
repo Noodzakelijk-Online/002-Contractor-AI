@@ -28,7 +28,10 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - A global red safety banner makes suspended autonomous work visible from every
   operator view.
 - Today shows an owner-only first-run task when legal/business identity fields are
-  incomplete and routes directly to the retained Operations form.
+  incomplete and opens a four-step identity, contact, billing, and readiness flow.
+- Every completed setup step is retained in the canonical ledger. The final screen
+  uses server readiness, keeps commercial issue gates intact, and remains contained
+  at mobile width with keyboard escape, focus cycling, and focus restoration.
 - Operations contains one explicit safety-control panel with reason display,
   suspend/resume confirmation, and privacy-minimized support-bundle download.
 - Autonomous cycle and command-apply actions are disabled and relabelled while
@@ -36,7 +39,7 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Business identity, material receiving, safety briefing, work permit, LMRA,
   environmental, expense, and daily-cycle forms keep the active job/draft stable
   during background refreshes and disable affected controls while loading.
-- The responsive production UI is exercised by 80 isolated Chromium tests across
+- The responsive production UI is exercised by 81 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised
@@ -65,7 +68,6 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - General draft autosave is not universal. Field offline capture has a dedicated
   queue; broad silent local caching would need privacy and conflict design.
 - Large lists do not all offer the same advanced filters and pagination.
-- Owner setup is a focused readiness panel rather than a multi-step wizard.
 - Team/role settings are environment-administered in production instead of being a
   full identity-provider and invitation UI.
 - The safety reason uses a native prompt/confirm sequence. It is accessible and

@@ -1,5 +1,23 @@
 # Codex Worklog
 
+## 2026-08-09 - Persistent owner onboarding pass
+
+- Replaced the first-run redirect with a four-step owner setup workflow for legal
+  identity, office/contact details, billing defaults, and readiness review.
+- Persisted each completed step through the canonical organization ledger API;
+  no browser storage, inferred business values, or weaker issue gate was added.
+- Added keyboard escape/focus cycling, opener focus restoration, compact mobile
+  progress controls, exact validation messages, and the existing Operations editor
+  remains the complete post-setup maintenance surface.
+- Browser-tested a fresh-ledger setup at 390x844 through server readiness and then
+  verified the retained record in the desktop Operations editor.
+- Split onboarding into lazy JS/CSS assets so normal dashboard startup does not
+  pay for the owner-only first-run flow.
+- The complete release gate passed: zero-vulnerability audit, lint, release
+  contract, 509 Node tests, 81 isolated Chromium workflows, production build,
+  bundle budget, container runtime, and a Node 22.23.2 Windows package smoke with
+  ready storage, compact framework catalog, read-only HAI feed, and no key leakage.
+
 ## 2026-08-09 - Framework method playbook pass
 
 - Added a validated operating playbook to every one of the 23 framework families:

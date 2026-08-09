@@ -7,7 +7,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | --- | --- | --- |
 | A01 | Fresh local startup applies all 69 migrations and reports ready | startup/readiness and migration tests |
 | A02 | Production startup fails without auth and hosted durability declarations | auth and startup-readiness tests |
-| A03 | Owner can complete business identity and it appears on governed packages | operations and issue-package tests |
+| A03 | Owner can complete persistent guided business setup and the identity appears on governed packages | onboarding, operations and issue-package tests |
 | A04 | Opportunity intake, qualification, survey, conversion, and follow-up persist | opportunity, market-fit, bid, survey tests |
 | A05 | WBS takeoff and rate build-up produce server-derived traceable estimate values | takeoff and estimate-rate tests |
 | A06 | Quote approval, package creation, delivery, and acceptance remain separate | quote issue and communication tests |
@@ -24,7 +24,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A17 | Support bundle and doctor expose diagnostics without records or secrets | operations-safety test and doctor smoke |
 | A18 | Backup verifies DB/evidence hashes; restore revokes sessions and preserves integrity | backup/restore tests |
 | A19 | Local backup migrates into an empty PostgreSQL/S3 target with parity | hosted migration contract test |
-| A20 | Desktop/mobile navigation, loading, error, empty, offline, and field flows render | 80-test isolated Chromium browser suite |
+| A20 | Desktop/mobile navigation, onboarding, loading, error, empty, offline, and field flows render | 81-test isolated Chromium browser suite |
 | A21 | Build output is served by the production Node runtime with no legacy app | release-contract and container tests |
 | A22 | Container runs non-root/read-only, handles signals, and retains state | container verification script |
 | A23 | CORS, CSRF origin, proxy trust, rate limiting, sessions, and role boundaries hold | security integration tests |

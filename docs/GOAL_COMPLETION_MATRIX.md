@@ -57,7 +57,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
 | 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 80 Playwright operator/client/field/framework flows plus API vertical slices |
+| 043 | End-to-end workflow tests | Implemented | 81 Playwright operator/client/field/framework/onboarding flows plus API vertical slices |
 | 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 25 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
@@ -108,7 +108,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 091 | Feature-level definition of done | Implemented | acceptance requires persistence, role, replay, UI, test and truthful side-effect state |
 | 092 | Fresh-clone dry run | Partial | package/build/container and Node 22 Windows packaging gates emulate clone; external hosted stack not available locally |
 | 093 | Manual verification evidence | Partial | automated real-browser, local runtime and Windows package evidence passed; independent operator/provider/hosted evidence remains external |
-| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 296 canonical source files; dependency audit reports zero vulnerabilities |
+| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 299 canonical source files; dependency audit reports zero vulnerabilities |
 | 095 | Completion matrix | Implemented | this file contains every phase 000-115 |
 | 096 | Final verification report | Implemented | report records exact local command, browser, runtime, package and container results plus external boundaries |
 | 097 | Final response requirements | N/A | final user response will list revision, tests, limitations, blockers and push state |
@@ -119,7 +119,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 102 | Data retention and archival policy | Partial | hosted policy reference required and archive/export exist; periods need counsel decision |
 | 103 | Migration from prototype to production | Implemented | Python/mock runtimes retired; Node ledger sole runtime and historical 410s guarded |
 | 104 | Operator safety stop and emergency controls | Implemented | audited durable suspend/resume; explicitly not a physical emergency system |
-| 105 | User onboarding and first-run wizard | Partial | owner setup panel routes to identity form; not a multi-step wizard |
+| 105 | User onboarding and first-run wizard | Implemented | owner-only four-step identity, contact, billing and readiness flow persists each step to the canonical ledger and is mobile/browser tested |
 | 106 | Role-based settings and team permissions | Partial | four role boundaries enforced; production identity/team provisioning remains environment-managed |
 | 107 | Quality scoring and confidence display | Partial | fit/scorecard/quality/confidence evidence exists but is not universal across predictions |
 | 108 | Human decision minimization | Implemented | Today proposes grouped next actions while retaining approval for risky decisions |

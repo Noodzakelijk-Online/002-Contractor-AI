@@ -18,14 +18,14 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 48 canonical paths, 12 retired paths, 16 hosted keys, 296 canonical source files; generated release/runtime directories excluded |
-| Node tests | Passed | `npm test`: 509 tests, 475 passed, 34 skipped, 0 failed, 195.1 s on a busy Windows host |
-| Production build | Passed | `npm run build`: application JS 522.87 kB and CSS 265.23 kB before gzip |
-| Bundle budget | Passed | `npm run verify:bundle`: 349,329 total gzip bytes across 29 assets |
-| Browser tests | Passed | `npm run test:browser`: 80 Playwright Chromium tests in 20 isolated batches |
+| Release contract | Passed | `npm run verify:release`: 48 canonical paths, 12 retired paths, 16 hosted keys, 299 canonical source files; generated release/runtime directories excluded |
+| Node tests | Passed | `npm test`: 509 tests, 475 passed, 34 skipped, 0 failed, 254.0 s on a busy Windows host |
+| Production build | Passed | `npm run build`: main application JS 523.76 kB and CSS 265.23 kB before gzip; onboarding loads separately as 10.20 kB JS and 5.02 kB CSS |
+| Bundle budget | Passed | `npm run verify:bundle`: 354,136 total gzip bytes across 31 assets |
+| Browser tests | Passed | `npm run test:browser`: 81 Playwright Chromium tests in 21 isolated batches |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, auth, persistence, shutdown and migration 069 smoke |
 | Runtime doctor | Passed | Latest local runtime returned ready configuration, verified DB/storage, migration 069, zero pending migrations, ledger/audit integrity, support bundle v1 and no owner key in startup logs |
-| Windows standalone | Passed | Node 22.23.2 x64 portable package build and isolated authenticated runtime/catalog/playbook smoke |
+| Windows standalone | Passed | Node 22.23.2 x64 portable package build and authenticated runtime/readiness/catalog/onboarding/HAI smoke; startup logs contain no owner key |
 | PostgreSQL parity | CI service gate | Contract tests are present; 34 environment-dependent tests were skipped without a local PostgreSQL service |
 
 ## Manual results
@@ -34,7 +34,7 @@ decisions outside this repository.
 | --- | --- |
 | Desktop owner critical-path rendering | Passed in automated Chromium workflow suite |
 | Mobile field workflow rendering | Passed in automated Chromium workflow suite |
-| First-run identity action | Passed in automated Chromium workflow suite |
+| Four-step owner onboarding | Passed from a fresh ledger at 390x844 through persistent server readiness and retained desktop Operations values |
 | Safety stop visible and controls disabled | Passed in automated Chromium and Node tests |
 | Support bundle and doctor | Passed against an isolated local production runtime |
 | Local backup/restore UX | Passed in browser and backend contract tests |

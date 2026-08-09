@@ -60,6 +60,17 @@ the repository rather than treating these statements as current by assumption.
 - External boundary: no method certification, provider execution, spend, message,
   schedule commitment, or financial action is inferred from a framework record
 
+## CP-06 Persistent owner onboarding
+
+- The Today first-run action opens a four-step owner setup flow instead of routing
+  to the complete Operations editor.
+- Each successful step persists to the canonical organization profile; completion
+  uses server readiness and retains all existing commercial issue gates.
+- Mobile containment, final persistence, and Operations editor compatibility are
+  covered by an isolated Chromium workflow.
+- Verification: 509 Node tests, 81 Chromium workflows, release/build/bundle,
+  container runtime, and the rebuilt Node 22.23.2 Windows package passed.
+
 ## Resume procedure
 
 1. Read the newest user request and `git status --short`.
