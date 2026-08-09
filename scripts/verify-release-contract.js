@@ -10,16 +10,40 @@ const REQUIRED_PATHS = [
   'components/BidDecisionControl.jsx',
   'components/MarketFitControl.jsx',
   'components/PerformanceScorecard.jsx',
+  'CHANGELOG.md',
   'Dockerfile',
+  'docs/ACCEPTANCE_TESTS.md',
+  'docs/API_USAGE_AUDIT.md',
+  'docs/CODEX_CHECKPOINTS.md',
+  'docs/CODEX_WORKLOG.md',
+  'docs/CRITICAL_PATH.md',
+  'docs/FINAL_VERIFICATION_REPORT.md',
+  'docs/GOAL_COMPLETION_MATRIX.md',
+  'docs/HAI_CONNECTOR.md',
+  'docs/NGROK.md',
+  'docs/OPERATOR_RUNBOOK.md',
+  'docs/SECURITY.md',
+  'docs/TASK_GRAPH.md',
+  'docs/TECHNICAL_AUDIT.md',
+  'docs/UI_ACTION_AUDIT.md',
+  'docs/WINDOWS_STANDALONE.md',
   'docker-compose.hosted.yml',
   'evidence-storage.js',
+  'hai-connector.js',
   'operating-ledger.js',
   'postgres-sync-database.js',
   'postgres-sync-worker.js',
   'server.js',
+  'standalone-launcher.js',
+  'standalone-runtime.js',
+  'scripts/build-windows-standalone.js',
+  'scripts/export-hai-feed.js',
   'scripts/migrate-local-backup-to-hosted.js',
+  'scripts/doctor.js',
   'scripts/restore-local-backup.js',
   'scripts/run-node-tests.js',
+  'scripts/start-ngrok.js',
+  'scripts/verify-bundle-budget.js',
   'scripts/verify-container-runtime.js'
 ];
 
@@ -53,7 +77,8 @@ const REQUIRED_HOSTED_ENV_KEYS = [
   'CONTRACTOR_AI_S3_BUCKET',
   'CONTRACTOR_AI_POSTGRES_BACKUP_MODE',
   'CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED',
-  'CONTRACTOR_AI_BACKUP_POLICY_REFERENCE'
+  'CONTRACTOR_AI_BACKUP_POLICY_REFERENCE',
+  'CONTRACTOR_AI_RETENTION_POLICY_REFERENCE'
 ];
 
 function walkFiles(root, relative = '', unreadableDirectories = []) {
@@ -104,17 +129,16 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const packageFile = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   if (packageJson.main !== 'server.js') failures.push('package.json must use server.js as the sole runtime entrypoint.');
-  for (const script of ['build', 'lint', 'migrate:hosted', 'restore:local', 'test', 'test:browser', 'test:container', 'verify:release']) {
+  for (const script of ['build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'verify:bundle', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
-  for (const script of ['pretest', 'test']) {
-    if (!packageJson.scripts?.[script]?.startsWith('node scripts/run-node-tests.js ')) {
-      failures.push(`package.json ${script} must isolate and clean temporary Node test state.`);
-    }
+  if (packageJson.scripts?.pretest) failures.push('package.json must not duplicate the full Node suite through an automatic pretest hook.');
+  if (!packageJson.scripts?.test?.startsWith('node scripts/run-node-tests.js ')) {
+    failures.push('package.json test must isolate and clean temporary Node test state.');
   }
 
   const nodeTestRunner = fs.readFileSync(path.join(root, 'scripts', 'run-node-tests.js'), 'utf8');
-  for (const cleanupRequirement of ['fs.mkdtempSync', 'TEMP: runtimeDirectory', 'TMP: runtimeDirectory', 'TMPDIR: runtimeDirectory', 'cleanupRuntimeDirectory(runtimeDirectory)']) {
+  for (const cleanupRequirement of ['fs.mkdtempSync', 'allTestFiles()', 'TEMP: runtimeDirectory', 'TMP: runtimeDirectory', 'TMPDIR: runtimeDirectory', 'cleanupRuntimeDirectory(runtimeDirectory)']) {
     if (!nodeTestRunner.includes(cleanupRequirement)) failures.push(`Node test runner is missing temporary-state cleanup: ${cleanupRequirement}`);
   }
 
@@ -166,7 +190,13 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/auth/logout'",
     "app.get('/api/session'",
     "app.post('/api/operations/exports/validate'",
-    "app.post('/api/operations/restore/validate'"
+    "app.post('/api/operations/restore/validate'",
+    "app.get('/api/operations/control'",
+    "app.post('/api/operations/control/suspend'",
+    "app.post('/api/operations/control/resume'",
+    "app.get('/api/operations/support-bundle'",
+    "app.get('/api/integrations/hai/manifest'",
+    "app.get('/api/integrations/hai/feed'"
   ]) {
     if (!serverSource.includes(canonicalRoute)) failures.push(`Canonical ledger route is missing: ${canonicalRoute}`);
   }
@@ -231,6 +261,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '067_governed_energy_performance'")) {
     failures.push('Canonical governed energy-performance migration is missing.');
   }
+  if (!ledgerSource.includes("version: '068_operational_safety_controls'")) {
+    failures.push('Canonical operational safety-control migration is missing.');
+  }
+  if (!ledgerSource.includes('this.assertAutomationActive();')) {
+    failures.push('Autonomous command application does not enforce the durable owner safety stop.');
+  }
   if (!serverSource.includes("actualEvidence: 'closed_daily_operating_cycle_required'")) {
     failures.push('Last Planner capability does not require closed daily operating-cycle evidence.');
   }
@@ -262,6 +298,17 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!serverSource.includes("clientFeedbackAutonomy: 'internal_service_recovery_only'")) {
     failures.push('Client feedback autonomy is not constrained to internal service recovery.');
+  }
+  const haiConnectorSource = fs.readFileSync(path.join(root, 'hai-connector.js'), 'utf8');
+  for (const haiBoundary of [
+    "connectorId: HAI_CONNECTOR_ID",
+    "mode: 'read_only'",
+    'canExecute: false',
+    'externalCommitments: 0'
+  ]) {
+    if (!haiConnectorSource.includes(haiBoundary)) {
+      failures.push(`HAI connector is missing its read-only boundary: ${haiBoundary}`);
+    }
   }
   if (!serverSource.includes("installationQcSourceValidation: 'server_current_at_receipt_and_release'")) {
     failures.push('Installation-QC capability does not require current source checks at receipt and release.');
@@ -359,6 +406,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   if (!/^USER node$/m.test(dockerfile)) failures.push('Docker runtime must run as the node user.');
   if (!/^HEALTHCHECK\b/m.test(dockerfile)) failures.push('Docker runtime must define a readiness healthcheck.');
+  if (!dockerfile.includes('hai-connector.js')) failures.push('Docker runtime must include the HAI connector required by server.js.');
 
   const dockerIgnore = fs.readFileSync(path.join(root, '.dockerignore'), 'utf8');
   if (!/^\.env\*$/m.test(dockerIgnore)) failures.push('Docker build context must exclude every .env variant.');
@@ -388,7 +436,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'verify.yml'), 'utf8');
-  for (const command of ['npm run verify:release', 'npm run lint', 'npm test', 'npm run build', 'npm run test:browser', 'npm run test:container']) {
+  for (const command of ['npm run verify:release', 'npm run lint', 'npm test', 'npm run build', 'npm run verify:bundle', 'npm run test:browser', 'npm run test:container']) {
     if (!workflow.includes(command)) failures.push(`CI workflow is missing required gate: ${command}`);
   }
   if (!/push:\s*\n\s+branches:\s*\n\s+- main/.test(workflow)) {
@@ -398,6 +446,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     failures.push('CI PostgreSQL contract must run with sslmode=require.');
   }
   if (!workflow.includes("SHOW ssl")) failures.push('CI workflow must verify PostgreSQL TLS is active.');
+  for (const windowsRequirement of ['windows-standalone:', 'runs-on: windows-latest', 'npm run package:windows', 'actions/upload-artifact@v7']) {
+    if (!workflow.includes(windowsRequirement)) failures.push(`CI workflow is missing Windows package verification: ${windowsRequirement}`);
+  }
+  if (workflow.includes('actions/checkout@v7') || workflow.includes('actions/setup-node@v7')) {
+    failures.push('CI workflow references an unavailable major for checkout or setup-node.');
+  }
 
   return {
     valid: failures.length === 0,

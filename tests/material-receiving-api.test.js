@@ -148,7 +148,8 @@ test('material receiving API retains exact field evidence and approval-backed re
   const finalJob = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}`);
   assert.equal(finalJob.body.job.materialReceipts[0].status, 'reversed');
   assert.equal(finalJob.body.job.materials[0].status, 'needed');
-  const diagnostics = await request(baseUrl, '/api/ledger/debug');
+  const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
+  assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '067_governed_energy_performance');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '068_operational_safety_controls');
 });

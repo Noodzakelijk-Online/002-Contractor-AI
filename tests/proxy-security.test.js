@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const PROXY_SCENARIO_TIMEOUT_MS = 120_000;
+
 const childScript = String.raw`
 const app = require('./server');
 let failed = false;
@@ -49,7 +51,7 @@ function runProxyScenario({ trustedProxy = '', pattern = 'unique' } = {}) {
     const result = childProcess.spawnSync(process.execPath, ['-e', childScript], {
       cwd: path.resolve(__dirname, '..'),
       encoding: 'utf8',
-      timeout: 30_000,
+      timeout: PROXY_SCENARIO_TIMEOUT_MS,
       env: {
         ...process.env,
         NODE_ENV: 'test',

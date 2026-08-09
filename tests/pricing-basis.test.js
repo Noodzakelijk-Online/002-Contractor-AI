@@ -250,12 +250,12 @@ test('migration 057 survives restart and diagnostics verify retained pricing dec
   createTakeoff(ledger, job.id);
   approveScope(ledger, job.id, 'pricing-basis-scope-restart-0001');
   const retained = ledger.retainPricingBasisDecision(job.id, decisionPayload('pricing-basis-restart-0001'));
-  assert.equal(ledger.migrationStatus().currentVersion, '067_governed_energy_performance');
+  assert.equal(ledger.migrationStatus().currentVersion, '068_operational_safety_controls');
   assert.equal(ledger.diagnose().valid, true);
   ledger.close();
 
   restarted = new ContractorOperatingLedger({ dbFile });
-  assert.equal(restarted.migrationStatus().currentVersion, '067_governed_energy_performance');
+  assert.equal(restarted.migrationStatus().currentVersion, '068_operational_safety_controls');
   assert.equal(restarted.getPricingBasisDecision(retained.decision.id).integrityValid, true);
   assert.equal(restarted.diagnose().counts.pricingBasisDecisions, 1);
   assert.equal(restarted.diagnose().valid, true);

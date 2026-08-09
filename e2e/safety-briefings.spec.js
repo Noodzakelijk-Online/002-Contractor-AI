@@ -47,9 +47,11 @@ test('safety briefing schedule, attendance exception, signoff, and mobile layout
   const panel = page.getByTestId('safety-briefing-control');
   await expect(panel.getByRole('heading', { name: 'Safety briefings' })).toBeVisible();
   await panel.getByLabel('Job').selectOption(job.id);
-  await panel.getByLabel('Title').fill(`Mobile scaffold toolbox talk ${suffix}`);
+  const briefingTitle = `Mobile scaffold toolbox talk ${suffix}`;
+  await panel.getByLabel('Title').fill(briefingTitle);
   await panel.getByLabel('Scheduled time').fill(new Date(Date.now() - 15 * 60 * 1000).toISOString().slice(0, 16));
   await panel.getByLabel('Discussion topics').fill('Inspection before use\nWheel locks\nExclusion zone');
+  await expect(panel.getByLabel('Title')).toHaveValue(briefingTitle);
   await panel.getByRole('button', { name: 'Schedule briefing' }).click();
 
   await expect(page.getByText('Safety briefing scheduled with the current assigned crew as expected attendees.')).toBeVisible();

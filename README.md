@@ -8,6 +8,14 @@ The manifest-level comparison of the supplied legacy archives and the decisions
 to port, retain, or exclude their capability families are recorded in the
 [archive port audit](docs/ARCHIVE_PORT_AUDIT.md).
 
+The current stabilization evidence is indexed by the
+[technical audit](docs/TECHNICAL_AUDIT.md),
+[goal completion matrix](docs/GOAL_COMPLETION_MATRIX.md),
+[acceptance tests](docs/ACCEPTANCE_TESTS.md), and
+[operator runbook](docs/OPERATOR_RUNBOOK.md). These documents distinguish local
+release evidence from provider-, legal-, and infrastructure-dependent production
+work.
+
 ## Local Use
 
 Requirements: Node.js 22 and npm.
@@ -20,6 +28,43 @@ npm start
 ```
 
 Open `http://localhost:3000`. For development, start the API with `npm run dev:api` and the Vite client with `npm run dev`.
+
+Owners can run a minimized readiness and support diagnostic against a live process:
+
+```powershell
+npm run doctor -- --url http://localhost:3000 --token <owner-role-key>
+```
+
+The support output contains aggregate runtime and integrity state, not customer
+records, evidence contents, logs, environment values, or credentials.
+
+### Windows 11 standalone
+
+The release workflow produces `ContractorAI-windows-x64.zip`. It contains a
+pinned Node.js 22 runtime, the production dashboard, and production-only
+dependencies, so the operator does not need to install Node or npm. Start
+`ContractorAI.cmd`. On first use it creates a random owner access key and keeps
+the ledger, evidence, and configuration under `%LOCALAPPDATA%\ContractorAI`.
+The server binds to `127.0.0.1` and opens the local dashboard. See
+[Windows standalone operation](docs/WINDOWS_STANDALONE.md).
+
+### Authenticated ngrok access
+
+`npm run start:tunnel` creates an HTTPS ngrok tunnel to the loopback-only local
+server. It refuses to open a listener unless `NGROK_AUTHTOKEN` and a strong
+Contractor.AI owner key are configured. The tunnel does not move the SQLite
+ledger or evidence to cloud storage and is not the durable EU-hosted mode. The
+portable package provides `ContractorAI-Tunnel.cmd` using the same local owner
+key. See [ngrok operation](docs/NGROK.md).
+
+### HAI connector
+
+The owner-only HAI connector exposes deterministic, read-only internal action
+summaries through `/api/integrations/hai/feed`. `npm run export:hai` writes that
+generic JSON feed atomically to an absolute operator-selected path. HAI can
+register it as its existing `generic_json_feed` / `local_json_file` source. It
+cannot execute a Contractor.AI command or create an external commitment. See
+[HAI connector setup](docs/HAI_CONNECTOR.md).
 
 Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to retain the owner-controlled business identity used on quote packages, inspect and filter the chained audit history, create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and archive eligible QA/demo jobs, non-won opportunities, workers, and tools. Backups are created before a QA reset. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.
 
@@ -57,6 +102,7 @@ The download endpoint streams a private `tar.gz` package only after verifying ev
 - Cost forecasts are calculated from approved budget lines, retained labor and expense evidence, issued purchase-order commitments, authorized-but-not-issued orders, and approved supplier invoices. A linked supplier invoice reduces the remaining order commitment before totals are calculated, preventing that cost from being counted twice. Mixed-currency sources and missing approved budgets block a snapshot. `FC-YYYY-NNNNNN` snapshots freeze the exact cost-code basis, variance, earned-value signal, and projected margin behind approval; approval fails atomically when any source changes and creates no spend, export, payment, or external commitment. Finance handoff preparation also requires this approved cost basis and fully reviewed evidence, embeds the cost-code forecast in the package, and rejects approval when that exact source hash is no longer current.
 - Billing milestones retain the staged net value, VAT rate, planned issue date, payment date, and approval decision. Active milestones cannot exceed the job's retained contract value. An approved milestone can source exactly one invoice at the retained values; rejecting that invoice releases the milestone for correction without losing its history.
 - The durable autonomous scheduler is opt-in. It uses an atomic compare-and-swap database lease so concurrent hosted replicas cannot claim the same due cycle. It only creates ledger drafts, checks, reminders, and approval records; external commitments remain blocked.
+- The owner can activate a durable, audited autonomous-work safety stop from Operations. Suspension blocks scheduler claims, applied autonomous cycles, and command-plan application with `automation_suspended`, while dry-run diagnosis and direct human-authored ledger work remain available. This is an application control, not a physical emergency or site Stop Work system.
 - Owners can inspect the prioritized command plan in Operations and apply exact safe-draft action IDs. Office operators can review the queue but cannot apply command-plan automation or request a scheduler run.
 - Manual dashboard and direct API cycles use the same persisted scheduler lease as background execution. Invalid candidates, such as a budget draft without a positive estimate or contract value, are retained as blocked results without aborting other safe work.
 - Evidence uploads accept JPEG, PNG, WebP, PDF and DOCX only, validate MIME, filename and binary signature, enforce bounded request sizes, and are never exposed as a public static directory.
@@ -84,12 +130,13 @@ The download endpoint streams a private `tar.gz` package only after verifying ev
 npm run verify:release
 npm run lint
 npm run build
+npm run verify:bundle
 npm test
 npm run test:container
 npm run test:browser
 ```
 
-GitHub Actions runs the same checks for every push and pull request. Its PostgreSQL service enables TLS before testing, verifies `SHOW ssl`, and supplies `sslmode=require`, so hosted-path tests cannot silently fall back to a plaintext or skipped contract. The container gate builds the exact production image, starts it with a read-only root filesystem, dropped capabilities, disabled privilege escalation, loopback-only publishing, and a durable data volume, then proves readiness, authentication, non-root execution, Docker health, restart persistence, and graceful shutdown. Every `.env*` file is excluded from the Docker build context.
+GitHub Actions runs the same checks for every push and pull request. A separate Windows job builds and uploads the portable Windows x64 package with Node.js 22. Its PostgreSQL service enables TLS before testing, verifies `SHOW ssl`, and supplies `sslmode=require`, so hosted-path tests cannot silently fall back to a plaintext or skipped contract. The container gate builds the exact production image, starts it with a read-only root filesystem, dropped capabilities, disabled privilege escalation, loopback-only publishing, and a durable data volume, then proves readiness, authentication, non-root execution, Docker health, restart persistence, and graceful shutdown. Every `.env*` file is excluded from the Docker build context.
 
 ## Container and EU Hosting
 

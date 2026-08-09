@@ -48,6 +48,7 @@ function loadServer(overrides = {}) {
     CONTRACTOR_AI_STORAGE_MODE: 'local',
     CONTRACTOR_AI_TRUST_PROXY: '',
     CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED: 'false',
+    CONTRACTOR_AI_RETENTION_POLICY_REFERENCE: '',
     ...overrides
   });
   if (!Object.prototype.hasOwnProperty.call(overrides, 'CONTRACTOR_AI_DATABASE_URL')) delete process.env.CONTRACTOR_AI_DATABASE_URL;
@@ -297,7 +298,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(readiness.body.status, 'ready');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
-  assert.equal(readiness.body.ledger.migrations.currentVersion, '067_governed_energy_performance');
+  assert.equal(readiness.body.ledger.migrations.currentVersion, '068_operational_safety_controls');
   assert.equal(readiness.body.ledger.auditIntegrity.valid, true);
   assert.deepEqual(readiness.body.ledger.migrations.pending, []);
 
@@ -311,6 +312,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(health.response.status, 200);
   assert.equal(health.body.services.ai, 'ledger_only');
   assert.equal(health.body.services.notifications, 'draft_only');
+  assert.equal(health.body.runtime.exposure.publicTunnel, false);
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities');
   assert.equal(capabilities.response.status, 200);
@@ -334,6 +336,10 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(capabilities.body.capabilities.providerRecovery.applicationPackageAvailable, true);
   assert.equal(capabilities.body.capabilities.persistence.schemaInitialization.serialized, true);
   assert.equal(capabilities.body.capabilities.persistence.schemaInitialization.mechanism, 'sqlite_write_transaction');
+  assert.equal(capabilities.body.capabilities.haiConnector.available, true);
+  assert.equal(capabilities.body.capabilities.haiConnector.mode, 'read_only');
+  assert.equal(capabilities.body.capabilities.haiConnector.canExecute, false);
+  assert.equal(capabilities.body.capabilities.haiConnector.externalCommitments, 0);
   assert.equal(capabilities.body.capabilities.auditIntegrity.valid, true);
   assert.equal(capabilities.body.capabilities.auditIntegrity.status, 'verified');
   assert.equal(capabilities.body.capabilities.auditIntegrity.algorithm, 'sha256');
@@ -444,6 +450,118 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(auditIntegrity.body.success, true);
   assert.equal(auditIntegrity.body.integrity.valid, true);
   assert.ok(auditIntegrity.body.integrity.eventCount >= 1);
+});
+
+test('owner safety stop blocks autonomous drafting and support bundle excludes operational records and secrets', async t => {
+  const secret = 'support-bundle-secret-that-must-never-appear';
+  const app = loadServer({
+    CONTRACTOR_AI_S3_SECRET_ACCESS_KEY: secret,
+    CONTRACTOR_AI_RELEASE_SHA: '0123456789abcdef'
+  });
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const intake = await request(baseUrl, '/api/ledger/intake', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Private support bundle customer job',
+      client: { name: 'Private Support Client' },
+      address: 'Sensitive street 123'
+    })
+  });
+  assert.equal(intake.response.status, 201);
+
+  const initial = await request(baseUrl, '/api/operations/control');
+  assert.equal(initial.response.status, 200);
+  assert.equal(initial.body.automation.status, 'active');
+  assert.equal(initial.body.automation.revision, 0);
+
+  const missingConfirmation = await request(baseUrl, '/api/operations/control/suspend', {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Unexpected provider behavior requires review.' })
+  });
+  assert.equal(missingConfirmation.response.status, 400);
+  assert.equal(missingConfirmation.body.error.code, 'confirmation_required');
+
+  const suspended = await request(baseUrl, '/api/operations/control/suspend', {
+    method: 'POST',
+    body: JSON.stringify({
+      confirmation: 'SUSPEND_AUTOMATION',
+      reason: 'Unexpected provider behavior requires review.'
+    })
+  });
+  assert.equal(suspended.response.status, 200);
+  assert.equal(suspended.body.control.status, 'suspended');
+  assert.equal(suspended.body.control.revision, 1);
+  assert.equal(suspended.body.scheduler.control.suspended, true);
+
+  const replay = await request(baseUrl, '/api/operations/control/suspend', {
+    method: 'POST',
+    body: JSON.stringify({
+      confirmation: 'SUSPEND_AUTOMATION',
+      reason: 'Unexpected provider behavior requires review.'
+    })
+  });
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.control.revision, 1);
+
+  const scheduler = await request(baseUrl, '/api/ledger/scheduler/run', { method: 'POST', body: '{}' });
+  assert.equal(scheduler.response.status, 200);
+  assert.equal(scheduler.body.ran, false);
+  assert.equal(scheduler.body.claim.reason, 'automation_suspended');
+
+  const commandPlan = await request(baseUrl, '/api/ledger/command-plan', { method: 'POST', body: '{}' });
+  assert.equal(commandPlan.response.status, 423);
+  assert.equal(commandPlan.body.error.code, 'automation_suspended');
+
+  const preview = await request(baseUrl, '/api/ledger/autonomous-cycle', {
+    method: 'POST',
+    body: JSON.stringify({ dryRun: true })
+  });
+  assert.equal(preview.response.status, 200);
+  assert.equal(preview.body.dryRun, true);
+  assert.equal(preview.body.automationControl.suspended, true);
+  assert.equal(preview.body.applied.length, 0);
+
+  const manualWork = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/tasks`, {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Direct operator task remains available', status: 'planned' })
+  });
+  assert.equal(manualWork.response.status, 201);
+
+  const support = await request(baseUrl, '/api/operations/support-bundle');
+  assert.equal(support.response.status, 200);
+  assert.equal(support.body.format, 'contractor-ai-support-bundle/v1');
+  assert.equal(support.body.application.version, '1.1.0');
+  assert.equal(support.body.application.releaseSha, '0123456789abcdef');
+  assert.equal(support.body.privacy.customerRecordsIncluded, false);
+  assert.equal(support.body.privacy.credentialsIncluded, false);
+  assert.equal(support.body.database.migrations.currentVersion, '068_operational_safety_controls');
+  assert.equal(support.body.control.automation.suspended, true);
+  assert.match(support.response.headers.get('content-disposition') || '', /contractor-ai-support-/);
+  const serializedSupport = JSON.stringify(support.body);
+  for (const forbidden of [secret, 'Private support bundle customer job', 'Private Support Client', 'Sensitive street 123']) {
+    assert.equal(serializedSupport.includes(forbidden), false);
+  }
+
+  const resumed = await request(baseUrl, '/api/operations/control/resume', {
+    method: 'POST',
+    body: JSON.stringify({
+      confirmation: 'RESUME_AUTOMATION',
+      reason: 'Owner verified provider and ledger readiness.'
+    })
+  });
+  assert.equal(resumed.response.status, 200);
+  assert.equal(resumed.body.control.status, 'active');
+  assert.equal(resumed.body.control.revision, 2);
+  assert.equal(resumed.body.control.resumedAt !== null, true);
+
+  const audit = await request(baseUrl, '/api/ledger/audit?action=suspend_autonomous_work&limit=10');
+  assert.equal(audit.response.status, 200);
+  assert.equal(audit.body.events.length, 1);
 });
 
 test('QA reset requires explicit confirmation and preserves non-QA work', async t => {
@@ -601,6 +719,7 @@ test('hosted readiness uses the PostgreSQL ledger adapter when durable services 
     CONTRACTOR_AI_POSTGRES_BACKUP_MODE: 'pitr',
     CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED: 'true',
     CONTRACTOR_AI_BACKUP_POLICY_REFERENCE: 'recovery-operations-test-2026',
+    CONTRACTOR_AI_RETENTION_POLICY_REFERENCE: 'retention-operations-test-2026',
     CONTRACTOR_AI_TRUST_PROXY: 'loopback',
     CORS_ORIGINS: 'https://contractor-ai.test',
     CONTRACTOR_AI_S3_ENDPOINT: storageEndpoint,
@@ -697,6 +816,7 @@ test('hosted readiness fails closed when object storage rejects the verification
     CONTRACTOR_AI_POSTGRES_BACKUP_MODE: 'pitr',
     CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED: 'true',
     CONTRACTOR_AI_BACKUP_POLICY_REFERENCE: 'recovery-operations-test-2026',
+    CONTRACTOR_AI_RETENTION_POLICY_REFERENCE: 'retention-operations-test-2026',
     CONTRACTOR_AI_TRUST_PROXY: 'loopback',
     CORS_ORIGINS: 'https://contractor-ai.test',
     CONTRACTOR_AI_S3_ENDPOINT: storageEndpoint,

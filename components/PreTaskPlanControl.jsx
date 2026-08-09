@@ -291,7 +291,10 @@ export default function PreTaskPlanControl({
 
   async function closePlan(event) {
     event.preventDefault()
-    if (!canCoordinate || !selectedPlan || closure.note.trim().length < 8 || closure.evidenceReference.trim().length < 3) return
+    if (!canCoordinate || !selectedPlan || closure.note.trim().length < 8 || closure.evidenceReference.trim().length < 3) {
+      setError('Retain a completion note and closeout evidence reference before closing this plan.')
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
@@ -438,8 +441,8 @@ export default function PreTaskPlanControl({
           {RELEASED_STATUSES.has(selectedPlan.status) && (fieldScoped || canCoordinate) ? (
             <form className="pre-task-suspension" onSubmit={suspendPlan}>
               <div className="pre-task-action-heading"><strong>Stop work</strong><span>Immediate safety action with retained evidence.</span></div>
-              <label>Reason<input required minLength="8" maxLength="1000" value={suspension.reason} onChange={event => setSuspension({ ...suspension, reason: event.target.value })} /></label>
-              <label>Evidence reference<input required minLength="3" maxLength="240" value={suspension.evidenceReference} onChange={event => setSuspension({ ...suspension, evidenceReference: event.target.value })} /></label>
+              <label>Reason<input required disabled={submitting || loading} minLength="8" maxLength="1000" value={suspension.reason} onChange={event => { const value = event.target.value; setSuspension(current => ({ ...current, reason: value })) }} /></label>
+              <label>Evidence reference<input required disabled={submitting || loading} minLength="3" maxLength="240" value={suspension.evidenceReference} onChange={event => { const value = event.target.value; setSuspension(current => ({ ...current, evidenceReference: value })) }} /></label>
               <button className="danger-button" disabled={submitting}><X size={16} /> {navigator.onLine === false ? 'Save stop offline' : 'Suspend'}</button>
             </form>
           ) : null}
@@ -447,8 +450,8 @@ export default function PreTaskPlanControl({
           {canCoordinate && ['active', 'suspended'].includes(selectedPlan.status) ? (
             <form className="pre-task-closure" onSubmit={closePlan}>
               <div className="pre-task-action-heading"><strong>Close plan</strong><span>Retain handback and completion evidence.</span></div>
-              <label>Completion note<input required minLength="8" maxLength="1000" value={closure.note} onChange={event => setClosure({ ...closure, note: event.target.value })} /></label>
-              <label>Closeout evidence<input required minLength="3" maxLength="240" value={closure.evidenceReference} onChange={event => setClosure({ ...closure, evidenceReference: event.target.value })} /></label>
+              <label>Completion note<input required disabled={submitting || loading} minLength="8" maxLength="1000" value={closure.note} onChange={event => { const value = event.target.value; setClosure(current => ({ ...current, note: value })) }} /></label>
+              <label>Closeout evidence<input required disabled={submitting || loading} minLength="3" maxLength="240" value={closure.evidenceReference} onChange={event => { const value = event.target.value; setClosure(current => ({ ...current, evidenceReference: value })) }} /></label>
               <button className="secondary-button" disabled={submitting}><ClipboardCheck size={16} /> Close plan</button>
             </form>
           ) : null}

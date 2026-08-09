@@ -375,6 +375,21 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     const deniedApproverAudit = await request(baseUrl, '/api/ledger/audit?limit=5', { headers: approverHeaders });
     assert.equal(deniedApproverAudit.response.status, 403);
     assert.equal(deniedApproverAudit.body.error.code, 'insufficient_role');
+    const ownerDebug = await request(baseUrl, '/api/ledger/debug', { headers: ownerHeaders });
+    assert.equal(ownerDebug.response.status, 200);
+    assert.equal(ownerDebug.body.diagnostics.valid, true);
+    const deniedOfficeDebug = await request(baseUrl, '/api/ledger/debug', { headers: officeHeaders });
+    assert.equal(deniedOfficeDebug.response.status, 403);
+    assert.equal(deniedOfficeDebug.body.error.code, 'insufficient_role');
+    const ownerSupport = await request(baseUrl, '/api/operations/support-bundle', { headers: ownerHeaders });
+    assert.equal(ownerSupport.response.status, 200);
+    assert.equal(ownerSupport.body.format, 'contractor-ai-support-bundle/v1');
+    const deniedOfficeSupport = await request(baseUrl, '/api/operations/support-bundle', { headers: officeHeaders });
+    assert.equal(deniedOfficeSupport.response.status, 403);
+    assert.equal(deniedOfficeSupport.body.error.code, 'insufficient_role');
+    const deniedApproverControl = await request(baseUrl, '/api/operations/control', { headers: approverHeaders });
+    assert.equal(deniedApproverControl.response.status, 403);
+    assert.equal(deniedApproverControl.body.error.code, 'insufficient_role');
     const deniedOfficeBackup = await request(baseUrl, `/api/operations/backups/${encodeURIComponent(ownerBackup.body.backup.backupId)}/download`, {
       headers: officeHeaders
     });

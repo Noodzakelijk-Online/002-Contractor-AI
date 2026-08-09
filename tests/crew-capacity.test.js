@@ -5,8 +5,22 @@ const os = require('node:os');
 const path = require('node:path');
 const { ContractorOperatingLedger } = require('../operating-ledger');
 
-const WINDOW_START = '2026-08-03';
-const WINDOW_END = '2026-08-16';
+function nextMondayWindow() {
+  const start = new Date();
+  start.setUTCHours(0, 0, 0, 0);
+  const daysUntilMonday = (8 - start.getUTCDay()) % 7 || 7;
+  start.setUTCDate(start.getUTCDate() + daysUntilMonday);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 13);
+  return {
+    start: start.toISOString().slice(0, 10),
+    end: end.toISOString().slice(0, 10)
+  };
+}
+
+const CREW_WINDOW = nextMondayWindow();
+const WINDOW_START = CREW_WINDOW.start;
+const WINDOW_END = CREW_WINDOW.end;
 
 function createLedger(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-crew-capacity-'));
@@ -118,7 +132,7 @@ test('explicit capacity and day allocations produce an approval-backed source-cu
   assert.equal(approvedBoard.plans.current, true);
   assert.equal(approvedBoard.safeguards.externalCommitments, 0);
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '067_governed_energy_performance');
+  assert.equal(ledger.migrationStatus().currentVersion, '068_operational_safety_controls');
 });
 
 test('overload, retained absence, stale source, and malformed hours fail closed', t => {

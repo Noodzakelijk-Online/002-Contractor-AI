@@ -158,6 +158,7 @@ test('direct hosted startup refuses missing HTTPS, EU, DPA, and recovery declara
       CONTRACTOR_AI_POSTGRES_BACKUP_MODE: '',
       CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED: 'false',
       CONTRACTOR_AI_BACKUP_POLICY_REFERENCE: '',
+      CONTRACTOR_AI_RETENTION_POLICY_REFERENCE: '',
       CONTRACTOR_AI_TRUST_PROXY: '',
       CORS_ORIGINS: 'https://different-origin.test',
       STATE_FILE: path.join(directory, 'state.json'),
@@ -175,6 +176,7 @@ test('direct hosted startup refuses missing HTTPS, EU, DPA, and recovery declara
   assert.match(result.stderr, /hosted_postgres_backup_required/);
   assert.match(result.stderr, /hosted_object_versioning_required/);
   assert.match(result.stderr, /hosted_backup_policy_required/);
+  assert.match(result.stderr, /hosted_retention_policy_required/);
   assert.match(result.stderr, /hosted_trusted_proxy_required/);
 });
 
@@ -201,6 +203,7 @@ test('direct hosted startup refuses insecure and unreachable object storage', { 
       CONTRACTOR_AI_POSTGRES_BACKUP_MODE: 'pitr',
       CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED: 'true',
       CONTRACTOR_AI_BACKUP_POLICY_REFERENCE: 'recovery-startup-test-2026',
+      CONTRACTOR_AI_RETENTION_POLICY_REFERENCE: 'retention-startup-test-2026',
       CONTRACTOR_AI_TRUST_PROXY: 'loopback',
       CONTRACTOR_AI_S3_ENDPOINT: 'http://127.0.0.1:1',
       CONTRACTOR_AI_S3_BUCKET: 'contractor-private',

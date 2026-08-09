@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -21,9 +22,12 @@ const {
 const { OpenMeteoWeatherService } = require('./weather-service');
 const { EvidenceStorageError, createEvidenceStorage } = require('./evidence-storage');
 const { verifySqliteBackupDatabase } = require('./scripts/restore-local-backup');
+const { boundedFeedLimit, buildHaiFeed, connectorManifest } = require('./hai-connector');
+const packageMetadata = require('./package.json');
 
 const app = express();
 const port = process.env.PORT || 3000;
+const configuredBindHost = String(process.env.CONTRACTOR_AI_BIND_HOST || '').trim();
 const weatherService = new OpenMeteoWeatherService({
   enabled: process.env.WEATHER_PROVIDER_ENABLED !== 'false'
 });
@@ -75,6 +79,8 @@ const dpaReference = String(process.env.CONTRACTOR_AI_DPA_REFERENCE || '').trim(
 const postgresBackupMode = String(process.env.CONTRACTOR_AI_POSTGRES_BACKUP_MODE || '').trim().toLowerCase();
 const objectVersioningEnabled = process.env.CONTRACTOR_AI_OBJECT_VERSIONING_ENABLED === 'true';
 const backupPolicyReference = String(process.env.CONTRACTOR_AI_BACKUP_POLICY_REFERENCE || '').trim();
+const retentionPolicyReference = String(process.env.CONTRACTOR_AI_RETENTION_POLICY_REFERENCE || '').trim();
+const releaseSha = String(process.env.CONTRACTOR_AI_RELEASE_SHA || '').trim();
 const hostedDatabaseSslMode = (() => {
   if (!hostedDatabaseUrl) return '';
   try {
@@ -216,6 +222,7 @@ function runtimeConfiguration(options = {}) {
     ['hosting_region', hostingRegion],
     ['dpa_reference', dpaReference],
     ['backup_policy_reference', backupPolicyReference],
+    ['retention_policy_reference', retentionPolicyReference],
     ['trusted_proxy', trustedProxyRaw],
     ['cors', process.env.CORS_ORIGINS],
     ['object_storage_endpoint', evidenceStorageOptions.endpoint],
@@ -291,6 +298,9 @@ function runtimeConfiguration(options = {}) {
   if (hosted && !isConfiguredReference(backupPolicyReference)) {
     issues.push({ code: 'hosted_backup_policy_required', message: 'Hosted mode requires a retained recovery-policy reference in CONTRACTOR_AI_BACKUP_POLICY_REFERENCE.' });
   }
+  if (hosted && !isConfiguredReference(retentionPolicyReference)) {
+    issues.push({ code: 'hosted_retention_policy_required', message: 'Hosted mode requires a retained data-retention policy reference in CONTRACTOR_AI_RETENTION_POLICY_REFERENCE.' });
+  }
   if (hosted && storageMode !== 's3') {
     issues.push({ code: 'durable_object_storage_required', message: 'Hosted mode requires S3-compatible EU object storage for evidence files.' });
   }
@@ -321,6 +331,12 @@ function runtimeConfiguration(options = {}) {
     mode: runtimeMode,
     storageMode,
     databaseMode: operatingLedger?.databaseMode || (hostedDatabaseUrl ? 'postgres' : 'sqlite'),
+    exposure: {
+      bindHost: configuredBindHost || null,
+      loopbackOnly: ['127.0.0.1', '::1', 'localhost'].includes(configuredBindHost.toLowerCase()),
+      publicTunnel: runtimeMode === 'local' && process.env.CONTRACTOR_AI_NGROK_ACTIVE === 'true',
+      publicOrigin: hostedPublicUrlDetails.valid ? hostedPublicUrlDetails.origin : null
+    },
     auth: {
       required: dashboardAuthRequired,
       legacyOwnerTokenConfigured: isStrongOperatorToken(dashboardAuthToken),
@@ -349,7 +365,8 @@ function runtimeConfiguration(options = {}) {
         postgresBackupMode: ['snapshot', 'pitr'].includes(postgresBackupMode) ? postgresBackupMode : null,
         objectVersioningEnabled,
         policyConfigured: isConfiguredReference(backupPolicyReference)
-      }
+      },
+      retentionPolicyConfigured: isConfiguredReference(retentionPolicyReference)
     },
     evidenceStorage: {
       status: storageVerification?.status || 'unverified',
@@ -1896,6 +1913,10 @@ function requireSessionMutationOrigin(req, res, next) {
 app.disable('x-powered-by');
 app.use(setSecurityHeaders);
 app.use(attachRequestContext);
+app.use(compression({
+  threshold: 1_024,
+  filter: (req, res) => req.headers['x-no-compression'] !== 'true' && compression.filter(req, res)
+}));
 app.use(cors({
   origin(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -2110,11 +2131,21 @@ function autonomousSchedulerStatus() {
     enabled: autonomousSchedulerEnabled,
     intervalSeconds: autonomousSchedulerIntervalSeconds,
     leaseSeconds: autonomousSchedulerLeaseSeconds,
+    control: operatingLedger.getAutomationControl(),
     job: operatingLedger.getScheduledJob(AUTONOMOUS_SCHEDULER_KEY)
   };
 }
 
 function runDurableAutonomousCycle(options = {}) {
+  const control = operatingLedger.getAutomationControl();
+  if (control.suspended) {
+    return {
+      success: true,
+      ran: false,
+      claim: { claimed: false, reason: 'automation_suspended', control },
+      scheduler: autonomousSchedulerStatus()
+    };
+  }
   const claim = operatingLedger.claimScheduledJob(AUTONOMOUS_SCHEDULER_KEY, {
     intervalSeconds: autonomousSchedulerIntervalSeconds,
     leaseSeconds: autonomousSchedulerLeaseSeconds,
@@ -5769,6 +5800,9 @@ app.post('/api/ledger/scheduler/run', (req, res) => {
 });
 
 app.get('/api/ledger/debug', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can inspect ledger diagnostics.');
+  }
   return handleLedgerRequest(req, res, () => ({
     success: true,
     diagnostics: operatingLedger.diagnose(),
@@ -5793,6 +5827,28 @@ app.get('/api/ledger/qualifications', (req, res) => {
     success: true,
     qualificationRegister: operatingLedger.listQualificationRegister(req.query || {})
   }));
+});
+
+app.get('/api/integrations/hai/manifest', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can inspect the HAI connector contract.');
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(connectorManifest());
+});
+
+app.get('/api/integrations/hai/feed', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can export the read-only HAI action feed.');
+  }
+  const limit = boundedFeedLimit(req.query.limit);
+  const actions = operatingLedger.nextActions({
+    includeCrewCapacity: true,
+    includeLastPlanner: true,
+    includeFiveS: true
+  });
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(buildHaiFeed(actions, { limit }));
 });
 
 app.get('/api/ledger/availability', (req, res) => {
@@ -6584,7 +6640,7 @@ app.post('/api/simulate/client-request', (req, res) => {
 
 });
 
-// AI Chat endpoint
+// Retired compatibility endpoint for pre-ledger clients.
 app.post('/api/legacy/ai/chat', (req, res) => {
   return res.status(410).json({
     error: {
@@ -6595,7 +6651,7 @@ app.post('/api/legacy/ai/chat', (req, res) => {
   });
 });
 
-// Simulate client request
+// Retired compatibility endpoint for pre-ledger sample intake.
 app.post('/api/legacy/simulate/client-request', (req, res) => {
   return res.status(410).json({
     error: {
@@ -7700,6 +7756,11 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
           mechanism: runtime.databaseMode === 'postgres' ? 'postgres_advisory_lock' : 'sqlite_write_transaction'
         }
       },
+      haiConnector: {
+        available: true,
+        ...connectorManifest(),
+        exportCommand: 'npm run export:hai'
+      },
       preconstructionSiteSurvey: {
         available: true,
         template: 'versioned_standard_checklist',
@@ -8306,7 +8367,27 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         intervalSeconds: runtime.autonomousScheduler.intervalSeconds,
         coordination: 'durable_compare_and_swap_lease',
         multiReplicaSafe: true,
+        control: operatingLedger.getAutomationControl(),
+        safetyStop: {
+          ownerControlled: true,
+          suspendEndpoint: '/api/operations/control/suspend',
+          resumeEndpoint: '/api/operations/control/resume',
+          blocks: ['manual_autonomous_cycle', 'durable_scheduler', 'command_plan_application']
+        },
         externalCommitments: 0
+      },
+      support: {
+        privacyMinimizedBundle: true,
+        endpoint: '/api/operations/support-bundle',
+        includesCustomerRecords: false,
+        includesSecrets: false,
+        includesLogs: false
+      },
+      retention: {
+        policyConfigured: runtime.hosting.retentionPolicyConfigured,
+        archiveMode: 'approval_gated_non_destructive',
+        automatedDeletion: false,
+        legalReviewRequired: true
       }
     },
     runtime,
@@ -8317,6 +8398,107 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       auditIntegrity: ledgerDiagnostics.auditIntegrity
     }
   });
+}));
+
+app.get('/api/operations/control', (req, res) => {
+  return res.json({
+    success: true,
+    automation: operatingLedger.getAutomationControl(),
+    scheduler: autonomousSchedulerStatus()
+  });
+});
+
+app.post('/api/operations/control/suspend', (req, res) => {
+  if (req.body?.confirmation !== 'SUSPEND_AUTOMATION') {
+    return sendError(req, res, 400, 'confirmation_required', 'Set confirmation to SUSPEND_AUTOMATION before activating the autonomous-work safety stop.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.setAutomationControl(
+      { status: 'suspended', reason: req.body?.reason },
+      { actor: actorFromRequest(req, 'owner_safety_stop') }
+    ),
+    scheduler: autonomousSchedulerStatus()
+  }));
+});
+
+app.post('/api/operations/control/resume', (req, res) => {
+  if (req.body?.confirmation !== 'RESUME_AUTOMATION') {
+    return sendError(req, res, 400, 'confirmation_required', 'Set confirmation to RESUME_AUTOMATION before releasing the autonomous-work safety stop.');
+  }
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.setAutomationControl(
+      { status: 'active', reason: req.body?.reason },
+      { actor: actorFromRequest(req, 'owner_safety_resume') }
+    ),
+    scheduler: autonomousSchedulerStatus()
+  }));
+});
+
+app.get('/api/operations/support-bundle', asyncHandler(async (req, res) => {
+  const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
+  const severityCounts = (ledgerDiagnostics.issues || []).reduce((counts, issue) => {
+    const severity = ['error', 'warning', 'info'].includes(issue.severity) ? issue.severity : 'other';
+    counts[severity] = (counts[severity] || 0) + 1;
+    return counts;
+  }, {});
+  const bundle = {
+    format: 'contractor-ai-support-bundle/v1',
+    generatedAt: new Date().toISOString(),
+    requestId: req.requestId,
+    privacy: {
+      customerRecordsIncluded: false,
+      evidenceIncluded: false,
+      logsIncluded: false,
+      environmentValuesIncluded: false,
+      credentialsIncluded: false,
+      aggregateCountsIncluded: true
+    },
+    application: {
+      name: packageMetadata.name,
+      version: packageMetadata.version,
+      releaseSha: releaseSha || null,
+      node: process.version,
+      platform: process.platform,
+      uptimeSeconds: Math.round(process.uptime())
+    },
+    readiness: {
+      status,
+      runtimeReady: runtime.ready,
+      issueCodes: runtime.issues.map(issue => issue.code),
+      storage: {
+        mode: storageVerification.mode || runtime.storageMode,
+        status: storageVerification.status,
+        checkedAt: storageVerification.checkedAt || null
+      }
+    },
+    database: {
+      mode: runtime.databaseMode,
+      migrations: ledgerDiagnostics.migrations,
+      aggregateCounts: ledgerDiagnostics.counts || {}
+    },
+    integrity: {
+      ledgerValid: ledgerDiagnostics.valid,
+      issueCount: ledgerDiagnostics.issueCount,
+      issueSeverityCounts: severityCounts,
+      auditValid: ledgerDiagnostics.auditIntegrity?.valid === true,
+      auditEventCount: Number(ledgerDiagnostics.auditIntegrity?.eventCount || 0),
+      auditFormat: ledgerDiagnostics.auditIntegrity?.format || null
+    },
+    control: {
+      automation: operatingLedger.getAutomationControl(),
+      scheduler: autonomousSchedulerStatus()
+    },
+    operatorNextSteps: [
+      'Use requestId to correlate the failing API call with infrastructure logs.',
+      'Run npm run doctor against the same runtime.',
+      'Do not attach customer evidence, exported ledgers, credentials, or environment files to a support ticket.'
+    ]
+  };
+  res.setHeader('Content-Disposition', `attachment; filename="contractor-ai-support-${Date.now()}.json"`);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(bundle);
 }));
 
 app.post('/api/operations/reset-qa', (req, res) => {
@@ -8397,7 +8579,7 @@ app.get('/api/readiness', asyncHandler(async (req, res) => {
         'managed PostgreSQL via CONTRACTOR_AI_DATABASE_URL',
         'S3-compatible EU object storage',
         'HTTPS public origin and a strong auth token',
-        'retained DPA and recovery-policy references',
+        'retained DPA, recovery-policy, and retention-policy references',
         'PostgreSQL backups and evidence object versioning'
       ]
     }
@@ -8426,7 +8608,7 @@ app.get('/api/health', (req, res) => {
     status: ledgerDiagnostics.valid && runtime.ready ? 'healthy' : 'degraded',
     requestId: req.requestId,
     timestamp: new Date().toISOString(),
-    version: '1.0.0',
+    version: packageMetadata.version,
     uptimeSeconds: Math.round(process.uptime()),
     services: {
       ai: 'ledger_only',
@@ -8451,7 +8633,18 @@ app.use('/api', (req, res) => {
 });
 
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir, { index: false, fallthrough: true }));
+  app.use(express.static(distDir, {
+    index: false,
+    fallthrough: true,
+    setHeaders: (res, filePath) => {
+      const relative = path.relative(distDir, filePath).replace(/\\/g, '/');
+      if (/^assets\/.+-[A-Za-z0-9_-]{8,}\.[^.]+$/.test(relative)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    }
+  }));
 }
 
 app.use((req, res, next) => {
@@ -8459,6 +8652,7 @@ app.use((req, res, next) => {
   if (!fs.existsSync(path.join(distDir, 'index.html'))) {
     return sendError(req, res, 503, 'web_client_not_built', 'Run npm run build before starting the production web client.');
   }
+  res.setHeader('Cache-Control', 'no-store');
   return res.sendFile(path.join(distDir, 'index.html'));
 });
 
@@ -8490,23 +8684,44 @@ app.use((error, req, res, next) => {
   return sendError(req, res, 500, 'internal_error', 'Unexpected server error', serializeError(error));
 });
 
-async function startDirectServer() {
+async function startDirectServer(options = {}) {
   const storageVerification = await verifyEvidenceStorage({ force: true });
   const startupRuntime = runtimeConfiguration({ storageVerification });
   if (isProduction && !startupRuntime.ready) {
     log('error', 'production_runtime_not_ready', { issues: startupRuntime.issues.map(issue => issue.code) });
     await shutdownRuntime({ signal: 'startup_not_ready' });
-    process.exitCode = 1;
-    return;
+    const error = new Error('Contractor.AI production runtime is not ready.');
+    error.code = 'production_runtime_not_ready';
+    throw error;
   }
-  directServer = configureHttpServer(app.listen(port, () => {
-    log('info', 'server_started', {
-      port,
-      dashboard: `http://localhost:${port}`,
-      health: `http://localhost:${port}/api/health`,
-      readiness: `http://localhost:${port}/api/health/ready`
+  if (directServer?.listening) return directServer;
+  const listenPort = options.port ?? port;
+  const listenHost = String(options.host ?? configuredBindHost).trim() || undefined;
+  directServer = configureHttpServer(app.listen({ port: listenPort, ...(listenHost ? { host: listenHost } : {}) }));
+  await new Promise((resolve, reject) => {
+    const onError = error => {
+      directServer.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      directServer.off('error', onError);
+      resolve();
+    };
+    directServer.once('error', onError);
+    directServer.once('listening', onListening);
+  });
+  const address = directServer.address();
+  const activePort = typeof address === 'object' && address ? address.port : listenPort;
+  const dashboardOrigin = hostedPublicUrlDetails.valid
+    ? hostedPublicUrlDetails.origin
+    : `http://localhost:${activePort}`;
+  log('info', 'server_started', {
+      host: listenHost || 'system_default',
+      port: activePort,
+      dashboard: dashboardOrigin,
+      health: `${dashboardOrigin}/api/health`,
+      readiness: `${dashboardOrigin}/api/health/ready`
     });
-  }));
   return directServer;
 }
 
@@ -8552,6 +8767,7 @@ function shutdownRuntime({ server = directServer, signal = 'shutdown', timeoutMs
 
 app.locals.runtimeControl = Object.freeze({
   configureHttpServer,
+  start: options => startDirectServer(options),
   shutdown: options => shutdownRuntime(options),
   schedulerTimerCount: () => autonomousSchedulerTimers.size,
   httpTimeouts: Object.freeze({

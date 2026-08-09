@@ -19,11 +19,20 @@ function cleanupRuntimeDirectory(runtimeDirectory) {
   fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
 }
 
+function allTestFiles() {
+  return fs.readdirSync(path.join(projectRoot, 'tests'), { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith('.test.js'))
+    .map(entry => path.posix.join('tests', entry.name))
+    .sort((left, right) => left.localeCompare(right));
+}
+
 function runNodeTests(args = process.argv.slice(2)) {
   const runtimeDirectory = createRuntimeDirectory();
+  const hasExplicitTestFile = args.some(argument => /(?:^|[\\/])[^\\/]+\.test\.js$/i.test(argument));
+  const testArguments = hasExplicitTestFile ? args : [...args, ...allTestFiles()];
   let result;
   try {
-    result = spawnSync(process.execPath, ['--test', ...args], {
+    result = spawnSync(process.execPath, ['--test', ...testArguments], {
       cwd: projectRoot,
       env: {
         ...process.env,
@@ -50,4 +59,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { cleanupRuntimeDirectory, createRuntimeDirectory, runNodeTests };
+module.exports = { allTestFiles, cleanupRuntimeDirectory, createRuntimeDirectory, runNodeTests };

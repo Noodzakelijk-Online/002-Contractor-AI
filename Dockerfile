@@ -11,7 +11,7 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-COPY server.js operating-ledger.js weather-service.js evidence-storage.js postgres-sync-database.js postgres-sync-worker.js ./
+COPY server.js operating-ledger.js weather-service.js evidence-storage.js hai-connector.js postgres-sync-database.js postgres-sync-worker.js ./
 COPY scripts/restore-local-backup.js ./scripts/restore-local-backup.js
 COPY scripts/migrate-local-backup-to-hosted.js ./scripts/migrate-local-backup-to-hosted.js
 RUN mkdir -p /var/lib/contractor-ai/uploads && chown -R node:node /var/lib/contractor-ai

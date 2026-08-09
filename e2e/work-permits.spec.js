@@ -60,6 +60,7 @@ test('permit approval, crew acceptance, stop work, closeout, and mobile layout s
   await panel.getByLabel('Hazards', { exact: true }).fill('Stored electrical energy\nUnexpected re-energization');
   await panel.getByLabel('Controls', { exact: true }).fill('Lock and tag isolation\nProve dead before work');
   await panel.getByLabel('Conditions', { exact: true }).fill('Suspend if the isolation boundary changes');
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue(permitTitle);
   await panel.getByRole('button', { name: 'Request approval' }).click();
   await expect(page.getByText('Permit definition and assigned crew were frozen for approval.')).toBeVisible();
 

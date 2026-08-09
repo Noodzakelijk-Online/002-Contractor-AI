@@ -175,7 +175,7 @@ test('bid/no-bid policy and pursuit decisions are replay-safe, approval-gated, s
   assert.equal(ledger.getOpportunity(opportunity.id).stage, 'new');
   assert.equal(register.summary.noBid, 1);
   assert.equal(ledger.diagnose().valid, true);
-  assert.equal(ledger.migrationStatus().currentVersion, '067_governed_energy_performance');
+  assert.equal(ledger.migrationStatus().currentVersion, '068_operational_safety_controls');
 });
 
 test('recommendation overrides require rationale and approval rejects stale pursuit evidence atomically', t => {

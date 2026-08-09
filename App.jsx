@@ -1088,6 +1088,18 @@ function reconcileApprovalResolution(data, approvalId, dashboard = null) {
 }
 
 async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped = false, viewContext = {}) {
+  if (section === 'today' && !fieldScoped) {
+    const [organization, scheduler, capabilities] = await Promise.all([
+      api('/api/ledger/organization').catch(() => null),
+      api('/api/ledger/scheduler').catch(() => null),
+      api('/api/operations/capabilities').catch(() => null),
+    ])
+    return {
+      organization: organization?.organization || null,
+      scheduler: scheduler?.scheduler || null,
+      operationsCapabilities: capabilities,
+    }
+  }
   if (section === 'pipeline') {
     const [opportunities, marketFit, bidDecisions, bids, partners] = await Promise.all([
       api('/api/ledger/opportunities?includeClosed=true&limit=500'),
@@ -3017,15 +3029,19 @@ function App() {
   const [fieldProgress, setFieldProgress] = useState(emptyFieldProgress)
   const [dailyHuddle, setDailyHuddle] = useState(emptyDailyHuddle)
   const [fieldDailyCycles, setFieldDailyCycles] = useState([])
+  const [dailyCycleLoading, setDailyCycleLoading] = useState(false)
   const [fieldDailyLog, setFieldDailyLog] = useState(emptyFieldDailyLog)
   const [fieldMaterialReceipt, setFieldMaterialReceipt] = useState(() => emptyMaterialReceiptDraft())
   const [fieldMaterialReceiptPlans, setFieldMaterialReceiptPlans] = useState([])
+  const [materialReceiptLoading, setMaterialReceiptLoading] = useState(false)
   const [fieldExpenseReceipt, setFieldExpenseReceipt] = useState(() => emptyFieldExpenseReceiptDraft())
   const [fieldExpenseReceipts, setFieldExpenseReceipts] = useState([])
+  const [expenseReceiptLoading, setExpenseReceiptLoading] = useState(false)
   const [fieldEnvironmentalActivity, setFieldEnvironmentalActivity] = useState(() => emptyFieldEnvironmentalDraft())
   const [fieldEnvironmentalActivities, setFieldEnvironmentalActivities] = useState([])
   const [environmentalRegister, setEnvironmentalRegister] = useState(null)
   const [environmentalReports, setEnvironmentalReports] = useState([])
+  const [environmentalLoading, setEnvironmentalLoading] = useState(false)
   const [environmentalReportDraft, setEnvironmentalReportDraft] = useState(() => emptyEnvironmentalReportDraft())
   const [environmentalReversal, setEnvironmentalReversal] = useState(null)
   const [environmentalReversalReason, setEnvironmentalReversalReason] = useState('')
@@ -3035,7 +3051,9 @@ function App() {
   const [fieldEquipmentCustody, setFieldEquipmentCustody] = useState([])
   const [attendanceDraft, setAttendanceDraft] = useState(emptyAttendanceDraft)
   const [safetyBriefingDraft, setSafetyBriefingDraft] = useState(emptySafetyBriefingDraft)
+  const [safetyBriefingLoading, setSafetyBriefingLoading] = useState(false)
   const [workPermitDraft, setWorkPermitDraft] = useState(emptyWorkPermitDraft)
+  const [workPermitLoading, setWorkPermitLoading] = useState(false)
   const [outboxPending, setOutboxPending] = useState(0)
   const [outboxQuarantined, setOutboxQuarantined] = useState(0)
   const [outboxSyncing, setOutboxSyncing] = useState(false)
@@ -3057,6 +3075,12 @@ function App() {
   const sectionRef = useRef('today')
   const resourceViewRef = useRef('workforce')
   const sectionLoadSequenceRef = useRef(0)
+  const dailyCycleLoadSequenceRef = useRef(0)
+  const materialReceiptLoadSequenceRef = useRef(0)
+  const expenseReceiptLoadSequenceRef = useRef(0)
+  const environmentalLoadSequenceRef = useRef(0)
+  const safetyBriefingLoadSequenceRef = useRef(0)
+  const workPermitLoadSequenceRef = useRef(0)
   const lastPlannerWeekRef = useRef('')
   const resourceViewLoadTimerRef = useRef(null)
 
@@ -3198,11 +3222,9 @@ function App() {
       const [dashboardResult, approvalsResult, sectionPatch] = await Promise.all([
         api('/api/ledger/dashboard'),
         api('/api/ledger/approvals?status=pending&limit=100'),
-        currentSection === 'today'
-          ? Promise.resolve({})
-          : loadSectionPatch(currentSection, resourceViewRef.current, fieldScoped, {
-              lastPlannerWeekStart: lastPlannerWeekRef.current,
-            }),
+        loadSectionPatch(currentSection, resourceViewRef.current, fieldScoped, {
+          lastPlannerWeekStart: lastPlannerWeekRef.current,
+        }),
       ])
       if (sequence !== fullLoadSequenceRef.current) return
       const currentSectionPatch = sectionRef.current === currentSection ? sectionPatch : {}
@@ -3246,6 +3268,8 @@ function App() {
   const canCoordinate = !fieldScoped && capabilities.intake === true
   const canManageMarketFitPolicy = operator.role === 'owner'
   const operationCapabilities = data?.operationsCapabilities?.capabilities || null
+  const automationControl = operationCapabilities?.automation?.control || data?.scheduler?.control || null
+  const automationSuspended = automationControl?.suspended === true
   const evidenceStorageCapability = operationCapabilities?.evidenceStorage || null
   const exportValidationAvailable = operationCapabilities?.export?.integrity === 'sha256'
   const localBackupAvailable = operationCapabilities?.backup?.available === true
@@ -4505,6 +4529,56 @@ function App() {
     }
   }
 
+  async function changeAutomationControl(suspend) {
+    const action = suspend ? 'suspend' : 'resume'
+    const reason = window.prompt(
+      suspend
+        ? 'Record why autonomous drafting must stop. Direct operator work and approvals remain available.'
+        : 'Record why autonomous drafting is safe to resume.',
+      suspend ? 'Owner safety stop requested.' : 'Owner verified readiness to resume autonomous drafting.',
+    )
+    if (reason === null) return
+    if (reason.trim().length < 8) {
+      setError('Record at least 8 characters explaining the operational control decision.')
+      return
+    }
+    if (!window.confirm(`${suspend ? 'Suspend' : 'Resume'} manual and scheduled autonomous drafting?`)) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api(`/api/operations/control/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          confirmation: suspend ? 'SUSPEND_AUTOMATION' : 'RESUME_AUTOMATION',
+          reason: reason.trim(),
+        }),
+      })
+      setData((current) => current ? {
+        ...current,
+        scheduler: result.scheduler || current.scheduler,
+        operationsCapabilities: current.operationsCapabilities ? {
+          ...current.operationsCapabilities,
+          capabilities: {
+            ...current.operationsCapabilities.capabilities,
+            automation: {
+              ...current.operationsCapabilities.capabilities?.automation,
+              control: result.control,
+            },
+          },
+        } : current.operationsCapabilities,
+      } : current)
+      notify(
+        suspend
+          ? 'Autonomous drafting suspended. Direct operator work, evidence capture, and approvals remain available.'
+          : 'Autonomous drafting resumed. External commitments remain approval-gated.',
+      )
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   function toggleCommandSelection(actionId, checked) {
     setSelectedCommandIds((current) => (checked ? [...new Set([...current, actionId])] : current.filter((id) => id !== actionId)))
   }
@@ -4783,36 +4857,59 @@ function App() {
   }
 
   async function selectFieldMaterialReceiptJob(jobId) {
+    const loadSequence = ++materialReceiptLoadSequenceRef.current
+    const shouldLoad = Boolean(jobId) && navigator.onLine !== false
+    setMaterialReceiptLoading(shouldLoad)
     setFieldMaterialReceipt({ ...emptyMaterialReceiptDraft(), jobId })
     setFieldMaterialReceiptPlans([])
-    if (!jobId || navigator.onLine === false) return
+    if (!shouldLoad) return
+    setError('')
     try {
       const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/material-receiving-plan`)
+      if (loadSequence !== materialReceiptLoadSequenceRef.current) return
       setFieldMaterialReceiptPlans(result.plans || [])
     } catch (requestError) {
-      setError(requestError.message)
+      if (loadSequence === materialReceiptLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (loadSequence === materialReceiptLoadSequenceRef.current) setMaterialReceiptLoading(false)
     }
   }
 
   function selectFieldMaterialReceiptPlan(purchaseOrderId) {
     const plan = fieldMaterialReceiptPlans.find(item => item.purchaseOrder?.id === purchaseOrderId)
     if (!plan) {
-      setFieldMaterialReceipt({ ...fieldMaterialReceipt, purchaseOrderId: '', lines: [emptyMaterialReceiptLine()], finalDelivery: false })
+      setFieldMaterialReceipt((current) => ({
+        ...current,
+        purchaseOrderId: '',
+        lines: [emptyMaterialReceiptLine()],
+        finalDelivery: false,
+      }))
       return
     }
     const next = emptyMaterialReceiptDraft(plan)
-    setFieldMaterialReceipt({
-      ...fieldMaterialReceipt,
+    setFieldMaterialReceipt((current) => ({
+      ...current,
       jobId: plan.purchaseOrder.jobId,
       purchaseOrderId,
       finalDelivery: plan.summary?.remainingLines === 1,
       lines: [next.lines[0]],
-    })
+    }))
   }
 
   function selectFieldMaterialReceiptLine(lineKey) {
     const line = selectedFieldMaterialReceiptPlan?.lines.find(item => item.lineKey === lineKey)
-    if (line) setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [emptyMaterialReceiptLine(line)] })
+    if (line) setFieldMaterialReceipt((current) => ({ ...current, lines: [emptyMaterialReceiptLine(line)] }))
+  }
+
+  function updateFieldMaterialReceipt(field, value) {
+    setFieldMaterialReceipt((current) => ({ ...current, [field]: value }))
+  }
+
+  function updateFieldMaterialReceiptLine(field, value) {
+    setFieldMaterialReceipt((current) => ({
+      ...current,
+      lines: [{ ...current.lines[0], [field]: value }],
+    }))
   }
 
   async function recordFieldMaterialReceipt(event) {
@@ -4894,17 +4991,39 @@ function App() {
     }
   }
 
+  function updateOrganizationProfile(field, value) {
+    setOrganizationProfileDraft((current) => ({ ...current, [field]: value }))
+  }
+
   async function selectFieldExpenseJob(jobId) {
+    const loadSequence = ++expenseReceiptLoadSequenceRef.current
+    const shouldLoad = Boolean(jobId) && navigator.onLine !== false
+    setExpenseReceiptLoading(shouldLoad)
     setFieldExpenseReceipt({ ...emptyFieldExpenseReceiptDraft(), jobId })
     setFieldExpenseReceipts([])
-    if (!jobId || navigator.onLine === false) return
+    if (!shouldLoad) return
     setError('')
     try {
       const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/expense-receipts?limit=8`)
+      if (loadSequence !== expenseReceiptLoadSequenceRef.current) return
       setFieldExpenseReceipts(result.expenses || [])
     } catch (requestError) {
-      setError(requestError.message)
+      if (loadSequence === expenseReceiptLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (loadSequence === expenseReceiptLoadSequenceRef.current) setExpenseReceiptLoading(false)
     }
+  }
+
+  function updateFieldExpenseReceipt(field, value) {
+    setFieldExpenseReceipt((current) => ({ ...current, [field]: value }))
+  }
+
+  function updateFieldExpenseTaxTreatment(taxTreatment) {
+    setFieldExpenseReceipt((current) => ({
+      ...current,
+      taxTreatment,
+      taxAmount: ['exempt', 'reverse_charge'].includes(taxTreatment) ? '0' : current.taxAmount,
+    }))
   }
 
   async function recordFieldExpenseReceipt(event) {
@@ -4985,15 +5104,19 @@ function App() {
   }
 
   async function selectFieldEnvironmentalJob(jobId) {
+    const loadSequence = ++environmentalLoadSequenceRef.current
+    const shouldLoad = Boolean(jobId) && navigator.onLine !== false
+    setEnvironmentalLoading(shouldLoad)
     setFieldEnvironmentalActivity({ ...emptyFieldEnvironmentalDraft(), jobId })
     setFieldEnvironmentalActivities([])
     setEnvironmentalRegister(null)
     setEnvironmentalReports([])
     setEnvironmentalReportDraft(emptyEnvironmentalReportDraft())
-    if (!jobId || navigator.onLine === false) return
+    if (!shouldLoad) return
     setError('')
     try {
       const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/environmental-activities?limit=20`)
+      if (loadSequence !== environmentalLoadSequenceRef.current) return
       setFieldEnvironmentalActivities(result.activities || [])
       setEnvironmentalRegister(result.register || null)
       setEnvironmentalReports(result.reports || [])
@@ -5001,7 +5124,9 @@ function App() {
         setEnvironmentalReportDraft({ periodStart: result.register.periodStart, periodEnd: result.register.periodEnd })
       }
     } catch (requestError) {
-      setError(requestError.message)
+      if (loadSequence === environmentalLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (loadSequence === environmentalLoadSequenceRef.current) setEnvironmentalLoading(false)
     }
   }
 
@@ -5018,7 +5143,11 @@ function App() {
       accommodation: { unit: 'night', ghgScope: 'scope_3' },
       other: { unit: 'unit', ghgScope: 'unclassified' },
     }
-    setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, category, ...(defaults[category] || defaults.other) })
+    setFieldEnvironmentalActivity((current) => ({ ...current, category, ...(defaults[category] || defaults.other) }))
+  }
+
+  function updateFieldEnvironmentalActivity(field, value) {
+    setFieldEnvironmentalActivity((current) => ({ ...current, [field]: value }))
   }
 
   async function recordFieldEnvironmentalActivity(event) {
@@ -5423,7 +5552,8 @@ function App() {
     } : current)
   }
 
-  function selectSafetyBriefingJob(jobId) {
+  async function selectSafetyBriefingJob(jobId) {
+    const loadSequence = ++safetyBriefingLoadSequenceRef.current
     const firstMeeting = safetyMeetings.find((meeting) => (
       meeting.jobId === jobId && ['scheduled', 'in_progress', 'pending_approval'].includes(meeting.status)
     )) || safetyMeetings.find((meeting) => meeting.jobId === jobId) || null
@@ -5432,6 +5562,36 @@ function App() {
       jobId,
       meetingId: firstMeeting?.id || '',
     })
+    const shouldLoad = Boolean(jobId) && navigator.onLine !== false
+    setSafetyBriefingLoading(shouldLoad)
+    if (!shouldLoad) return
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/safety-meetings`)
+      if (loadSequence !== safetyBriefingLoadSequenceRef.current) return
+      const meetings = result.safetyMeetings || []
+      const selectedMeeting = meetings.find((meeting) => (
+        ['scheduled', 'in_progress', 'pending_approval'].includes(meeting.status)
+      )) || meetings[0] || null
+      setData((current) => current ? {
+        ...current,
+        safetyMeetings: [
+          ...meetings,
+          ...(current.safetyMeetings || []).filter((meeting) => meeting.jobId !== jobId),
+        ],
+      } : current)
+      setSafetyBriefingDraft((current) => (
+        current.jobId === jobId ? { ...current, meetingId: selectedMeeting?.id || '' } : current
+      ))
+    } catch (requestError) {
+      if (loadSequence === safetyBriefingLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (loadSequence === safetyBriefingLoadSequenceRef.current) setSafetyBriefingLoading(false)
+    }
+  }
+
+  function updateSafetyBriefingDraft(field, value) {
+    setSafetyBriefingDraft((current) => ({ ...current, [field]: value }))
   }
 
   async function createSafetyBriefing(event) {
@@ -5590,7 +5750,8 @@ function App() {
     } : current)
   }
 
-  function selectWorkPermitJob(jobId) {
+  async function selectWorkPermitJob(jobId) {
+    const loadSequence = ++workPermitLoadSequenceRef.current
     const firstPermit = workPermits.find((permit) => (
       permit.jobId === jobId && ['active', 'pending_approval', 'suspended'].includes(permit.status)
     )) || workPermits.find((permit) => permit.jobId === jobId) || null
@@ -5599,6 +5760,36 @@ function App() {
       jobId,
       permitId: firstPermit?.id || '',
     })
+    const shouldLoad = Boolean(jobId) && navigator.onLine !== false
+    setWorkPermitLoading(shouldLoad)
+    if (!shouldLoad) return
+    setError('')
+    try {
+      const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/work-permits`)
+      if (loadSequence !== workPermitLoadSequenceRef.current) return
+      const permits = result.workPermits || []
+      const selectedPermit = permits.find((permit) => (
+        ['active', 'pending_approval', 'suspended'].includes(permit.status)
+      )) || permits[0] || null
+      setData((current) => current ? {
+        ...current,
+        workPermits: [
+          ...permits,
+          ...(current.workPermits || []).filter((permit) => permit.jobId !== jobId),
+        ],
+      } : current)
+      setWorkPermitDraft((current) => (
+        current.jobId === jobId ? { ...current, permitId: selectedPermit?.id || '' } : current
+      ))
+    } catch (requestError) {
+      if (loadSequence === workPermitLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (loadSequence === workPermitLoadSequenceRef.current) setWorkPermitLoading(false)
+    }
+  }
+
+  function updateWorkPermitDraft(field, value) {
+    setWorkPermitDraft((current) => ({ ...current, [field]: value }))
   }
 
   async function createWorkPermit(event) {
@@ -5782,6 +5973,9 @@ function App() {
   }
 
   async function selectDailyCycleJob(jobId) {
+    const loadSequence = ++dailyCycleLoadSequenceRef.current
+    const shouldLoad = Boolean(jobId) && navigator.onLine !== false
+    setDailyCycleLoading(shouldLoad)
     const workerIds = fieldScoped && operator.worker?.id ? [operator.worker.id] : []
     setDailyHuddle({
       ...emptyDailyHuddle(),
@@ -5792,10 +5986,11 @@ function App() {
     })
     setFieldDailyLog({ ...emptyFieldDailyLog(), jobId })
     setFieldDailyCycles([])
-    if (!jobId || navigator.onLine === false) return
+    if (!shouldLoad) return
     setError('')
     try {
       const result = await api(`/api/ledger/jobs/${encodeURIComponent(jobId)}/daily-cycles?limit=30`)
+      if (loadSequence !== dailyCycleLoadSequenceRef.current) return
       const cycles = result.cycles || []
       const openCycle = cycles.find(cycle => ['released', 'blocked'].includes(cycle.status)) || null
       setFieldDailyCycles(cycles)
@@ -5809,8 +6004,14 @@ function App() {
         })
       }
     } catch (requestError) {
-      setError(requestError.message)
+      if (loadSequence === dailyCycleLoadSequenceRef.current) setError(requestError.message)
+    } finally {
+      if (loadSequence === dailyCycleLoadSequenceRef.current) setDailyCycleLoading(false)
     }
+  }
+
+  function updateDailyHuddle(field, value) {
+    setDailyHuddle((current) => ({ ...current, [field]: value }))
   }
 
   function toggleDailyHuddleWorker(workerId, checked) {
@@ -10628,7 +10829,11 @@ function App() {
         </div>
       </aside>
 
-      <main className="workspace" aria-busy={loading || sectionLoading}>
+      <main
+        className="workspace"
+        aria-busy={loading || sectionLoading}
+        inert={loading || sectionLoading ? true : undefined}
+      >
         <header className="topbar">
           <button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}>
             <Menu size={20} />
@@ -10685,6 +10890,20 @@ function App() {
             <button onClick={refreshCurrentView}>Retry</button>
           </div>
         ) : null}
+        {automationSuspended ? (
+          <div className="safety-stop-banner" role="alert" data-testid="automation-safety-stop-banner">
+            <Ban size={18} />
+            <span>
+              <strong>Autonomous drafting suspended.</strong> {automationControl.reason} Direct operator work, evidence capture, and
+              approvals remain available.
+            </span>
+            {capabilities.maintenance ? (
+              <button className="secondary-button" disabled={submitting} onClick={() => changeAutomationControl(false)}>
+                Resume
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         {loading && !data ? (
           <div className="loading">
@@ -10703,6 +10922,22 @@ function App() {
               <>
             {section === 'today' && (
               <section className="page-grid">
+                {capabilities.maintenance && data.organization && !data.organization.readiness?.ready ? (
+                  <section className="panel first-run-panel" data-testid="first-run-setup">
+                    <div>
+                      <p className="eyebrow">Owner setup</p>
+                      <h2>Complete the business identity</h2>
+                      <p>
+                        Commercial issue packages stay blocked until {data.organization.readiness.missing.length} required identity
+                        item(s) are retained.
+                      </p>
+                    </div>
+                    <button className="primary-button" onClick={() => selectSection('operations')}>
+                      <Building2 size={16} />
+                      Finish setup
+                    </button>
+                  </section>
+                ) : null}
                 <div className="metrics-grid">
                   <Metric
                     icon={BriefcaseBusiness}
@@ -10819,6 +11054,7 @@ function App() {
                                 <button
                                   className="icon-button table-action"
                                   aria-label={`Open ${job.title}`}
+                                  disabled={loading}
                                   onClick={() => openJobWorkspace(job)}
                                 >
                                   <ArrowUpRight size={16} />
@@ -10885,9 +11121,9 @@ function App() {
                         The durable cycle creates internal drafts and approval requests. It cannot send messages, commit spend, or confirm
                         dates.
                       </p>
-                      <button className="secondary-button full-button" disabled={submitting} onClick={runCycle}>
+                      <button className="secondary-button full-button" disabled={submitting || automationSuspended} onClick={runCycle}>
                         <Activity size={16} />
-                        Run due cycle
+                        {automationSuspended ? 'Safety stop active' : 'Run due cycle'}
                       </button>
                     </section>
                   ) : null}
@@ -10994,6 +11230,7 @@ function App() {
                             <button
                               className="icon-button table-action"
                               aria-label={`Open ${job.title}`}
+                              disabled={loading || sectionLoading}
                               onClick={() => openJobWorkspace(job)}
                             >
                               <ArrowUpRight size={16} />
@@ -11386,7 +11623,7 @@ function App() {
                   </div>
                   <p className="attendance-policy">Operational self-reported presence only. Payroll, statutory registers, and location tracking remain separate.</p>
                 </section>
-                <section className="safety-briefing-control" data-testid="safety-briefing-control">
+                <section className="safety-briefing-control" data-testid="safety-briefing-control" aria-busy={safetyBriefingLoading}>
                   <div className="panel-heading">
                     <div>
                       <h2>Safety briefings</h2>
@@ -11400,7 +11637,7 @@ function App() {
                   <div className="safety-briefing-selector">
                     <label>
                       Job
-                      <select required value={safetyBriefingDraft.jobId} onChange={(event) => selectSafetyBriefingJob(event.target.value)}>
+                      <select required value={safetyBriefingDraft.jobId} onChange={(event) => void selectSafetyBriefingJob(event.target.value)}>
                         <option value="">Select an assigned job</option>
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
@@ -11409,8 +11646,11 @@ function App() {
                       Briefing
                       <select
                         value={safetyBriefingDraft.meetingId}
-                        disabled={!safetyBriefingDraft.jobId || !selectedJobSafetyMeetings.length}
-                        onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, meetingId: event.target.value, evidenceReference: '', acknowledged: false, completionEvidence: '', excusalReason: '' })}
+                        disabled={safetyBriefingLoading || !safetyBriefingDraft.jobId || !selectedJobSafetyMeetings.length}
+                        onChange={(event) => {
+                          const meetingId = event.target.value
+                          setSafetyBriefingDraft((current) => ({ ...current, meetingId, evidenceReference: '', acknowledged: false, completionEvidence: '', excusalReason: '' }))
+                        }}
                       >
                         <option value="">{selectedJobSafetyMeetings.length ? 'Select a briefing' : 'No retained briefing'}</option>
                         {selectedJobSafetyMeetings.map((meeting) => (
@@ -11464,7 +11704,7 @@ function App() {
                               minLength="3"
                               maxLength="240"
                               value={safetyBriefingDraft.evidenceReference}
-                              onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, evidenceReference: event.target.value })}
+                              onChange={(event) => updateSafetyBriefingDraft('evidenceReference', event.target.value)}
                               placeholder="Device, badge, signature, or retained field record"
                             />
                           </label>
@@ -11472,7 +11712,7 @@ function App() {
                             <input
                               type="checkbox"
                               checked={safetyBriefingDraft.acknowledged}
-                              onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, acknowledged: event.target.checked })}
+                              onChange={(event) => updateSafetyBriefingDraft('acknowledged', event.target.checked)}
                             />
                             I attended, understood the retained topics, and will stop work if conditions or controls change.
                           </label>
@@ -11496,7 +11736,7 @@ function App() {
                                 minLength="8"
                                 maxLength="500"
                                 value={safetyBriefingDraft.excusalReason}
-                                onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, excusalReason: event.target.value })}
+                                onChange={(event) => updateSafetyBriefingDraft('excusalReason', event.target.value)}
                                 placeholder="Retained reason for an expected attendee absence"
                               />
                             </label>
@@ -11508,7 +11748,7 @@ function App() {
                               minLength="3"
                               maxLength="240"
                               value={safetyBriefingDraft.completionEvidence}
-                              onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, completionEvidence: event.target.value })}
+                              onChange={(event) => updateSafetyBriefingDraft('completionEvidence', event.target.value)}
                               placeholder="Signed register, minutes, photo, or document reference"
                             />
                           </label>
@@ -11522,24 +11762,24 @@ function App() {
                     <div className="attendance-empty"><ClipboardList size={20} /><span>No briefing is retained for this job.</span></div>
                   ) : null}
                   {canCoordinate ? (
-                    <form className="safety-briefing-create" onSubmit={createSafetyBriefing}>
+                    <form className="safety-briefing-create" aria-busy={safetyBriefingLoading || submitting} inert={safetyBriefingLoading || submitting ? true : undefined} onSubmit={createSafetyBriefing}>
                       <div className="safety-briefing-create-heading">
                         <strong>Schedule briefing</strong>
                         <span>Assigned crew are frozen as expected attendees.</span>
                       </div>
                       <label>
                         Title
-                        <input required minLength="2" maxLength="240" value={safetyBriefingDraft.title} onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, title: event.target.value })} placeholder="Pre-start or toolbox talk" />
+                        <input required disabled={safetyBriefingLoading || submitting} minLength="2" maxLength="240" value={safetyBriefingDraft.title} onChange={(event) => updateSafetyBriefingDraft('title', event.target.value)} placeholder="Pre-start or toolbox talk" />
                       </label>
                       <label>
                         Scheduled time
-                        <input required type="datetime-local" value={safetyBriefingDraft.scheduledAt} onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, scheduledAt: event.target.value })} />
+                        <input required disabled={safetyBriefingLoading || submitting} type="datetime-local" value={safetyBriefingDraft.scheduledAt} onChange={(event) => updateSafetyBriefingDraft('scheduledAt', event.target.value)} />
                       </label>
                       <label className="form-span">
                         Discussion topics
-                        <textarea required minLength="2" maxLength="4000" value={safetyBriefingDraft.topics} onChange={(event) => setSafetyBriefingDraft({ ...safetyBriefingDraft, topics: event.target.value })} placeholder="One retained topic per line" />
+                        <textarea required disabled={safetyBriefingLoading || submitting} minLength="2" maxLength="4000" value={safetyBriefingDraft.topics} onChange={(event) => updateSafetyBriefingDraft('topics', event.target.value)} placeholder="One retained topic per line" />
                       </label>
-                      <button className="secondary-button" disabled={submitting || !safetyBriefingDraft.jobId}>
+                      <button className="secondary-button" disabled={safetyBriefingLoading || submitting || !safetyBriefingDraft.jobId}>
                         <Plus size={16} /> Schedule briefing
                       </button>
                     </form>
@@ -11594,7 +11834,7 @@ function App() {
                     refreshOutboxState={refreshOutboxState}
                   />
                 </LazyControlBoundary>
-                <section className="work-permit-control" data-testid="work-permit-control">
+                <section className="work-permit-control" data-testid="work-permit-control" aria-busy={workPermitLoading}>
                   <div className="panel-heading">
                     <div>
                       <h2>Work permits</h2>
@@ -11609,7 +11849,7 @@ function App() {
                   <div className="work-permit-selector">
                     <label>
                       Job
-                      <select required value={workPermitDraft.jobId} onChange={(event) => selectWorkPermitJob(event.target.value)}>
+                      <select required value={workPermitDraft.jobId} onChange={(event) => void selectWorkPermitJob(event.target.value)}>
                         <option value="">Select an assigned job</option>
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
@@ -11618,17 +11858,20 @@ function App() {
                       Permit
                       <select
                         value={workPermitDraft.permitId}
-                        disabled={!workPermitDraft.jobId || !selectedJobWorkPermits.length}
-                        onChange={(event) => setWorkPermitDraft({
-                          ...workPermitDraft,
-                          permitId: event.target.value,
-                          acknowledgementEvidence: '',
-                          acknowledged: false,
-                          suspensionReason: '',
-                          suspensionEvidence: '',
-                          closureNote: '',
-                          closureEvidence: '',
-                        })}
+                        disabled={workPermitLoading || !workPermitDraft.jobId || !selectedJobWorkPermits.length}
+                        onChange={(event) => {
+                          const permitId = event.target.value
+                          setWorkPermitDraft((current) => ({
+                            ...current,
+                            permitId,
+                            acknowledgementEvidence: '',
+                            acknowledged: false,
+                            suspensionReason: '',
+                            suspensionEvidence: '',
+                            closureNote: '',
+                            closureEvidence: '',
+                          }))
+                        }}
                       >
                         <option value="">{selectedJobWorkPermits.length ? 'Select a permit' : 'No retained permit'}</option>
                         {selectedJobWorkPermits.map((permit) => (
@@ -11698,7 +11941,7 @@ function App() {
                               minLength="3"
                               maxLength="240"
                               value={workPermitDraft.acknowledgementEvidence}
-                              onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, acknowledgementEvidence: event.target.value })}
+                              onChange={(event) => updateWorkPermitDraft('acknowledgementEvidence', event.target.value)}
                               placeholder="Device, badge, signature, or retained field record"
                             />
                           </label>
@@ -11706,7 +11949,7 @@ function App() {
                             <input
                               type="checkbox"
                               checked={workPermitDraft.acknowledged}
-                              onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, acknowledged: event.target.checked })}
+                              onChange={(event) => updateWorkPermitDraft('acknowledged', event.target.checked)}
                             />
                             I reviewed this permit, understand the hazards and controls, and will stop work if conditions change.
                           </label>
@@ -11731,11 +11974,11 @@ function App() {
                               </div>
                               <label>
                                 Stop-work reason
-                                <input required minLength="8" maxLength="500" value={workPermitDraft.suspensionReason} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, suspensionReason: event.target.value })} />
+                                <input required disabled={submitting} minLength="8" maxLength="500" value={workPermitDraft.suspensionReason} onChange={(event) => updateWorkPermitDraft('suspensionReason', event.target.value)} />
                               </label>
                               <label>
                                 Evidence reference
-                                <input required minLength="3" maxLength="240" value={workPermitDraft.suspensionEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, suspensionEvidence: event.target.value })} />
+                                <input required disabled={submitting} minLength="3" maxLength="240" value={workPermitDraft.suspensionEvidence} onChange={(event) => updateWorkPermitDraft('suspensionEvidence', event.target.value)} />
                               </label>
                               <button className="secondary-button danger-button" disabled={submitting}><Ban size={15} /> Suspend</button>
                             </form>
@@ -11747,11 +11990,11 @@ function App() {
                             </div>
                             <label>
                               Completion note
-                              <input required minLength="8" maxLength="500" value={workPermitDraft.closureNote} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, closureNote: event.target.value })} />
+                              <input required disabled={submitting} minLength="8" maxLength="500" value={workPermitDraft.closureNote} onChange={(event) => updateWorkPermitDraft('closureNote', event.target.value)} />
                             </label>
                             <label>
                               Closeout evidence
-                              <input required minLength="3" maxLength="240" value={workPermitDraft.closureEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, closureEvidence: event.target.value })} />
+                              <input required disabled={submitting} minLength="3" maxLength="240" value={workPermitDraft.closureEvidence} onChange={(event) => updateWorkPermitDraft('closureEvidence', event.target.value)} />
                             </label>
                             <button className="secondary-button" disabled={submitting}><Check size={15} /> Close permit</button>
                           </form>
@@ -11762,14 +12005,14 @@ function App() {
                     <div className="attendance-empty"><LockKeyhole size={20} /><span>No governed work permit is retained for this job.</span></div>
                   ) : null}
                   {canCoordinate ? (
-                    <form className="work-permit-create" onSubmit={createWorkPermit}>
+                    <form className="work-permit-create" aria-busy={workPermitLoading || submitting} inert={workPermitLoading || submitting ? true : undefined} onSubmit={createWorkPermit}>
                       <div className="work-permit-create-heading">
                         <strong>Request permit activation</strong>
                         <span>Current assigned crew are frozen into the approval snapshot.</span>
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-type">Permit type</label>
-                        <select id="work-permit-type" value={workPermitDraft.permitType} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, permitType: event.target.value })}>
+                        <select id="work-permit-type" disabled={workPermitLoading || submitting} value={workPermitDraft.permitType} onChange={(event) => updateWorkPermitDraft('permitType', event.target.value)}>
                           <option value="general_work">General work</option>
                           <option value="hot_work">Hot work</option>
                           <option value="confined_space">Confined space</option>
@@ -11781,37 +12024,37 @@ function App() {
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-title">Title</label>
-                        <input id="work-permit-title" required minLength="3" maxLength="240" value={workPermitDraft.title} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, title: event.target.value })} />
+                        <input id="work-permit-title" required disabled={workPermitLoading || submitting} minLength="3" maxLength="240" value={workPermitDraft.title} onChange={(event) => updateWorkPermitDraft('title', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-location">Location</label>
-                        <input id="work-permit-location" maxLength="240" value={workPermitDraft.location} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, location: event.target.value })} />
+                        <input id="work-permit-location" disabled={workPermitLoading || submitting} maxLength="240" value={workPermitDraft.location} onChange={(event) => updateWorkPermitDraft('location', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-valid-from">Valid from</label>
-                        <input id="work-permit-valid-from" required type="datetime-local" value={workPermitDraft.validFrom} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, validFrom: event.target.value })} />
+                        <input id="work-permit-valid-from" required disabled={workPermitLoading || submitting} type="datetime-local" value={workPermitDraft.validFrom} onChange={(event) => updateWorkPermitDraft('validFrom', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-expires-at">Expires</label>
-                        <input id="work-permit-expires-at" required type="datetime-local" value={workPermitDraft.expiresAt} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, expiresAt: event.target.value })} />
+                        <input id="work-permit-expires-at" required disabled={workPermitLoading || submitting} type="datetime-local" value={workPermitDraft.expiresAt} onChange={(event) => updateWorkPermitDraft('expiresAt', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-source-evidence">Source evidence</label>
-                        <input id="work-permit-source-evidence" required minLength="3" maxLength="240" value={workPermitDraft.sourceEvidence} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, sourceEvidence: event.target.value })} />
+                        <input id="work-permit-source-evidence" required disabled={workPermitLoading || submitting} minLength="3" maxLength="240" value={workPermitDraft.sourceEvidence} onChange={(event) => updateWorkPermitDraft('sourceEvidence', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-hazards">Hazards</label>
-                        <textarea id="work-permit-hazards" required minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, hazards: event.target.value })} placeholder="One retained hazard per line" />
+                        <textarea id="work-permit-hazards" required disabled={workPermitLoading || submitting} minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => updateWorkPermitDraft('hazards', event.target.value)} placeholder="One retained hazard per line" />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-controls">Controls</label>
-                        <textarea id="work-permit-controls" required minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, controls: event.target.value })} placeholder="One retained control per line" />
+                        <textarea id="work-permit-controls" required disabled={workPermitLoading || submitting} minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => updateWorkPermitDraft('controls', event.target.value)} placeholder="One retained control per line" />
                       </div>
                       <div className="work-permit-field">
                         <label htmlFor="work-permit-conditions">Conditions</label>
-                        <textarea id="work-permit-conditions" maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => setWorkPermitDraft({ ...workPermitDraft, conditions: event.target.value })} placeholder="One stop or revalidation condition per line" />
+                        <textarea id="work-permit-conditions" disabled={workPermitLoading || submitting} maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => updateWorkPermitDraft('conditions', event.target.value)} placeholder="One stop or revalidation condition per line" />
                       </div>
-                      <button className="secondary-button" disabled={submitting || !workPermitDraft.jobId}><Plus size={16} /> Request approval</button>
+                      <button className="secondary-button" disabled={workPermitLoading || submitting || !workPermitDraft.jobId}><Plus size={16} /> Request approval</button>
                     </form>
                   ) : null}
                   <p className="attendance-policy">Permit readiness is derived from approval, validity, retained integrity, and every assigned worker acknowledgement. Changed conditions require stop work and a current permit.</p>
@@ -11992,8 +12235,8 @@ function App() {
                     </div>
                     <Leaf size={20} />
                   </div>
-                  <form data-testid="field-environmental-activity-form" onSubmit={recordFieldEnvironmentalActivity}>
-                    <div className="form-grid">
+                  <form data-testid="field-environmental-activity-form" aria-busy={environmentalLoading} onSubmit={recordFieldEnvironmentalActivity}>
+                    <div className="form-grid environmental-job-grid">
                       <label>
                         Job
                         <select required value={fieldEnvironmentalActivity.jobId} onChange={(event) => void selectFieldEnvironmentalJob(event.target.value)}>
@@ -12001,9 +12244,11 @@ function App() {
                           {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                         </select>
                       </label>
+                    </div>
+                    <fieldset className="form-grid environmental-fieldset" disabled={environmentalLoading}>
                       <label>
                         Activity date
-                        <input required type="date" max={futureDateInput(0)} value={fieldEnvironmentalActivity.activityDate} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, activityDate: event.target.value })} />
+                        <input required type="date" max={futureDateInput(0)} value={fieldEnvironmentalActivity.activityDate} onChange={(event) => updateFieldEnvironmentalActivity('activityDate', event.target.value)} />
                       </label>
                       <label>
                         Category
@@ -12022,7 +12267,7 @@ function App() {
                       </label>
                       <label>
                         GHG scope
-                        <select value={fieldEnvironmentalActivity.ghgScope} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, ghgScope: event.target.value })}>
+                        <select value={fieldEnvironmentalActivity.ghgScope} onChange={(event) => updateFieldEnvironmentalActivity('ghgScope', event.target.value)}>
                           <option value="scope_1">Scope 1</option>
                           <option value="scope_2">Scope 2</option>
                           <option value="scope_3">Scope 3</option>
@@ -12031,19 +12276,19 @@ function App() {
                       </label>
                       <label className="form-span">
                         Activity description
-                        <input required minLength="3" maxLength="240" value={fieldEnvironmentalActivity.description} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, description: event.target.value })} placeholder="Generator diesel, temporary power, delivery distance, waste transfer" />
+                        <input required minLength="3" maxLength="240" value={fieldEnvironmentalActivity.description} onChange={(event) => updateFieldEnvironmentalActivity('description', event.target.value)} placeholder="Generator diesel, temporary power, delivery distance, waste transfer" />
                       </label>
                       <label>
                         Quantity
-                        <input required type="number" min="0.000001" step="any" inputMode="decimal" value={fieldEnvironmentalActivity.quantity} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, quantity: event.target.value })} />
+                        <input required type="number" min="0.000001" step="any" inputMode="decimal" value={fieldEnvironmentalActivity.quantity} onChange={(event) => updateFieldEnvironmentalActivity('quantity', event.target.value)} />
                       </label>
                       <label>
                         Unit
-                        <input required maxLength="24" value={fieldEnvironmentalActivity.unit} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, unit: event.target.value })} placeholder="litre, kWh, kg, km" />
+                        <input required maxLength="24" value={fieldEnvironmentalActivity.unit} onChange={(event) => updateFieldEnvironmentalActivity('unit', event.target.value)} placeholder="litre, kWh, kg, km" />
                       </label>
                       <label>
                         Factor (kg CO2e / unit)
-                        <input required type="number" min="0" step="any" inputMode="decimal" value={fieldEnvironmentalActivity.emissionFactor} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, emissionFactor: event.target.value })} />
+                        <input required type="number" min="0" step="any" inputMode="decimal" value={fieldEnvironmentalActivity.emissionFactor} onChange={(event) => updateFieldEnvironmentalActivity('emissionFactor', event.target.value)} />
                       </label>
                       <div className="environmental-calculation" aria-live="polite">
                         <span>Calculated emissions</span>
@@ -12051,25 +12296,25 @@ function App() {
                       </div>
                       <label>
                         Factor source
-                        <input required minLength="3" maxLength="240" value={fieldEnvironmentalActivity.factorSource} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, factorSource: event.target.value })} placeholder="Authority, supplier, or retained factor library" />
+                        <input required minLength="3" maxLength="240" value={fieldEnvironmentalActivity.factorSource} onChange={(event) => updateFieldEnvironmentalActivity('factorSource', event.target.value)} placeholder="Authority, supplier, or retained factor library" />
                       </label>
                       <label>
                         Factor reference
-                        <input required minLength="3" maxLength="500" value={fieldEnvironmentalActivity.factorReference} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, factorReference: event.target.value })} placeholder="Publication version, URL, or controlled record ID" />
+                        <input required minLength="3" maxLength="500" value={fieldEnvironmentalActivity.factorReference} onChange={(event) => updateFieldEnvironmentalActivity('factorReference', event.target.value)} placeholder="Publication version, URL, or controlled record ID" />
                       </label>
                       <label className="form-span">
                         Activity evidence reference
-                        <input required minLength="3" maxLength="500" value={fieldEnvironmentalActivity.evidenceReference} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, evidenceReference: event.target.value })} placeholder="Meter statement, delivery ticket, fuel receipt, or waste transfer note" />
+                        <input required minLength="3" maxLength="500" value={fieldEnvironmentalActivity.evidenceReference} onChange={(event) => updateFieldEnvironmentalActivity('evidenceReference', event.target.value)} placeholder="Meter statement, delivery ticket, fuel receipt, or waste transfer note" />
                       </label>
                       <label className="form-span">
                         Review note
-                        <textarea maxLength="2000" value={fieldEnvironmentalActivity.notes} onChange={(event) => setFieldEnvironmentalActivity({ ...fieldEnvironmentalActivity, notes: event.target.value })} placeholder="Measurement boundary, allocation basis, or retained context" />
+                        <textarea maxLength="2000" value={fieldEnvironmentalActivity.notes} onChange={(event) => updateFieldEnvironmentalActivity('notes', event.target.value)} placeholder="Measurement boundary, allocation basis, or retained context" />
                       </label>
-                    </div>
+                    </fieldset>
                     <div className="modal-actions">
-                      <button className="primary-button" disabled={submitting}>
+                      <button className="primary-button" disabled={submitting || environmentalLoading}>
                         <Leaf size={16} />
-                        {submitting ? 'Recording...' : navigator.onLine === false ? 'Save activity offline' : 'Request source review'}
+                        {submitting ? 'Recording...' : environmentalLoading ? 'Loading sources...' : navigator.onLine === false ? 'Save activity offline' : 'Request source review'}
                       </button>
                     </div>
                   </form>
@@ -12155,7 +12400,7 @@ function App() {
                   ) : null}
                   <p className="attendance-policy">Calculations use the retained operator-supplied factor source. Approval does not certify a footprint, submit a report, or buy offsets.</p>
                 </section>
-                <form className="evidence-form field-expense-receipt-form" data-testid="field-expense-receipt-form" onSubmit={recordFieldExpenseReceipt}>
+                <form className="evidence-form field-expense-receipt-form" data-testid="field-expense-receipt-form" aria-busy={expenseReceiptLoading} onSubmit={recordFieldExpenseReceipt}>
                   <div className="panel-heading">
                     <div>
                       <h2>Expense receipt</h2>
@@ -12163,7 +12408,7 @@ function App() {
                     </div>
                     <ReceiptEuro size={20} />
                   </div>
-                  <div className="form-grid">
+                  <div className="form-grid expense-receipt-job-grid">
                     <label>
                       Job
                       <select required value={fieldExpenseReceipt.jobId} onChange={(event) => void selectFieldExpenseJob(event.target.value)}>
@@ -12171,13 +12416,15 @@ function App() {
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
                     </label>
+                  </div>
+                  <fieldset className="form-grid expense-receipt-fieldset" disabled={expenseReceiptLoading}>
                     <label>
                       Expense date
-                      <input required type="date" max={futureDateInput(0)} value={fieldExpenseReceipt.expenseDate} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, expenseDate: event.target.value })} />
+                      <input required type="date" max={futureDateInput(0)} value={fieldExpenseReceipt.expenseDate} onChange={(event) => updateFieldExpenseReceipt('expenseDate', event.target.value)} />
                     </label>
                     <label>
                       Category
-                      <select value={fieldExpenseReceipt.category} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, category: event.target.value })}>
+                      <select value={fieldExpenseReceipt.category} onChange={(event) => updateFieldExpenseReceipt('category', event.target.value)}>
                         <option value="materials">Materials</option>
                         <option value="equipment">Equipment</option>
                         <option value="travel">Travel</option>
@@ -12192,23 +12439,23 @@ function App() {
                     </label>
                     <label>
                       Vendor
-                      <input required minLength="2" maxLength="160" value={fieldExpenseReceipt.vendor} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, vendor: event.target.value })} placeholder="Supplier or merchant" />
+                      <input required minLength="2" maxLength="160" value={fieldExpenseReceipt.vendor} onChange={(event) => updateFieldExpenseReceipt('vendor', event.target.value)} placeholder="Supplier or merchant" />
                     </label>
                     <label>
                       Receipt reference
-                      <input required minLength="3" maxLength="240" value={fieldExpenseReceipt.receiptReference} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, receiptReference: event.target.value })} placeholder="Receipt number or retained evidence reference" />
+                      <input required minLength="3" maxLength="240" value={fieldExpenseReceipt.receiptReference} onChange={(event) => updateFieldExpenseReceipt('receiptReference', event.target.value)} placeholder="Receipt number or retained evidence reference" />
                     </label>
                     <label>
                       Gross total (EUR)
-                      <input required type="number" min="0.01" step="0.01" inputMode="decimal" value={fieldExpenseReceipt.totalAmount} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, totalAmount: event.target.value })} />
+                      <input required type="number" min="0.01" step="0.01" inputMode="decimal" value={fieldExpenseReceipt.totalAmount} onChange={(event) => updateFieldExpenseReceipt('totalAmount', event.target.value)} />
                     </label>
                     <label>
                       VAT amount (EUR)
-                      <input required type="number" min="0" max={fieldExpenseReceipt.totalAmount || undefined} step="0.01" inputMode="decimal" value={fieldExpenseReceipt.taxAmount} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, taxAmount: event.target.value })} />
+                      <input required type="number" min="0" max={fieldExpenseReceipt.totalAmount || undefined} step="0.01" inputMode="decimal" value={fieldExpenseReceipt.taxAmount} onChange={(event) => updateFieldExpenseReceipt('taxAmount', event.target.value)} />
                     </label>
                     <label>
                       VAT treatment
-                      <select value={fieldExpenseReceipt.taxTreatment} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, taxTreatment: event.target.value, taxAmount: ['exempt', 'reverse_charge'].includes(event.target.value) ? '0' : fieldExpenseReceipt.taxAmount })}>
+                      <select value={fieldExpenseReceipt.taxTreatment} onChange={(event) => updateFieldExpenseTaxTreatment(event.target.value)}>
                         <option value="recoverable">Recoverable VAT</option>
                         <option value="non_recoverable">Non-recoverable VAT</option>
                         <option value="exempt">VAT exempt</option>
@@ -12217,7 +12464,7 @@ function App() {
                     </label>
                     <label>
                       Payment method
-                      <select value={fieldExpenseReceipt.paymentMethod} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, paymentMethod: event.target.value })}>
+                      <select value={fieldExpenseReceipt.paymentMethod} onChange={(event) => updateFieldExpenseReceipt('paymentMethod', event.target.value)}>
                         <option value="company_card">Company card</option>
                         <option value="personal_card">Personal card</option>
                         <option value="cash">Cash</option>
@@ -12228,13 +12475,13 @@ function App() {
                     </label>
                     <label>
                       Cost code
-                      <input required minLength="2" maxLength="80" value={fieldExpenseReceipt.costCode} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, costCode: event.target.value })} />
+                      <input required minLength="2" maxLength="80" value={fieldExpenseReceipt.costCode} onChange={(event) => updateFieldExpenseReceipt('costCode', event.target.value)} />
                     </label>
                     <label className="form-span">
                       Receipt note
-                      <textarea maxLength="2000" value={fieldExpenseReceipt.notes} onChange={(event) => setFieldExpenseReceipt({ ...fieldExpenseReceipt, notes: event.target.value })} placeholder="Purpose, allocation, or review context" />
+                      <textarea maxLength="2000" value={fieldExpenseReceipt.notes} onChange={(event) => updateFieldExpenseReceipt('notes', event.target.value)} placeholder="Purpose, allocation, or review context" />
                     </label>
-                  </div>
+                  </fieldset>
                   {fieldExpenseReceipts.length ? (
                     <div className="field-expense-receipt-list" aria-label="Recent expense receipts">
                       {fieldExpenseReceipts.map((expense) => (
@@ -12252,14 +12499,14 @@ function App() {
                     </div>
                   ) : null}
                   <div className="modal-actions">
-                    <button className="primary-button" disabled={submitting}>
+                    <button className="primary-button" disabled={submitting || expenseReceiptLoading}>
                       <ReceiptEuro size={16} />
-                      {submitting ? 'Recording...' : navigator.onLine === false ? 'Save receipt offline' : 'Request expense approval'}
+                      {submitting ? 'Recording...' : expenseReceiptLoading ? 'Loading receipts...' : navigator.onLine === false ? 'Save receipt offline' : 'Request expense approval'}
                     </button>
                   </div>
                   <p className="attendance-policy">Approval recognizes the job cost only. Reimbursement, card settlement, bookkeeping export, and supplier contact remain separate.</p>
                 </form>
-                <form className="evidence-form material-receipt-form" data-testid="field-material-receipt-form" onSubmit={recordFieldMaterialReceipt}>
+                <form className="evidence-form material-receipt-form" data-testid="field-material-receipt-form" aria-busy={materialReceiptLoading || submitting} onSubmit={recordFieldMaterialReceipt}>
                   <div className="panel-heading">
                     <div>
                       <h2>Receive materials</h2>
@@ -12267,6 +12514,7 @@ function App() {
                     </div>
                     <PackageCheck size={20} />
                   </div>
+                  <fieldset className="material-receipt-fieldset" disabled={materialReceiptLoading || submitting}>
                   <div className="form-grid">
                     <label>
                       Job
@@ -12300,55 +12548,56 @@ function App() {
                     ) : null}
                     <label>
                       Delivery-note reference
-                      <input required minLength="3" maxLength="160" value={fieldMaterialReceipt.receiptReference} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, receiptReference: event.target.value })} placeholder="Supplier ticket number" />
+                      <input required minLength="3" maxLength="160" value={fieldMaterialReceipt.receiptReference} onChange={(event) => updateFieldMaterialReceipt('receiptReference', event.target.value)} placeholder="Supplier ticket number" />
                     </label>
                     <label>
                       Delivered at
-                      <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldMaterialReceipt.deliveredAt} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, deliveredAt: event.target.value })} />
+                      <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldMaterialReceipt.deliveredAt} onChange={(event) => updateFieldMaterialReceipt('deliveredAt', event.target.value)} />
                     </label>
                     {!fieldScoped ? (
                       <label>
                         Received by
-                        <input required minLength="2" maxLength="160" value={fieldMaterialReceipt.receivedBy} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, receivedBy: event.target.value })} />
+                        <input required minLength="2" maxLength="160" value={fieldMaterialReceipt.receivedBy} onChange={(event) => updateFieldMaterialReceipt('receivedBy', event.target.value)} />
                       </label>
                     ) : null}
                     <label>
                       Delivery location
-                      <input maxLength="240" value={fieldMaterialReceipt.location} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, location: event.target.value })} placeholder="Gate, floor, or storage area" />
+                      <input maxLength="240" value={fieldMaterialReceipt.location} onChange={(event) => updateFieldMaterialReceipt('location', event.target.value)} placeholder="Gate, floor, or storage area" />
                     </label>
                     <label>
                       Item
-                      <input required minLength="2" maxLength="240" value={fieldMaterialReceipt.lines[0].itemName} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], itemName: event.target.value }] })} placeholder="Match the planned material name when possible" />
+                      <input required minLength="2" maxLength="240" value={fieldMaterialReceipt.lines[0].itemName} onChange={(event) => updateFieldMaterialReceiptLine('itemName', event.target.value)} placeholder="Match the planned material name when possible" />
                     </label>
                     <label>
                       Unit
-                      <input required maxLength="40" value={fieldMaterialReceipt.lines[0].unit} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], unit: event.target.value }] })} />
+                      <input required maxLength="40" value={fieldMaterialReceipt.lines[0].unit} onChange={(event) => updateFieldMaterialReceiptLine('unit', event.target.value)} />
                     </label>
                     <label>
                       Received
-                      <input required type="number" min="0.000001" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].receivedQuantity} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], receivedQuantity: event.target.value }] })} />
+                      <input required type="number" min="0.000001" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].receivedQuantity} onChange={(event) => updateFieldMaterialReceiptLine('receivedQuantity', event.target.value)} />
                     </label>
                     <label>
                       Accepted
-                      <input required type="number" min="0" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].acceptedQuantity} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], acceptedQuantity: event.target.value }] })} />
+                      <input required type="number" min="0" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].acceptedQuantity} onChange={(event) => updateFieldMaterialReceiptLine('acceptedQuantity', event.target.value)} />
                     </label>
                     <label>
                       Damaged
-                      <input required type="number" min="0" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].damagedQuantity} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, lines: [{ ...fieldMaterialReceipt.lines[0], damagedQuantity: event.target.value }] })} />
+                      <input required type="number" min="0" step="any" inputMode="decimal" value={fieldMaterialReceipt.lines[0].damagedQuantity} onChange={(event) => updateFieldMaterialReceiptLine('damagedQuantity', event.target.value)} />
                     </label>
                     <label className="form-span">
                       Evidence reference
-                      <input required minLength="3" maxLength="240" value={fieldMaterialReceipt.evidenceReference} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, evidenceReference: event.target.value })} placeholder="Signed ticket, photo, or retained document reference" />
+                      <input required minLength="3" maxLength="240" value={fieldMaterialReceipt.evidenceReference} onChange={(event) => updateFieldMaterialReceipt('evidenceReference', event.target.value)} placeholder="Signed ticket, photo, or retained document reference" />
                     </label>
                     <label className="form-span">
                       Delivery note
-                      <textarea maxLength="4000" value={fieldMaterialReceipt.notes} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, notes: event.target.value })} placeholder="Damage, rejection, storage, or follow-up detail" />
+                      <textarea maxLength="4000" value={fieldMaterialReceipt.notes} onChange={(event) => updateFieldMaterialReceipt('notes', event.target.value)} placeholder="Damage, rejection, storage, or follow-up detail" />
                     </label>
                     <label className="checkbox-label form-span">
-                      <input type="checkbox" checked={fieldMaterialReceipt.finalDelivery} onChange={(event) => setFieldMaterialReceipt({ ...fieldMaterialReceipt, finalDelivery: event.target.checked })} />
+                      <input type="checkbox" checked={fieldMaterialReceipt.finalDelivery} onChange={(event) => updateFieldMaterialReceipt('finalDelivery', event.target.checked)} />
                       This is the final delivery against the order
                     </label>
                   </div>
+                  </fieldset>
                   <div className="modal-actions">
                     <button className="primary-button" disabled={submitting}>
                       <PackageCheck size={16} />
@@ -12356,7 +12605,7 @@ function App() {
                     </button>
                   </div>
                 </form>
-                <form className="evidence-form daily-cycle-form" data-testid="daily-start-huddle-form" onSubmit={recordDailyStartHuddle}>
+                <form className="evidence-form daily-cycle-form" data-testid="daily-start-huddle-form" aria-busy={dailyCycleLoading} onSubmit={recordDailyStartHuddle}>
                   <div className="panel-heading">
                     <div>
                       <h2>Daily start huddle</h2>
@@ -12364,7 +12613,7 @@ function App() {
                     </div>
                     <span className="tag">Internal control</span>
                   </div>
-                  <div className="form-grid">
+                  <div className="form-grid daily-cycle-job-grid">
                     <label>
                       Job
                       <select required value={dailyHuddle.jobId} onChange={(event) => void selectDailyCycleJob(event.target.value)}>
@@ -12372,13 +12621,15 @@ function App() {
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
                     </label>
+                  </div>
+                  <fieldset className="form-grid daily-cycle-fieldset" disabled={dailyCycleLoading}>
                     <label>
                       Work date
-                      <input required type="date" value={dailyHuddle.workDate} onChange={(event) => setDailyHuddle({ ...dailyHuddle, workDate: event.target.value })} />
+                      <input required type="date" value={dailyHuddle.workDate} onChange={(event) => updateDailyHuddle('workDate', event.target.value)} />
                     </label>
                     <label>
                       Shift
-                      <select value={dailyHuddle.shiftLabel} onChange={(event) => setDailyHuddle({ ...dailyHuddle, shiftLabel: event.target.value })}>
+                      <select value={dailyHuddle.shiftLabel} onChange={(event) => updateDailyHuddle('shiftLabel', event.target.value)}>
                         <option value="day">Day</option>
                         <option value="early">Early</option>
                         <option value="late">Late</option>
@@ -12387,7 +12638,7 @@ function App() {
                     </label>
                     <label>
                       Weather
-                      <select value={dailyHuddle.weather} onChange={(event) => setDailyHuddle({ ...dailyHuddle, weather: event.target.value })}>
+                      <select value={dailyHuddle.weather} onChange={(event) => updateDailyHuddle('weather', event.target.value)}>
                         <option value="clear">Clear</option>
                         <option value="cloudy">Cloudy</option>
                         <option value="rain">Rain</option>
@@ -12400,11 +12651,11 @@ function App() {
                       <>
                         <label>
                           Facilitator
-                          <input required minLength="2" maxLength="160" value={dailyHuddle.facilitator} onChange={(event) => setDailyHuddle({ ...dailyHuddle, facilitator: event.target.value })} placeholder="Crew lead or supervisor" />
+                          <input required minLength="2" maxLength="160" value={dailyHuddle.facilitator} onChange={(event) => updateDailyHuddle('facilitator', event.target.value)} placeholder="Crew lead or supervisor" />
                         </label>
                         <label>
                           Daily lead
-                          <select required value={dailyHuddle.leadWorkerId} onChange={(event) => setDailyHuddle({ ...dailyHuddle, leadWorkerId: event.target.value })}>
+                          <select required value={dailyHuddle.leadWorkerId} onChange={(event) => updateDailyHuddle('leadWorkerId', event.target.value)}>
                             <option value="">Select retained crew first</option>
                             {workers.filter(worker => dailyHuddle.workerIds.includes(worker.id)).map(worker => <option key={worker.id} value={worker.id}>{worker.name}</option>)}
                           </select>
@@ -12429,45 +12680,45 @@ function App() {
                     )}
                     <label className="form-span">
                       Planned work
-                      <textarea required minLength="8" maxLength="4000" value={dailyHuddle.plannedWork} onChange={(event) => setDailyHuddle({ ...dailyHuddle, plannedWork: event.target.value })} placeholder="Specific work areas, sequence, and handoffs for this shift." />
+                      <textarea required minLength="8" maxLength="4000" value={dailyHuddle.plannedWork} onChange={(event) => updateDailyHuddle('plannedWork', event.target.value)} placeholder="Specific work areas, sequence, and handoffs for this shift." />
                     </label>
                     <label className="form-span">
                       Production target
-                      <textarea required minLength="3" maxLength="1000" value={dailyHuddle.productionTarget} onChange={(event) => setDailyHuddle({ ...dailyHuddle, productionTarget: event.target.value })} placeholder="A measurable quantity, milestone, or completion state." />
+                      <textarea required minLength="3" maxLength="1000" value={dailyHuddle.productionTarget} onChange={(event) => updateDailyHuddle('productionTarget', event.target.value)} placeholder="A measurable quantity, milestone, or completion state." />
                     </label>
                     <label className="form-span">
                       Site conditions
-                      <textarea maxLength="2000" value={dailyHuddle.siteConditions} onChange={(event) => setDailyHuddle({ ...dailyHuddle, siteConditions: event.target.value })} placeholder="Access, occupants, logistics, weather exposure, or changed conditions." />
+                      <textarea maxLength="2000" value={dailyHuddle.siteConditions} onChange={(event) => updateDailyHuddle('siteConditions', event.target.value)} placeholder="Access, occupants, logistics, weather exposure, or changed conditions." />
                     </label>
                     <label className="form-span">
                       Safety focus
-                      <textarea required minLength="5" maxLength="2000" value={dailyHuddle.safetyFocus} onChange={(event) => setDailyHuddle({ ...dailyHuddle, safetyFocus: event.target.value })} placeholder="Today&apos;s hazards, controls, LMRA trigger, and stop-work condition." />
+                      <textarea required minLength="5" maxLength="2000" value={dailyHuddle.safetyFocus} onChange={(event) => updateDailyHuddle('safetyFocus', event.target.value)} placeholder="Today&apos;s hazards, controls, LMRA trigger, and stop-work condition." />
                     </label>
                     <label className="form-span">
                       Quality hold points
-                      <textarea value={dailyHuddle.qualityHoldPoints} onChange={(event) => setDailyHuddle({ ...dailyHuddle, qualityHoldPoints: event.target.value })} placeholder="One inspection, witness, or approval hold point per line." />
+                      <textarea value={dailyHuddle.qualityHoldPoints} onChange={(event) => updateDailyHuddle('qualityHoldPoints', event.target.value)} placeholder="One inspection, witness, or approval hold point per line." />
                     </label>
                     <label className="form-span">
                       Constraints
-                      <textarea value={dailyHuddle.constraints} onChange={(event) => setDailyHuddle({ ...dailyHuddle, constraints: event.target.value })} placeholder="Materials, information, access, equipment, or third-party dependencies." />
+                      <textarea value={dailyHuddle.constraints} onChange={(event) => updateDailyHuddle('constraints', event.target.value)} placeholder="Materials, information, access, equipment, or third-party dependencies." />
                     </label>
                     <label className="form-span">
                       Blocking issues
-                      <textarea value={dailyHuddle.blockingIssues} onChange={(event) => setDailyHuddle({ ...dailyHuddle, blockingIssues: event.target.value })} placeholder="Only conditions that prevent planned work; one per line." />
+                      <textarea value={dailyHuddle.blockingIssues} onChange={(event) => updateDailyHuddle('blockingIssues', event.target.value)} placeholder="Only conditions that prevent planned work; one per line." />
                     </label>
                     <label className="checkbox-label form-span daily-stop-work">
-                      <input type="checkbox" checked={dailyHuddle.stopWorkRequired} onChange={(event) => setDailyHuddle({ ...dailyHuddle, stopWorkRequired: event.target.checked })} />
+                      <input type="checkbox" checked={dailyHuddle.stopWorkRequired} onChange={(event) => updateDailyHuddle('stopWorkRequired', event.target.checked)} />
                       Stop work until the retained blocking issues are resolved
                     </label>
                     <label className="form-span">
                       Huddle evidence reference
-                      <input required minLength="3" maxLength="500" value={dailyHuddle.evidenceReference} onChange={(event) => setDailyHuddle({ ...dailyHuddle, evidenceReference: event.target.value })} placeholder="Signed sheet, attendance photo, or retained document reference" />
+                      <input required minLength="3" maxLength="500" value={dailyHuddle.evidenceReference} onChange={(event) => updateDailyHuddle('evidenceReference', event.target.value)} placeholder="Signed sheet, attendance photo, or retained document reference" />
                     </label>
-                  </div>
+                  </fieldset>
                   <div className="modal-actions">
-                    <button className="primary-button" disabled={submitting}>
+                    <button className="primary-button" disabled={submitting || dailyCycleLoading}>
                       <ClipboardCheck size={16} />
-                      {submitting ? 'Retaining...' : navigator.onLine === false ? 'Save huddle offline' : 'Retain start huddle'}
+                      {submitting ? 'Retaining...' : dailyCycleLoading ? 'Loading daily cycles...' : navigator.onLine === false ? 'Save huddle offline' : 'Retain start huddle'}
                     </button>
                   </div>
                   <p className="attendance-policy">A released huddle is an internal coordination record. It does not create a permit, certify compliance, notify the crew, or authorize hazardous work.</p>
@@ -12912,31 +13163,28 @@ function App() {
                       {data.organization?.readiness?.ready ? 'issue ready' : 'incomplete'}
                     </span>
                   </div>
-                  <form onSubmit={saveOrganizationProfile}>
+                  <form onSubmit={saveOrganizationProfile} aria-busy={submitting}>
+                    <fieldset className="form-fieldset" disabled={submitting}>
                     <div className="form-grid organization-profile-form">
                       <label>
                         Legal name
                         <input
                           value={organizationProfileDraft.legalName}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, legalName: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('legalName', event.target.value)}
                         />
                       </label>
                       <label>
                         Trading name
                         <input
                           value={organizationProfileDraft.tradingName}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, tradingName: event.target.value })
-                          }
+                          onChange={(event) => updateOrganizationProfile('tradingName', event.target.value)}
                         />
                       </label>
                       <label>
                         Registration number
                         <input
                           value={organizationProfileDraft.registrationNumber}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, registrationNumber: event.target.value })
-                          }
+                          onChange={(event) => updateOrganizationProfile('registrationNumber', event.target.value)}
                           placeholder="KVK or national registry number"
                         />
                       </label>
@@ -12944,9 +13192,7 @@ function App() {
                         Electronic address scheme
                         <input
                           value={organizationProfileDraft.electronicAddressScheme}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, electronicAddressScheme: event.target.value })
-                          }
+                          onChange={(event) => updateOrganizationProfile('electronicAddressScheme', event.target.value)}
                           placeholder="0106 for KVK"
                         />
                       </label>
@@ -12954,9 +13200,7 @@ function App() {
                         Electronic address
                         <input
                           value={organizationProfileDraft.electronicAddress}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, electronicAddress: event.target.value })
-                          }
+                          onChange={(event) => updateOrganizationProfile('electronicAddress', event.target.value)}
                           placeholder="Defaults to KVK for Dutch entities"
                         />
                       </label>
@@ -12965,20 +13209,21 @@ function App() {
                         <input
                           disabled={organizationProfileDraft.vatExempt}
                           value={organizationProfileDraft.vatNumber}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, vatNumber: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('vatNumber', event.target.value)}
                         />
                       </label>
                       <label className="checkbox-label form-span">
                         <input
                           type="checkbox"
                           checked={organizationProfileDraft.vatExempt}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({
-                              ...organizationProfileDraft,
-                              vatExempt: event.target.checked,
-                              vatNumber: event.target.checked ? '' : organizationProfileDraft.vatNumber,
-                            })
-                          }
+                          onChange={(event) => {
+                            const vatExempt = event.target.checked
+                            setOrganizationProfileDraft((current) => ({
+                              ...current,
+                              vatExempt,
+                              vatNumber: vatExempt ? '' : current.vatNumber,
+                            }))
+                          }}
                         />
                         This legal entity is VAT exempt
                       </label>
@@ -12987,14 +13232,14 @@ function App() {
                         <input
                           type="email"
                           value={organizationProfileDraft.email}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, email: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('email', event.target.value)}
                         />
                       </label>
                       <label>
                         Phone
                         <input
                           value={organizationProfileDraft.phone}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, phone: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('phone', event.target.value)}
                         />
                       </label>
                       <label className="form-span">
@@ -13002,7 +13247,7 @@ function App() {
                         <input
                           type="url"
                           value={organizationProfileDraft.website}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, website: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('website', event.target.value)}
                           placeholder="https://"
                         />
                       </label>
@@ -13010,21 +13255,21 @@ function App() {
                         Registered address
                         <input
                           value={organizationProfileDraft.address}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, address: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('address', event.target.value)}
                         />
                       </label>
                       <label>
                         Postal code
                         <input
                           value={organizationProfileDraft.postalCode}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, postalCode: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('postalCode', event.target.value)}
                         />
                       </label>
                       <label>
                         City
                         <input
                           value={organizationProfileDraft.city}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, city: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('city', event.target.value)}
                         />
                       </label>
                       <label>
@@ -13033,23 +13278,21 @@ function App() {
                           required
                           maxLength="2"
                           value={organizationProfileDraft.country}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, country: event.target.value.toUpperCase() })
-                          }
+                          onChange={(event) => updateOrganizationProfile('country', event.target.value.toUpperCase())}
                         />
                       </label>
                       <label>
                         IBAN
                         <input
                           value={organizationProfileDraft.iban}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, iban: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('iban', event.target.value)}
                         />
                       </label>
                       <label>
                         BIC
                         <input
                           value={organizationProfileDraft.bic}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, bic: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('bic', event.target.value)}
                         />
                       </label>
                       <label>
@@ -13060,9 +13303,7 @@ function App() {
                           min="1"
                           max="365"
                           value={organizationProfileDraft.defaultPaymentTermsDays}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, defaultPaymentTermsDays: event.target.value })
-                          }
+                          onChange={(event) => updateOrganizationProfile('defaultPaymentTermsDays', event.target.value)}
                         />
                       </label>
                       <label>
@@ -13073,16 +13314,14 @@ function App() {
                           min="1"
                           max="365"
                           value={organizationProfileDraft.defaultQuoteValidityDays}
-                          onChange={(event) =>
-                            setOrganizationProfileDraft({ ...organizationProfileDraft, defaultQuoteValidityDays: event.target.value })
-                          }
+                          onChange={(event) => updateOrganizationProfile('defaultQuoteValidityDays', event.target.value)}
                         />
                       </label>
                       <label className="form-span">
                         Quote terms
                         <textarea
                           value={organizationProfileDraft.quoteTerms}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, quoteTerms: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('quoteTerms', event.target.value)}
                           placeholder="Commercial terms shown on every new issue package."
                         />
                       </label>
@@ -13090,7 +13329,7 @@ function App() {
                         Internal notes
                         <textarea
                           value={organizationProfileDraft.notes}
-                          onChange={(event) => setOrganizationProfileDraft({ ...organizationProfileDraft, notes: event.target.value })}
+                          onChange={(event) => updateOrganizationProfile('notes', event.target.value)}
                         />
                       </label>
                     </div>
@@ -13111,6 +13350,7 @@ function App() {
                         {submitting ? 'Saving...' : 'Save business identity'}
                       </button>
                     </div>
+                    </fieldset>
                   </form>
                 </section>
                 <LazyControlBoundary label="automation controls">
@@ -13122,7 +13362,7 @@ function App() {
                     error={commandPlanError}
                     view={commandPlanView}
                     selectedIds={selectedCommandIds}
-                    submitting={submitting}
+                    submitting={submitting || automationSuspended}
                     onViewChange={setCommandPlanView}
                     onToggle={toggleCommandSelection}
                     onSelectVisible={setSelectedCommandIds}
@@ -13133,6 +13373,40 @@ function App() {
                     onOpen={openJobWorkspace}
                   />
                 </LazyControlBoundary>
+                <section className={`panel page-panel automation-safety-panel ${automationSuspended ? 'automation-safety-panel-active' : ''}`} data-testid="automation-safety-control">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Autonomous-work safety stop</h2>
+                      <p>Owner control for manual command plans and the durable scheduler.</p>
+                    </div>
+                    <span className={`status ${automationSuspended ? 'status-attention' : 'status-ready'}`}>
+                      {automationSuspended ? 'suspended' : 'active'}
+                    </span>
+                  </div>
+                  <p className="panel-copy">
+                    {automationSuspended
+                      ? `${automationControl.reason} Direct operator entries, evidence, and approvals are unaffected.`
+                      : 'Autonomous work can create internal drafts and review tasks only. External commitments remain approval-gated.'}
+                  </p>
+                  <div className="operations-actions">
+                    <button
+                      className={automationSuspended ? 'primary-button' : 'danger-button'}
+                      disabled={submitting}
+                      onClick={() => changeAutomationControl(!automationSuspended)}
+                    >
+                      {automationSuspended ? <Activity size={16} /> : <Ban size={16} />}
+                      {automationSuspended ? 'Resume autonomous drafting' : 'Suspend autonomous drafting'}
+                    </button>
+                    <a className="secondary-button" href="/api/operations/support-bundle" download>
+                      <FileDown size={16} />
+                      Download support bundle
+                    </a>
+                  </div>
+                  <p className="panel-copy">
+                    The support bundle contains runtime, migration, aggregate-count, integrity, and control diagnostics only. It excludes
+                    customer records, evidence, logs, environment values, and credentials.
+                  </p>
+                </section>
                 <section className="panel page-panel">
                   <div className="panel-heading">
                     <div>
@@ -13147,6 +13421,18 @@ function App() {
                     <div>
                       <span>Runtime</span>
                       <strong>{data.health.runtime?.mode || 'local'}</strong>
+                    </div>
+                    <div data-testid="runtime-exposure-readiness">
+                      <span>Access</span>
+                      <strong>
+                        {data.health.runtime?.exposure?.publicTunnel
+                          ? 'authenticated tunnel'
+                          : data.health.runtime?.exposure?.loopbackOnly
+                            ? 'this computer only'
+                            : data.health.runtime?.mode === 'hosted'
+                              ? 'hosted ingress'
+                              : 'local network'}
+                      </strong>
                     </div>
                     <div data-testid="storage-readiness">
                       <span>Storage</span>
@@ -13211,6 +13497,10 @@ function App() {
                             : 'checking'}
                       </strong>
                     </div>
+                    <div data-testid="hai-connector-readiness">
+                      <span>HAI feed</span>
+                      <strong>{operationCapabilities?.haiConnector?.available ? 'read-only ready' : 'checking'}</strong>
+                    </div>
                     <div>
                       <span>Recovery</span>
                       <strong>{recoveryLabel}</strong>
@@ -13258,6 +13548,10 @@ function App() {
                     <a className="secondary-button" href="/api/operations/export">
                       <FileDown size={16} />
                       Export ledger
+                    </a>
+                    <a className="secondary-button" href="/api/integrations/hai/feed?limit=100" download="contractor-ai.json">
+                      <GitBranch size={16} />
+                      Export HAI feed
                     </a>
                     <button
                       className="secondary-button"
@@ -13314,6 +13608,7 @@ function App() {
                           <span className="backup-actions">
                             <button
                               className="secondary-button"
+                              aria-label={`Check restore for backup ${backup.backupId}`}
                               title="Verify file checksums and SQLite restore readiness"
                               disabled={submitting || backup.manifestStatus === 'unreadable'}
                               onClick={() => verifyBackup(backup.backupId)}
@@ -13324,6 +13619,7 @@ function App() {
                             {backup.downloadAvailable ? (
                               <a
                                 className="secondary-button"
+                                aria-label={`Download backup ${backup.backupId}`}
                                 href={`/api/operations/backups/${encodeURIComponent(backup.backupId)}/download`}
                                 download
                               >

@@ -255,7 +255,7 @@ test('migration 025 restores checklist schema and diagnostics detect retained sn
 
   const upgraded = new ContractorOperatingLedger({ dbFile });
   try {
-    assert.equal(upgraded.migrationStatus().currentVersion, '067_governed_energy_performance');
+    assert.equal(upgraded.migrationStatus().currentVersion, '068_operational_safety_controls');
     assert.equal(upgraded.migrationStatus().pending.length, 0);
     assert.equal(upgraded.listInspectionTemplates().filter(candidate => candidate.builtIn).length, 4);
     for (const table of ['inspection_templates', 'inspection_checklist_submissions']) {

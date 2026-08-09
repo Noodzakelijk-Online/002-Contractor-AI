@@ -1,6 +1,9 @@
 node_modules
 dist
 data
+uploads
+release
+tmp
 .git
 .env*
 .pytest_cache

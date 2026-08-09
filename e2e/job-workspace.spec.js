@@ -2781,11 +2781,11 @@ test('operations distinguishes checksummed exports from restorable local backups
   expect(backups.backups[0].format).toBe('contractor-ai-backup-manifest/v2');
   expect(backups.backups[0].evidenceFiles).toBeGreaterThan(0);
   expect(backups.backups[0].downloadAvailable).toBeTruthy();
-  await page.getByRole('button', { name: 'Check restore' }).first().click();
+  await page.getByRole('button', { name: `Check restore for backup ${backups.backups[0].backupId}` }).click();
   await expect(page.getByText(/passed \d+ file checks and the SQLite restore check\./)).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('link', { name: 'Download' }).first().click()
+    page.getByRole('link', { name: `Download backup ${backups.backups[0].backupId}` }).click()
   ]);
   expect(download.suggestedFilename()).toBe(`contractor-ai-backup-${backups.backups[0].backupId}.tar.gz`);
   expect(await download.failure()).toBeNull();

@@ -273,7 +273,7 @@ test('Contractor Balanced Scorecard derives all ten perspectives and freezes sou
     () => ledger.resolveApproval(revised.approval.id, { status: 'approved', resolvedBy: 'owner', reason: 'Stale source must be rejected.' }),
     error => error.code === 'performance_scorecard_stale' && error.statusCode === 409
   );
-  assert.equal(ledger.migrationStatus().currentVersion, '067_governed_energy_performance');
+  assert.equal(ledger.migrationStatus().currentVersion, '068_operational_safety_controls');
   const diagnostics = ledger.diagnose();
   assert.equal(
     diagnostics.issues.some(issue => /approved performance .*lack|Performance scorecard .*failed retained snapshot verification/i.test(issue.message)),

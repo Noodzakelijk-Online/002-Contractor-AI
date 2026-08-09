@@ -126,6 +126,10 @@ export default function LmraControl({
     setDraft({ ...emptyDraft(job), preTaskPlanId: planId })
   }
 
+  function updateDraft(field, value) {
+    setDraft((current) => ({ ...current, [field]: value }))
+  }
+
   async function sendOrQueue(operation) {
     if (navigator.onLine === false) {
       await enqueueFieldOperationDraft(operation)
@@ -233,7 +237,7 @@ export default function LmraControl({
         </label>
         <label>
           Pre-task plan
-          <select value={draft.preTaskPlanId} disabled={!jobId || !plans.length} onChange={event => setDraft({ ...draft, preTaskPlanId: event.target.value })}>
+          <select value={draft.preTaskPlanId} disabled={!jobId || !plans.length} onChange={event => updateDraft('preTaskPlanId', event.target.value)}>
             <option value="">{plans.length ? 'Select the exact plan' : 'No retained plan'}</option>
             {plans.map(plan => (
               <option key={plan.id} value={plan.id}>{plan.planNumber} / {formatStatus(plan.effectiveStatus || plan.status)}</option>
@@ -258,26 +262,26 @@ export default function LmraControl({
       ) : null}
 
       {fieldScoped && selectedPlan ? (
-        <form className="lmra-form" onSubmit={submitAssessment}>
+        <form className="lmra-form" aria-busy={loading || submitting} inert={loading || submitting ? true : undefined} onSubmit={submitAssessment}>
           <div className="lmra-form-grid">
             <label>
               Activity
-              <input required minLength="3" maxLength="500" value={draft.activity} onChange={event => setDraft({ ...draft, activity: event.target.value })} placeholder="Hazardous task about to start" />
+              <input required disabled={loading || submitting} minLength="3" maxLength="500" value={draft.activity} onChange={event => updateDraft('activity', event.target.value)} placeholder="Hazardous task about to start" />
             </label>
             <label>
               Work area
-              <input required minLength="2" maxLength="240" value={draft.workArea} onChange={event => setDraft({ ...draft, workArea: event.target.value })} />
+              <input required disabled={loading || submitting} minLength="2" maxLength="240" value={draft.workArea} onChange={event => updateDraft('workArea', event.target.value)} />
             </label>
             <label>
               Linked task
-              <select value={draft.taskId} onChange={event => setDraft({ ...draft, taskId: event.target.value })}>
+              <select disabled={loading || submitting} value={draft.taskId} onChange={event => updateDraft('taskId', event.target.value)}>
                 <option value="">No task selected</option>
                 {tasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}
               </select>
             </label>
             <label>
               Validity
-              <select value={draft.validForMinutes} onChange={event => setDraft({ ...draft, validForMinutes: event.target.value })}>
+              <select disabled={loading || submitting} value={draft.validForMinutes} onChange={event => updateDraft('validForMinutes', event.target.value)}>
                 <option value="60">1 hour</option>
                 <option value="120">2 hours</option>
                 <option value="240">4 hours maximum</option>
@@ -291,8 +295,12 @@ export default function LmraControl({
               <label className="lmra-check" key={key}>
                 <input
                   type="checkbox"
+                  disabled={loading || submitting}
                   checked={draft.checks[key]}
-                  onChange={event => setDraft(current => ({ ...current, checks: { ...current.checks, [key]: event.target.checked } }))}
+                  onChange={event => {
+                    const checked = event.target.checked
+                    setDraft(current => ({ ...current, checks: { ...current.checks, [key]: checked } }))
+                  }}
                 />
                 <span>{label}</span>
               </label>
@@ -302,31 +310,31 @@ export default function LmraControl({
           <div className="lmra-form-grid">
             <label>
               Evidence reference
-              <input required minLength="3" maxLength="240" value={draft.evidenceReference} onChange={event => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder="Photo, field note, or device record" />
+              <input required disabled={loading || submitting} minLength="3" maxLength="240" value={draft.evidenceReference} onChange={event => updateDraft('evidenceReference', event.target.value)} placeholder="Photo, field note, or device record" />
             </label>
             <label>
               Observed hazards
-              <textarea maxLength="4000" value={draft.observedHazards} onChange={event => setDraft({ ...draft, observedHazards: event.target.value })} placeholder="One observation per line" />
+              <textarea disabled={loading || submitting} maxLength="4000" value={draft.observedHazards} onChange={event => updateDraft('observedHazards', event.target.value)} placeholder="One observation per line" />
             </label>
             {!readyRequested ? (
               <label className="lmra-form-span">
                 Stop-work reason
-                <textarea required minLength="8" maxLength="1000" value={draft.stopWorkReason} onChange={event => setDraft({ ...draft, stopWorkReason: event.target.value })} placeholder="Describe the failed, unknown, or changed condition" />
+                <textarea required disabled={loading || submitting} minLength="8" maxLength="1000" value={draft.stopWorkReason} onChange={event => updateDraft('stopWorkReason', event.target.value)} placeholder="Describe the failed, unknown, or changed condition" />
               </label>
             ) : null}
             {needsReassessmentEvidence ? (
               <label className="lmra-form-span">
                 Prior condition resolution
-                <textarea required minLength="8" maxLength="1000" value={draft.resolutionNote} onChange={event => setDraft({ ...draft, resolutionNote: event.target.value })} placeholder="What changed and what evidence confirms the control is now effective?" />
+                <textarea required disabled={loading || submitting} minLength="8" maxLength="1000" value={draft.resolutionNote} onChange={event => updateDraft('resolutionNote', event.target.value)} placeholder="What changed and what evidence confirms the control is now effective?" />
               </label>
             ) : null}
           </div>
 
           <label className="checkbox-label lmra-attestation">
-            <input type="checkbox" checked={draft.safeToStart} onChange={event => setDraft({ ...draft, safeToStart: event.target.checked })} />
+            <input type="checkbox" disabled={loading || submitting} checked={draft.safeToStart} onChange={event => updateDraft('safeToStart', event.target.checked)} />
             Based on these checks, I confirm the work is safe to start now. I will stop and reassess if anything changes.
           </label>
-          <button className={readyRequested ? 'primary-button' : 'danger-button'} disabled={submitting}>
+          <button className={readyRequested ? 'primary-button' : 'danger-button'} disabled={loading || submitting}>
             {readyRequested ? <Check size={16} /> : <TriangleAlert size={16} />}
             {submitting ? 'Validating...' : navigator.onLine === false ? 'Save evidence offline / keep work stopped' : readyRequested ? 'Validate and retain LMRA' : 'Retain stop-work LMRA'}
           </button>

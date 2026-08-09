@@ -5930,6 +5930,28 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           WHERE status IN ('verified_compliant', 'verified_gap');
       `);
     }
+  },
+  {
+    version: '068_operational_safety_controls',
+    description: 'Retain owner-controlled automation suspension state so scheduled and manual autonomous drafting fail closed until explicitly resumed.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operational_controls (
+          control_key TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          reason TEXT,
+          changed_by TEXT NOT NULL,
+          suspended_at TEXT,
+          resumed_at TEXT,
+          revision INTEGER NOT NULL DEFAULT 1,
+          data_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_operational_controls_status
+          ON operational_controls(status, updated_at DESC);
+      `);
+    }
   }
 ];
 
@@ -7081,6 +7103,115 @@ class ContractorOperatingLedger {
       }
       return after;
     });
+  }
+
+  getAutomationControl() {
+    const row = this.db.prepare('SELECT * FROM operational_controls WHERE control_key = ?').get('autonomous_work');
+    if (!row) {
+      return {
+        controlKey: 'autonomous_work',
+        status: 'active',
+        suspended: false,
+        reason: null,
+        changedBy: null,
+        suspendedAt: null,
+        resumedAt: null,
+        revision: 0,
+        data: { externalCommitments: 0 },
+        createdAt: null,
+        updatedAt: null
+      };
+    }
+    return {
+      controlKey: row.control_key,
+      status: row.status,
+      suspended: row.status === 'suspended',
+      reason: row.reason || null,
+      changedBy: row.changed_by,
+      suspendedAt: row.suspended_at || null,
+      resumedAt: row.resumed_at || null,
+      revision: Number(row.revision || 0),
+      data: fromJson(row.data_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  setAutomationControl(payload = {}, options = {}) {
+    const requestedStatus = normalizeStatus(payload.status, '');
+    if (!['active', 'suspended'].includes(requestedStatus)) {
+      throw ledgerInputError('automation_control_status_invalid', 'Automation control status must be active or suspended.');
+    }
+    const reason = normalizeText(payload.reason, '');
+    if (reason.length < 8 || reason.length > 1000) {
+      throw ledgerInputError('automation_control_reason_invalid', 'Record an operational reason between 8 and 1,000 characters.');
+    }
+    const actor = normalizeText(options.actor || payload.actor, 'owner');
+    const timestamp = nowIso();
+    return this.transaction(() => {
+      const before = this.getAutomationControl();
+      if (before.status === requestedStatus && before.reason === reason) {
+        return { control: before, replayed: true };
+      }
+      const suspendedAt = requestedStatus === 'suspended' ? timestamp : before.suspendedAt;
+      const resumedAt = requestedStatus === 'active' ? timestamp : null;
+      const data = {
+        externalCommitments: 0,
+        effect: requestedStatus === 'suspended'
+          ? 'Blocks manual and scheduled autonomous ledger drafting.'
+          : 'Allows manual and configured scheduled autonomous ledger drafting.',
+        doesNotAffect: ['direct operator ledger entry', 'approval decisions', 'evidence capture', 'emergency services']
+      };
+      this.db.prepare(`
+        INSERT INTO operational_controls (
+          control_key, status, reason, changed_by, suspended_at, resumed_at,
+          revision, data_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(control_key) DO UPDATE SET
+          status = excluded.status,
+          reason = excluded.reason,
+          changed_by = excluded.changed_by,
+          suspended_at = excluded.suspended_at,
+          resumed_at = excluded.resumed_at,
+          revision = operational_controls.revision + 1,
+          data_json = excluded.data_json,
+          updated_at = excluded.updated_at
+      `).run(
+        'autonomous_work',
+        requestedStatus,
+        reason,
+        actor,
+        suspendedAt,
+        resumedAt,
+        Math.max(1, before.revision + 1),
+        toJson(data),
+        before.createdAt || timestamp,
+        timestamp
+      );
+      const after = this.getAutomationControl();
+      this.audit({
+        entityType: 'operational_control',
+        entityId: 'autonomous_work',
+        action: requestedStatus === 'suspended' ? 'suspend_autonomous_work' : 'resume_autonomous_work',
+        actor,
+        before,
+        after,
+        metadata: { externalCommitments: 0, ownerControlled: true }
+      });
+      return { control: after, replayed: false };
+    });
+  }
+
+  assertAutomationActive() {
+    const control = this.getAutomationControl();
+    if (!control.suspended) return control;
+    const error = ledgerInputError(
+      'automation_suspended',
+      `Autonomous drafting is suspended: ${control.reason || 'owner safety stop active'}. Resume it explicitly before applying automated work.`,
+      { control }
+    );
+    error.statusCode = 423;
+    throw error;
   }
 
   createOperatorSession(input = {}) {
@@ -56483,6 +56614,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   applyTodayCommandPlan(payload = {}, options = {}) {
+    this.assertAutomationActive();
     const actor = options.actor || payload.actor || 'Contractor.AI';
     const limit = safeLimit(payload.limit, 10, 50);
     const preview = this.buildTodayCommandPlan({ ...payload, limit: Math.max(limit, 50), mode: payload.mode || 'safe' });
@@ -56602,6 +56734,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
 
   runAutonomousCycle(options = {}) {
     const dryRun = options.dryRun === true;
+    const automationControl = dryRun ? this.getAutomationControl() : this.assertAutomationActive();
     const actor = options.actor || 'Contractor.AI';
     const actionTypeFilter = new Set(
       []
@@ -58593,6 +58726,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview,
       applied,
       blocked,
+      automationControl,
       summary: {
         previewed: preview.length,
         applied: applied.length,
