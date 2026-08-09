@@ -33673,7 +33673,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       parameters.push(scopeId);
     }
     if (query) {
-      const matchingFrameworkIds = this.frameworkCatalog({ query, limit: 1_000 }).frameworks.map(framework => framework.id);
+      const matchingFrameworkIds = this.frameworkCatalog({ query, limit: 1_000, compactFamilies: true }).frameworks.map(framework => framework.id);
       const searchClauses = ['LOWER(objective) LIKE ?', 'LOWER(owner_name) LIKE ?'];
       parameters.push(`%${query}%`, `%${query}%`);
       if (matchingFrameworkIds.length) {
@@ -33700,7 +33700,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   getFrameworkWorkspace(options = {}) {
-    const catalog = this.frameworkCatalog({ limit: 1 });
+    const catalog = this.frameworkCatalog({ limit: 1, compactFamilies: true });
     const implementations = this.listFrameworkImplementations(options);
     const today = this.currentTimeIso().slice(0, 10);
     const dueReviews = this.db.prepare(`

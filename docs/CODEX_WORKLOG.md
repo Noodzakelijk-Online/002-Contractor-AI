@@ -1,5 +1,19 @@
 # Codex Worklog
 
+## 2026-08-09 - Framework method playbook pass
+
+- Added a validated operating playbook to every one of the 23 framework families:
+  recommended scope, review cadence, evidence prompts, measure candidates, and
+  safeguards.
+- Added the method basis to the framework review dialog and a guarded starter that
+  fills only missing review cadence and measures. It never retains suggested
+  evidence as proof.
+- Added an explicit compact-family representation for the dashboard, reducing its
+  complete catalog response from 320,592 to 183,602 bytes while adding the
+  playbooks. The default API retains the prior nested-guidance contract.
+- Browser-tested the workflow at 1280x900 and 390x844 with no console errors, page
+  errors, or horizontal overflow; the focused framework lifecycle test passed.
+
 ## 2026-08-09 - Governed framework implementation pass
 
 - Parsed goal sections 1-23 into a deterministic ASCII-safe catalog containing

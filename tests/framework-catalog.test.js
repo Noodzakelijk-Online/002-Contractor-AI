@@ -24,11 +24,26 @@ test('framework catalog retains every source family and membership with stable i
   ]);
   assert.equal(jobsToBeDone.families.length, 2);
   assert.equal(jobsToBeDone.families.every(family => family.guidance.length === 3), true);
+  assert.equal(jobsToBeDone.families.every(family => family.playbook.format === 'contractor-ai/framework-family-playbook-v1'), true);
+  assert.equal(jobsToBeDone.families.every(family => family.playbook.evidenceSuggestions.length >= 3), true);
+  assert.equal(jobsToBeDone.families.every(family => family.playbook.measureSuggestions.length >= 3), true);
 
   const strategy = listFrameworkCatalog({ familyId: 'family-02-strategy-frameworks', query: 'SWOT' });
+  assert.equal(strategy.playbookFormat, 'contractor-ai/framework-family-playbook-v1');
+  assert.equal(strategy.familyRepresentation, 'compatible');
   assert.equal(strategy.page.total, 1);
   assert.equal(strategy.frameworks[0].id, 'swot');
+  assert.equal(strategy.frameworks[0].families[0].guidance.length, 3);
+  assert.equal(strategy.frameworks[0].families[0].frameworkCount > 0, true);
+  assert.equal(strategy.frameworks[0].families[0].playbook, undefined);
+  assert.equal(strategy.families.every(family => family.playbook.reviewCadenceDays >= 1), true);
   assert.equal(strategy.page.hasMore, false);
+
+  const compactCatalog = listFrameworkCatalog({ compactFamilies: true });
+  assert.equal(compactCatalog.familyRepresentation, 'compact');
+  assert.deepEqual(Object.keys(compactCatalog.frameworks[0].families[0]).sort(), ['id', 'name', 'number']);
+  const compactCatalogBytes = Buffer.byteLength(JSON.stringify(compactCatalog));
+  assert.ok(compactCatalogBytes < 250_000, `compact catalog payload is ${compactCatalogBytes} bytes`);
 });
 
 test('catalog generator repairs source encoding and deterministically merges duplicate labels', () => {

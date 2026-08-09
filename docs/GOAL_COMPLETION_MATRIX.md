@@ -38,7 +38,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 021 | Forms, validation, and autosave behavior | Partial | validation/submission states and field offline queue; universal draft autosave absent |
 | 022 | Search, filters, sorting, and pagination | Partial | major queues are filterable/bounded; behavior is not uniform across every list |
 | 023 | Import and export workflows | Implemented | operational export/validation, backup download, hosted migration and CSV packages |
-| 024 | Templates, presets, and reusable user defaults | Partial | playbooks/checklist templates/rate policies exist; user presets are not universal |
+| 024 | Templates, presets, and reusable user defaults | Partial | all 23 framework families have guarded method playbooks and cadence/measure starters; checklist templates and rate policies exist; user presets are not universal |
 | 025 | AI/provider abstraction and deterministic fallback | Partial | deterministic ledger drafting and provider gates; no configured general AI adapter |
 | 026 | Human review queue and approval gates | Implemented | approval queue, atomic source-current decisions, rejection recovery |
 | 027 | Notifications and reminders | Partial | internal reminders/follow-ups exist; external notifications require verified provider |

@@ -18,7 +18,15 @@ test('operator searches, activates, reviews, and inspects a governed framework',
 
   let dialog = page.getByRole('dialog', { name: 'SWOT' });
   await expect(dialog.getByLabel('Scope')).toHaveValue('organization');
-  await dialog.getByLabel('Objective').fill(`Select the next operating priority from retained evidence ${marker}.`);
+  await expect(dialog.getByText('Strategy frameworks', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Evidence candidates', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Review every 90 days', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Evidence candidates are prompts only and are never retained as proof automatically.')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Use cadence and measures' }).click();
+  await expect(dialog.getByLabel('Review due')).not.toHaveValue('');
+  await expect(dialog.getByLabel('Success measures')).toHaveValue(/Strategic objective completion rate/);
+  await expect(dialog.getByLabel('Evidence references')).toHaveValue('');
+  await dialog.getByLabel('Objective', { exact: true }).fill(`Select the next operating priority from retained evidence ${marker}.`);
   await dialog.getByLabel('Owner').fill('Browser operations owner');
   await dialog.getByLabel('Review due').fill('2026-12-31');
   await dialog.getByLabel('Revision reason').fill('Create the browser-verified governed strategy review.');

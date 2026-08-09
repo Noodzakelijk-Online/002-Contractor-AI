@@ -1219,7 +1219,7 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
   if (section === 'performance') {
     const [result, catalog, frameworks] = await Promise.all([
       api('/api/ledger/performance-scorecard'),
-      api('/api/ledger/frameworks/catalog?limit=1000'),
+      api('/api/ledger/frameworks/catalog?limit=1000&compact_families=true'),
       api('/api/ledger/frameworks?limit=2000'),
     ])
     return {

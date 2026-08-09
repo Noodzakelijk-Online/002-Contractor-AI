@@ -133,8 +133,11 @@
 .framework-banner-notice { border-color: #237a57; color: #175d42; }
 
 .framework-modal { width: min(920px, calc(100vw - 28px)); max-height: calc(100vh - 32px); overflow-y: auto; }
+.framework-modal > .modal-heading { position: sticky; z-index: 2; top: 0; background: #fff; }
 .framework-modal form,
 .framework-modal fieldset { display: grid; gap: 14px; }
+.framework-modal form { padding: 0 22px 22px; }
+.framework-modal .modal-actions { padding: 0; }
 .framework-modal fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .framework-modal label { display: grid; gap: 6px; color: #52635d; font-size: .8rem; font-weight: 750; }
 .framework-modal label small { color: #809089; font-weight: 600; }
@@ -154,6 +157,33 @@
 .framework-form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .framework-form-grid-text { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
+.framework-playbook {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0;
+  border-block: 1px solid #dfe7e3;
+}
+
+.framework-playbook-heading,
+.framework-playbook-meta,
+.framework-playbook-safeguard {
+  display: flex;
+  align-items: center;
+}
+
+.framework-playbook-heading { justify-content: space-between; gap: 12px; }
+.framework-playbook-heading > div { display: grid; gap: 2px; }
+.framework-playbook-heading > div > span,
+.framework-playbook > small { color: #687873; font-size: .74rem; }
+.framework-playbook-meta { flex-wrap: wrap; gap: 7px 16px; color: #52635d; font-size: .76rem; font-weight: 750; }
+.framework-playbook-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.framework-playbook-grid > div { min-width: 0; }
+.framework-playbook-grid strong { color: #263832; font-size: .76rem; }
+.framework-playbook-grid ol,
+.framework-playbook-grid ul { margin: 6px 0 0; padding-left: 18px; color: #52635d; font-size: .75rem; line-height: 1.45; }
+.framework-playbook-safeguard { align-items: flex-start; gap: 7px; color: #7c4a03; font-size: .75rem; }
+.framework-playbook-safeguard svg { flex: 0 0 auto; margin-top: 1px; }
+
 .framework-history { display: grid; gap: 10px; padding-top: 4px; border-top: 1px solid #dfe7e3; }
 .framework-history .secondary-button { justify-self: start; }
 .framework-history ol { display: grid; gap: 8px; max-height: 220px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
@@ -165,6 +195,7 @@
   .framework-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .framework-summary > div:nth-child(2) { border-right: 0; }
   .framework-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .framework-playbook-grid { grid-template-columns: 1fr; gap: 10px; }
 }
 
 @media (max-width: 620px) {
@@ -176,5 +207,8 @@
   .framework-status-filter button { flex: 1 0 auto; }
   .framework-form-grid,
   .framework-form-grid-text { grid-template-columns: 1fr; }
+  .framework-modal form { padding: 0 14px 14px; }
+  .framework-playbook-heading { align-items: flex-start; flex-direction: column; }
+  .framework-playbook-heading .secondary-button { width: 100%; }
   .framework-pagination { align-items: flex-start; flex-direction: column; }
 }

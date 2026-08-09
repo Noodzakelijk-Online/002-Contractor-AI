@@ -211,6 +211,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     if (!serverSource.includes(canonicalRoute)) failures.push(`Canonical ledger route is missing: ${canonicalRoute}`);
   }
   const ledgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
+  const appSource = fs.readFileSync(path.join(root, 'App.jsx'), 'utf8');
+  const frameworkCatalogSource = fs.readFileSync(path.join(root, 'framework-catalog.js'), 'utf8');
+  const frameworkWorkspaceSource = fs.readFileSync(path.join(root, 'components', 'FrameworkWorkspace.jsx'), 'utf8');
   const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   const windowsPackageSource = fs.readFileSync(path.join(root, 'scripts', 'build-windows-standalone.js'), 'utf8');
   for (const runtimePath of ['framework-catalog.js', 'contractor-framework-catalog.json']) {
@@ -291,6 +294,27 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     || frameworkCatalog.counts?.familyMemberships !== 700
   ) {
     failures.push('Checked-in framework catalog does not retain all 23 families and 700 memberships.');
+  }
+  for (const playbookRequirement of [
+    "const PLAYBOOK_FORMAT = 'contractor-ai/framework-family-playbook-v1'",
+    'recommendedScope',
+    'reviewCadenceDays',
+    'evidenceSuggestions',
+    'measureSuggestions',
+    'safeguards'
+  ]) {
+    if (!frameworkCatalogSource.includes(playbookRequirement)) {
+      failures.push(`Framework family playbooks are missing required behavior: ${playbookRequirement}`);
+    }
+  }
+  if (!frameworkWorkspaceSource.includes('Evidence candidates are prompts only and are never retained as proof automatically.')) {
+    failures.push('Framework method starter does not retain the no-fabricated-evidence boundary.');
+  }
+  if (!appSource.includes('/api/ledger/frameworks/catalog?limit=1000&compact_families=true')) {
+    failures.push('Framework dashboard does not request the explicit compact family representation.');
+  }
+  if (!frameworkCatalogSource.includes("familyRepresentation: compactFamilies ? 'compact' : 'compatible'")) {
+    failures.push('Framework catalog does not preserve default nested-family compatibility.');
   }
   if (!ledgerSource.includes('this.assertAutomationActive();')) {
     failures.push('Autonomous command application does not enforce the durable owner safety stop.');

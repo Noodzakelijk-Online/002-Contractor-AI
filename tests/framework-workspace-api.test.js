@@ -50,11 +50,23 @@ test('framework API is role-scoped, cacheable, replay-safe, exportable, and revi
 
   const fieldCatalog = await request(baseUrl, '/api/ledger/frameworks/catalog', tokens.field_worker.token);
   assert.equal(fieldCatalog.response.status, 403);
-  const catalog = await request(baseUrl, '/api/ledger/frameworks/catalog?query=swot&limit=20', tokens.approver);
+  const compatibleCatalog = await request(baseUrl, '/api/ledger/frameworks/catalog?query=swot&limit=1', tokens.approver);
+  assert.equal(compatibleCatalog.response.status, 200, JSON.stringify(compatibleCatalog.body));
+  assert.equal(compatibleCatalog.body.catalog.familyRepresentation, 'compatible');
+  assert.equal(compatibleCatalog.body.catalog.frameworks[0].families[0].guidance.length, 3);
+  const catalog = await request(baseUrl, '/api/ledger/frameworks/catalog?query=swot&limit=20&compact_families=true', tokens.approver);
   assert.equal(catalog.response.status, 200, JSON.stringify(catalog.body));
   assert.equal(catalog.response.headers.get('cache-control'), 'private, max-age=3600');
   assert.equal(catalog.body.catalog.counts.frameworks, 671);
+  assert.equal(catalog.body.catalog.playbookFormat, 'contractor-ai/framework-family-playbook-v1');
+  assert.equal(catalog.body.catalog.familyRepresentation, 'compact');
   assert.equal(catalog.body.catalog.frameworks[0].id, 'swot');
+  assert.deepEqual(Object.keys(catalog.body.catalog.frameworks[0].families[0]).sort(), ['id', 'name', 'number']);
+  const strategyFamily = catalog.body.catalog.families.find(family => family.number === 2);
+  assert.equal(strategyFamily.playbook.reviewCadenceDays, 90);
+  assert.equal(strategyFamily.playbook.evidenceSuggestions.length, 3);
+  assert.equal(strategyFamily.playbook.measureSuggestions.length, 3);
+  assert.match(strategyFamily.playbook.safeguards[0], /facts, assumptions/i);
 
   const payload = {
     frameworkId: 'swot',

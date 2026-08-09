@@ -32,6 +32,44 @@ function lines(value) {
     .filter(Boolean)
 }
 
+function unique(values) {
+  return [...new Set(values.filter(Boolean))]
+}
+
+function composePlaybook(framework, families) {
+  if (!framework) return null
+  const matchedFamilies = framework.familyIds
+    .map(id => families.find(family => family.id === id))
+    .filter(Boolean)
+  const playbooks = matchedFamilies.map(family => family.playbook).filter(Boolean)
+  if (!playbooks.length) return null
+  return {
+    families: matchedFamilies,
+    recommendedScopes: unique(playbooks.map(playbook => playbook.recommendedScope)),
+    reviewCadenceDays: Math.min(...playbooks.map(playbook => playbook.reviewCadenceDays)),
+    steps: unique(matchedFamilies.flatMap(family => family.guidance || EMPTY_LIST)),
+    evidenceSuggestions: unique(playbooks.flatMap(playbook => playbook.evidenceSuggestions || EMPTY_LIST)),
+    measureSuggestions: unique(playbooks.flatMap(playbook => playbook.measureSuggestions || EMPTY_LIST)),
+    safeguards: unique(playbooks.flatMap(playbook => playbook.safeguards || EMPTY_LIST)),
+  }
+}
+
+function futureDate(days) {
+  const date = new Date()
+  date.setHours(12, 0, 0, 0)
+  date.setDate(date.getDate() + days)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function scopeLabel(value) {
+  if (value === 'organization') return 'Organization'
+  if (value === 'job') return 'Project'
+  return 'Organization or project'
+}
+
 function draftFor(framework, implementation = null) {
   return {
     id: implementation?.id || null,
@@ -77,6 +115,11 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
   const frameworks = catalog?.frameworks || EMPTY_LIST
   const implementations = workspace?.implementations || EMPTY_LIST
   const summary = workspace?.summary || {}
+  const editorFramework = editor ? frameworks.find(framework => framework.id === editor.frameworkId) : null
+  const editorPlaybook = useMemo(
+    () => composePlaybook(editorFramework, families),
+    [editorFramework, families],
+  )
   const editorStatuses = editor?.id
     ? {
         draft: ['draft', 'active', 'retired'],
@@ -195,6 +238,17 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
     }
   }
 
+  function applyMethodStarter() {
+    if (!editorPlaybook) return
+    setEditor(current => ({
+      ...current,
+      reviewDueAt: current.reviewDueAt || futureDate(editorPlaybook.reviewCadenceDays),
+      successMeasures: current.successMeasures.trim()
+        ? current.successMeasures
+        : editorPlaybook.measureSuggestions.join('\n'),
+    }))
+  }
+
   if (!catalog || !workspace) {
     return <div className="framework-loading" role="status">Preparing the operating framework register</div>
   }
@@ -294,6 +348,33 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
             </div>
             <form onSubmit={save}>
               <fieldset disabled={busy || !canCoordinate}>
+                {editorPlaybook ? (
+                  <section className="framework-playbook" aria-labelledby="framework-playbook-title">
+                    <div className="framework-playbook-heading">
+                      <div>
+                        <strong id="framework-playbook-title">Method basis</strong>
+                        <span>{editorPlaybook.families.map(family => family.name).join(' + ')}</span>
+                      </div>
+                      <button className="secondary-button" type="button" onClick={applyMethodStarter}>
+                        <CalendarClock size={16} />Use cadence and measures
+                      </button>
+                    </div>
+                    <div className="framework-playbook-meta">
+                      <span>Scope: {editorPlaybook.recommendedScopes.map(scopeLabel).join(' / ')}</span>
+                      <span>Review every {editorPlaybook.reviewCadenceDays} days</span>
+                    </div>
+                    <div className="framework-playbook-grid">
+                      <div><strong>Review steps</strong><ol>{editorPlaybook.steps.map(item => <li key={item}>{item}</li>)}</ol></div>
+                      <div><strong>Evidence candidates</strong><ul>{editorPlaybook.evidenceSuggestions.map(item => <li key={item}>{item}</li>)}</ul></div>
+                      <div><strong>Measure candidates</strong><ul>{editorPlaybook.measureSuggestions.map(item => <li key={item}>{item}</li>)}</ul></div>
+                    </div>
+                    <div className="framework-playbook-safeguard">
+                      <TriangleAlert size={16} aria-hidden="true" />
+                      <span>{editorPlaybook.safeguards.join(' ')}</span>
+                    </div>
+                    <small>Evidence candidates are prompts only and are never retained as proof automatically.</small>
+                  </section>
+                ) : null}
                 <div className="framework-form-grid">
                   <label>Scope
                     <select value={editor.scopeType} onChange={event => setEditor(current => ({ ...current, scopeType: event.target.value, scopeId: '' }))} disabled={Boolean(editor.id)}>

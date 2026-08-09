@@ -30,7 +30,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A23 | CORS, CSRF origin, proxy trust, rate limiting, sessions, and role boundaries hold | security integration tests |
 | A24 | Hosted mode refuses non-EU/non-TLS/non-private/non-backed-up configuration | startup-readiness tests |
 | A25 | Lint, dependency audit, release contract, Node tests, build, browser, and container gates pass | CI and final report |
-| A26 | All 23 framework families and 700 memberships are searchable; scoped records retain guarded immutable revisions and surface due reviews without execution authority | catalog, framework workspace, PostgreSQL, backup, HAI, and browser tests |
+| A26 | All 23 framework families and 700 memberships are searchable; family playbooks expose guarded cadence and measure starters without fabricating evidence; scoped records retain immutable revisions and surface due reviews without execution authority | catalog, framework workspace, PostgreSQL, backup, HAI, and browser tests |
 
 ## Manual provider acceptance
 

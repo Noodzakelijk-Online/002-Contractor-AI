@@ -14,6 +14,8 @@ Versioning for the application contract; database migrations remain append-only.
   revision snapshots, backup validation, hosted PostgreSQL parity, and diagnostics.
 - A responsive searchable framework register under Performance with family/status
   filters, bounded pagination, evidence, measures, review dates, and revision history.
+- Validated method playbooks for all 23 framework families with guarded cadence
+  and measure starters that never retain suggested evidence as proof.
 - Due framework reviews in the internal command queue and read-only HAI feed with
   no execution authority or external commitment.
 
@@ -23,6 +25,9 @@ Versioning for the application contract; database migrations remain append-only.
   records and revision counts.
 - Long framework lists and summaries use bounded database filtering and aggregate
   queries in SQLite and PostgreSQL.
+- The dashboard uses an explicit compact-family catalog representation, reducing
+  its full catalog response while the default API retains prior nested guidance
+  compatibility and keeps family playbooks available once per family.
 - Windows standalone starts only display the owner key when the protected runtime
   configuration is first created; later starts report the configuration path.
 
