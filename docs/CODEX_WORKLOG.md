@@ -52,6 +52,10 @@ Node 22 x64 packaging. Exact counts and external boundaries are retained in
   expense, and daily-cycle workflows.
 - Updated Docker and CI to verify HAI export compatibility, current action majors,
   Windows packaging, PostgreSQL TLS parity, browser workflows, and container safety.
+- The first publication run exposed an Operations hydration race that could replace
+  the first business-identity field after input began. The form now remains natively
+  disabled until its retained profile loads, and the browser test verifies the save
+  response and persistent readiness state instead of relying on a transient notice.
 
 ### Scope decisions
 

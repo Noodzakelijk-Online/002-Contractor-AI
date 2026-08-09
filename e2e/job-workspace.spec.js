@@ -299,8 +299,13 @@ test('commercial control retains server totals and changes contract value only a
   await organizationPanel.getByLabel('IBAN').fill('NL91ABNA0417164300');
   await organizationPanel.getByLabel('BIC').fill('ABNANL2A');
   await organizationPanel.getByLabel('Quote terms').fill('Additional work requires a separately accepted scope change.');
+  const organizationSave = page.waitForResponse(response => (
+    response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/ledger/organization'
+  ));
   await organizationPanel.getByRole('button', { name: 'Save business identity' }).click();
-  await expect(page.getByText('Business identity retained and ready for controlled commercial packages.')).toBeVisible();
+  const organizationResponse = await organizationSave;
+  expect(organizationResponse.ok()).toBeTruthy();
+  expect((await organizationResponse.json()).organization.readiness.ready).toBe(true);
   await expect(organizationPanel.getByText('issue ready', { exact: true })).toBeVisible();
 
   const intake = await createBrowserJob(request, 'Browser commercial acceptance workflow', {

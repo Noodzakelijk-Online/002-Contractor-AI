@@ -13163,8 +13163,8 @@ function App() {
                       {data.organization?.readiness?.ready ? 'issue ready' : 'incomplete'}
                     </span>
                   </div>
-                  <form onSubmit={saveOrganizationProfile} aria-busy={submitting}>
-                    <fieldset className="form-fieldset" disabled={submitting}>
+                  <form onSubmit={saveOrganizationProfile} aria-busy={submitting || sectionLoading}>
+                    <fieldset className="form-fieldset" disabled={submitting || sectionLoading}>
                     <div className="form-grid organization-profile-form">
                       <label>
                         Legal name
@@ -13347,7 +13347,7 @@ function App() {
                     <div className="modal-actions">
                       <button className="primary-button" disabled={submitting}>
                         <Building2 size={16} />
-                        {submitting ? 'Saving...' : 'Save business identity'}
+                        {sectionLoading ? 'Loading identity...' : submitting ? 'Saving...' : 'Save business identity'}
                       </button>
                     </div>
                     </fieldset>
