@@ -9,8 +9,8 @@ Starting revision: `d1a89fbc73be714b6cb05bb7fbf554309c3387ea`
 Contractor.AI is a mature local-first contractor operating ledger, not a greenfield
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
-S3-compatible evidence storage. The audit found 365 declared HTTP routes, 69
-append-only migrations, 160 Node test files, 47 browser spec files, and 81 direct
+S3-compatible evidence storage. The audit found 376 declared HTTP routes, 71
+append-only migrations, 162 Node test files, 49 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
@@ -22,7 +22,7 @@ controls, procurement, finance handoffs, handover, feedback, and scorecards.
 This pass closes four material control gaps: a durable autonomous-work safety stop,
 owner-only privacy-minimized diagnostics, hosted retention-policy enforcement, and
 first-run business-identity visibility. It also delivers the portable Windows
-runtime, loopback-only ngrok launcher, read-only HAI connector, compressed and
+runtime, loopback-only ngrok launcher, maintained-parser-compatible read-only HAI connector, compressed and
 budgeted production assets, isolated browser runner, phase evidence, and refreshed
 dependency lockfile.
 

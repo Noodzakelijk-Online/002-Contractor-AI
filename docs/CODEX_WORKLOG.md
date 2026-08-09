@@ -1,5 +1,15 @@
 # Codex Worklog
 
+- Reconciled the HAI connector with the maintained HAI account-feed parser. The
+  previous normalized shape omitted required `provider` and `itemType` fields;
+  the export now emits `accountfeed.GenericItem`, rejects retired fields, and has
+  native, Windows-package, CI, and optional actual-parser compatibility gates.
+- Verified the generated fixture through maintained HAI `ParseGenericFeed` in an
+  isolated network-disabled Docker Go runtime without changing the HAI checkout.
+  Lint, dependency audit, release/HAI contracts, 525 Node tests, build/bundle,
+  container, Node 22 Windows package, 83 browser workflows, and retained-ledger
+  startup all passed.
+
 ## 2026-08-09 - Privacy rights operations pass
 
 - Added migration 071 and an owner-controlled register for client and worker

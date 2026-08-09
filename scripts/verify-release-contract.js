@@ -45,6 +45,7 @@ const REQUIRED_PATHS = [
   'scripts/build-windows-standalone.js',
   'scripts/verify-windows-standalone.js',
   'scripts/export-hai-feed.js',
+  'scripts/verify-hai-contract.js',
   'scripts/generate-framework-catalog.js',
   'scripts/migrate-local-backup-to-hosted.js',
   'scripts/benchmark-ledger.js',
@@ -138,7 +139,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const packageFile = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   if (packageJson.main !== 'server.js') failures.push('package.json must use server.js as the sole runtime entrypoint.');
-  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:performance', 'test:windows-package', 'verify:bundle', 'verify:release']) {
+  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:performance', 'test:windows-package', 'verify:bundle', 'verify:hai-contract', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
   if (packageJson.scripts?.pretest) failures.push('package.json must not duplicate the full Node suite through an automatic pretest hook.');
@@ -238,6 +239,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     '/api/operations/operators',
     '/api/operations/privacy/requests',
     '/api/integrations/hai/manifest',
+    'accountfeed.GenericItem',
+    'generic_json_feed',
+    'review_document',
     'operatorRegisterRedacted',
     'privacyRegisterAvailable',
     'removeFixture(fixtureRoot)'
@@ -448,11 +452,30 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   for (const haiBoundary of [
     "connectorId: HAI_CONNECTOR_ID",
     "mode: 'read_only'",
+    "const HAI_FEED_FORMAT = 'hai-accountfeed-generic-item/v1'",
+    "const HAI_ITEM_PROVIDER = 'generic_json_feed'",
+    "const HAI_ITEM_TYPE = 'document'",
+    "const HAI_FEED_OPERATION = 'review_document'",
+    'provider: HAI_ITEM_PROVIDER',
+    'itemType: HAI_ITEM_TYPE',
+    'content: cleanText',
     'canExecute: false',
     'externalCommitments: 0'
   ]) {
     if (!haiConnectorSource.includes(haiBoundary)) {
       failures.push(`HAI connector is missing its read-only boundary: ${haiBoundary}`);
+    }
+  }
+  const haiContractVerifierSource = fs.readFileSync(path.join(root, 'scripts', 'verify-hai-contract.js'), 'utf8');
+  for (const haiVerificationRequirement of [
+    'ParseGenericFeed(data, 200000, 16000)',
+    'normalized.OperationType != "review_document"',
+    "'--network', 'none'",
+    "golang:1.25-alpine@sha256:",
+    'verifyNativeContract()'
+  ]) {
+    if (!haiContractVerifierSource.includes(haiVerificationRequirement)) {
+      failures.push(`HAI compatibility verifier is missing required behavior: ${haiVerificationRequirement}`);
     }
   }
   if (!serverSource.includes("installationQcSourceValidation: 'server_current_at_receipt_and_release'")) {
@@ -581,7 +604,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'verify.yml'), 'utf8');
-  for (const command of ['npm run verify:release', 'npm run lint', 'npm test', 'npm run build', 'npm run verify:bundle', 'npm run test:browser', 'npm run test:container']) {
+  for (const command of ['npm run verify:release', 'npm run verify:hai-contract', 'npm run lint', 'npm test', 'npm run build', 'npm run verify:bundle', 'npm run test:browser', 'npm run test:container']) {
     if (!workflow.includes(command)) failures.push(`CI workflow is missing required gate: ${command}`);
   }
   if (!/push:\s*\n\s+branches:\s*\n\s+- main/.test(workflow)) {

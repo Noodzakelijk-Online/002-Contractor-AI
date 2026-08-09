@@ -3,6 +3,16 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-10 Maintained HAI parser contract
+
+- HAI input schema: `accountfeed.GenericItem` root array
+- Required source identity: `provider: generic_json_feed`, `itemType: document`
+- HAI-derived operation: `review_document`; Contractor.AI action type remains metadata
+- Boundary: read-only export, `canExecute: false`, zero external commitments
+- Verification: `npm run verify:hai-contract`; `--hai-root` executes the maintained
+  parser from a temporary copy and does not modify the HAI checkout
+- External boundary: parser acceptance is not a configured or live HAI sync
+
 ## CP-00 Starting state
 
 - Branch: `main`

@@ -32,6 +32,10 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Changed
 
+- The HAI export now emits the maintained `accountfeed.GenericItem` input shape
+  (`generic_json_feed` provider and `document` item type), which HAI normalizes to
+  read-only `review_document` work. A native CI gate and optional maintained-parser
+  verifier prevent the former incompatible normalized-feed shape from returning.
 - Operational exports and support diagnostics now include governed framework
   records and revision counts.
 - Long framework lists and summaries use bounded database filtering and aggregate

@@ -19,7 +19,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 002 | Product definition and user outcome contract | Implemented | README and critical path define the local-first contractor operating outcome |
 | 003 | Critical path definition and smoke test | Implemented | `CRITICAL_PATH.md`, workflow integration/browser tests |
 | 004 | Architecture decision and current stack validation | Implemented | One Node/Express + React ledger runtime; SQLite local/PostgreSQL hosted decision |
-| 005 | Data model, ownership, and persistence design | Implemented | 69 migrations, resource ownership, SQLite/PostgreSQL contracts |
+| 005 | Data model, ownership, and persistence design | Implemented | 71 migrations, resource ownership, SQLite/PostgreSQL contracts |
 | 006 | Configuration validation and startup guards | Implemented | local/hosted startup readiness tests and fail-closed environment validation |
 | 007 | Authentication model and session security | Implemented | signed revocable cookies, independent role keys, login limits, auth tests |
 | 008 | Authorization and resource ownership | Implemented | role middleware, job/assignment/portal scoping, owner-only debug/operations |
@@ -42,7 +42,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 025 | AI/provider abstraction and deterministic fallback | Partial | deterministic ledger drafting and provider gates; no configured general AI adapter |
 | 026 | Human review queue and approval gates | Implemented | approval queue, atomic source-current decisions, rejection recovery |
 | 027 | Notifications and reminders | Partial | internal reminders/follow-ups exist; external notifications require verified provider |
-| 028 | Privacy controls and data deletion | Partial | scoped access/export/archive/minimized diagnostics; legal erasure automation absent |
+| 028 | Privacy controls and data deletion | Partial | approval-gated rights register, restriction/objection guards, export, correction and partial pseudonymisation exist; full legal erasure remains decision-dependent |
 | 029 | Security headers and web security | Implemented | CSP/headers, CORS/origin, body limits, proxy validation and tests |
 | 030 | Secrets management and credential rotation | Implemented | no fallback secrets, env validation, role-key rotation/revocation guidance |
 | 031 | Local development one-command experience | Implemented | `npm install`, build/start plus split API/Vite development commands and isolated browser runner |
@@ -57,14 +57,14 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
 | 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 82 Playwright operator/client/field/framework/onboarding/team-access flows plus API vertical slices |
-| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 27 release outcomes |
+| 043 | End-to-end workflow tests | Implemented | 83 Playwright operator/client/field/framework/onboarding/team-access/privacy flows plus API vertical slices |
+| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 30 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
 | 049 | Accessibility review | Partial | semantic controls, focus/labels and responsive browser review; no full external audit |
-| 050 | Responsive and browser compatibility | Implemented | 82 desktop/mobile operator and field Chromium tests in isolated batches |
+| 050 | Responsive and browser compatibility | Implemented | 83 desktop/mobile operator and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
@@ -108,7 +108,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 091 | Feature-level definition of done | Implemented | acceptance requires persistence, role, replay, UI, test and truthful side-effect state |
 | 092 | Fresh-clone dry run | Partial | package/build/container and Node 22 Windows packaging gates emulate clone; external hosted stack not available locally |
 | 093 | Manual verification evidence | Partial | automated real-browser, local runtime and Windows package evidence passed; independent operator/provider/hosted evidence remains external |
-| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 299 canonical source files; dependency audit reports zero vulnerabilities |
+| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 311 canonical source files; dependency audit reports zero vulnerabilities |
 | 095 | Completion matrix | Implemented | this file contains every phase 000-115 |
 | 096 | Final verification report | Implemented | report records exact local command, browser, runtime, package and container results plus external boundaries |
 | 097 | Final response requirements | N/A | final user response will list revision, tests, limitations, blockers and push state |

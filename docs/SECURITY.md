@@ -52,7 +52,10 @@ the exact returned HTTPS origin.
 The HAI connector is export-only. Its owner endpoint and local exporter expose
 bounded internal action summaries without evidence bodies, arbitrary ledger
 payloads, credentials, or write-back authority. Each item explicitly declares
-that it cannot execute and creates zero external commitments.
+that it cannot execute and creates zero external commitments. Exported records
+use HAI's maintained `accountfeed.GenericItem` input fields; the compatibility
+verifier can execute HAI's parser from a temporary copy without modifying the
+HAI checkout or granting either system command authority.
 
 ## Operational safety stop
 

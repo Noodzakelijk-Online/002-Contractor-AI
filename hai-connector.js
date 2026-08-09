@@ -2,8 +2,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const HAI_CONNECTOR_ID = 'contractor-ai-hai-readonly-v1';
-const HAI_FEED_OPERATION = 'review_contractor_ai_action';
+const HAI_CONNECTOR_ID = 'contractor-ai-hai-readonly-v2';
+const HAI_FEED_FORMAT = 'hai-accountfeed-generic-item/v1';
+const HAI_ITEM_PROVIDER = 'generic_json_feed';
+const HAI_ITEM_TYPE = 'document';
+const HAI_FEED_OPERATION = 'review_document';
+const HAI_SOURCE_URI_PREFIX = 'contractor-ai://review-actions/';
 const DEFAULT_HAI_FEED_LIMIT = 100;
 const MAX_HAI_FEED_LIMIT = 250;
 
@@ -97,8 +101,12 @@ function mapActionToHaiItem(action = {}) {
   return {
     externalId,
     title: actionTitle(action),
-    body: cleanText(action.message || action.nextAction || 'Review this Contractor.AI ledger action.', 2_000),
-    operationType: HAI_FEED_OPERATION,
+    content: cleanText(action.message || action.nextAction || 'Review this Contractor.AI ledger action.', 2_000),
+    sourceUri: `${HAI_SOURCE_URI_PREFIX}${externalId.slice('contractor-ai:'.length)}`,
+    itemType: HAI_ITEM_TYPE,
+    provider: HAI_ITEM_PROVIDER,
+    accountLabel: 'contractor-ai',
+    projectKey: 'contractor-ai',
     ...(sourceTimestamp ? { receivedAt: sourceTimestamp } : {}),
     metadata
   };
@@ -127,9 +135,13 @@ function connectorManifest() {
     connectorId: HAI_CONNECTOR_ID,
     direction: 'contractor_ai_to_hai',
     mode: 'read_only',
-    format: 'hai_generic_json_feed',
+    format: HAI_FEED_FORMAT,
+    schema: 'accountfeed.GenericItem',
     root: 'array',
+    itemProvider: HAI_ITEM_PROVIDER,
+    itemType: HAI_ITEM_TYPE,
     operationType: HAI_FEED_OPERATION,
+    operationTypeSource: 'derived_by_hai_from_item_type',
     authentication: 'owner_bearer_token',
     recommendedTransport: 'local_json_file',
     externalCommitments: 0,
@@ -146,8 +158,21 @@ function validateHaiFeed(feed) {
   for (const [index, item] of feed.entries()) {
     if (!item || typeof item !== 'object') throw new Error(`HAI feed item ${index} must be an object.`);
     if (!cleanText(item.externalId, 512)) throw new Error(`HAI feed item ${index} is missing externalId.`);
-    if (!cleanText(item.title, 512)) throw new Error(`HAI feed item ${index} is missing title.`);
-    if (item.operationType !== HAI_FEED_OPERATION) throw new Error(`HAI feed item ${index} has an unsupported operationType.`);
+    if (!cleanText(item.title, 512) && !cleanText(item.content, 2_000)) throw new Error(`HAI feed item ${index} requires title or content.`);
+    if (item.provider !== HAI_ITEM_PROVIDER) throw new Error(`HAI feed item ${index} has an unsupported provider.`);
+    if (item.itemType !== HAI_ITEM_TYPE) throw new Error(`HAI feed item ${index} has an unsupported itemType.`);
+    if (typeof item.content !== 'string' || Buffer.byteLength(item.content, 'utf8') > 200_000) {
+      throw new Error(`HAI feed item ${index} has invalid content.`);
+    }
+    if (!cleanText(item.sourceUri, 512).startsWith(HAI_SOURCE_URI_PREFIX)
+      || /(?:token|auth|api[_-]?key|secret|password|bearer)=/i.test(item.sourceUri)) {
+      throw new Error(`HAI feed item ${index} has an unsafe sourceUri.`);
+    }
+    if (Object.hasOwn(item, 'body') || Object.hasOwn(item, 'operationType')) {
+      throw new Error(`HAI feed item ${index} uses a retired normalized-feed field.`);
+    }
+    if (item.receivedAt && !Number.isFinite(Date.parse(item.receivedAt))) throw new Error(`HAI feed item ${index} has an invalid receivedAt value.`);
+    if (Buffer.byteLength(JSON.stringify(item.metadata || {}), 'utf8') > 16_000) throw new Error(`HAI feed item ${index} metadata is too large.`);
     if (item.metadata?.canExecute !== false || item.metadata?.externalCommitments !== 0) {
       throw new Error(`HAI feed item ${index} violates the read-only connector boundary.`);
     }
@@ -178,7 +203,10 @@ function writeHaiFeedAtomically(outputFile, feed) {
 module.exports = {
   DEFAULT_HAI_FEED_LIMIT,
   HAI_CONNECTOR_ID,
+  HAI_FEED_FORMAT,
   HAI_FEED_OPERATION,
+  HAI_ITEM_PROVIDER,
+  HAI_ITEM_TYPE,
   MAX_HAI_FEED_LIMIT,
   boundedFeedLimit,
   buildHaiFeed,

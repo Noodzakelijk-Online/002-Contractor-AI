@@ -6,13 +6,17 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  HAI_FEED_FORMAT,
   HAI_FEED_OPERATION,
+  HAI_ITEM_PROVIDER,
+  HAI_ITEM_TYPE,
   buildHaiFeed,
   connectorManifest,
   validateHaiFeed,
   writeHaiFeedAtomically
 } = require('../hai-connector');
 const { exportHaiFeed } = require('../scripts/export-hai-feed');
+const { verifyHaiContract } = require('../scripts/verify-hai-contract');
 
 test('HAI feed is deterministic, bounded, deduplicated, and read-only', () => {
   const actions = [
@@ -47,12 +51,43 @@ test('HAI feed is deterministic, bounded, deduplicated, and read-only', () => {
   assert.deepEqual(first, second);
   assert.equal(first.length, 2);
   assert.equal(first[0].metadata.severity, 'critical');
-  assert.ok(first.every(item => item.operationType === HAI_FEED_OPERATION));
+  assert.ok(first.every(item => item.provider === HAI_ITEM_PROVIDER));
+  assert.ok(first.every(item => item.itemType === HAI_ITEM_TYPE));
+  assert.ok(first.every(item => typeof item.content === 'string' && item.content.length > 0));
+  assert.ok(first.every(item => item.sourceUri.startsWith('contractor-ai://review-actions/')));
+  assert.ok(first.every(item => !Object.hasOwn(item, 'body') && !Object.hasOwn(item, 'operationType')));
   assert.ok(first.every(item => item.metadata.canExecute === false));
   assert.ok(first.every(item => item.metadata.externalCommitments === 0));
   assert.doesNotMatch(JSON.stringify(first), /token|password|secret/i);
   validateHaiFeed(first);
-  assert.equal(connectorManifest().recommendedTransport, 'local_json_file');
+  const manifest = connectorManifest();
+  assert.equal(manifest.recommendedTransport, 'local_json_file');
+  assert.equal(manifest.format, HAI_FEED_FORMAT);
+  assert.equal(manifest.schema, 'accountfeed.GenericItem');
+  assert.equal(manifest.itemProvider, HAI_ITEM_PROVIDER);
+  assert.equal(manifest.itemType, HAI_ITEM_TYPE);
+  assert.equal(manifest.operationType, HAI_FEED_OPERATION);
+  assert.equal(manifest.operationTypeSource, 'derived_by_hai_from_item_type');
+});
+
+test('HAI feed rejects the retired normalized shape and verifies its native contract', () => {
+  const current = buildHaiFeed([{ type: 'review', id: 'shape-one', message: 'Review shape.' }]);
+  const stale = [{ ...current[0], body: current[0].content, operationType: 'review_contractor_ai_action' }];
+  assert.throws(() => validateHaiFeed(stale), /retired normalized-feed field/);
+  assert.throws(() => validateHaiFeed([{ ...current[0], provider: 'contractor_ai' }]), /unsupported provider/);
+  const verification = verifyHaiContract();
+  assert.deepEqual(verification, {
+    valid: true,
+    format: HAI_FEED_FORMAT,
+    schema: 'accountfeed.GenericItem',
+    provider: HAI_ITEM_PROVIDER,
+    itemType: HAI_ITEM_TYPE,
+    operationType: HAI_FEED_OPERATION,
+    canExecute: false,
+    externalCommitments: 0,
+    fixtureSha256: verification.fixtureSha256,
+    actualHaiParser: false
+  });
 });
 
 test('HAI feed writes an operator-selected absolute local file with stable integrity', () => {
@@ -117,7 +152,12 @@ test('HAI API is owner-only and returns the generic JSON root array', async () =
   try {
     const manifest = await request('/api/integrations/hai/manifest', tokens.owner);
     assert.equal(manifest.status, 200);
-    assert.equal((await manifest.json()).canExecute, false);
+    const manifestBody = await manifest.json();
+    assert.equal(manifestBody.canExecute, false);
+    assert.equal(manifestBody.schema, 'accountfeed.GenericItem');
+    assert.equal(manifestBody.itemProvider, HAI_ITEM_PROVIDER);
+    assert.equal(manifestBody.itemType, HAI_ITEM_TYPE);
+    assert.equal(manifestBody.operationType, HAI_FEED_OPERATION);
     const feed = await request('/api/integrations/hai/feed?limit=5', tokens.owner);
     assert.equal(feed.status, 200);
     assert.ok(Array.isArray(await feed.json()));

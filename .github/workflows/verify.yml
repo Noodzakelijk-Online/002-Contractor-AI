@@ -59,6 +59,7 @@ jobs:
           docker exec "$container_id" pg_isready -U contractor_ai -d contractor_ai
           test "$(docker exec --user postgres "$container_id" psql -U contractor_ai -d contractor_ai -Atc 'SHOW ssl')" = "on"
       - run: npm run verify:release
+      - run: npm run verify:hai-contract
       - run: npm run lint
       - run: npm run build
       - run: npm run verify:bundle

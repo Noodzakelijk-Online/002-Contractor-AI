@@ -142,6 +142,10 @@ async function verifyWindowsStandalone() {
     assert.equal(manifest.response.status, 200);
     assert.equal(manifest.body?.mode, 'read_only');
     assert.equal(manifest.body?.canExecute, false);
+    assert.equal(manifest.body?.schema, 'accountfeed.GenericItem');
+    assert.equal(manifest.body?.itemProvider, 'generic_json_feed');
+    assert.equal(manifest.body?.itemType, 'document');
+    assert.equal(manifest.body?.operationType, 'review_document');
     assert.equal(stdout.includes(ownerToken), false, 'A retained standalone owner key must not reappear in startup output.');
 
     return {
@@ -151,7 +155,8 @@ async function verifyWindowsStandalone() {
       pendingMigrations: readiness.ledger.migrations.pending.length,
       operatorRegisterRedacted: true,
       privacyRegisterAvailable: true,
-      haiReadOnly: true
+      haiReadOnly: true,
+      haiContract: manifest.body.schema
     };
   } finally {
     await stopChild(child);

@@ -2,11 +2,16 @@
 
 ## Boundary
 
-Contractor.AI exports prioritized internal ledger actions in the generic HAI
-JSON feed format. Every item has a stable `externalId`, title, bounded body,
-`review_contractor_ai_action` operation type, optional source timestamp, and
+Contractor.AI exports prioritized internal ledger actions as HAI
+`accountfeed.GenericItem` records. Every item has a stable `externalId`,
+`provider: generic_json_feed`, `itemType: document`, a title, bounded `content`,
+a non-secret `contractor-ai://` source URI, an optional source timestamp, and
 privacy-minimized metadata. Every item declares `canExecute: false` and
-`externalCommitments: 0`.
+`externalCommitments: 0` in its metadata.
+
+HAI derives `operationType: review_document` from `itemType: document` while it
+normalizes the source item. Contractor.AI's more specific review category remains
+in `metadata.actionType`; it is not emitted as a custom HAI operation type.
 
 Active or paused framework implementations whose review date is due appear as
 `review_framework_implementation` items. Their stable identity includes the
@@ -52,7 +57,7 @@ In HAI's Connected Sources screen, register an owner-scoped account feed with:
   "workspaceId": "local",
   "ownerUserId": "<HAI owner id>",
   "projectKey": "contractor-ai",
-  "operationType": "review_contractor_ai_action",
+  "operationType": "review_document",
   "enabled": true
 }
 ```
@@ -61,3 +66,24 @@ Sync the feed from HAI after each export. HAI preserves raw source JSON and
 deduplicates by external id plus content revision. This connector deliberately
 does not provide a write-back or command endpoint; consequential actions remain
 inside Contractor.AI's authenticated approval workflow.
+
+## Compatibility verification
+
+The standard release gate validates the native Contractor.AI shape:
+
+```powershell
+npm run verify:hai-contract
+```
+
+When the maintained HAI source is available locally, run its actual generic-feed
+parser against a generated Contractor.AI fixture. The verifier copies only the
+required parser files into a temporary directory and does not change the HAI
+checkout. It uses local Go when available and otherwise an isolated Docker Go
+runtime with networking disabled:
+
+```powershell
+npm run verify:hai-contract -- --hai-root 'C:\absolute\path\to\018-HAI'
+```
+
+Parser acceptance proves source compatibility. It does not prove a configured
+HAI account-feed sync, owner mapping, or live deployment acceptance.

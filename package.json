@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "doctor": "node scripts/doctor.js",
     "verify:release": "node scripts/verify-release-contract.js",
+    "verify:hai-contract": "node scripts/verify-hai-contract.js",
     "migrate:hosted": "node scripts/migrate-local-backup-to-hosted.js",
     "restore:local": "node scripts/restore-local-backup.js",
     "serve": "node server.js",

@@ -72,9 +72,12 @@ key. See [ngrok operation](docs/NGROK.md).
 
 The owner-only HAI connector exposes deterministic, read-only internal action
 summaries through `/api/integrations/hai/feed`. `npm run export:hai` writes that
-generic JSON feed atomically to an absolute operator-selected path. HAI can
-register it as its existing `generic_json_feed` / `local_json_file` source. It
-cannot execute a Contractor.AI command or create an external commitment. See
+`accountfeed.GenericItem` JSON feed atomically to an absolute operator-selected
+path. HAI can register it as its existing `generic_json_feed` /
+`local_json_file` source and derives `review_document` from the retained
+`document` item type. It cannot execute a Contractor.AI command or create an
+external commitment. Run `npm run verify:hai-contract` for the native contract,
+or pass `--hai-root` to execute the maintained HAI parser. See
 [HAI connector setup](docs/HAI_CONNECTOR.md).
 
 Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to retain the owner-controlled business identity used on quote packages, manage named team access, operate approval-gated privacy-rights requests, inspect and filter the chained audit history, create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and archive eligible QA/demo jobs, non-won opportunities, workers, and tools. Privacy handling is documented in [Privacy rights operations](docs/PRIVACY_OPERATIONS.md). Backups are created before a QA reset. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.

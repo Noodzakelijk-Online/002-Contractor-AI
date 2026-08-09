@@ -18,15 +18,16 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 52 canonical paths, 12 retired paths, 16 hosted keys, 310 canonical source files; generated release/runtime/artifact directories excluded |
-| Node tests | Passed | `npm test`: 524 tests, 488 passed, 36 PostgreSQL/environment skips, 0 failed, 263.4 s on a busy Windows host |
+| Release contract | Passed | `npm run verify:release`: 53 canonical paths, 12 retired paths, 16 hosted keys, 311 canonical source files; generated release/runtime/artifact directories excluded |
+| HAI input contract | Passed | Native verifier passed; maintained HAI `ParseGenericFeed` accepted the generated fixture in an isolated Docker Go runtime and derived read-only `review_document` work |
+| Node tests | Passed | `npm test`: 525 tests, 489 passed, 36 PostgreSQL/environment skips, 0 failed, 238.2 s on a busy Windows host |
 | Production build | Passed | `npm run build`: main application JS 524.89 kB and CSS 274.35 kB before gzip; privacy operations load separately as 20.83 kB JS |
 | Bundle budget | Passed | `npm run verify:bundle`: 364,531 total gzip bytes across 33 assets |
 | Production-scale ledger | Passed | Packaged Node 22.23.2 with the deterministic 63,500-row fixture: seed 1,149.18 ms; cold start 655.36 ms; reopen 4.76 ms; dashboard p95 382.96 ms; intake p95 63.24 ms; audit verification 240.25 ms; all thresholds passed |
-| Browser tests | Passed | `npm run test:browser`: 83 Playwright Chromium workflows in 21 isolated batches, 587.5 s |
+| Browser tests | Passed | `npm run test:browser`: 83 Playwright Chromium workflows in 21 isolated batches, 543.5 s |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart-persistent session, graceful shutdown and migration 071 smoke |
-| Local runtime | Passed | Rebuilt standalone is ready at `127.0.0.1:4175` against the retained local ledger; migration 071 is current, zero migrations are pending, public readiness returns 200, and the retained audit chain is valid |
-| Windows standalone | Passed | `npm run test:windows-package`: bundled Node 22.23.2 x64 runtime passed authenticated isolated-profile startup, migration 071/zero pending, redacted owner register, available privacy register, read-only HAI manifest, credential-safe logs, shutdown and fixture cleanup |
+| Local runtime | Passed | Rebuilt standalone is ready at `127.0.0.1:4175` against the retained local ledger; migration 071 is current, zero migrations are pending, public readiness returns 200, the retained audit chain is valid, and the live HAI manifest exposes the corrected generic-item contract |
+| Windows standalone | Passed | `npm run test:windows-package`: bundled Node 22.23.2 x64 runtime passed authenticated isolated-profile startup, migration 071/zero pending, redacted owner register, available privacy register, `accountfeed.GenericItem` HAI manifest, credential-safe logs, shutdown and fixture cleanup |
 | PostgreSQL parity | CI service gate | The migration 071 privacy lifecycle and shared ledger contract tests are present; 36 PostgreSQL/environment tests were skipped without local provider services |
 
 ## Manual results
@@ -56,9 +57,10 @@ decisions outside this repository.
   tests remain partial.
 - The ngrok launcher and fail-closed tests are complete, but no live tunnel was
   opened because no `NGROK_AUTHTOKEN` was available.
-- The HAI connector is read-only, source-compatible, exportable, and covered by
-  contract tests. It was not executed against a live HAI deployment and has no
-  authority to mutate Contractor.AI records.
+- The HAI connector is read-only, exportable, and accepted by the maintained HAI
+  generic-feed parser. A configured HAI account-feed sync and owner mapping were
+  not available for live deployment acceptance; the connector has no authority
+  to mutate Contractor.AI records.
 - The product supports compliance evidence and review gates but makes no legal or
   certification claim.
 
