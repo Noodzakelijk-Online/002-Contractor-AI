@@ -1,5 +1,14 @@
 # Codex Worklog
 
+- Added a pinned axe WCAG A/AA release gate for production sign-in, all twelve
+  owner workspaces, representative dialogs, mobile navigation, and the client
+  portal at mobile and desktop widths.
+- Fixed shared compact-text contrast in tables, schedule and crew planning,
+  finance summaries, resource tabs, field assurance, onboarding, performance,
+  framework, and client-portal surfaces without excluding any axe rule.
+- The full browser release gate now passes 87 workflows in 22 isolated batches,
+  including all four accessibility checks and the independent production sign-in
+  scan in the authentication workflow file.
 - Reconciled the HAI connector with the maintained HAI account-feed parser. The
   previous normalized shape omitted required `provider` and `itemType` fields;
   the export now emits `accountfeed.GenericItem`, rejects retired fields, and has
@@ -7,7 +16,8 @@
 - Verified the generated fixture through maintained HAI `ParseGenericFeed` in an
   isolated network-disabled Docker Go runtime without changing the HAI checkout.
   Lint, dependency audit, release/HAI contracts, 525 Node tests, build/bundle,
-  container, Node 22 Windows package, 83 browser workflows, and retained-ledger
+  production-scale benchmark, container, Node 22 Windows package, 87 browser
+  workflows, and retained-ledger
   startup all passed.
 
 ## 2026-08-09 - Privacy rights operations pass

@@ -16,6 +16,7 @@ const REQUIRED_PATHS = [
   'contractor-framework-catalog.json',
   'CHANGELOG.md',
   'Dockerfile',
+  'docs/ACCESSIBILITY.md',
   'docs/ACCEPTANCE_TESTS.md',
   'docs/API_USAGE_AUDIT.md',
   'docs/CODEX_CHECKPOINTS.md',
@@ -34,6 +35,8 @@ const REQUIRED_PATHS = [
   'docs/WINDOWS_STANDALONE.md',
   'docker-compose.hosted.yml',
   'evidence-storage.js',
+  'e2e/accessibility-helpers.js',
+  'e2e/accessibility.spec.js',
   'framework-catalog.js',
   'hai-connector.js',
   'operating-ledger.js',
@@ -143,6 +146,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
   if (packageJson.scripts?.pretest) failures.push('package.json must not duplicate the full Node suite through an automatic pretest hook.');
+  if (packageJson.devDependencies?.['@axe-core/playwright'] !== '4.12.1') {
+    failures.push('The browser accessibility gate must use the pinned @axe-core/playwright 4.12.1 engine.');
+  }
   if (!packageJson.scripts?.test?.startsWith('node scripts/run-node-tests.js ')) {
     failures.push('package.json test must isolate and clean temporary Node test state.');
   }
@@ -230,6 +236,22 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   const windowsPackageSource = fs.readFileSync(path.join(root, 'scripts', 'build-windows-standalone.js'), 'utf8');
   const windowsPackageVerificationSource = fs.readFileSync(path.join(root, 'scripts', 'verify-windows-standalone.js'), 'utf8');
+  const accessibilitySource = fs.readFileSync(path.join(root, 'e2e', 'accessibility.spec.js'), 'utf8');
+  const accessibilityHelperSource = fs.readFileSync(path.join(root, 'e2e', 'accessibility-helpers.js'), 'utf8');
+  for (const accessibilityRequirement of [
+    'owner primary workspaces meet automated WCAG A and AA rules',
+    'representative owner dialogs meet automated WCAG A and AA rules',
+    'mobile navigation and client portal meet automated WCAG A and AA rules'
+  ]) {
+    if (!accessibilitySource.includes(accessibilityRequirement)) {
+      failures.push(`Accessibility browser coverage is missing: ${accessibilityRequirement}`);
+    }
+  }
+  for (const accessibilityTag of ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']) {
+    if (!accessibilityHelperSource.includes(`'${accessibilityTag}'`)) {
+      failures.push(`Accessibility browser gate is missing WCAG tag: ${accessibilityTag}`);
+    }
+  }
   for (const runtimePath of ['framework-catalog.js', 'contractor-framework-catalog.json']) {
     if (!dockerSource.includes(runtimePath)) failures.push(`Docker runtime is missing framework dependency: ${runtimePath}`);
     if (!windowsPackageSource.includes(`'${runtimePath}'`)) failures.push(`Windows runtime is missing framework dependency: ${runtimePath}`);

@@ -13,6 +13,20 @@ the repository rather than treating these statements as current by assumption.
   parser from a temporary copy and does not modify the HAI checkout
 - External boundary: parser acceptance is not a configured or live HAI sync
 
+## CP-11 Automated accessibility assurance
+
+- Engine: pinned `@axe-core/playwright` 4.12.1
+- Standards tags: WCAG 2.0 A/AA, WCAG 2.1 A/AA, and WCAG 2.2 AA
+- Scope: production sign-in, all twelve primary owner workspaces, representative
+  dialogs, mobile navigation, and mobile/desktop client portal
+- Enforcement: every matched violation fails the browser gate; no per-rule or
+  per-component exclusions are retained
+- Verification: full gate passed with 525 Node tests, 87 Chromium workflows in
+  22 isolated batches, build/bundle budgets, production benchmark, hardened
+  container, and Node 22.23.2 Windows package smoke
+- External boundary: independent assistive-technology and user acceptance still
+  requires representative production users and environments
+
 ## CP-00 Starting state
 
 - Branch: `main`

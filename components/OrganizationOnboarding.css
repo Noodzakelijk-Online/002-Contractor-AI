@@ -2,7 +2,7 @@
 .onboarding-modal { width: min(760px, 100%); overflow: hidden; }
 .onboarding-heading h2:focus { outline: none; }
 .onboarding-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 0 22px; list-style: none; background: #f5f8f7; border-bottom: 1px solid #e0e8e4; }
-.onboarding-steps li { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; padding: 13px 10px; color: #74817c; font-size: 11px; }
+.onboarding-steps li { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; padding: 13px 10px; color: #62736d; font-size: 11px; }
 .onboarding-steps li::after { position: absolute; right: -3px; width: 6px; height: 6px; content: ''; border-top: 1px solid #cfdad5; border-right: 1px solid #cfdad5; transform: rotate(45deg); }
 .onboarding-steps li:last-child::after { display: none; }
 .onboarding-steps li > span { display: grid; width: 23px; height: 23px; flex: 0 0 auto; place-items: center; background: #e5ebe8; border-radius: 50%; }

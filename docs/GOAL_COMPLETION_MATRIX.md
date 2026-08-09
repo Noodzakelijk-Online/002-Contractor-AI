@@ -57,14 +57,14 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
 | 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 83 Playwright operator/client/field/framework/onboarding/team-access/privacy flows plus API vertical slices |
-| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 30 release outcomes |
+| 043 | End-to-end workflow tests | Implemented | 87 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility flows plus API vertical slices |
+| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 31 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
-| 049 | Accessibility review | Partial | semantic controls, focus/labels and responsive browser review; no full external audit |
-| 050 | Responsive and browser compatibility | Implemented | 83 desktop/mobile operator and field Chromium tests in isolated batches |
+| 049 | Accessibility review | Partial | pinned axe gate reports zero selected WCAG A/AA violations across sign-in, all primary workspaces, representative dialogs, mobile navigation, and the mobile/desktop client portal; independent assistive-technology and user audit remains external |
+| 050 | Responsive and browser compatibility | Implemented | 87 desktop/mobile operator, client and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
@@ -82,7 +82,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 065 | Privacy impact assessment | Partial | data classes/purpose/minimization/retention risks documented; counsel sign-off external |
 | 066 | Supply chain and dependency review | Implemented | lockfile audit at zero known advisories and CI dependency gate |
 | 067 | License and third-party service review | Partial | MIT package license and provider boundaries; service terms need operator legal review |
-| 068 | CI/CD quality gates | Implemented | lint, audit, release, test, build, browser and container workflows |
+| 068 | CI/CD quality gates | Implemented | lint, audit, release, test, build, axe accessibility, browser and container workflows |
 | 069 | Release process, canary, and rollback | Blocked | local gate/runbook implemented; real EU canary/rollback needs selected infrastructure |
 | 070 | Operator runbook | Implemented | `OPERATOR_RUNBOOK.md` and `EU_HOSTING.md` |
 | 071 | User guide and help system | Partial | README/runbooks and inline states; no comprehensive in-app help center |
@@ -108,7 +108,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 091 | Feature-level definition of done | Implemented | acceptance requires persistence, role, replay, UI, test and truthful side-effect state |
 | 092 | Fresh-clone dry run | Partial | package/build/container and Node 22 Windows packaging gates emulate clone; external hosted stack not available locally |
 | 093 | Manual verification evidence | Partial | automated real-browser, local runtime and Windows package evidence passed; independent operator/provider/hosted evidence remains external |
-| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 311 canonical source files; dependency audit reports zero vulnerabilities |
+| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 314 canonical source files; dependency audit reports zero vulnerabilities |
 | 095 | Completion matrix | Implemented | this file contains every phase 000-115 |
 | 096 | Final verification report | Implemented | report records exact local command, browser, runtime, package and container results plus external boundaries |
 | 097 | Final response requirements | N/A | final user response will list revision, tests, limitations, blockers and push state |

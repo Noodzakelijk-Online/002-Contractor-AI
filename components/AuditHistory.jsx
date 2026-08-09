@@ -219,7 +219,7 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
           </button>
         </div>
       ) : null}
-      <div className="audit-history-list" role="list">
+      <div className="audit-history-list" role={events.length ? 'list' : undefined}>
         {events.map((event) => (
           <article className="audit-history-row" role="listitem" key={event.id}>
             <div className="audit-sequence">

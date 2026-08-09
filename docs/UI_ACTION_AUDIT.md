@@ -32,6 +32,9 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Every completed setup step is retained in the canonical ledger. The final screen
   uses server readiness, keeps commercial issue gates intact, and remains contained
   at mobile width with keyboard escape, focus cycling, and focus restoration.
+- A pinned axe gate blocks release on selected WCAG 2.0/2.1 A/AA and WCAG 2.2 AA
+  violations across sign-in, all primary workspaces, representative dialogs,
+  mobile navigation, and the client portal at mobile and desktop widths.
 - Operations contains one explicit safety-control panel with reason display,
   suspend/resume confirmation, and privacy-minimized support-bundle download.
 - Autonomous cycle and command-apply actions are disabled and relabelled while
@@ -39,7 +42,7 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Business identity, material receiving, safety briefing, work permit, LMRA,
   environmental, expense, and daily-cycle forms keep the active job/draft stable
   during background refreshes and disable affected controls while loading.
-- The responsive production UI is exercised by 82 isolated Chromium tests across
+- The responsive production UI is exercised by 87 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised

@@ -25,7 +25,7 @@
 .performance-heading p,
 .performance-perspective-heading p {
   margin: 4px 0 0;
-  color: #687873;
+  color: #5f7069;
 }
 
 .performance-snapshot-state,
@@ -48,7 +48,7 @@
   display: grid;
   gap: 5px;
   min-width: 150px;
-  color: #687873;
+  color: #5f7069;
   font-size: 0.78rem;
   font-weight: 700;
 }
@@ -86,9 +86,9 @@
 
 .performance-summary > div:last-child { border-right: 0; }
 .performance-summary span,
-.performance-history span { color: #687873; font-size: 0.78rem; font-weight: 700; }
+.performance-history span { color: #5f7069; font-size: 0.78rem; font-weight: 700; }
 .performance-summary strong { font-size: 1.5rem; }
-.performance-summary small { color: #687873; }
+.performance-summary small { color: #5f7069; }
 .performance-summary progress { width: 100%; accent-color: #237a57; }
 
 .performance-tabs {
@@ -110,7 +110,7 @@
   border: 0;
   border-radius: 0;
   background: #fff;
-  color: #687873;
+  color: #5f7069;
   cursor: pointer;
   text-align: left;
 }
@@ -153,7 +153,7 @@
 }
 
 .performance-table thead th {
-  color: #687873;
+  color: #5f7069;
   font-size: 0.72rem;
   text-transform: uppercase;
 }
@@ -167,7 +167,7 @@
 .performance-table td small,
 .performance-table details span {
   margin-top: 3px;
-  color: #687873;
+  color: #5f7069;
   font-size: 0.72rem;
 }
 
@@ -188,7 +188,7 @@
 .performance-status-on_track { border-color: #83c4a7; color: #175d42; background: #edf8f2; }
 .performance-status-watch { border-color: #d9b36c; color: #7c4a03; background: #fff8e8; }
 .performance-status-off_track { border-color: #e1a09a; color: #8f1d14; background: #fff1f0; }
-.performance-status-no_data { color: #687873; background: #f5f8f7; }
+.performance-status-no_data { color: #5f7069; background: #f5f8f7; }
 
 .performance-trend {
   display: inline-flex;
@@ -199,7 +199,7 @@
 
 .performance-trend-improving { color: #237a57; }
 .performance-trend-declining { color: #b42318; }
-.performance-trend-flat_or_unavailable { color: #687873; }
+.performance-trend-flat_or_unavailable { color: #5f7069; }
 
 .performance-history {
   justify-content: flex-start;
@@ -224,7 +224,7 @@
 }
 .performance-target-modal textarea { min-height: 100px; resize: vertical; }
 .performance-target-modal .modal-actions { padding: 0; }
-.performance-loading { padding: 30px 0; color: #687873; }
+.performance-loading { padding: 30px 0; color: #5f7069; }
 
 @media (max-width: 900px) {
   .performance-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }

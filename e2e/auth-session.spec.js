@@ -1,9 +1,16 @@
 const { test, expect } = require('@playwright/test');
+const { expectNoAxeViolations } = require('./accessibility-helpers');
 
 const OFFICE_ACCESS_KEY = 'browser-office-token-at-least-32-characters';
 const OWNER_ACCESS_KEY = 'browser-owner-token-at-least-32-characters';
 const FIELD_ACCESS_KEY = 'browser-field-token-at-least-32-characters';
 const FIELD_WORKER_ID = 'browser-field-task-worker';
+
+test('operator sign-in meets automated WCAG A and AA rules', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Operator sign in' })).toBeVisible();
+  await expectNoAxeViolations(page, 'operator sign-in');
+});
 
 test('office operator signs in through an HTTP-only role session and signs out cleanly', async ({ page, context }) => {
   await page.goto('/');

@@ -20,7 +20,7 @@
 .framework-pagination { justify-content: space-between; }
 .framework-heading { gap: 16px; }
 .framework-heading h2 { margin: 2px 0 0; }
-.framework-heading p { margin: 4px 0 0; color: #687873; }
+.framework-heading p { margin: 4px 0 0; color: #5f7069; }
 
 .framework-due {
   display: inline-flex;
@@ -54,7 +54,7 @@
 
 .framework-summary > div:last-child { border-right: 0; }
 .framework-summary svg { grid-row: 1 / span 2; color: #237a57; }
-.framework-summary span { color: #687873; font-size: .76rem; font-weight: 700; }
+.framework-summary span { color: #5f7069; font-size: .76rem; font-weight: 700; }
 .framework-summary strong { font-size: 1.25rem; }
 
 .framework-toolbar { flex-wrap: wrap; gap: 9px; }
@@ -96,11 +96,11 @@
 .framework-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: .86rem; }
 .framework-table th,
 .framework-table td { padding: 11px 10px; border-bottom: 1px solid #e5ebe8; text-align: left; vertical-align: top; }
-.framework-table thead th { color: #687873; font-size: .72rem; text-transform: uppercase; }
+.framework-table thead th { color: #5f7069; font-size: .72rem; text-transform: uppercase; }
 .framework-table tbody th { width: 31%; }
 .framework-table tbody th span,
 .framework-table tbody th small { display: block; }
-.framework-table tbody th small { margin-top: 3px; color: #809089; font-size: .68rem; }
+.framework-table tbody th small { margin-top: 3px; color: #5f7069; font-size: .68rem; }
 .framework-table tbody tr:hover { background: #f8faf9; }
 
 .framework-family-list { display: flex; flex-wrap: wrap; gap: 5px; max-width: 440px; }
@@ -120,13 +120,13 @@
 .framework-status-green { border-color: #83c4a7; background: #edf8f2; color: #175d42; }
 .framework-status-amber { border-color: #d9b36c; background: #fff8e8; color: #7c4a03; }
 .framework-status-blue { border-color: #9cbde2; background: #eaf2fc; color: #2e6eb9; }
-.framework-status-neutral { color: #687873; }
-.framework-unset { color: #809089; font-size: .78rem; }
+.framework-status-neutral { color: #5f7069; }
+.framework-unset { color: #5f7069; font-size: .78rem; }
 
-.framework-pagination { gap: 12px; color: #687873; font-size: .78rem; }
+.framework-pagination { gap: 12px; color: #5f7069; font-size: .78rem; }
 .framework-pagination > div { gap: 9px; }
 .framework-empty,
-.framework-loading { padding: 28px 0; color: #687873; text-align: center; }
+.framework-loading { padding: 28px 0; color: #5f7069; text-align: center; }
 
 .framework-banner { align-items: flex-start; gap: 9px; padding: 10px 12px; border-left: 3px solid; background: #f5f8f7; }
 .framework-banner-error { border-color: #b42318; color: #8f1d14; }
@@ -140,7 +140,7 @@
 .framework-modal .modal-actions { padding: 0; }
 .framework-modal fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .framework-modal label { display: grid; gap: 6px; color: #52635d; font-size: .8rem; font-weight: 750; }
-.framework-modal label small { color: #809089; font-weight: 600; }
+.framework-modal label small { color: #5f7069; font-weight: 600; }
 .framework-modal input,
 .framework-modal select,
 .framework-modal textarea {
@@ -174,7 +174,7 @@
 .framework-playbook-heading { justify-content: space-between; gap: 12px; }
 .framework-playbook-heading > div { display: grid; gap: 2px; }
 .framework-playbook-heading > div > span,
-.framework-playbook > small { color: #687873; font-size: .74rem; }
+.framework-playbook > small { color: #5f7069; font-size: .74rem; }
 .framework-playbook-meta { flex-wrap: wrap; gap: 7px 16px; color: #52635d; font-size: .76rem; font-weight: 750; }
 .framework-playbook-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .framework-playbook-grid > div { min-width: 0; }
@@ -188,7 +188,7 @@
 .framework-history .secondary-button { justify-self: start; }
 .framework-history ol { display: grid; gap: 8px; max-height: 220px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
 .framework-history li { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; padding: 8px 10px; border-left: 3px solid #9cbde2; background: #f5f8f7; }
-.framework-history li span { color: #687873; font-size: .74rem; }
+.framework-history li span { color: #5f7069; font-size: .74rem; }
 .framework-history li small { grid-column: 1 / -1; }
 
 @media (max-width: 900px) {

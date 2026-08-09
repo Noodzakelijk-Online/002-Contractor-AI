@@ -13659,6 +13659,7 @@ function App() {
                       className="visually-hidden"
                       type="file"
                       accept="application/json"
+                      aria-label="Ledger export JSON file"
                       onChange={(event) => validateExport(event.target.files?.[0])}
                     />
                     <button

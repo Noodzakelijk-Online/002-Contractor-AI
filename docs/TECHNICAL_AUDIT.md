@@ -10,7 +10,7 @@ Contractor.AI is a mature local-first contractor operating ledger, not a greenfi
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
 S3-compatible evidence storage. The audit found 376 declared HTTP routes, 71
-append-only migrations, 162 Node test files, 49 browser spec files, and 81 direct
+append-only migrations, 162 Node test files, 50 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
@@ -81,6 +81,11 @@ external-provider engines.
     audit integrity, disk/memory use, and p50/p95 startup, read, dashboard, and
     canonical-write thresholds in Node 22 and CI. Profiling also removed irrelevant
     full job-detail assembly from unassigned crew and ineligible handover queues.
+11. Accessibility evidence relied on semantic spot checks. A pinned axe browser
+    gate now covers sign-in, every primary workspace, representative dialogs,
+    mobile navigation, and the client portal at mobile and desktop widths. Shared
+    compact-text palettes were corrected wherever the selected WCAG A/AA rules
+    identified insufficient contrast.
 
 ### Residual technical debt
 
