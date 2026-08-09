@@ -48,6 +48,16 @@ function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+function managedCredential(accessKey) {
+  return {
+    tokenHash: crypto.createHash('sha256')
+      .update('contractor-ai-managed-operator\0')
+      .update(accessKey, 'utf8')
+      .digest('hex'),
+    tokenFingerprint: crypto.createHash('sha256').update(accessKey, 'utf8').digest('base64url').slice(0, 24)
+  };
+}
+
 function migrationFiveSItems(tool) {
   return [
     { id: 'migration-sort', stage: 'sort', title: 'Remove unrelated stock', requirement: 'Only retained job stock and equipment remain.' },
@@ -448,6 +458,13 @@ function createBackupFixture(t, suffix = 'success') {
     issuedAt: new Date(Date.now() - 60_000).toISOString(),
     expiresAt: new Date(Date.now() + 3_600_000).toISOString()
   });
+  const managedOperatorAccessKey = `cai_migration-${suffix}-managed-access-key-with-safe-length`;
+  const managedOperator = source.createManagedOperatorAccount({
+    id: `migration-office-${suffix}`,
+    name: `Migration office operator ${suffix}`,
+    role: 'office_operator',
+    ...managedCredential(managedOperatorAccessKey)
+  }, { actor: 'migration_fixture' });
   source.recordAuthenticationFailure(crypto.createHash('sha256').update(`migration-rate-limit-${suffix}`).digest('hex'));
   source.recordApiRateLimitRequest(crypto.createHash('sha256').update(`migration-api-rate-limit-${suffix}`).digest('hex'));
   const estimateRatePolicyRequest = source.requestEstimateRatePolicy({
@@ -1044,7 +1061,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 4 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, energyDocument, energyEvidenceBytes, energyPerformance, energyStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, energyDocument, energyEvidenceBytes, energyPerformance, energyStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, managedOperator, managedOperatorAccessKey, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1170,9 +1187,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.backupId, fixture.backupId);
   assert.equal(migration.evidenceFiles, 4);
   assert.equal(migration.invalidatedOperatorSessions, 1);
+  assert.equal(migration.deactivatedManagedOperators, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '069_governed_framework_workspace');
+  assert.equal(migration.migrationVersion, '070_managed_operator_accounts');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1425,6 +1443,10 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedHandover.document.data.evidenceHash, fixture.handover.evidenceHash);
     assert.match(migratedHandover.content, /Hosted migration success/);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM operator_sessions').get().count), 0);
+    const migratedManagedOperator = hosted.getManagedOperatorAccount(fixture.managedOperator.id);
+    assert.equal(migratedManagedOperator.status, 'deactivated');
+    assert.equal(migratedManagedOperator.keyVersion, fixture.managedOperator.keyVersion);
+    assert.equal(hosted.authenticateManagedOperator(managedCredential(fixture.managedOperatorAccessKey).tokenHash), null);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);
     const receipt = hosted.listAudit({ entityType: 'operational_migration', limit: 100 })
@@ -1433,6 +1455,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(receipt.metadata.sourceBackupId, fixture.backupId);
     assert.equal(receipt.metadata.databaseSha256, migration.databaseSha256);
     assert.equal(receipt.metadata.invalidatedOperatorSessions, 1);
+    assert.equal(receipt.metadata.deactivatedManagedOperators, 1);
     assert.equal(receipt.metadata.clearedAuthenticationRateLimits, 1);
     assert.equal(receipt.metadata.clearedApiRateLimits, 1);
   } finally {

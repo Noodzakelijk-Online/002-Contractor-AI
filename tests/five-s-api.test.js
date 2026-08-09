@@ -165,6 +165,6 @@ test('5S API scopes field access, forces field identity, and exports governed re
   assert.equal(operationalExport.body.fiveSAudits.length, 1);
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues));
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '069_governed_framework_workspace');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '070_managed_operator_accounts');
   assert.equal(diagnostics.body.diagnostics.counts.fiveSAudits, 1);
 });

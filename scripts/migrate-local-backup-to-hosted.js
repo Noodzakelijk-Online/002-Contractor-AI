@@ -18,6 +18,7 @@ const { resolvePostgresConnectionOptions } = require('../postgres-sync-database'
 const projectRoot = path.resolve(__dirname, '..');
 const MIGRATION_LOCK_ID = 2_024_070_013;
 const OPERATOR_SESSION_TABLE = 'operator_sessions';
+const MANAGED_OPERATOR_TABLE = 'managed_operator_accounts';
 const AUTH_RATE_LIMIT_TABLE = 'auth_rate_limits';
 const API_RATE_LIMIT_TABLE = 'api_rate_limits';
 
@@ -512,6 +513,18 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
     if (sourceRowsByTable.has(API_RATE_LIMIT_TABLE)) {
       sourceRowsByTable.set(API_RATE_LIMIT_TABLE, []);
     }
+    const accessDeactivationTime = new Date().toISOString();
+    const deactivatedManagedOperators = (sourceRowsByTable.get(MANAGED_OPERATOR_TABLE) || [])
+      .filter(row => row.status === 'active').length;
+    if (sourceRowsByTable.has(MANAGED_OPERATOR_TABLE)) {
+      sourceRowsByTable.set(MANAGED_OPERATOR_TABLE, sourceRowsByTable.get(MANAGED_OPERATOR_TABLE).map(row => ({
+        ...row,
+        status: 'deactivated',
+        last_used_at: null,
+        deactivated_at: row.status === 'active' ? accessDeactivationTime : row.deactivated_at,
+        updated_at: row.status === 'active' ? accessDeactivationTime : row.updated_at
+      })));
+    }
     const documents = sourceRowsByTable.get('documents') || [];
 
     await client.connect();
@@ -565,6 +578,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
       sourceRows: tableResults.reduce((total, result) => total + result.rows, 0),
       tables: tableResults.length,
       invalidatedOperatorSessions,
+      deactivatedManagedOperators,
       clearedAuthenticationRateLimits,
       clearedApiRateLimits,
       sourceAuditIntegrity: {
@@ -615,6 +629,7 @@ async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = nu
         tables: tableResults,
         sourceRows: receiptMetadata.sourceRows,
         invalidatedOperatorSessions,
+        deactivatedManagedOperators,
         clearedAuthenticationRateLimits,
         clearedApiRateLimits,
         sourceAuditIntegrity,

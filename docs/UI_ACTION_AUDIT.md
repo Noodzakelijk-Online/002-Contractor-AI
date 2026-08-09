@@ -39,7 +39,7 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Business identity, material receiving, safety briefing, work permit, LMRA,
   environmental, expense, and daily-cycle forms keep the active job/draft stable
   during background refreshes and disable affected controls while loading.
-- The responsive production UI is exercised by 81 isolated Chromium tests across
+- The responsive production UI is exercised by 82 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised

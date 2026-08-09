@@ -10,6 +10,7 @@ const REQUIRED_PATHS = [
   'components/BidDecisionControl.jsx',
   'components/MarketFitControl.jsx',
   'components/PerformanceScorecard.jsx',
+  'components/TeamAccessControl.jsx',
   'components/FrameworkWorkspace.css',
   'components/FrameworkWorkspace.jsx',
   'contractor-framework-catalog.json',
@@ -42,6 +43,7 @@ const REQUIRED_PATHS = [
   'standalone-launcher.js',
   'standalone-runtime.js',
   'scripts/build-windows-standalone.js',
+  'scripts/verify-windows-standalone.js',
   'scripts/export-hai-feed.js',
   'scripts/generate-framework-catalog.js',
   'scripts/migrate-local-backup-to-hosted.js',
@@ -136,7 +138,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const packageFile = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   if (packageJson.main !== 'server.js') failures.push('package.json must use server.js as the sole runtime entrypoint.');
-  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:performance', 'verify:bundle', 'verify:release']) {
+  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:performance', 'test:windows-package', 'verify:bundle', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
   if (packageJson.scripts?.pretest) failures.push('package.json must not duplicate the full Node suite through an automatic pretest hook.');
@@ -204,6 +206,10 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/operations/exports/validate'",
     "app.post('/api/operations/restore/validate'",
     "app.get('/api/operations/control'",
+    "app.get('/api/operations/operators'",
+    "app.post('/api/operations/operators'",
+    "app.post('/api/operations/operators/:operatorId/rotate'",
+    "app.post('/api/operations/operators/:operatorId/deactivate'",
     "app.post('/api/operations/control/suspend'",
     "app.post('/api/operations/control/resume'",
     "app.get('/api/operations/support-bundle'",
@@ -216,11 +222,26 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const appSource = fs.readFileSync(path.join(root, 'App.jsx'), 'utf8');
   const frameworkCatalogSource = fs.readFileSync(path.join(root, 'framework-catalog.js'), 'utf8');
   const frameworkWorkspaceSource = fs.readFileSync(path.join(root, 'components', 'FrameworkWorkspace.jsx'), 'utf8');
+  const teamAccessSource = fs.readFileSync(path.join(root, 'components', 'TeamAccessControl.jsx'), 'utf8');
+  const restoreSource = fs.readFileSync(path.join(root, 'scripts', 'restore-local-backup.js'), 'utf8');
+  const hostedMigrationSource = fs.readFileSync(path.join(root, 'scripts', 'migrate-local-backup-to-hosted.js'), 'utf8');
   const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   const windowsPackageSource = fs.readFileSync(path.join(root, 'scripts', 'build-windows-standalone.js'), 'utf8');
+  const windowsPackageVerificationSource = fs.readFileSync(path.join(root, 'scripts', 'verify-windows-standalone.js'), 'utf8');
   for (const runtimePath of ['framework-catalog.js', 'contractor-framework-catalog.json']) {
     if (!dockerSource.includes(runtimePath)) failures.push(`Docker runtime is missing framework dependency: ${runtimePath}`);
     if (!windowsPackageSource.includes(`'${runtimePath}'`)) failures.push(`Windows runtime is missing framework dependency: ${runtimePath}`);
+  }
+  for (const verificationRequirement of [
+    '070_managed_operator_accounts',
+    '/api/operations/operators',
+    '/api/integrations/hai/manifest',
+    'operatorRegisterRedacted',
+    'removeFixture(fixtureRoot)'
+  ]) {
+    if (!windowsPackageVerificationSource.includes(verificationRequirement)) {
+      failures.push(`Windows package smoke test is missing verification: ${verificationRequirement}`);
+    }
   }
   if (!ledgerSource.includes("version: '048_thirteen_week_cash_flow_forecast'")) {
     failures.push('Canonical cash-flow forecast migration is missing.');
@@ -287,6 +308,32 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   if (!ledgerSource.includes("version: '069_governed_framework_workspace'")) {
     failures.push('Canonical governed framework workspace migration is missing.');
+  }
+  if (!ledgerSource.includes("version: '070_managed_operator_accounts'")) {
+    failures.push('Canonical managed operator account migration is missing.');
+  }
+  for (const managedAccessRequirement of [
+    'createManagedOperatorAccount',
+    'rotateManagedOperatorAccess',
+    'deactivateManagedOperatorAccount',
+    'revokeOperatorSessionsForPrincipal'
+  ]) {
+    if (!ledgerSource.includes(managedAccessRequirement)) {
+      failures.push(`Managed operator lifecycle is missing required behavior: ${managedAccessRequirement}`);
+    }
+  }
+  if (!serverSource.includes("randomBytes(32).toString('base64url')")
+    || !serverSource.includes("update('contractor-ai-managed-operator\\0')")) {
+    failures.push('Managed operator keys are not generated strongly and retained through a domain-separated hash.');
+  }
+  if (!teamAccessSource.includes('data-testid="issued-operator-access-key"')
+    || teamAccessSource.includes('localStorage')
+    || teamAccessSource.includes('sessionStorage')) {
+    failures.push('Managed operator keys must be shown once without browser-storage retention.');
+  }
+  if (!restoreSource.includes('deactivateRestoredManagedOperators')
+    || !hostedMigrationSource.includes('deactivatedManagedOperators')) {
+    failures.push('Restore and hosted migration do not deactivate retained managed operator access.');
   }
   const frameworkCatalog = JSON.parse(fs.readFileSync(path.join(root, 'contractor-framework-catalog.json'), 'utf8'));
   if (
@@ -500,7 +547,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     failures.push('CI PostgreSQL contract must run with sslmode=require.');
   }
   if (!workflow.includes("SHOW ssl")) failures.push('CI workflow must verify PostgreSQL TLS is active.');
-  for (const windowsRequirement of ['windows-standalone:', 'runs-on: windows-latest', 'npm run package:windows', 'actions/upload-artifact@v7']) {
+  for (const windowsRequirement of ['windows-standalone:', 'runs-on: windows-latest', 'npm run package:windows', 'npm run test:windows-package', 'actions/upload-artifact@v7']) {
     if (!workflow.includes(windowsRequirement)) failures.push(`CI workflow is missing Windows package verification: ${windowsRequirement}`);
   }
   if (workflow.includes('actions/checkout@v7') || workflow.includes('actions/setup-node@v7')) {

@@ -92,6 +92,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run package:windows
+      - run: npm run test:windows-package
       - name: Package portable Windows folder
         shell: powershell
         run: Compress-Archive -Path release/ContractorAI-windows-x64/* -DestinationPath release/ContractorAI-windows-x64.zip -Force

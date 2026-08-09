@@ -5,7 +5,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 
 | ID | Acceptance outcome | Evidence |
 | --- | --- | --- |
-| A01 | Fresh local startup applies all 69 migrations and reports ready | startup/readiness and migration tests |
+| A01 | Fresh local startup applies all 70 migrations and reports ready | startup/readiness and migration tests |
 | A02 | Production startup fails without auth and hosted durability declarations | auth and startup-readiness tests |
 | A03 | Owner can complete persistent guided business setup and the identity appears on governed packages | onboarding, operations and issue-package tests |
 | A04 | Opportunity intake, qualification, survey, conversion, and follow-up persist | opportunity, market-fit, bid, survey tests |
@@ -22,9 +22,9 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A15 | Private evidence rejects unsafe types, traversal, tampering, and public serving | evidence and file-safety tests |
 | A16 | Owner stop blocks scheduler and command application but permits dry run | operations-safety and scheduler tests |
 | A17 | Support bundle and doctor expose diagnostics without records or secrets | operations-safety test and doctor smoke |
-| A18 | Backup verifies DB/evidence hashes; restore revokes sessions and preserves integrity | backup/restore tests |
+| A18 | Backup verifies DB/evidence hashes; restore revokes sessions, deactivates managed keys, and preserves integrity | backup/restore tests |
 | A19 | Local backup migrates into an empty PostgreSQL/S3 target with parity | hosted migration contract test |
-| A20 | Desktop/mobile navigation, onboarding, loading, error, empty, offline, and field flows render | 81-test isolated Chromium browser suite |
+| A20 | Desktop/mobile navigation, onboarding, team access, loading, error, empty, offline, and field flows render | isolated Chromium browser suite |
 | A21 | Build output is served by the production Node runtime with no legacy app | release-contract and container tests |
 | A22 | Container runs non-root/read-only, handles signals, and retains state | container verification script |
 | A23 | CORS, CSRF origin, proxy trust, rate limiting, sessions, and role boundaries hold | security integration tests |
@@ -32,6 +32,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A25 | Lint, dependency audit, release contract, Node tests, build, browser, and container gates pass | CI and final report |
 | A26 | All 23 framework families and 700 memberships are searchable; family playbooks expose guarded cadence and measure starters without fabricating evidence; scoped records retain immutable revisions and surface due reviews without execution authority | catalog, framework workspace, PostgreSQL, backup, HAI, and browser tests |
 | A27 | A deterministic production-scale local ledger preserves historical search, full pipeline totals, bounded responses, audit integrity, startup/write latency, memory, and disk thresholds | ledger benchmark unit contract, `npm run benchmark:ledger`, and CI JSON artifact |
+| A28 | Owner-managed team provisioning returns a key once, stores only a hash, scopes field access, redacts lists, and revokes sessions on rotate, deactivate, restore, and hosted migration | managed-access API, ledger, restore, PostgreSQL, and browser tests |
 
 ## Manual provider acceptance
 

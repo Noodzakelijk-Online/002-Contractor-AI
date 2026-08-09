@@ -40,7 +40,7 @@ function draftPayload(overrides = {}) {
 
 test('framework workspace governs replay, revision history, transitions, dates, and summaries', t => {
   const ledger = temporaryLedger(t);
-  assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+  assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   assert.deepEqual(ledger.frameworkCatalog().counts, { families: 23, frameworks: 671, familyMemberships: 700 });
 
   const created = ledger.createFrameworkImplementation(draftPayload(), { actor: 'framework-test' });

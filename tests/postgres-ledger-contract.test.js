@@ -14,6 +14,16 @@ const {
 
 const connectionString = process.env.CONTRACTOR_AI_POSTGRES_TEST_URL;
 
+function managedCredential(accessKey) {
+  return {
+    tokenHash: crypto.createHash('sha256')
+      .update('contractor-ai-managed-operator\0')
+      .update(accessKey, 'utf8')
+      .digest('hex'),
+    tokenFingerprint: crypto.createHash('sha256').update(accessKey, 'utf8').digest('base64url').slice(0, 24)
+  };
+}
+
 function approveCommercialScope(ledger, jobId, suffix, actor = 'postgres_contract_test') {
   const requested = ledger.requestCommercialScopeRevision(jobId, {
     entryKey: `postgres-commercial-scope-${suffix}`,
@@ -482,7 +492,67 @@ test('PostgreSQL framework workspace preserves governed revision parity', { skip
         )
     `).get();
     assert.equal(Number(indexes.count), 3);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
+    assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
+  } finally {
+    try {
+      ledger.db.exec('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    } finally {
+      ledger.close();
+    }
+  }
+});
+
+test('PostgreSQL managed operator access preserves hashed credentials and revocation parity', { skip: !connectionString }, () => {
+  const ledger = new ContractorOperatingLedger({ databaseUrl: connectionString });
+  try {
+    const firstKey = 'cai_postgres-managed-access-key-with-more-than-32-characters';
+    const secondKey = 'cai_postgres-rotated-access-key-with-more-than-32-characters';
+    const account = ledger.createManagedOperatorAccount({
+      id: 'postgres-office-operator',
+      name: 'PostgreSQL office operator',
+      role: 'office_operator',
+      ...managedCredential(firstKey)
+    }, { actor: 'postgres_owner' });
+    assert.equal(account.status, 'active');
+    assert.equal(account.keyVersion, 1);
+    assert.equal(JSON.stringify(account).includes(firstKey), false);
+    assert.equal(ledger.authenticateManagedOperator(managedCredential(firstKey).tokenHash).id, account.id);
+
+    ledger.createOperatorSession({
+      sessionIdHash: 'postgres-managed-session-hash',
+      operatorId: account.id,
+      role: account.role,
+      tokenFingerprint: managedCredential(firstKey).tokenFingerprint,
+      issuedAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString()
+    });
+    const rotated = ledger.rotateManagedOperatorAccess(account.id, managedCredential(secondKey), { actor: 'postgres_owner' });
+    assert.equal(rotated.account.keyVersion, 2);
+    assert.equal(rotated.revokedSessions, 1);
+    assert.equal(ledger.authenticateManagedOperator(managedCredential(firstKey).tokenHash), null);
+    assert.equal(ledger.authenticateManagedOperator(managedCredential(secondKey).tokenHash).id, account.id);
+    assert.equal(ledger.getOperatorSession('postgres-managed-session-hash'), null);
+
+    const retained = ledger.db.prepare('SELECT token_hash, token_fingerprint FROM managed_operator_accounts WHERE operator_id = ?').get(account.id);
+    assert.equal(retained.token_hash, managedCredential(secondKey).tokenHash);
+    assert.equal(retained.token_fingerprint, managedCredential(secondKey).tokenFingerprint);
+    assert.equal(JSON.stringify(retained).includes(secondKey), false);
+    const indexes = ledger.db.prepare(`
+      SELECT COUNT(*) AS count FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN ('idx_managed_operator_accounts_status_role', 'idx_managed_operator_accounts_fingerprint')
+    `).get();
+    assert.equal(Number(indexes.count), 2);
+
+    const deactivated = ledger.deactivateManagedOperatorAccount(account.id, { actor: 'postgres_owner' });
+    assert.equal(deactivated.account.status, 'deactivated');
+    assert.equal(ledger.authenticateManagedOperator(managedCredential(secondKey).tokenHash), null);
+    assert.deepEqual(
+      ledger.listAudit({ entityType: 'managed_operator_account', entityId: account.id, limit: 10 }).map(event => event.action),
+      ['deactivate_managed_operator_access', 'rotate_managed_operator_access', 'create_managed_operator_access']
+    );
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     try {
@@ -1601,7 +1671,7 @@ test('PostgreSQL adapter applies the ledger contract and durable scheduler migra
     assert.ok(Array.isArray(ledger.nextActions()));
 
     const migrations = ledger.migrationStatus();
-    assert.equal(migrations.currentVersion, '069_governed_framework_workspace');
+    assert.equal(migrations.currentVersion, '070_managed_operator_accounts');
     assert.equal(migrations.pending.length, 0);
     assert.equal(ledger.getAutomationControl().status, 'active');
     const suspendedControl = ledger.setAutomationControl({
@@ -1699,7 +1769,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('069_governed_framework_workspace'));
+  assert.deepEqual(versions, Array(4).fill('070_managed_operator_accounts'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
@@ -2350,7 +2420,7 @@ test('PostgreSQL bid packages preserve comparison and approval parity', { skip: 
     assert.equal(issued.commitment.externalCommitments, 1);
     assert.equal(issued.commitment.issuePackage.transportStatus, 'delivered_by_verified_integration');
     assert.equal(ledger.getJobDetail(converted.job.id).purchaseOrders[0].id, commitment.purchaseOrder.id);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.verifyAuditIntegrity().valid, true);
   } finally {
     ledger.close();
@@ -2753,7 +2823,7 @@ test('PostgreSQL work permit parity preserves source-current approval, worker ac
     }, { actor: 'postgres_site_supervisor' });
     assert.equal(closed.permit.status, 'closed');
     assert.equal(closed.permit.definitionIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2861,7 +2931,7 @@ test('PostgreSQL pre-task plan parity preserves source approval, exact crew ackn
     assert.equal(active.status, 'active');
     assert.equal(active.readyForWork, true);
     assert.equal(active.attendanceSummary.acknowledged, 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -2996,7 +3066,7 @@ test('PostgreSQL LMRA parity preserves worker evidence, source-current readiness
     assert.equal(stop.assessment.outcome, 'stop_work');
     assert.equal(stop.stopWorkImmediate, true);
     assert.equal(ledger.getLmraAssessment(assessmentId).readyForHazardousWork, false);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -3136,7 +3206,7 @@ test('PostgreSQL photo evidence preserves task-bound checksummed phases and inde
       notes: 'Hosted task completed after governed photographic release.'
     });
     assert.equal(completed.record.status, 'completed');
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -3224,7 +3294,7 @@ test('PostgreSQL governed daywork preserves replay, source approval, acknowledge
     assert.equal(converted.changeOrder.data.source.sourceHash, created.ticket.sourceHash);
     assert.equal(ledger.getJobDetail(job.id).dayworkTickets.length, 1);
     assert.equal(ledger.dashboardSummary().metrics.dayworkTickets >= 1, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true);
   } finally {
     ledger.close();
@@ -3311,7 +3381,7 @@ test('PostgreSQL governed nonconformance preserves replay, dual approval, integr
     assert.equal(retained.integrityValid, true);
     assert.equal(retained.correctionIntegrityValid, true);
     assert.equal(retained.closureIntegrityValid, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger?.close();
   }
@@ -3416,7 +3486,7 @@ test('PostgreSQL governed SDS revisions preserve exact replay, atomic supersessi
       )
     `).get();
     assert.equal(Number(sdsIndexes.count), 6);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -3482,7 +3552,7 @@ test('PostgreSQL cash-flow parity preserves recurrence, immutable approval, and 
       reason: 'Hosted opening balance, recurrence, timing, and retained source evidence verified.'
     });
     assert.equal(ledger.calculateCashFlowForecast({ asOfDate, openingBalance: 1000 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -3537,7 +3607,7 @@ test('PostgreSQL performance scorecard preserves target governance, immutable ap
       reason: 'Hosted retained evidence, target register, and scorecard period verified.'
     });
     assert.equal(ledger.calculatePerformanceScorecard({ periodEnd, weeks: 13 }).snapshotCurrent, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -3629,7 +3699,7 @@ test('PostgreSQL crew capacity preserves source-current two-week approval and re
       reason: 'Hosted source-current two-week capacity plan verified.'
     });
     assert.equal(ledger.listCrewCapacityBoard({ referenceDate: windowStart }).plans.current, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -3716,7 +3786,7 @@ test('PostgreSQL daily operating cycle preserves approval-linked huddle and EOD 
       reason: 'Hosted plan-versus-actual evidence verified.'
     });
     assert.equal(ledger.getDailyOperatingCycle(cycleId).status, 'closed');
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -3854,7 +3924,7 @@ test('PostgreSQL Last Planner lite preserves make-ready, weekly approval, daily 
     outcomeId = outcome.outcome.id;
     assert.equal(outcome.outcome.integrityValid, true);
     assert.equal(ledger.getLastPlannerBoard({ jobId, weekStart }).summary.ppcPercent, 100);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -3955,7 +4025,7 @@ test('PostgreSQL 5S control preserves approved standards, audits, and corrective
     }, { actor: 'postgres_five_s_field' });
     assert.equal(compliant.audit.integrityValid, true);
     assert.equal(ledger.getFiveSBoard({ jobId, includeGlobal: false }).ready, true);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -4117,7 +4187,7 @@ test('PostgreSQL installation QC preserves task holds, retained evidence, and in
       notes: 'Hosted installation released with retained evidence.'
     });
     assert.equal(completed.record.status, 'completed');
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
   } finally {
     ledger.close();
   }
@@ -4206,7 +4276,7 @@ test('PostgreSQL client feedback preserves portal uniqueness, scorecard evidence
     assert.equal(autonomous.applied.length, 1);
     aftercareId = autonomous.applied[0].aftercareId;
     assert.equal(autonomous.summary.externalCommitments, 0);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();
@@ -4321,7 +4391,7 @@ test('PostgreSQL energy performance preserves precision, approval, source integr
         AND indexname IN ('idx_energy_performance_pending_scope', 'idx_energy_performance_current_scope')
     `).get();
     assert.equal(Number(energyIndexes.count), 2);
-    assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+    assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
     ledger.close();

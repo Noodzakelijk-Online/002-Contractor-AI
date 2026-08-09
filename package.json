@@ -20,6 +20,7 @@
     "benchmark:ledger": "node scripts/benchmark-ledger.js --profile production",
     "test:browser": "node scripts/run-browser-tests.js",
     "test:container": "node scripts/verify-container-runtime.js",
+    "test:windows-package": "node scripts/verify-windows-standalone.js",
     "start:standalone": "node standalone-launcher.js",
     "start:tunnel": "node scripts/start-ngrok.js",
     "export:hai": "node scripts/export-hai-feed.js",

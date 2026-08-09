@@ -2,7 +2,7 @@
 
 Report date: 2026-08-09
 Release candidate: `1.1.0`
-Starting revision: `d1a89fbc73be714b6cb05bb7fbf554309c3387ea`
+Starting revision: `1c084d5fe30acd2068ae8408078c0769d137a765`
 Release revision: the Git commit containing this report; record the resulting SHA
 in the release or deployment record.
 
@@ -18,16 +18,16 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 50 canonical paths, 12 retired paths, 16 hosted keys, 302 canonical source files; generated release/runtime/artifact directories excluded |
-| Node tests | Passed | `npm test`: 512 tests, 478 passed, 34 skipped, 0 failed, 215.5 s on a busy Windows host |
-| Production build | Passed | `npm run build`: main application JS 523.76 kB and CSS 265.23 kB before gzip; onboarding loads separately as 10.20 kB JS and 5.02 kB CSS |
-| Bundle budget | Passed | `npm run verify:bundle`: 354,136 total gzip bytes across 31 assets |
-| Production-scale ledger | Passed | Node 22.23.2: deterministic 63,500-row fixture in 1.51 s; dashboard p95 620.83 ms; canonical intake p95 86.24 ms; 25,000-event audit verification 352.02 ms; 37 MiB DB and all thresholds passed |
-| Browser tests | Passed | `npm run test:browser`: 81 Playwright Chromium tests in 21 isolated batches, 555.4 s |
-| Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, auth, persistence, shutdown and migration 069 smoke |
-| Runtime doctor | Passed | Latest local runtime returned ready configuration, verified DB/storage, migration 069, zero pending migrations, ledger/audit integrity, support bundle v1 and no owner key in startup logs |
-| Windows standalone | Passed | Rebuilt Node 22.23.2 x64 package; authenticated readiness, migration 069/zero pending, 23-family/671-framework catalog, empty-array HAI feed, and no owner key in logs verified at `127.0.0.1:4175` |
-| PostgreSQL parity | CI service gate | Contract tests are present; 34 environment-dependent tests were skipped without a local PostgreSQL service |
+| Release contract | Passed | `npm run verify:release`: 52 canonical paths, 12 retired paths, 16 hosted keys, 306 canonical source files; generated release/runtime/artifact directories excluded |
+| Node tests | Passed | `npm test`: 517 tests, 482 passed, 35 PostgreSQL/environment skips, 0 failed, 247.35 s on a busy Windows host |
+| Production build | Passed | `npm run build`: main application JS 524.32 kB and CSS 269.21 kB before gzip; managed Team access loads separately as 10.98 kB JS |
+| Bundle budget | Passed | `npm run verify:bundle`: 358,551 total gzip bytes across 32 assets |
+| Production-scale ledger | Passed | Node 22.23.2: 5,000 jobs, 20,000 tasks, 2,500 opportunities and 25,000 audit events seeded in 1,171.25 ms; cold start 263.14 ms; reopen 4.74 ms; dashboard p95 492.55 ms; intake p95 45.20 ms; audit verification 284.64 ms; all thresholds passed |
+| Browser tests | Passed | `npm run test:browser`: 82 Playwright Chromium workflows in 21 isolated batches, 485.5 s |
+| Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, graceful shutdown and migration 070 smoke |
+| Local runtime | Passed | Rebuilt standalone is ready at `127.0.0.1:4175` against the retained local ledger; migration 070 is current, zero migrations are pending, public readiness returns 200, and the owner register contains no credential material |
+| Windows standalone | Passed | `npm run test:windows-package`: bundled Node 22.23.2 x64 runtime passed authenticated isolated-profile startup, migration 070/zero pending, redacted owner register, read-only HAI manifest, credential-safe logs, shutdown and fixture cleanup |
+| PostgreSQL parity | CI service gate | The migration 070 managed-account lifecycle and shared ledger contract tests are present; 35 PostgreSQL/environment tests were skipped without a local PostgreSQL service |
 
 ## Manual results
 
@@ -41,8 +41,8 @@ decisions outside this repository.
 | Local backup/restore UX | Passed in browser and backend contract tests |
 | Governed framework lifecycle | Passed across catalog, 23 family playbooks, guarded starters, API, SQLite, restore, export, HAI, desktop and mobile tests |
 | Material, safety, permit and LMRA load races | Passed with job-scoped sequence guards and disabled form controls |
-| In-app Browser attachment | Not available: the browser webview repeatedly failed to attach; the release suite used real Playwright Chromium instead |
-| Screenshot evidence | Temporary 1280x900 and 390x844 captures confirmed no horizontal overflow or runtime errors; automated assertions remain the retained release evidence |
+| In-app Browser QA | Passed for Team access creation, scoped field-worker access, key rotation, deactivation and responsive layout with no console errors; automated Chromium remains the retained authority |
+| Responsive evidence | Desktop and 720 CSS-pixel mobile geometry were inspected in the in-app browser; 82 automated workflows retain the repeatable interaction evidence |
 
 ## Confirmed limitations
 
@@ -61,12 +61,11 @@ decisions outside this repository.
 - The product supports compliance evidence and review gates but makes no legal or
   certification claim.
 
-The performance pass adds a disposable deterministic 63,500-row release fixture,
-historical-search and full-aggregate correctness checks, retained resource and
-latency thresholds, and a CI report artifact. Profiling reduced the representative
-dashboard p95 from 5,951.57 ms to 620.83 ms on the packaged Node 22 runtime by
-excluding unassigned crew and ineligible handover records before full job-detail
-assembly.
+The performance gate retains a disposable deterministic production-scale fixture,
+historical-search and full-aggregate correctness checks, resource and latency
+thresholds, and a CI report artifact. The current packaged Node 22 run completed
+the representative dashboard at 492.55 ms p95 while preserving the prior query
+and assembly optimizations.
 
 The publication record must add the pushed commit SHA and GitHub Actions run URL.
 No repository-only test can replace provider, infrastructure, DPA, recovery, or

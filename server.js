@@ -327,6 +327,18 @@ function runtimeConfiguration(options = {}) {
   if (hosted && operatingLedger?.databaseMode !== 'postgres') {
     issues.push({ code: 'hosted_postgres_adapter_required', message: 'Hosted mode requires the PostgreSQL ledger adapter.' });
   }
+  const managedOperators = operatingLedger?.listManagedOperatorAccounts({ status: 'active', limit: 500 }) || [];
+  const environmentOperatorIds = new Set(configuredOperatorTokens().map(principal => principal.id));
+  const conflictingManagedOperators = managedOperators.filter(principal => environmentOperatorIds.has(principal.id));
+  if (conflictingManagedOperators.length) {
+    issues.push({
+      code: 'operator_principal_id_conflict',
+      message: `Managed operator ids conflict with deployment configuration: ${conflictingManagedOperators.map(principal => principal.id).join(', ')}.`
+    });
+  }
+  const configuredRoles = roleTokenConfig.principals.map(principal => principal.role);
+  if (isStrongOperatorToken(dashboardAuthToken)) configuredRoles.push('owner');
+  configuredRoles.push(...managedOperators.map(principal => principal.role));
   return {
     mode: runtimeMode,
     storageMode,
@@ -341,8 +353,10 @@ function runtimeConfiguration(options = {}) {
       required: dashboardAuthRequired,
       legacyOwnerTokenConfigured: isStrongOperatorToken(dashboardAuthToken),
       minimumTokenLength: minimumOperatorTokenLength,
-      configuredRoles: [...new Set(roleTokenConfig.principals.map(principal => principal.role))],
-      configuredPrincipalCount: configuredOperatorTokens().length,
+      configuredRoles: [...new Set(configuredRoles)],
+      configuredPrincipalCount: configuredOperatorTokens().length + managedOperators.length,
+      bootstrapPrincipalCount: configuredOperatorTokens().length,
+      managedPrincipalCount: managedOperators.length,
       loginRateLimit: {
         durability: 'ledger',
         keyMaterial: 'hmac-sha256',
@@ -988,14 +1002,15 @@ function parseRoleTokens(rawValue) {
 }
 
 function configuredOperatorTokens() {
-  const entries = roleTokenConfig.principals.map(principal => ({ ...principal }));
+  const entries = roleTokenConfig.principals.map(principal => ({ ...principal, source: 'environment' }));
   if (isStrongOperatorToken(dashboardAuthToken) && !entries.some(entry => entry.token === dashboardAuthToken)) {
     entries.push({
       id: entries.some(entry => entry.id === 'owner') ? 'legacy_owner' : 'owner',
       name: 'Owner',
       role: 'owner',
       token: dashboardAuthToken,
-      scope: null
+      scope: null,
+      source: 'environment'
     });
   }
   return entries;
@@ -1015,15 +1030,45 @@ function operatorTokenFingerprint(token) {
   return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('base64url').slice(0, 24);
 }
 
+function managedOperatorTokenHash(token) {
+  return crypto.createHash('sha256')
+    .update('contractor-ai-managed-operator\0')
+    .update(String(token || ''), 'utf8')
+    .digest('hex');
+}
+
+function generateManagedOperatorAccessKey() {
+  return `cai_${crypto.randomBytes(32).toString('base64url')}`;
+}
+
 function operatorSessionIdHash(sessionId) {
   return crypto.createHash('sha256').update(String(sessionId || ''), 'utf8').digest('base64url');
 }
 
-function resolveOperatorToken(suppliedToken) {
+function resolveOperatorToken(suppliedToken, options = {}) {
   for (const entry of configuredOperatorTokens()) {
     if (safeEqualToken(suppliedToken, entry.token)) {
-      return { id: entry.id, name: entry.name, role: entry.role, scope: entry.scope, token: entry.token };
+      return {
+        id: entry.id,
+        name: entry.name,
+        role: entry.role,
+        scope: entry.scope,
+        source: 'environment',
+        tokenFingerprint: operatorTokenFingerprint(entry.token)
+      };
     }
+  }
+  const managed = operatingLedger.authenticateManagedOperator(managedOperatorTokenHash(suppliedToken));
+  if (managed) {
+    if (options.recordUse === true) operatingLedger.recordManagedOperatorUse(managed.id);
+    return {
+      id: managed.id,
+      name: managed.name,
+      role: managed.role,
+      scope: managed.scope,
+      source: 'managed',
+      tokenFingerprint: managed.tokenFingerprint
+    };
   }
   return null;
 }
@@ -1051,7 +1096,7 @@ function signOperatorSession(operator) {
     sessionId,
     operatorId: operator.id,
     role: operator.role,
-    tokenFingerprint: operatorTokenFingerprint(operator.token),
+    tokenFingerprint: operator.tokenFingerprint,
     issuedAt: now,
     expiresAt: now + operatorSessionTtlSeconds
   };
@@ -1081,11 +1126,20 @@ function verifyOperatorSession(value) {
     if (typeof payload.sessionId !== 'string' || payload.sessionId.length !== 32) return null;
     if (!Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt)) return null;
     if (payload.issuedAt > now + 60 || payload.expiresAt <= now || payload.expiresAt - payload.issuedAt > operatorSessionTtlSeconds) return null;
-    const configured = configuredOperatorTokens().find(entry => (
+    const environmentPrincipal = configuredOperatorTokens().find(entry => (
       entry.id === payload.operatorId
       && entry.role === payload.role
       && safeEqualToken(operatorTokenFingerprint(entry.token), payload.tokenFingerprint)
     ));
+    const configured = environmentPrincipal
+      ? {
+          id: environmentPrincipal.id,
+          name: environmentPrincipal.name,
+          role: environmentPrincipal.role,
+          scope: environmentPrincipal.scope,
+          source: 'environment'
+        }
+      : operatingLedger.resolveManagedOperatorSession(payload.operatorId, payload.role, payload.tokenFingerprint);
     if (!configured) return null;
     const sessionIdHash = operatorSessionIdHash(payload.sessionId);
     const retainedSession = operatingLedger.getOperatorSession(sessionIdHash, { at: new Date(now * 1000).toISOString() });
@@ -1102,6 +1156,7 @@ function verifyOperatorSession(value) {
       name: configured.name,
       role: configured.role,
       scope: configured.scope,
+      source: configured.source || 'managed',
       authMethod: 'session',
       sessionIdHash
     };
@@ -1151,8 +1206,10 @@ function extractAuthToken(req) {
 function resolveOperatorRole(req) {
   const suppliedToken = extractAuthToken(req);
   if (suppliedToken) {
-    const operator = resolveOperatorToken(suppliedToken);
-    return operator ? { id: operator.id, name: operator.name, role: operator.role, scope: operator.scope, authMethod: 'token' } : null;
+    const operator = resolveOperatorToken(suppliedToken, { recordUse: true });
+    return operator
+      ? { id: operator.id, name: operator.name, role: operator.role, scope: operator.scope, source: operator.source, authMethod: 'token' }
+      : null;
   }
   return verifyOperatorSession(requestCookie(req, operatorSessionCookieName));
 }
@@ -1968,7 +2025,7 @@ app.post('/api/auth/login', rateLimitAuthLogin, (req, res) => {
     return sendError(req, res, 503, 'auth_not_configured', 'Contractor.AI authentication is not configured.');
   }
   const suppliedToken = typeof req.body?.token === 'string' ? req.body.token : '';
-  const operator = resolveOperatorToken(suppliedToken);
+  const operator = resolveOperatorToken(suppliedToken, { recordUse: true });
   if (!operator) {
     return recordAuthenticationFailure(req, res);
   }
@@ -2054,6 +2111,136 @@ app.get('/api/session', (req, res) => {
         maintenance: role === 'owner'
       }
     }
+  });
+});
+
+function environmentOperatorAccount(principal) {
+  return {
+    id: principal.id,
+    name: principal.name || null,
+    role: principal.role,
+    status: 'active',
+    source: 'environment',
+    scope: principal.scope || null,
+    keyVersion: null,
+    createdBy: 'runtime_configuration',
+    lastUsedAt: null,
+    deactivatedAt: null,
+    createdAt: null,
+    updatedAt: null,
+    mutable: false
+  };
+}
+
+function operatorAccessRegister() {
+  const environment = configuredOperatorTokens().map(environmentOperatorAccount);
+  const managed = operatingLedger.listManagedOperatorAccounts({ limit: 500 });
+  const accounts = [...environment, ...managed].sort((left, right) => (
+    Number(left.status !== 'active') - Number(right.status !== 'active')
+    || String(left.name || left.id).localeCompare(String(right.name || right.id))
+  ));
+  return {
+    accounts,
+    summary: accounts.reduce((summary, account) => {
+      summary.total += 1;
+      summary[account.status] = Number(summary[account.status] || 0) + 1;
+      summary[account.source] = Number(summary[account.source] || 0) + 1;
+      summary.roles[account.role] = Number(summary.roles[account.role] || 0) + 1;
+      return summary;
+    }, { total: 0, active: 0, deactivated: 0, environment: 0, managed: 0, roles: {} })
+  };
+}
+
+function assertManagedOperatorIdAvailable(operatorId) {
+  const id = String(operatorId || '').trim();
+  if (configuredOperatorTokens().some(principal => principal.id === id)) {
+    const error = new Error(`Operator id ${id} is retained by runtime configuration and cannot be managed in the dashboard.`);
+    error.statusCode = 409;
+    error.code = 'environment_operator_id_conflict';
+    throw error;
+  }
+}
+
+function assertManagedOperatorMutable(operatorId) {
+  const id = String(operatorId || '').trim();
+  if (configuredOperatorTokens().some(principal => principal.id === id)) {
+    const error = new Error('Environment-managed operator access is immutable in the dashboard. Change the deployment configuration instead.');
+    error.statusCode = 409;
+    error.code = 'environment_operator_immutable';
+    throw error;
+  }
+}
+
+app.get('/api/operations/operators', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => ({ success: true, ...operatorAccessRegister() }));
+});
+
+app.post('/api/operations/operators', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => {
+    assertManagedOperatorIdAvailable(req.body?.id || req.body?.operatorId);
+    if (req.body?.role === 'owner' && req.body?.confirmation !== 'CREATE_OWNER_ACCESS') {
+      const error = new Error('Creating another owner requires confirmation CREATE_OWNER_ACCESS.');
+      error.statusCode = 400;
+      error.code = 'confirmation_required';
+      throw error;
+    }
+    const accessKey = generateManagedOperatorAccessKey();
+    const account = operatingLedger.createManagedOperatorAccount({
+      ...req.body,
+      tokenHash: managedOperatorTokenHash(accessKey),
+      tokenFingerprint: operatorTokenFingerprint(accessKey)
+    }, { actor: actorFromRequest(req, 'local_owner') });
+    return {
+      success: true,
+      account,
+      accessKey,
+      shownOnce: true,
+      register: operatorAccessRegister()
+    };
+  }, 201);
+});
+
+app.post('/api/operations/operators/:operatorId/rotate', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => {
+    assertManagedOperatorMutable(req.params.operatorId);
+    if (req.body?.confirmation !== 'ROTATE_OPERATOR_ACCESS') {
+      const error = new Error('Rotating operator access requires confirmation ROTATE_OPERATOR_ACCESS.');
+      error.statusCode = 400;
+      error.code = 'confirmation_required';
+      throw error;
+    }
+    const accessKey = generateManagedOperatorAccessKey();
+    const result = operatingLedger.rotateManagedOperatorAccess(req.params.operatorId, {
+      tokenHash: managedOperatorTokenHash(accessKey),
+      tokenFingerprint: operatorTokenFingerprint(accessKey)
+    }, { actor: actorFromRequest(req, 'local_owner') });
+    return {
+      success: true,
+      ...result,
+      accessKey,
+      shownOnce: true,
+      register: operatorAccessRegister()
+    };
+  });
+});
+
+app.post('/api/operations/operators/:operatorId/deactivate', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => {
+    assertManagedOperatorMutable(req.params.operatorId);
+    if (req.body?.confirmation !== 'DEACTIVATE_OPERATOR_ACCESS') {
+      const error = new Error('Deactivating operator access requires confirmation DEACTIVATE_OPERATOR_ACCESS.');
+      error.statusCode = 400;
+      error.code = 'confirmation_required';
+      throw error;
+    }
+    const result = operatingLedger.deactivateManagedOperatorAccount(req.params.operatorId, {
+      actor: actorFromRequest(req, 'local_owner')
+    });
+    return { success: true, ...result, register: operatorAccessRegister() };
   });
 });
 

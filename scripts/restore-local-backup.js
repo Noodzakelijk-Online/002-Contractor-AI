@@ -1538,6 +1538,46 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('070_managed_operator_accounts')) {
+        if (!retainedTables.has('managed_operator_accounts')) {
+          throw new Error('Backup managed-operator schema is incomplete: managed_operator_accounts.');
+        }
+        const managedOperatorColumns = new Set(
+          database.prepare('PRAGMA table_info(managed_operator_accounts)').all().map(row => row.name)
+        );
+        for (const column of [
+          'operator_id',
+          'display_name',
+          'role',
+          'status',
+          'token_hash',
+          'token_fingerprint',
+          'scope_json',
+          'key_version',
+          'created_by',
+          'last_used_at',
+          'deactivated_at',
+          'created_at',
+          'updated_at'
+        ]) {
+          if (!managedOperatorColumns.has(column)) {
+            throw new Error(`Backup managed-operator schema is incomplete: managed_operator_accounts.${column}.`);
+          }
+        }
+        const managedOperatorIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_managed_operator_%'")
+            .all()
+            .map(row => row.name)
+        );
+        for (const index of [
+          'idx_managed_operator_accounts_status_role',
+          'idx_managed_operator_accounts_fingerprint'
+        ]) {
+          if (!managedOperatorIndexes.has(index)) {
+            throw new Error(`Backup managed-operator constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {
@@ -1592,6 +1632,23 @@ function clearRestoredApiRateLimits(ledgerFile) {
     const retained = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'api_rate_limits'").get();
     if (!retained) return 0;
     const result = database.prepare('DELETE FROM api_rate_limits').run();
+    return Number(result.changes || 0);
+  } finally {
+    database.close();
+  }
+}
+
+function deactivateRestoredManagedOperators(ledgerFile) {
+  const database = new DatabaseSync(ledgerFile);
+  try {
+    const retained = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'managed_operator_accounts'").get();
+    if (!retained) return 0;
+    const timestamp = new Date().toISOString();
+    const result = database.prepare(`
+      UPDATE managed_operator_accounts
+      SET status = 'deactivated', deactivated_at = ?, last_used_at = NULL, updated_at = ?
+      WHERE status = 'active'
+    `).run(timestamp, timestamp);
     return Number(result.changes || 0);
   } finally {
     database.close();
@@ -1700,6 +1757,7 @@ function restore(argumentsMap) {
   const invalidatedOperatorSessions = invalidateRestoredOperatorSessions(ledgerFile);
   const clearedAuthenticationRateLimits = clearRestoredAuthenticationRateLimits(ledgerFile);
   const clearedApiRateLimits = clearRestoredApiRateLimits(ledgerFile);
+  const deactivatedManagedOperators = deactivateRestoredManagedOperators(ledgerFile);
 
   let evidenceRestored = false;
   let restoredEvidenceFiles = 0;
@@ -1735,6 +1793,7 @@ function restore(argumentsMap) {
     restoredEvidenceFiles,
     databaseVerification,
     invalidatedOperatorSessions,
+    deactivatedManagedOperators,
     clearedAuthenticationRateLimits,
     clearedApiRateLimits,
     preRestoreBackupId: safetyId,

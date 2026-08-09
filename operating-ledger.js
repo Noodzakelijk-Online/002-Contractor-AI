@@ -6005,6 +6005,36 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON framework_implementation_revisions(implementation_id, revision_number DESC);
       `);
     }
+  },
+  {
+    version: '070_managed_operator_accounts',
+    description: 'Retain owner-managed role access with hashed one-time keys, field scope, revocation, and immutable lifecycle audit evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS managed_operator_accounts (
+          operator_id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          role TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          token_hash TEXT NOT NULL UNIQUE,
+          token_fingerprint TEXT NOT NULL,
+          scope_json TEXT NOT NULL DEFAULT '{}',
+          key_version INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT NOT NULL,
+          last_used_at TEXT,
+          deactivated_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(role IN ('owner', 'approver', 'office_operator', 'field_worker')),
+          CHECK(status IN ('active', 'deactivated')),
+          CHECK(key_version >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS idx_managed_operator_accounts_status_role
+          ON managed_operator_accounts(status, role, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_managed_operator_accounts_fingerprint
+          ON managed_operator_accounts(operator_id, role, token_fingerprint, status);
+      `);
+    }
   }
 ];
 
@@ -7361,6 +7391,265 @@ class ContractorOperatingLedger {
       WHERE revoked_at IS NULL
     `).run(timestamp, reason, timestamp);
     return Number(result.changes || 0);
+  }
+
+  mapManagedOperatorAccount(row) {
+    const retainedScope = fromJson(row.scope_json, {});
+    const scope = row.role === 'field_worker'
+      ? {
+          workerId: normalizeText(retainedScope.workerId, '') || null,
+          jobIds: Array.isArray(retainedScope.jobIds)
+            ? [...new Set(retainedScope.jobIds.map(value => normalizeText(value, '')).filter(Boolean))]
+            : []
+        }
+      : null;
+    return {
+      id: row.operator_id,
+      name: row.display_name,
+      role: row.role,
+      status: row.status,
+      source: 'managed',
+      scope,
+      keyVersion: Number(row.key_version || 1),
+      createdBy: row.created_by,
+      lastUsedAt: row.last_used_at || null,
+      deactivatedAt: row.deactivated_at || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      mutable: true
+    };
+  }
+
+  validateManagedOperatorCredential(input = {}) {
+    const tokenHash = normalizeText(input.tokenHash || input.token_hash, '').toLowerCase();
+    const tokenFingerprint = normalizeText(input.tokenFingerprint || input.token_fingerprint, '');
+    if (!/^[a-f0-9]{64}$/.test(tokenHash)) {
+      throw ledgerInputError('managed_operator_token_hash_invalid', 'Managed operator access requires a SHA-256 credential hash.');
+    }
+    if (!/^[A-Za-z0-9_-]{24}$/.test(tokenFingerprint)) {
+      throw ledgerInputError('managed_operator_token_fingerprint_invalid', 'Managed operator access requires a valid credential fingerprint.');
+    }
+    const duplicate = this.db.prepare(`
+      SELECT operator_id FROM managed_operator_accounts
+      WHERE token_hash = ? AND operator_id <> ?
+      LIMIT 1
+    `).get(tokenHash, normalizeText(input.operatorId || input.operator_id || input.id, ''));
+    if (duplicate) {
+      throw ledgerInputError('managed_operator_token_duplicate', 'This managed operator credential is already assigned.', null, 409);
+    }
+    return { tokenHash, tokenFingerprint };
+  }
+
+  validateManagedOperatorIdentity(input = {}) {
+    const id = normalizeText(input.operatorId || input.operator_id || input.id, '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,79}$/.test(id)) {
+      throw ledgerInputError('managed_operator_id_invalid', 'Operator id must contain 2 to 80 safe characters.');
+    }
+    const name = normalizeText(input.name || input.displayName || input.display_name, '');
+    if (name.length < 2 || name.length > 120) {
+      throw ledgerInputError('managed_operator_name_invalid', 'Operator name must contain 2 to 120 characters.');
+    }
+    const role = normalizeText(input.role, '');
+    if (!['owner', 'approver', 'office_operator', 'field_worker'].includes(role)) {
+      throw ledgerInputError('managed_operator_role_invalid', 'Operator role must be owner, approver, office operator, or field worker.');
+    }
+
+    const rawScope = input.scope && typeof input.scope === 'object' ? input.scope : input;
+    const workerId = normalizeText(rawScope.workerId || rawScope.worker_id, '');
+    const rawJobIds = Array.isArray(rawScope.jobIds || rawScope.job_ids) ? (rawScope.jobIds || rawScope.job_ids) : [];
+    const jobIds = [...new Set(rawJobIds.map(value => normalizeText(value, '')).filter(Boolean))];
+    if (jobIds.length > 100) {
+      throw ledgerInputError('managed_operator_scope_invalid', 'A field operator can retain at most 100 explicit job scopes.');
+    }
+    if (role !== 'field_worker' && (workerId || jobIds.length)) {
+      throw ledgerInputError('managed_operator_scope_invalid', 'Only field workers can retain worker or job scope.');
+    }
+    if (role === 'field_worker' && !workerId && jobIds.length === 0) {
+      throw ledgerInputError('field_worker_scope_required', 'A field worker requires a retained worker identity or at least one active job.');
+    }
+    if (workerId) {
+      const worker = this.getWorker(workerId);
+      if (worker.status === 'retired') {
+        throw ledgerInputError('field_worker_scope_inactive', 'A retired worker cannot receive operator access.', { workerId }, 409);
+      }
+    }
+    for (const jobId of jobIds) {
+      const job = this.db.prepare('SELECT id, status FROM jobs WHERE id = ?').get(jobId);
+      if (!job) throw ledgerInputError('field_worker_scope_job_missing', `Scoped job ${jobId} was not found.`, { jobId }, 404);
+      if (!this.jobAllowsOperations(job.status)) {
+        throw ledgerInputError('field_worker_scope_job_inactive', `Scoped job ${jobId} is not active.`, { jobId, status: job.status }, 409);
+      }
+    }
+    return {
+      id,
+      name,
+      role,
+      scope: role === 'field_worker' ? { workerId: workerId || null, jobIds } : null
+    };
+  }
+
+  listManagedOperatorAccounts(filters = {}) {
+    const status = normalizeText(filters.status, '');
+    const limit = safeLimit(filters.limit, 250, 500);
+    return this.db.prepare(`
+      SELECT * FROM managed_operator_accounts
+      WHERE (? = '' OR status = ?)
+      ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, display_name, operator_id
+      LIMIT ?
+    `).all(status, status, limit).map(row => this.mapManagedOperatorAccount(row));
+  }
+
+  getManagedOperatorAccount(operatorId) {
+    const id = normalizeText(operatorId, '');
+    const row = this.db.prepare('SELECT * FROM managed_operator_accounts WHERE operator_id = ?').get(id);
+    if (!row) throw ledgerInputError('managed_operator_not_found', 'Managed operator account was not found.', { operatorId: id }, 404);
+    return this.mapManagedOperatorAccount(row);
+  }
+
+  authenticateManagedOperator(tokenHash) {
+    const normalizedHash = normalizeText(tokenHash, '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalizedHash)) return null;
+    const row = this.db.prepare(`
+      SELECT * FROM managed_operator_accounts
+      WHERE token_hash = ? AND status = 'active'
+    `).get(normalizedHash);
+    if (!row) return null;
+    return { ...this.mapManagedOperatorAccount(row), tokenFingerprint: row.token_fingerprint };
+  }
+
+  resolveManagedOperatorSession(operatorId, role, tokenFingerprint) {
+    const row = this.db.prepare(`
+      SELECT * FROM managed_operator_accounts
+      WHERE operator_id = ? AND role = ? AND token_fingerprint = ? AND status = 'active'
+    `).get(normalizeText(operatorId, ''), normalizeText(role, ''), normalizeText(tokenFingerprint, ''));
+    return row ? this.mapManagedOperatorAccount(row) : null;
+  }
+
+  createManagedOperatorAccount(input = {}, options = {}) {
+    return this.transaction(() => {
+      const identity = this.validateManagedOperatorIdentity(input);
+      const credential = this.validateManagedOperatorCredential({ ...input, operatorId: identity.id });
+      if (this.db.prepare('SELECT operator_id FROM managed_operator_accounts WHERE operator_id = ?').get(identity.id)) {
+        throw ledgerInputError('managed_operator_id_duplicate', `Operator id ${identity.id} already exists.`, { operatorId: identity.id }, 409);
+      }
+      const actor = normalizeText(options.actor || input.createdBy || input.created_by, 'Contractor.AI');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO managed_operator_accounts (
+          operator_id, display_name, role, status, token_hash, token_fingerprint, scope_json,
+          key_version, created_by, last_used_at, deactivated_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 'active', ?, ?, ?, 1, ?, NULL, NULL, ?, ?)
+      `).run(
+        identity.id,
+        identity.name,
+        identity.role,
+        credential.tokenHash,
+        credential.tokenFingerprint,
+        toJson(identity.scope || {}),
+        actor,
+        timestamp,
+        timestamp
+      );
+      const after = this.getManagedOperatorAccount(identity.id);
+      this.audit({
+        entityType: 'managed_operator_account',
+        entityId: identity.id,
+        action: 'create_managed_operator_access',
+        actor,
+        before: null,
+        after,
+        metadata: { role: identity.role, keyVersion: 1, credentialStoredAsHash: true, externalCommitments: 0 }
+      });
+      return after;
+    });
+  }
+
+  revokeOperatorSessionsForPrincipal(operatorId, options = {}) {
+    const id = normalizeText(operatorId, '');
+    if (!id) return 0;
+    const timestamp = normalizeText(options.revokedAt, nowIso());
+    const reason = normalizeText(options.reason, 'operator_access_changed').slice(0, 160);
+    const result = this.db.prepare(`
+      UPDATE operator_sessions
+      SET revoked_at = ?, revocation_reason = ?, updated_at = ?
+      WHERE operator_id = ? AND revoked_at IS NULL
+    `).run(timestamp, reason, timestamp, id);
+    return Number(result.changes || 0);
+  }
+
+  rotateManagedOperatorAccess(operatorId, input = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getManagedOperatorAccount(operatorId);
+      const credential = this.validateManagedOperatorCredential({ ...input, operatorId: before.id });
+      const actor = normalizeText(options.actor || input.actor, 'Contractor.AI');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE managed_operator_accounts
+        SET status = 'active', token_hash = ?, token_fingerprint = ?, key_version = ?,
+          last_used_at = NULL, deactivated_at = NULL, updated_at = ?
+        WHERE operator_id = ?
+      `).run(credential.tokenHash, credential.tokenFingerprint, before.keyVersion + 1, timestamp, before.id);
+      const revokedSessions = this.revokeOperatorSessionsForPrincipal(before.id, {
+        revokedAt: timestamp,
+        reason: 'managed_operator_access_rotated'
+      });
+      const after = this.getManagedOperatorAccount(before.id);
+      this.audit({
+        entityType: 'managed_operator_account',
+        entityId: before.id,
+        action: 'rotate_managed_operator_access',
+        actor,
+        before,
+        after,
+        metadata: { keyVersion: after.keyVersion, revokedSessions, credentialStoredAsHash: true, externalCommitments: 0 }
+      });
+      return { account: after, revokedSessions, replayed: false };
+    });
+  }
+
+  deactivateManagedOperatorAccount(operatorId, options = {}) {
+    return this.transaction(() => {
+      const before = this.getManagedOperatorAccount(operatorId);
+      if (before.status === 'deactivated') {
+        return { account: before, revokedSessions: 0, replayed: true };
+      }
+      const actor = normalizeText(options.actor, 'Contractor.AI');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE managed_operator_accounts
+        SET status = 'deactivated', deactivated_at = ?, updated_at = ?
+        WHERE operator_id = ?
+      `).run(timestamp, timestamp, before.id);
+      const revokedSessions = this.revokeOperatorSessionsForPrincipal(before.id, {
+        revokedAt: timestamp,
+        reason: 'managed_operator_access_deactivated'
+      });
+      const after = this.getManagedOperatorAccount(before.id);
+      this.audit({
+        entityType: 'managed_operator_account',
+        entityId: before.id,
+        action: 'deactivate_managed_operator_access',
+        actor,
+        before,
+        after,
+        metadata: { keyVersion: after.keyVersion, revokedSessions, externalCommitments: 0 }
+      });
+      return { account: after, revokedSessions, replayed: false };
+    });
+  }
+
+  recordManagedOperatorUse(operatorId, options = {}) {
+    const id = normalizeText(operatorId, '');
+    if (!id) return false;
+    const timestamp = normalizeText(options.at, nowIso());
+    const cutoff = new Date(Date.parse(timestamp) - 5 * 60 * 1000).toISOString();
+    const result = this.db.prepare(`
+      UPDATE managed_operator_accounts
+      SET last_used_at = ?
+      WHERE operator_id = ? AND status = 'active'
+        AND (last_used_at IS NULL OR last_used_at < ?)
+    `).run(timestamp, id, cutoff);
+    return Number(result.changes || 0) === 1;
   }
 
   getAuthenticationRateLimit(keyHash, options = {}) {
@@ -61498,6 +61787,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         takeoffItems: this.count('takeoff_items'),
         tradePartners: this.count('trade_partners'),
         organizationProfiles: this.count('organization_profile'),
+        managedOperatorAccounts: this.count('managed_operator_accounts'),
+        activeManagedOperatorAccounts: Number(this.db.prepare("SELECT COUNT(*) AS count FROM managed_operator_accounts WHERE status = 'active'").get().count || 0),
         jobs: this.count('jobs'),
         approvals: this.count('approvals'),
         siteVisits: this.count('site_visits'),

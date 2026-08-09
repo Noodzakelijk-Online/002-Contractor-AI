@@ -48,8 +48,11 @@ The package command intentionally fails outside Windows x64 or Node.js 22:
 ```powershell
 npm ci
 npm run package:windows
+npm run test:windows-package
 ```
 
 The unpacked result is under `release\ContractorAI-windows-x64`. Git ignores
-the release directory; signed distribution and malware scanning remain release
-owner responsibilities.
+the release directory. The package smoke test starts that exact bundled runtime
+against an isolated profile and verifies current migration, authentication,
+redacted team access, and read-only HAI behavior before cleanup. Signed
+distribution and malware scanning remain release owner responsibilities.

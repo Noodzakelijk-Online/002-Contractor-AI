@@ -180,7 +180,7 @@ test('make-ready release, weekly approval, daily actual, and PPC form one replay
   assert.equal(board.summary.openConstraints, 0);
   assert.equal(board.safeguards.scheduleChanged, false);
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
+  assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
 });
 
 test('weekly approvals fail atomically on changed crew evidence and autonomy only creates internal review work', t => {

@@ -95,6 +95,7 @@ const CrewCapacityBoard = lazy(() => import('./components/CrewCapacityBoard'))
 const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
 const OrganizationOnboarding = lazy(() => import('./components/OrganizationOnboarding'))
+const TeamAccessControl = lazy(() => import('./components/TeamAccessControl'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -1258,13 +1259,16 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'operations') {
-    const [templates, scheduler, organization, backups, capabilities, archivedJobs] = await Promise.all([
+    const [templates, scheduler, organization, backups, capabilities, archivedJobs, operatorRegister, workers, operatorScopeJobs] = await Promise.all([
       api('/api/ledger/inspection-templates'),
       api('/api/ledger/scheduler').catch(() => null),
       api('/api/ledger/organization'),
       api('/api/operations/backups').catch(() => ({ backups: [] })),
       api('/api/operations/capabilities').catch(() => null),
       api('/api/ledger/jobs?archiveOnly=true&limit=100').catch(() => ({ jobs: [] })),
+      api('/api/operations/operators'),
+      api('/api/ledger/workers?limit=500'),
+      api('/api/ledger/jobs?limit=500'),
     ])
     return {
       inspectionTemplates: templates.templates || [],
@@ -1273,6 +1277,10 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       backups: backups.backups || [],
       operationsCapabilities: capabilities,
       archivedJobs: archivedJobs.jobs || [],
+      operatorRegister,
+      operatorScopeJobs: operatorScopeJobs.jobs || [],
+      workers: workers.workers || [],
+      workerSummary: workers.summary || {},
     }
   }
   return {}
@@ -11322,7 +11330,7 @@ function App() {
                 <LazyControlBoundary label="Last Planner weekly control">
                   <LastPlannerBoard
                     board={data.lastPlanner}
-                    jobs={jobs}
+                    jobs={data.operatorScopeJobs || jobs}
                     canApprove={capabilities.approvals === true}
                     submitting={submitting}
                     onLoadWeek={loadLastPlannerWeek}
@@ -13216,6 +13224,17 @@ function App() {
 
             {section === 'operations' && capabilities.maintenance && (
               <section className="operations-grid">
+                <LazyControlBoundary label="team access">
+                  <TeamAccessControl
+                    request={api}
+                    register={data.operatorRegister}
+                    workers={data.workers}
+                    jobs={jobs}
+                    onRegisterChange={(operatorRegister) => setData((current) => current ? { ...current, operatorRegister } : current)}
+                    onError={setError}
+                    onNotice={notify}
+                  />
+                </LazyControlBoundary>
                 <section className="panel page-panel organization-profile-panel" data-testid="organization-profile-panel">
                   <div className="panel-heading">
                     <div>

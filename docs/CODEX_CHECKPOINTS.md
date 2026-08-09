@@ -87,6 +87,18 @@ the repository rather than treating these statements as current by assumption.
 - Hosted boundary: selected EU infrastructure still needs provider-specific load,
   recovery, ingress, database, and object-storage acceptance.
 
+## CP-08 Owner-managed team access
+
+- Migration: `070_managed_operator_accounts`
+- Operations: owners add, rotate, reactivate, and deactivate named accounts while
+  deployment principals remain redacted and environment-controlled.
+- Security: generated keys are shown once, stored only as hashes, excluded from
+  browser storage and audit output, and rotation/deactivation revoke sessions.
+- Recovery: local restore and local-to-hosted migration deactivate all managed
+  accounts so credentials from another recovery point or environment cannot revive.
+- Verification: SQLite/API lifecycle, restore schema and access invalidation,
+  PostgreSQL parity contract, and desktop/mobile Chromium workflow are retained.
+
 ## Resume procedure
 
 1. Read the newest user request and `git status --short`.

@@ -23,6 +23,9 @@ Versioning for the application contract; database migrations remain append-only.
   responsive keyboard-accessible interaction.
 - A deterministic disposable ledger benchmark with smoke and 63,500-row production
   profiles, correctness/resource/latency thresholds, and a retained CI JSON report.
+- Migration `070_managed_operator_accounts` and an owner-only Team access register
+  for named owner, approver, office, and field accounts with scoped access, one-time
+  generated keys, immediate rotation, session revocation, and retained deactivation.
 
 ### Changed
 
@@ -39,11 +42,17 @@ Versioning for the application contract; database migrations remain append-only.
 - Job and opportunity search/filtering now executes before database limits, pipeline
   forecasts aggregate every matching record, and autonomous dashboard queues avoid
   full job-detail assembly for unassigned crews or ineligible handover records.
+- Local restore and local-to-hosted migration preserve managed account records but
+  deactivate every active key, requiring an owner to issue new environment-specific
+  access after recovery.
 
 ### Security
 
 - Prevented repeat standalone starts and redirected runtime logs from disclosing
   the retained owner access key.
+- Managed account credentials are retained only as domain-separated SHA-256 hashes;
+  plaintext keys are returned once with no-store responses and never enter browser
+  storage, list APIs, diagnostics, exports, or audit events.
 
 ## 1.1.0 - 2026-08-09
 
