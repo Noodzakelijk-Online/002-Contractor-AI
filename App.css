@@ -2520,6 +2520,50 @@
   .energy-performance-record-heading { align-items: flex-start; flex-direction: column; }
 }
 
+.privacy-requests-panel { grid-column: 1 / -1; min-width: 0; }
+.privacy-requests-heading { align-items: center; }
+.privacy-requests-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid #e4ebe8; }
+.privacy-requests-summary > div { display: grid; gap: 4px; min-width: 0; padding: 13px 18px; border-left: 1px solid #e4ebe8; }
+.privacy-requests-summary > div:first-child { border-left: 0; }
+.privacy-requests-summary span { color: #74817c; font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.privacy-requests-summary strong { color: #263b33; font-size: 18px; }
+.privacy-requests-summary .summary-danger strong { color: #a63a31; }
+.privacy-request-filters { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(160px, auto) minmax(180px, auto); gap: 10px; padding: 12px 18px; background: #f8faf9; border-bottom: 1px solid #e4ebe8; }
+.privacy-request-filters label { min-width: 0; }
+.privacy-request-filters input, .privacy-request-filters select { width: 100%; min-width: 0; }
+.privacy-request-filters .search-field { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 7px; min-width: 0; padding: 0 10px; color: #6b7a75; background: #fff; border: 1px solid #ccd9d4; border-radius: 5px; }
+.privacy-request-filters .search-field:focus-within { border-color: #23725c; box-shadow: 0 0 0 2px rgb(35 114 92 / .12); }
+.privacy-request-filters .search-field input { padding: 0; border: 0; outline: 0; box-shadow: none; }
+.privacy-request-list { display: grid; min-width: 0; }
+.privacy-request-row { display: grid; grid-template-columns: 34px minmax(230px, 1.1fr) minmax(220px, .75fr) minmax(285px, auto); align-items: center; gap: 14px; min-width: 0; padding: 14px 18px; border-bottom: 1px solid #e5ece9; }
+.privacy-request-row:last-child { border-bottom: 0; }
+.privacy-request-icon { display: grid; width: 32px; height: 32px; place-items: center; color: #225f68; background: #e5f0f2; border: 1px solid #d1e2e5; border-radius: 6px; }
+.privacy-request-identity, .privacy-request-deadline { display: grid; gap: 4px; min-width: 0; }
+.privacy-request-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.privacy-request-title h3 { min-width: 0; margin: 0; overflow: hidden; color: #2d4038; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.privacy-request-identity p, .privacy-request-identity small, .privacy-request-deadline span, .privacy-request-deadline small { margin: 0; overflow-wrap: anywhere; color: #6d7b76; font-size: 10px; line-height: 1.4; }
+.privacy-request-deadline strong { color: #344a41; font-size: 11px; }
+.privacy-request-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; min-width: 0; }
+.privacy-request-actions button:not(.icon-button) { min-height: 32px; padding: 0 10px; font-size: 10px; }
+.privacy-request-actions .icon-button { flex: 0 0 auto; }
+.privacy-request-row .status-danger { color: #a63a31; background: #fae8e6; }
+.privacy-request-row .status-muted { color: #63716c; background: #e9eeec; }
+.privacy-request-modal { width: min(720px, 100%); }
+.privacy-assessment-modal { width: min(820px, 100%); }
+.privacy-request-form { max-height: min(64vh, 650px); overflow-y: auto; }
+.privacy-identity-warning { display: flex; align-items: flex-start; gap: 9px; margin: 18px 18px 0; padding: 11px 13px; color: #4b5f57; background: #f3f7f5; border-left: 3px solid #2b725f; }
+.privacy-identity-warning svg { flex: 0 0 auto; color: #276352; }
+.privacy-identity-warning p, .privacy-partial-warning { margin: 0; font-size: 11px; line-height: 1.5; }
+.privacy-blockers { display: grid; gap: 5px; margin: 18px 18px 0; padding: 12px 14px; color: #74461a; background: #fff5df; border-left: 3px solid #b87a20; }
+.privacy-blockers strong { font-size: 11px; }
+.privacy-blockers p { margin: 0; font-size: 10px; line-height: 1.45; }
+.privacy-partial-warning { margin: 0 18px; padding: 11px 13px; color: #6f4a16; background: #fff5df; border-left: 3px solid #b87a20; }
+.privacy-correction-fields { display: grid; gap: 8px; padding: 12px; border: 1px solid #d8e4df; border-radius: 6px; }
+.privacy-correction-fields legend { padding: 0 6px; color: #40564e; font-size: 10px; font-weight: 750; }
+.privacy-correction-row { display: grid; grid-template-columns: minmax(145px, .45fr) minmax(180px, 1fr); align-items: center; gap: 10px; }
+.privacy-correction-row .checkbox-label { min-width: 0; }
+.privacy-correction-row input:disabled { color: #7c8984; background: #edf1ef; }
+
 .team-access-panel { grid-column: 1 / -1; min-width: 0; }
 .team-access-heading { align-items: center; }
 .team-access-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid #e4ebe8; border-bottom: 1px solid #e4ebe8; }
@@ -2556,11 +2600,26 @@
 .team-access-key-field input { min-width: 0; font-family: Consolas, monospace; font-size: 11px; }
 
 @media (max-width: 900px) {
+  .privacy-request-row { grid-template-columns: 34px minmax(0, 1fr) minmax(200px, .75fr); }
+  .privacy-request-actions { grid-column: 2 / -1; justify-content: flex-start; }
   .team-access-row { grid-template-columns: 34px minmax(0, 1fr) minmax(170px, .65fr); }
   .team-access-actions { grid-column: 2 / -1; justify-content: flex-start; }
 }
 
 @media (max-width: 760px) {
+  .privacy-requests-heading { align-items: stretch; flex-direction: column; }
+  .privacy-requests-heading .primary-button { width: 100%; }
+  .privacy-requests-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .privacy-requests-summary > div:nth-child(odd) { border-left: 0; }
+  .privacy-requests-summary > div:nth-child(n + 3) { border-top: 1px solid #e4ebe8; }
+  .privacy-request-filters { grid-template-columns: minmax(0, 1fr); padding: 12px 14px; }
+  .privacy-request-row { grid-template-columns: 34px minmax(0, 1fr); align-items: flex-start; padding: 14px; }
+  .privacy-request-deadline, .privacy-request-actions { grid-column: 2; }
+  .privacy-request-actions { align-items: stretch; flex-direction: column; }
+  .privacy-request-actions button, .privacy-request-actions .icon-button { width: 100%; }
+  .privacy-correction-row { grid-template-columns: minmax(0, 1fr); }
+  .privacy-request-modal .modal-actions { align-items: stretch; flex-direction: column-reverse; }
+  .privacy-request-modal .modal-actions button { width: 100%; }
   .team-access-heading { align-items: stretch; flex-direction: column; }
   .team-access-heading .primary-button { width: 100%; }
   .team-access-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }

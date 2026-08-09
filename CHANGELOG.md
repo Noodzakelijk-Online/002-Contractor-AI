@@ -26,6 +26,9 @@ Versioning for the application contract; database migrations remain append-only.
 - Migration `070_managed_operator_accounts` and an owner-only Team access register
   for named owner, approver, office, and field accounts with scoped access, one-time
   generated keys, immediate rotation, session revocation, and retained deactivation.
+- Migration `071_data_subject_request_governance` and an owner-only privacy-rights
+  register for access, rectification, restriction, erasure, portability, and
+  objection requests with identity, deadline, assessment, and approval controls.
 
 ### Changed
 
@@ -45,6 +48,8 @@ Versioning for the application contract; database migrations remain append-only.
 - Local restore and local-to-hosted migration preserve managed account records but
   deactivate every active key, requiring an owner to issue new environment-specific
   access after recovery.
+- Operational exports, diagnostics, backup validation, hosted migration, and the
+  HAI-safe capability contract now retain privacy-request state and deadlines.
 
 ### Security
 
@@ -53,6 +58,11 @@ Versioning for the application contract; database migrations remain append-only.
 - Managed account credentials are retained only as domain-separated SHA-256 hashes;
   plaintext keys are returned once with no-store responses and never enter browser
   storage, list APIs, diagnostics, exports, or audit events.
+- Privacy exports require verified identity, a source-current assessment, and an
+  independently approved decision. Full identity documents are prohibited, and
+  partial pseudonymisation is never represented as complete erasure.
+- Response-deadline extensions require a retained requester-notification reference,
+  and that evidence remains intact through approval completion.
 
 ## 1.1.0 - 2026-08-09
 

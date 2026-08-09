@@ -77,6 +77,20 @@ test('backup verification rejects a migration 070 ledger with missing managed op
   );
 });
 
+test('backup verification rejects a migration 071 ledger with missing data-subject request constraints', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-privacy-request-schema-'));
+  const ledgerFile = path.join(directory, 'ledger.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  createBackupLedger(ledgerFile, 'Privacy request schema fixture');
+  const database = new DatabaseSync(ledgerFile);
+  database.exec('DROP INDEX idx_data_subject_requests_status_due');
+  database.close();
+  assert.throws(
+    () => verifySqliteBackupDatabase(ledgerFile),
+    /data-subject request constraints are incomplete: idx_data_subject_requests_status_due/i
+  );
+});
+
 test('backup verification rejects a migration 023 ledger with missing transmittal constraints', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-transmittal-schema-'));
   const ledgerFile = path.join(directory, 'ledger.sqlite');
@@ -266,7 +280,7 @@ test('backup verification accepts a complete migration 059 ledger without migrat
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
     DROP TABLE daily_operating_cycles;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('060_daily_operating_cycles', '061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -292,7 +306,7 @@ test('backup verification accepts a complete migration 060 ledger without migrat
     DROP TABLE last_planner_outcomes;
     DROP TABLE last_planner_weekly_plans;
     DROP TABLE last_planner_constraints;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('061_last_planner_lite', '062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -343,7 +357,7 @@ test('backup verification accepts a complete migration 061 ledger without migrat
     DROP TABLE five_s_audits;
     DROP TABLE five_s_standards;
     DROP TABLE five_s_locations;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('062_governed_five_s', '063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -376,7 +390,7 @@ test('backup verification accepts a complete migration 062 ledger without migrat
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
     DROP TABLE lmra_assessments;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('063_governed_lmra', '064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -408,7 +422,7 @@ test('backup verification accepts a complete migration 063 ledger without migrat
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
     DROP TABLE installation_qc_controls;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('064_governed_installation_qc', '065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -439,7 +453,7 @@ test('backup verification accepts a complete migration 064 ledger without migrat
     DROP TABLE client_feedback;
     DROP TABLE photo_evidence_captures;
     DROP TABLE photo_evidence_sets;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('065_governed_photo_evidence', '066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -468,7 +482,7 @@ test('backup verification accepts a complete migration 065 ledger without migrat
   database.exec(`
     DROP TABLE energy_performance_records;
     DROP TABLE client_feedback;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('066_governed_client_feedback', '067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);
@@ -500,7 +514,7 @@ test('backup verification accepts a complete migration 066 ledger without migrat
   const database = new DatabaseSync(ledgerFile);
   database.exec(`
     DROP TABLE energy_performance_records;
-    DELETE FROM ledger_schema_migrations WHERE version IN ('067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts');
+    DELETE FROM ledger_schema_migrations WHERE version IN ('067_governed_energy_performance', '068_operational_safety_controls', '069_governed_framework_workspace', '070_managed_operator_accounts', '071_data_subject_request_governance');
   `);
   database.close();
   assert.equal(verifySqliteBackupDatabase(ledgerFile).valid, true);

@@ -99,6 +99,21 @@ the repository rather than treating these statements as current by assumption.
 - Verification: SQLite/API lifecycle, restore schema and access invalidation,
   PostgreSQL parity contract, and desktop/mobile Chromium workflow are retained.
 
+## CP-09 Privacy rights operations
+
+- Migration: `071_data_subject_request_governance`
+- Operations: owners register, verify, assess, extend, approve, and export
+  data-subject requests against current client and worker records.
+- Safety: full identity-document copies are prohibited, disclosure and change actions
+  require source-current independent approval, and erasure is represented only as
+  blocker-aware partial pseudonymisation.
+- Processing: restriction and direct-marketing objections prevent relevant new
+  opportunity, assignment, communication, and portal activity.
+- Recovery: export, backup validation, SQLite-to-PostgreSQL migration, diagnostics,
+  and Windows smoke checks retain or verify the privacy register and migration.
+- External boundary: Contractor.AI does not deliver exports, decide legal exceptions,
+  or claim that retained contractual, financial, safety, or audit history is erased.
+
 ## Resume procedure
 
 1. Read the newest user request and `git status --short`.

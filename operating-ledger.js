@@ -245,6 +245,19 @@ const ENERGY_PERFORMANCE_PHASES = new Set([
 ]);
 const ENERGY_PERFORMANCE_BUILDING_USES = new Set(['residential', 'utility', 'mixed_use']);
 const ENERGY_PERFORMANCE_SCOPES = new Set(['building', 'dwelling_unit']);
+const DATA_SUBJECT_TYPES = new Set(['client', 'worker']);
+const DATA_SUBJECT_REQUEST_TYPES = new Set(['access', 'rectification', 'erasure', 'restriction', 'portability', 'objection']);
+const DATA_SUBJECT_REQUEST_STATUSES = new Set(['open', 'in_review', 'pending_approval', 'completed', 'partially_completed', 'rejected', 'cancelled']);
+const DATA_SUBJECT_IDENTITY_METHODS = new Set(['existing_contact', 'in_person', 'signed_correspondence', 'delegated_authority', 'other']);
+const DATA_SUBJECT_ACTIONS_BY_REQUEST = {
+  access: new Set(['provide_access', 'reject']),
+  portability: new Set(['provide_portability', 'reject']),
+  rectification: new Set(['apply_rectification', 'reject']),
+  restriction: new Set(['apply_restriction', 'lift_restriction', 'reject']),
+  erasure: new Set(['pseudonymize_current_records', 'reject']),
+  objection: new Set(['apply_objection', 'reject'])
+};
+const DATA_SUBJECT_EXPORT_FORMAT = 'contractor-ai-data-subject-export/v1';
 
 const BUILT_IN_INSPECTION_TEMPLATES = [
   {
@@ -6035,6 +6048,49 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON managed_operator_accounts(operator_id, role, token_fingerprint, status);
       `);
     }
+  },
+  {
+    version: '071_data_subject_request_governance',
+    description: 'Retain source-current privacy-rights requests, identity verification references, approval decisions, restrictions, exports, and pseudonymization evidence.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS data_subject_requests (
+          id TEXT PRIMARY KEY,
+          subject_type TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
+          subject_label TEXT NOT NULL,
+          request_type TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          received_at TEXT NOT NULL,
+          due_at TEXT NOT NULL,
+          identity_status TEXT NOT NULL DEFAULT 'unverified',
+          identity_method TEXT,
+          identity_evidence_reference TEXT,
+          identity_verified_at TEXT,
+          identity_verified_by TEXT,
+          request_json TEXT NOT NULL DEFAULT '{}',
+          assessment_json TEXT NOT NULL DEFAULT '{}',
+          source_hash TEXT,
+          approval_id TEXT REFERENCES approvals(id) ON DELETE SET NULL,
+          result_json TEXT NOT NULL DEFAULT '{}',
+          completed_at TEXT,
+          completed_by TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(subject_type IN ('client', 'worker')),
+          CHECK(request_type IN ('access', 'rectification', 'erasure', 'restriction', 'portability', 'objection')),
+          CHECK(status IN ('open', 'in_review', 'pending_approval', 'completed', 'partially_completed', 'rejected', 'cancelled')),
+          CHECK(identity_status IN ('unverified', 'verified', 'rejected'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_subject_requests_status_due
+          ON data_subject_requests(status, due_at, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_data_subject_requests_subject
+          ON data_subject_requests(subject_type, subject_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_data_subject_requests_type
+          ON data_subject_requests(request_type, status, created_at DESC);
+      `);
+    }
   }
 ];
 
@@ -7652,6 +7708,666 @@ class ContractorOperatingLedger {
     return Number(result.changes || 0) === 1;
   }
 
+  normalizeDataSubjectType(value) {
+    const subjectType = normalizeStatus(value, '');
+    if (!DATA_SUBJECT_TYPES.has(subjectType)) {
+      throw ledgerInputError('data_subject_type_invalid', 'Data subject type must be client or worker.');
+    }
+    return subjectType;
+  }
+
+  normalizeDataSubjectRequestType(value) {
+    const requestType = normalizeStatus(value, '');
+    if (!DATA_SUBJECT_REQUEST_TYPES.has(requestType)) {
+      throw ledgerInputError('data_subject_request_type_invalid', 'Privacy request type must be access, rectification, erasure, restriction, portability, or objection.');
+    }
+    return requestType;
+  }
+
+  dataSubjectDeadline(receivedAt, months = 1) {
+    const received = new Date(receivedAt);
+    if (Number.isNaN(received.getTime())) throw ledgerInputError('data_subject_received_at_invalid', 'Privacy request receivedAt must be a valid date and time.');
+    const day = received.getUTCDate();
+    const target = new Date(received.getTime());
+    target.setUTCDate(1);
+    target.setUTCMonth(target.getUTCMonth() + months);
+    const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    target.setUTCDate(Math.min(day, lastDay));
+    return target.toISOString();
+  }
+
+  requireDataSubject(subjectType, subjectId) {
+    const type = this.normalizeDataSubjectType(subjectType);
+    const id = normalizeText(subjectId, '');
+    const row = type === 'client'
+      ? this.db.prepare('SELECT * FROM clients WHERE id = ?').get(id)
+      : this.db.prepare('SELECT * FROM workers WHERE id = ?').get(id);
+    if (!row) throw ledgerInputError('data_subject_not_found', `The selected ${type} record does not exist.`, { subjectType: type, subjectId: id }, 404);
+    const record = type === 'client' ? this.mapClient(row) : this.mapWorker(row);
+    return { type, id, label: record.name || id, row, record };
+  }
+
+  dataSubjectPrivacyState(subjectType, subjectId) {
+    const subject = this.requireDataSubject(subjectType, subjectId);
+    const privacy = subject.record.data?.privacy || {};
+    return {
+      subjectType: subject.type,
+      subjectId: subject.id,
+      processingRestricted: privacy.processingRestricted === true,
+      directMarketingBlocked: privacy.directMarketingBlocked === true,
+      pseudonymized: privacy.pseudonymized === true,
+      requestId: privacy.requestId || null,
+      reason: privacy.reason || null,
+      changedAt: privacy.changedAt || privacy.pseudonymizedAt || null
+    };
+  }
+
+  assertDataSubjectProcessingAllowed(subjectType, subjectId, operation = 'operational_processing') {
+    const state = this.dataSubjectPrivacyState(subjectType, subjectId);
+    const directMarketing = operation === 'direct_marketing';
+    if (!state.processingRestricted && !(directMarketing && state.directMarketingBlocked)) return state;
+    throw ledgerInputError(
+      directMarketing ? 'data_subject_marketing_objection_active' : 'data_subject_processing_restricted',
+      directMarketing
+        ? 'This person objected to direct marketing. Do not create or deliver marketing communication.'
+        : 'Processing for this person is restricted. Resolve the retained privacy request before creating new operational use.',
+      { ...state, operation },
+      409
+    );
+  }
+
+  dataSubjectInventory(subjectType, subjectId) {
+    const subject = this.requireDataSubject(subjectType, subjectId);
+    const compact = rows => rows.map(row => ({
+      id: row.id,
+      status: row.status || row.stage || null,
+      jobId: row.job_id || null,
+      updatedAt: row.updated_at || row.created_at || null
+    }));
+    const records = {};
+    const blockers = [];
+    const retainedCategories = [];
+
+    if (subject.type === 'client') {
+      records.jobs = compact(this.db.prepare('SELECT id, status, updated_at FROM jobs WHERE client_id = ? ORDER BY id').all(subject.id));
+      records.opportunities = compact(this.db.prepare('SELECT id, stage, updated_at FROM opportunities WHERE client_id = ? ORDER BY id').all(subject.id));
+      records.requests = compact(this.db.prepare('SELECT id, status, updated_at FROM job_requests WHERE client_id = ? ORDER BY id').all(subject.id));
+      records.invoices = compact(this.db.prepare(`
+        SELECT invoices.id, invoices.status, invoices.job_id, invoices.updated_at
+        FROM invoices JOIN jobs ON jobs.id = invoices.job_id
+        WHERE jobs.client_id = ? ORDER BY invoices.id
+      `).all(subject.id));
+      records.creditNotes = compact(this.db.prepare(`
+        SELECT credit_notes.id, credit_notes.status, credit_notes.job_id, credit_notes.updated_at
+        FROM credit_notes JOIN jobs ON jobs.id = credit_notes.job_id
+        WHERE jobs.client_id = ? ORDER BY credit_notes.id
+      `).all(subject.id));
+      records.payments = compact(this.db.prepare(`
+        SELECT payments.id, payments.status, payments.job_id, payments.updated_at
+        FROM payments JOIN jobs ON jobs.id = payments.job_id
+        WHERE jobs.client_id = ? ORDER BY payments.id
+      `).all(subject.id));
+      records.communications = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM communication_records WHERE client_id = ? ORDER BY id').all(subject.id));
+      records.portalAccess = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM client_portal_access WHERE client_id = ? ORDER BY id').all(subject.id));
+      records.feedback = compact(this.db.prepare(`
+        SELECT client_feedback.id, client_feedback.status, client_feedback.job_id, client_feedback.updated_at
+        FROM client_feedback JOIN jobs ON jobs.id = client_feedback.job_id
+        WHERE jobs.client_id = ? ORDER BY client_feedback.id
+      `).all(subject.id));
+      records.documents = compact(this.db.prepare(`
+        SELECT documents.id, documents.status, documents.job_id, documents.updated_at
+        FROM documents JOIN jobs ON jobs.id = documents.job_id
+        WHERE jobs.client_id = ? ORDER BY documents.id
+      `).all(subject.id));
+      const jobIds = records.jobs.map(record => record.id);
+      records.pendingApprovals = jobIds.length
+        ? compact(this.db.prepare(`SELECT id, status, job_id, updated_at FROM approvals WHERE status = 'pending' AND job_id IN (${jobIds.map(() => '?').join(', ')}) ORDER BY id`).all(...jobIds))
+        : [];
+      const activeJobs = records.jobs.filter(record => !['archived', 'cancelled', 'closed', 'completed'].includes(record.status));
+      const activeOpportunities = records.opportunities.filter(record => !['archived', 'lost', 'won'].includes(record.status));
+      const openFinance = [...records.invoices, ...records.creditNotes, ...records.payments]
+        .filter(record => !['paid', 'settled', 'void', 'cancelled', 'credited', 'reconciled'].includes(record.status));
+      const activePortals = records.portalAccess.filter(record => ['active', 'pending_approval'].includes(record.status));
+      if (activeJobs.length) blockers.push({ code: 'active_jobs', count: activeJobs.length, message: 'Archive, close, complete, or cancel active jobs before pseudonymizing the current client projection.' });
+      if (activeOpportunities.length) blockers.push({ code: 'active_opportunities', count: activeOpportunities.length, message: 'Close active opportunities before pseudonymizing the current client projection.' });
+      if (openFinance.length) blockers.push({ code: 'open_financial_records', count: openFinance.length, message: 'Resolve open invoice, credit, and payment records before pseudonymization.' });
+      if (activePortals.length) blockers.push({ code: 'active_portal_access', count: activePortals.length, message: 'Revoke or resolve active client portal access before pseudonymization.' });
+      if (records.pendingApprovals.length) blockers.push({ code: 'pending_approvals', count: records.pendingApprovals.length, message: 'Resolve pending job approvals before pseudonymization.' });
+      if (records.invoices.length || records.creditNotes.length || records.payments.length) retainedCategories.push('financial_and_tax_evidence');
+      if (records.documents.length) retainedCategories.push('job_and_quality_evidence');
+      if (records.communications.length) retainedCategories.push('contract_and_communication_evidence');
+    } else {
+      records.assignments = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM assignments WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.credentials = compact(this.db.prepare('SELECT id, status, updated_at FROM worker_credentials WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.availability = compact(this.db.prepare('SELECT id, status, updated_at FROM worker_availability_periods WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.attendance = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM attendance_sessions WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.timeLogs = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM time_logs WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.expenses = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM expenses WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.custody = compact(this.db.prepare('SELECT id, status, job_id, updated_at FROM equipment_custody_sessions WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.timesheets = compact(this.db.prepare('SELECT id, status, updated_at FROM weekly_timesheets WHERE worker_id = ? ORDER BY id').all(subject.id));
+      records.pendingApprovals = compact(this.db.prepare(`
+        SELECT id, status, updated_at FROM approvals
+        WHERE status = 'pending' AND target_type <> 'data_subject_request' AND (
+          (target_type = 'worker_retirement' AND target_id = ?)
+          OR data_json LIKE ?
+        ) ORDER BY id
+      `).all(subject.id, `%"workerId":"${subject.id.replace(/[\\%_]/g, '')}"%`));
+      const activeAssignments = records.assignments.filter(record => !['released', 'cancelled', 'completed', 'closed', 'rejected'].includes(record.status));
+      const activeCustody = records.custody.filter(record => record.status === 'checked_out');
+      const openTimesheets = records.timesheets.filter(record => ['pending_approval', 'draft'].includes(record.status));
+      if (subject.record.status !== 'retired') blockers.push({ code: 'worker_not_retired', count: 1, message: 'Complete the approval-gated worker retirement before pseudonymization.' });
+      if (activeAssignments.length) blockers.push({ code: 'active_assignments', count: activeAssignments.length, message: 'Release active assignments before pseudonymization.' });
+      if (activeCustody.length) blockers.push({ code: 'active_equipment_custody', count: activeCustody.length, message: 'Return assigned equipment before pseudonymization.' });
+      if (openTimesheets.length) blockers.push({ code: 'open_timesheets', count: openTimesheets.length, message: 'Resolve draft or pending timesheets before pseudonymization.' });
+      if (records.pendingApprovals.length) blockers.push({ code: 'pending_approvals', count: records.pendingApprovals.length, message: 'Resolve pending worker approvals before pseudonymization.' });
+      if (records.attendance.length || records.timeLogs.length || records.timesheets.length) retainedCategories.push('work_and_time_evidence');
+      if (records.credentials.length) retainedCategories.push('qualification_and_safety_evidence');
+      if (records.expenses.length) retainedCategories.push('expense_and_financial_evidence');
+    }
+    retainedCategories.push('tamper_evident_audit_history');
+    const privacy = this.dataSubjectPrivacyState(subject.type, subject.id);
+    const sourceBasis = {
+      subject: { type: subject.type, id: subject.id, updatedAt: subject.record.updatedAt, status: subject.record.status || null, privacy },
+      records
+    };
+    return {
+      format: 'contractor-ai-data-subject-inventory/v1',
+      generatedAt: nowIso(),
+      subject: { type: subject.type, id: subject.id, label: subject.label, status: subject.record.status || null, privacy },
+      counts: Object.fromEntries(Object.entries(records).map(([key, rows]) => [key, rows.length])),
+      blockers,
+      retainedCategories: [...new Set(retainedCategories)],
+      sourceHash: sha256Json(sourceBasis),
+      sourceBasis
+    };
+  }
+
+  mapDataSubjectRequest(row) {
+    if (!row) return null;
+    const status = DATA_SUBJECT_REQUEST_STATUSES.has(row.status) ? row.status : 'open';
+    const dueTime = Date.parse(row.due_at || '');
+    return {
+      id: row.id,
+      subjectType: row.subject_type,
+      subjectId: row.subject_id,
+      subjectLabel: row.subject_label,
+      requestType: row.request_type,
+      status,
+      receivedAt: row.received_at,
+      dueAt: row.due_at,
+      overdue: !['completed', 'partially_completed', 'rejected', 'cancelled'].includes(status) && Number.isFinite(dueTime) && dueTime < Date.now(),
+      identity: {
+        status: row.identity_status,
+        method: row.identity_method,
+        evidenceReference: row.identity_evidence_reference,
+        verifiedAt: row.identity_verified_at,
+        verifiedBy: row.identity_verified_by,
+        fullIdentityDocumentStored: false
+      },
+      request: fromJson(row.request_json, {}),
+      assessment: fromJson(row.assessment_json, {}),
+      sourceHash: row.source_hash,
+      approvalId: row.approval_id,
+      result: fromJson(row.result_json, {}),
+      completedAt: row.completed_at,
+      completedBy: row.completed_by,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  getDataSubjectRequest(requestId) {
+    const row = this.db.prepare('SELECT * FROM data_subject_requests WHERE id = ?').get(normalizeText(requestId, ''));
+    if (!row) throw ledgerInputError('data_subject_request_not_found', 'Privacy request not found.', { requestId }, 404);
+    return this.mapDataSubjectRequest(row);
+  }
+
+  listDataSubjectRequests(filters = {}) {
+    const status = normalizeStatus(filters.status, '');
+    const subjectType = normalizeStatus(filters.subjectType || filters.subject_type, '');
+    const requestType = normalizeStatus(filters.requestType || filters.request_type, '');
+    const search = normalizeText(filters.search, '').toLowerCase();
+    if (status && !DATA_SUBJECT_REQUEST_STATUSES.has(status) && status !== 'all') throw ledgerInputError('data_subject_request_status_invalid', 'Privacy request status filter is invalid.');
+    if (subjectType && !DATA_SUBJECT_TYPES.has(subjectType)) throw ledgerInputError('data_subject_type_invalid', 'Privacy subject filter is invalid.');
+    if (requestType && !DATA_SUBJECT_REQUEST_TYPES.has(requestType)) throw ledgerInputError('data_subject_request_type_invalid', 'Privacy request filter is invalid.');
+    const requests = this.db.prepare(`
+      SELECT * FROM data_subject_requests
+      WHERE (? = '' OR ? = 'all' OR status = ?)
+        AND (? = '' OR subject_type = ?)
+        AND (? = '' OR request_type = ?)
+        AND (? = '' OR lower(subject_label || ' ' || subject_id || ' ' || id) LIKE ?)
+      ORDER BY CASE WHEN status IN ('open', 'in_review', 'pending_approval') THEN 0 ELSE 1 END, due_at ASC, updated_at DESC
+      LIMIT ?
+    `).all(status, status, status, subjectType, subjectType, requestType, requestType, search, `%${search}%`, safeLimit(filters.limit, 100, 500)).map(row => this.mapDataSubjectRequest(row));
+    const now = Date.now();
+    const active = requests.filter(request => ['open', 'in_review', 'pending_approval'].includes(request.status));
+    return {
+      requests,
+      summary: {
+        total: requests.length,
+        active: active.length,
+        identityPending: active.filter(request => request.identity.status !== 'verified').length,
+        pendingApproval: active.filter(request => request.status === 'pending_approval').length,
+        dueWithinSevenDays: active.filter(request => {
+          const due = Date.parse(request.dueAt || '');
+          return Number.isFinite(due) && due >= now && due <= now + (7 * 24 * 60 * 60 * 1000);
+        }).length,
+        overdue: active.filter(request => request.overdue).length,
+        completed: requests.filter(request => ['completed', 'partially_completed'].includes(request.status)).length
+      }
+    };
+  }
+
+  createDataSubjectRequest(input = {}, options = {}) {
+    return this.transaction(() => {
+      const subject = this.requireDataSubject(input.subjectType || input.subject_type, input.subjectId || input.subject_id);
+      const requestType = this.normalizeDataSubjectRequestType(input.requestType || input.request_type);
+      const existing = this.db.prepare(`
+        SELECT id FROM data_subject_requests
+        WHERE subject_type = ? AND subject_id = ? AND request_type = ?
+          AND status IN ('open', 'in_review', 'pending_approval')
+        ORDER BY created_at DESC LIMIT 1
+      `).get(subject.type, subject.id, requestType);
+      if (existing) throw ledgerInputError('data_subject_request_already_active', 'An active request of this type already exists for this person.', { requestId: existing.id }, 409);
+      const receivedAt = new Date(input.receivedAt || input.received_at || nowIso());
+      if (Number.isNaN(receivedAt.getTime())) throw ledgerInputError('data_subject_received_at_invalid', 'Privacy request receivedAt is invalid.');
+      const defaultDueAt = this.dataSubjectDeadline(receivedAt.toISOString(), 1);
+      const dueAt = new Date(input.dueAt || input.due_at || defaultDueAt);
+      if (Number.isNaN(dueAt.getTime()) || dueAt.getTime() < receivedAt.getTime()) throw ledgerInputError('data_subject_due_at_invalid', 'Privacy request dueAt must be on or after receivedAt.');
+      if (dueAt.getTime() > Date.parse(this.dataSubjectDeadline(receivedAt.toISOString(), 3))) throw ledgerInputError('data_subject_due_at_invalid', 'Privacy request dueAt cannot exceed the retained three-month extension window.');
+      const details = normalizeText(input.details || input.notes, '');
+      if (details.length > 4000) throw ledgerInputError('data_subject_request_details_too_long', 'Privacy request details cannot exceed 4000 characters.');
+      const timestamp = nowIso();
+      const actor = normalizeText(options.actor || input.actor, 'Contractor.AI');
+      const id = makeId('privacy');
+      this.db.prepare(`
+        INSERT INTO data_subject_requests (
+          id, subject_type, subject_id, subject_label, request_type, status, received_at, due_at,
+          identity_status, request_json, assessment_json, result_json, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, 'unverified', ?, '{}', '{}', ?, ?, ?)
+      `).run(id, subject.type, subject.id, subject.label, requestType, receivedAt.toISOString(), dueAt.toISOString(), toJson({
+        channel: normalizeStatus(input.channel, 'manual'),
+        requesterReference: normalizeText(input.requesterReference || input.requester_reference, '').slice(0, 240) || null,
+        details: details || null,
+        responseTargetBasis: input.dueAt || input.due_at ? 'operator_supplied' : 'one_calendar_month'
+      }), actor, timestamp, timestamp);
+      const request = this.getDataSubjectRequest(id);
+      this.audit({
+        entityType: 'data_subject_request', entityId: id, action: 'create_data_subject_request', actor,
+        after: { id, subjectType: subject.type, subjectId: subject.id, requestType, status: request.status, dueAt: request.dueAt },
+        metadata: { externalCommitments: 0, identityDocumentStored: false }
+      });
+      return request;
+    });
+  }
+
+  verifyDataSubjectRequestIdentity(requestId, input = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getDataSubjectRequest(requestId);
+      if (!['open', 'in_review'].includes(before.status)) throw ledgerInputError('data_subject_request_not_verifiable', 'Only open or in-review privacy requests can receive identity verification.', { status: before.status }, 409);
+      const method = normalizeStatus(input.method || input.identityMethod || input.identity_method, '');
+      if (!DATA_SUBJECT_IDENTITY_METHODS.has(method)) throw ledgerInputError('data_subject_identity_method_invalid', 'Choose an approved identity verification method.');
+      const evidenceReference = normalizeText(input.evidenceReference || input.evidence_reference, '');
+      if (evidenceReference.length < 4 || evidenceReference.length > 500) throw ledgerInputError('data_subject_identity_evidence_required', 'Retain a 4 to 500 character verification reference without storing a full identity-document copy.');
+      const actor = normalizeText(options.actor || input.actor, 'Contractor.AI');
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE data_subject_requests
+        SET status = 'in_review', identity_status = 'verified', identity_method = ?, identity_evidence_reference = ?,
+          identity_verified_at = ?, identity_verified_by = ?, updated_at = ?
+        WHERE id = ?
+      `).run(method, evidenceReference, timestamp, actor, timestamp, before.id);
+      const after = this.getDataSubjectRequest(before.id);
+      this.audit({
+        entityType: 'data_subject_request', entityId: before.id, action: 'verify_data_subject_identity', actor,
+        before: { status: before.status, identityStatus: before.identity.status },
+        after: { status: after.status, identityStatus: after.identity.status, method },
+        metadata: { identityDocumentStored: false, externalCommitments: 0 }
+      });
+      return after;
+    });
+  }
+
+  extendDataSubjectRequestDeadline(requestId, input = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getDataSubjectRequest(requestId);
+      if (!['open', 'in_review', 'pending_approval'].includes(before.status)) throw ledgerInputError('data_subject_request_deadline_locked', 'Completed or rejected privacy requests cannot be extended.', { status: before.status }, 409);
+      const reason = normalizeText(input.reason || input.notes, '');
+      if (reason.length < 8 || reason.length > 1000) throw ledgerInputError('data_subject_extension_reason_required', 'A specific extension reason of 8 to 1000 characters is required.');
+      const notificationReference = normalizeText(input.notificationReference || input.notification_reference, '');
+      if (notificationReference.length < 4 || notificationReference.length > 500) {
+        throw ledgerInputError('data_subject_extension_notification_required', 'Retain a 4 to 500 character reference showing that the requester was informed of the extension and reason.');
+      }
+      const dueAt = new Date(input.dueAt || input.due_at || '');
+      const maximum = Date.parse(this.dataSubjectDeadline(before.receivedAt, 3));
+      if (Number.isNaN(dueAt.getTime()) || dueAt.getTime() <= Date.parse(before.dueAt) || dueAt.getTime() > maximum) {
+        throw ledgerInputError('data_subject_extension_due_at_invalid', 'The extended due date must be later than the current target and no later than three calendar months after receipt.');
+      }
+      const actor = normalizeText(options.actor || input.actor, 'Contractor.AI');
+      const timestamp = nowIso();
+      const result = {
+        ...before.result,
+        extensions: [...(before.result.extensions || []), {
+          previousDueAt: before.dueAt,
+          dueAt: dueAt.toISOString(),
+          reason,
+          notificationReference,
+          changedAt: timestamp,
+          changedBy: actor
+        }]
+      };
+      this.db.prepare('UPDATE data_subject_requests SET due_at = ?, result_json = ?, updated_at = ? WHERE id = ?')
+        .run(dueAt.toISOString(), toJson(result), timestamp, before.id);
+      const after = this.getDataSubjectRequest(before.id);
+      this.audit({
+        entityType: 'data_subject_request', entityId: before.id, action: 'extend_data_subject_deadline', actor,
+        before: { dueAt: before.dueAt }, after: { dueAt: after.dueAt },
+        metadata: { reason, notificationReferenceRecorded: true, externalCommitments: 0 }
+      });
+      return after;
+    });
+  }
+
+  normalizeDataSubjectCorrections(subjectType, subjectId, corrections = {}) {
+    const subject = this.requireDataSubject(subjectType, subjectId);
+    if (!corrections || typeof corrections !== 'object' || Array.isArray(corrections)) throw ledgerInputError('data_subject_corrections_required', 'Rectification requires a corrections object.');
+    if (subject.type === 'client') {
+      const allowed = new Set(['name', 'company', 'email', 'phone', 'address', 'city', 'country', 'vatNumber', 'preferredLanguage', 'billingEmail', 'postalCode', 'registrationNumber', 'electronicAddressScheme', 'electronicAddress']);
+      const unknown = Object.keys(corrections).filter(key => !allowed.has(key));
+      if (unknown.length) throw ledgerInputError('data_subject_correction_field_invalid', `Unsupported client correction field(s): ${unknown.join(', ')}.`);
+      if (!Object.keys(corrections).length) throw ledgerInputError('data_subject_corrections_required', 'At least one client correction is required.');
+      const profile = this.normalizeClientProfile({ ...subject.record, ...corrections, data: { ...subject.record.data, ...corrections } }, subject.record);
+      return Object.fromEntries(Object.keys(corrections).map(key => [key, key in profile ? profile[key] : profile.data[key]]));
+    }
+    const allowed = new Set(['name', 'role', 'email', 'phone', 'homeRegion']);
+    const unknown = Object.keys(corrections).filter(key => !allowed.has(key));
+    if (unknown.length) throw ledgerInputError('data_subject_correction_field_invalid', `Unsupported worker correction field(s): ${unknown.join(', ')}.`);
+    if (!Object.keys(corrections).length) throw ledgerInputError('data_subject_corrections_required', 'At least one worker correction is required.');
+    const normalized = {};
+    if (Object.hasOwn(corrections, 'name')) {
+      normalized.name = normalizeText(corrections.name, '');
+      if (normalized.name.length < 2 || normalized.name.length > 160) throw ledgerInputError('worker_name_required', 'Worker name must contain 2 to 160 characters.');
+    }
+    if (Object.hasOwn(corrections, 'role')) normalized.role = normalizeText(corrections.role, '').slice(0, 160) || null;
+    if (Object.hasOwn(corrections, 'email')) {
+      normalized.email = normalizeText(corrections.email, '').toLowerCase();
+      if (normalized.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized.email)) throw ledgerInputError('worker_email_invalid', 'Worker email address is invalid.');
+    }
+    if (Object.hasOwn(corrections, 'phone')) normalized.phone = normalizeText(corrections.phone, '').slice(0, 80) || null;
+    if (Object.hasOwn(corrections, 'homeRegion')) normalized.homeRegion = normalizeText(corrections.homeRegion, '').slice(0, 160) || null;
+    return normalized;
+  }
+
+  assessDataSubjectRequest(requestId, input = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getDataSubjectRequest(requestId);
+      if (!['in_review', 'open'].includes(before.status)) throw ledgerInputError('data_subject_request_not_assessable', 'Only open or in-review privacy requests can be assessed.', { status: before.status }, 409);
+      if (before.identity.status !== 'verified') throw ledgerInputError('data_subject_identity_verification_required', 'Verify the requester identity before assessing or exporting personal data.', {}, 409);
+      const action = normalizeStatus(input.action, '');
+      if (!DATA_SUBJECT_ACTIONS_BY_REQUEST[before.requestType]?.has(action)) throw ledgerInputError('data_subject_action_invalid', `Action ${action || '(missing)'} is not valid for a ${before.requestType} request.`);
+      const rationale = normalizeText(input.rationale || input.reason, '');
+      if (rationale.length < 8 || rationale.length > 4000) throw ledgerInputError('data_subject_rationale_required', 'Retain a specific assessment rationale of 8 to 4000 characters.');
+      const policyReference = normalizeText(input.retentionPolicyReference || input.retention_policy_reference, '');
+      const legalBasisReference = normalizeText(input.legalBasisReference || input.legal_basis_reference, '');
+      if (policyReference.length < 4 || legalBasisReference.length < 4) throw ledgerInputError('data_subject_policy_basis_required', 'Assessment requires retained legal-basis and retention-policy references.');
+      const inventory = this.dataSubjectInventory(before.subjectType, before.subjectId);
+      if (action === 'pseudonymize_current_records' && inventory.blockers.length) {
+        throw ledgerInputError('data_subject_pseudonymization_blocked', 'Current operational blockers must be resolved before pseudonymization.', { blockers: inventory.blockers }, 409);
+      }
+      const corrections = action === 'apply_rectification'
+        ? this.normalizeDataSubjectCorrections(before.subjectType, before.subjectId, input.corrections)
+        : null;
+      const actor = normalizeText(options.actor || input.actor, 'Contractor.AI');
+      const timestamp = nowIso();
+      const assessment = {
+        action,
+        rationale,
+        legalBasisReference,
+        retentionPolicyReference: policyReference,
+        corrections,
+        assessedAt: timestamp,
+        assessedBy: actor,
+        inventory: {
+          counts: inventory.counts,
+          blockers: inventory.blockers,
+          retainedCategories: inventory.retainedCategories
+        },
+        sourceHash: inventory.sourceHash,
+        externalCommitments: 0,
+        automaticComplianceDecision: false
+      };
+      const approval = this.createApproval({
+        targetType: 'data_subject_request', targetId: before.id, approvalType: 'privacy_rights_decision', requestedBy: actor,
+        summary: `${action.replaceAll('_', ' ')} for ${before.subjectType} ${before.subjectLabel}`,
+        reason: rationale,
+        data: {
+          requestId: before.id, requestType: before.requestType, subjectType: before.subjectType, subjectId: before.subjectId,
+          action, sourceHash: inventory.sourceHash, blockerCount: inventory.blockers.length,
+          retainedCategories: inventory.retainedCategories, externalCommitments: 0, automaticComplianceDecision: false
+        }
+      }, { actor });
+      this.db.prepare(`
+        UPDATE data_subject_requests
+        SET status = 'pending_approval', assessment_json = ?, source_hash = ?, approval_id = ?, updated_at = ?
+        WHERE id = ?
+      `).run(toJson(assessment), inventory.sourceHash, approval.id, timestamp, before.id);
+      const after = this.getDataSubjectRequest(before.id);
+      this.audit({
+        entityType: 'data_subject_request', entityId: before.id, action: 'assess_data_subject_request', actor,
+        before: { status: before.status }, after: { status: after.status, action, approvalId: approval.id, sourceHash: inventory.sourceHash },
+        metadata: { retainedCategories: inventory.retainedCategories, blockerCount: inventory.blockers.length, externalCommitments: 0 }
+      });
+      return { request: after, approval, inventory };
+    });
+  }
+
+  dataSubjectExportPayload(requestId) {
+    const request = this.getDataSubjectRequest(requestId);
+    if (request.identity.status !== 'verified') throw ledgerInputError('data_subject_identity_verification_required', 'Verified identity is required before preparing a privacy export.', {}, 409);
+    if (!['completed', 'partially_completed'].includes(request.status) || !['provide_access', 'provide_portability'].includes(request.assessment.action)) {
+      throw ledgerInputError('data_subject_export_not_approved', 'An approved access or portability decision is required before preparing the export.', { status: request.status }, 409);
+    }
+    const inventory = this.dataSubjectInventory(request.subjectType, request.subjectId);
+    if (inventory.sourceHash !== request.sourceHash) throw ledgerInputError('data_subject_export_source_stale', 'Personal data changed after approval. Open and approve a current request before exporting.', { approvedSourceHash: request.sourceHash, currentSourceHash: inventory.sourceHash }, 409);
+    const projectRows = rows => rows.map(row => {
+      const projected = {};
+      for (const [key, value] of Object.entries(row)) {
+        if (key === 'token_hash') continue;
+        projected[key === 'data_json' ? 'data' : key] = key === 'data_json' ? fromJson(value, {}) : value;
+      }
+      return projected;
+    });
+    let records;
+    if (request.subjectType === 'client') {
+      const jobIds = inventory.sourceBasis.records.jobs.map(record => record.id);
+      records = {
+        profile: this.requireDataSubject('client', request.subjectId).record,
+        jobRequests: projectRows(this.db.prepare('SELECT * FROM job_requests WHERE client_id = ? ORDER BY created_at').all(request.subjectId)),
+        opportunities: projectRows(this.db.prepare('SELECT * FROM opportunities WHERE client_id = ? ORDER BY created_at').all(request.subjectId)),
+        jobs: projectRows(this.db.prepare('SELECT * FROM jobs WHERE client_id = ? ORDER BY created_at').all(request.subjectId)),
+        communications: projectRows(this.db.prepare('SELECT * FROM communication_records WHERE client_id = ? ORDER BY created_at').all(request.subjectId)),
+        portalAccess: projectRows(this.db.prepare('SELECT id, job_id, client_id, status, approval_id, expires_at, last_accessed_at, revoked_at, data_json, created_at, updated_at FROM client_portal_access WHERE client_id = ? ORDER BY created_at').all(request.subjectId)),
+        feedback: jobIds.length ? projectRows(this.db.prepare(`SELECT * FROM client_feedback WHERE job_id IN (${jobIds.map(() => '?').join(', ')}) ORDER BY created_at`).all(...jobIds)) : [],
+        financialReferences: {
+          invoices: inventory.sourceBasis.records.invoices,
+          creditNotes: inventory.sourceBasis.records.creditNotes,
+          payments: inventory.sourceBasis.records.payments
+        }
+      };
+    } else {
+      records = {
+        profile: this.requireDataSubject('worker', request.subjectId).record,
+        assignments: projectRows(this.db.prepare('SELECT * FROM assignments WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        credentials: projectRows(this.db.prepare('SELECT * FROM worker_credentials WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        availability: projectRows(this.db.prepare('SELECT * FROM worker_availability_periods WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        attendance: projectRows(this.db.prepare('SELECT * FROM attendance_sessions WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        timeLogs: projectRows(this.db.prepare('SELECT * FROM time_logs WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        expenses: projectRows(this.db.prepare('SELECT * FROM expenses WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        equipmentCustody: projectRows(this.db.prepare('SELECT * FROM equipment_custody_sessions WHERE worker_id = ? ORDER BY created_at').all(request.subjectId)),
+        timesheets: projectRows(this.db.prepare('SELECT * FROM weekly_timesheets WHERE worker_id = ? ORDER BY created_at').all(request.subjectId))
+      };
+    }
+    const payload = {
+      format: DATA_SUBJECT_EXPORT_FORMAT,
+      generatedAt: nowIso(),
+      request: { id: request.id, type: request.requestType, receivedAt: request.receivedAt, completedAt: request.completedAt },
+      subject: { type: request.subjectType, id: request.subjectId },
+      sourceHash: inventory.sourceHash,
+      privacy: {
+        purpose: 'operator-reviewed response to an approved data-subject request',
+        identityVerified: true,
+        fullIdentityDocumentStored: false,
+        thirdPartyRightsReviewRequiredBeforeDelivery: true,
+        automaticallyDelivered: false
+      },
+      categories: inventory.counts,
+      retainedCategories: inventory.retainedCategories,
+      records
+    };
+    return { request, inventory, payload, checksum: sha256Json(payload) };
+  }
+
+  applyDataSubjectRectification(request, timestamp, actor) {
+    const corrections = request.assessment.corrections || {};
+    const subject = this.requireDataSubject(request.subjectType, request.subjectId);
+    const beforeHash = sha256Json(subject.record);
+    if (request.subjectType === 'client') {
+      const profile = this.normalizeClientProfile({ ...subject.record, ...corrections, data: { ...subject.record.data, ...corrections } }, subject.record);
+      this.db.prepare(`
+        UPDATE clients SET name = ?, company = ?, email = ?, phone = ?, address = ?, city = ?, country = ?, vat_number = ?,
+          preferred_language = ?, data_json = ?, updated_at = ? WHERE id = ?
+      `).run(profile.name, profile.company, profile.email, profile.phone, profile.address, profile.city, profile.country, profile.vatNumber, profile.preferredLanguage, toJson(profile.data), timestamp, subject.id);
+    } else {
+      const next = { ...subject.record, ...corrections };
+      this.db.prepare('UPDATE workers SET name = ?, role = ?, email = ?, phone = ?, home_region = ?, updated_at = ? WHERE id = ?')
+        .run(next.name, next.role || null, next.email || null, next.phone || null, next.homeRegion || null, timestamp, subject.id);
+    }
+    const after = this.requireDataSubject(request.subjectType, request.subjectId).record;
+    this.audit({ entityType: request.subjectType, entityId: request.subjectId, action: 'apply_data_subject_rectification', actor, before: subject.record, after, metadata: { requestId: request.id, approvalId: request.approvalId, externalCommitments: 0 } });
+    return { correctedFields: Object.keys(corrections), beforeHash, afterHash: sha256Json(after) };
+  }
+
+  updateDataSubjectPrivacyState(request, patch, timestamp) {
+    const subject = this.requireDataSubject(request.subjectType, request.subjectId);
+    const data = { ...subject.record.data, privacy: { ...(subject.record.data?.privacy || {}), ...patch, requestId: request.id, changedAt: timestamp } };
+    const table = request.subjectType === 'client' ? 'clients' : 'workers';
+    this.db.prepare(`UPDATE ${table} SET data_json = ?, updated_at = ? WHERE id = ?`).run(toJson(data), timestamp, subject.id);
+    return this.dataSubjectPrivacyState(request.subjectType, request.subjectId);
+  }
+
+  pseudonymizeDataSubjectCurrentRecords(request, timestamp) {
+    const inventory = this.dataSubjectInventory(request.subjectType, request.subjectId);
+    if (inventory.blockers.length) throw ledgerInputError('data_subject_pseudonymization_blocked', 'Current operational blockers changed or remain unresolved.', { blockers: inventory.blockers }, 409);
+    const suffix = request.subjectId.replace(/[^A-Za-z0-9]/g, '').slice(-8) || crypto.randomBytes(4).toString('hex');
+    const pseudonym = request.subjectType === 'client' ? `Pseudonymized client ${suffix}` : `Pseudonymized worker ${suffix}`;
+    let revokedPortalAccess = 0;
+    let deactivatedOperatorAccounts = 0;
+    if (request.subjectType === 'client') {
+      this.db.prepare(`
+        UPDATE clients SET name = ?, company = NULL, email = NULL, phone = NULL, address = NULL, city = NULL, vat_number = NULL,
+          data_json = ?, updated_at = ? WHERE id = ?
+      `).run(pseudonym, toJson({ privacy: { pseudonymized: true, pseudonymizedAt: timestamp, requestId: request.id, retainedCategories: inventory.retainedCategories } }), timestamp, request.subjectId);
+      this.db.prepare(`UPDATE jobs SET title = 'Retained job ' || id, description = NULL, address = NULL, city = NULL, region = NULL, updated_at = ? WHERE client_id = ?`).run(timestamp, request.subjectId);
+      this.db.prepare(`UPDATE opportunities SET title = 'Retained opportunity ' || id, description = NULL, address = NULL, city = NULL, postal_code = NULL, owner_name = NULL, updated_at = ? WHERE client_id = ?`).run(timestamp, request.subjectId);
+      this.db.prepare('UPDATE job_requests SET description = NULL, budget = NULL, data_json = ?, updated_at = ? WHERE client_id = ?').run(toJson({ privacy: { pseudonymizedByRequestId: request.id } }), timestamp, request.subjectId);
+      this.db.prepare(`
+        UPDATE client_feedback SET respondent_name = NULL, comment = NULL, data_json = ?, updated_at = ?
+        WHERE job_id IN (SELECT id FROM jobs WHERE client_id = ?)
+      `).run(toJson({ privacy: { pseudonymizedByRequestId: request.id } }), timestamp, request.subjectId);
+      const revoked = this.db.prepare(`
+        UPDATE client_portal_access SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+        WHERE client_id = ? AND status IN ('active', 'pending_approval')
+      `).run(timestamp, timestamp, request.subjectId);
+      revokedPortalAccess = Number(revoked.changes || 0);
+    } else {
+      this.db.prepare(`
+        UPDATE workers SET name = ?, role = 'retired', email = NULL, phone = NULL, home_region = NULL, hourly_rate = 0,
+          skills_json = '[]', data_json = ?, updated_at = ? WHERE id = ?
+      `).run(pseudonym, toJson({ privacy: { pseudonymized: true, pseudonymizedAt: timestamp, requestId: request.id, retainedCategories: inventory.retainedCategories } }), timestamp, request.subjectId);
+      for (const table of ['safety_meeting_attendees', 'work_permit_attendees', 'pre_task_plan_attendees']) {
+        this.db.prepare(`UPDATE ${table} SET attendee_name = ?, company = NULL, updated_at = ? WHERE worker_id = ?`).run(pseudonym, timestamp, request.subjectId);
+      }
+      for (const account of this.listManagedOperatorAccounts({ status: 'active' }).filter(item => item.scope?.workerId === request.subjectId)) {
+        const changed = this.db.prepare(`UPDATE managed_operator_accounts SET status = 'deactivated', deactivated_at = ?, updated_at = ? WHERE operator_id = ? AND status = 'active'`)
+          .run(timestamp, timestamp, account.id);
+        if (Number(changed.changes || 0) === 1) {
+          deactivatedOperatorAccounts += 1;
+          this.revokeOperatorSessionsForPrincipal(account.id, { revokedAt: timestamp, reason: 'worker_privacy_pseudonymization' });
+        }
+      }
+    }
+    this.db.prepare(`
+      UPDATE data_subject_requests
+      SET subject_label = ?, updated_at = ?
+      WHERE subject_type = ? AND subject_id = ?
+    `).run(pseudonym, timestamp, request.subjectType, request.subjectId);
+    return { pseudonym, retainedCategories: inventory.retainedCategories, revokedPortalAccess, deactivatedOperatorAccounts };
+  }
+
+  applyDataSubjectRequestDecision(requestId) {
+    return this.transaction(() => {
+      const before = this.getDataSubjectRequest(requestId);
+      if (before.status !== 'pending_approval') throw ledgerInputError('data_subject_request_not_pending', 'Privacy request is not awaiting approval.', { status: before.status }, 409);
+      const approval = before.approvalId ? this.db.prepare("SELECT * FROM approvals WHERE id = ? AND status = 'approved'").get(before.approvalId) : null;
+      if (!approval) throw ledgerInputError('data_subject_approval_missing', 'Approved privacy decision evidence could not be loaded.', {}, 409);
+      const currentInventory = this.dataSubjectInventory(before.subjectType, before.subjectId);
+      if (currentInventory.sourceHash !== before.sourceHash) throw ledgerInputError('data_subject_source_stale', 'The subject record changed after assessment. Reject and prepare a current decision.', { approvedSourceHash: before.sourceHash, currentSourceHash: currentInventory.sourceHash }, 409);
+      const actor = approval.resolved_by || approval.requested_by || 'approval';
+      const timestamp = nowIso();
+      let result = {
+        ...before.result,
+        action: before.assessment.action,
+        approvalId: approval.id,
+        decidedAt: timestamp,
+        decidedBy: actor,
+        externalCommitments: 0
+      };
+      let status = 'completed';
+      if (before.assessment.action === 'apply_rectification') result = { ...result, ...this.applyDataSubjectRectification(before, timestamp, actor) };
+      if (before.assessment.action === 'apply_restriction') result = { ...result, privacy: this.updateDataSubjectPrivacyState(before, { processingRestricted: true, restrictionReason: before.assessment.rationale }, timestamp) };
+      if (before.assessment.action === 'lift_restriction') result = { ...result, privacy: this.updateDataSubjectPrivacyState(before, { processingRestricted: false, restrictionLiftedAt: timestamp, restrictionReason: null }, timestamp) };
+      if (before.assessment.action === 'apply_objection') result = { ...result, privacy: this.updateDataSubjectPrivacyState(before, { directMarketingBlocked: true, objectionReason: before.assessment.rationale }, timestamp) };
+      if (before.assessment.action === 'pseudonymize_current_records') {
+        result = { ...result, ...this.pseudonymizeDataSubjectCurrentRecords(before, timestamp), fullErasureClaimed: false };
+        status = 'partially_completed';
+      }
+      if (before.assessment.action === 'reject') status = 'rejected';
+      this.db.prepare(`
+        UPDATE data_subject_requests
+        SET status = ?, result_json = ?, completed_at = ?, completed_by = ?, updated_at = ?
+        WHERE id = ?
+      `).run(status, toJson(result), timestamp, actor, timestamp, before.id);
+      const after = this.getDataSubjectRequest(before.id);
+      this.audit({
+        entityType: 'data_subject_request', entityId: before.id, action: 'apply_data_subject_request_decision', actor,
+        before: { status: before.status, action: before.assessment.action, sourceHash: before.sourceHash },
+        after: { status: after.status, result: after.result },
+        metadata: { approvalId: approval.id, retainedCategories: currentInventory.retainedCategories, fullErasureClaimed: false, externalCommitments: 0 }
+      });
+      return after;
+    });
+  }
+
+  restoreRejectedDataSubjectRequest(approvalRow, status, options = {}) {
+    const row = this.db.prepare('SELECT * FROM data_subject_requests WHERE id = ?').get(approvalRow.target_id);
+    if (!row || row.approval_id !== approvalRow.id || row.status !== 'pending_approval') return row ? this.mapDataSubjectRequest(row) : null;
+    const before = this.mapDataSubjectRequest(row);
+    const timestamp = options.timestamp || nowIso();
+    const actor = options.actor || 'approval';
+    const result = {
+      ...before.result,
+      approvalResolution: { approvalId: approvalRow.id, status, resolvedAt: timestamp, resolvedBy: actor, reason: options.reason || null }
+    };
+    this.db.prepare(`
+      UPDATE data_subject_requests
+      SET status = ?, approval_id = NULL, result_json = ?, updated_at = ? WHERE id = ?
+    `).run(status === 'cancelled' ? 'cancelled' : 'in_review', toJson(result), timestamp, before.id);
+    const after = this.getDataSubjectRequest(before.id);
+    this.audit({ entityType: 'data_subject_request', entityId: before.id, action: status === 'cancelled' ? 'cancel_data_subject_request' : 'reject_data_subject_decision', actor, before: { status: before.status }, after: { status: after.status }, metadata: { approvalId: approvalRow.id, externalCommitments: 0 } });
+    return after;
+  }
+
   getAuthenticationRateLimit(keyHash, options = {}) {
     const normalizedKeyHash = normalizeText(keyHash).toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) throw new Error('Authentication rate-limit key must be a SHA-256 hash');
@@ -8751,6 +9467,7 @@ class ContractorOperatingLedger {
         throw error;
       }
       const client = this.findOrCreateClient(payload.client || payload, { actor });
+      this.assertDataSubjectProcessingAllowed('client', client.id, 'new_opportunity');
       const timestamp = nowIso();
       const id = makeId('opp');
       const record = {
@@ -23190,6 +23907,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.code = 'worker_retired';
         throw error;
       }
+      this.assertDataSubjectProcessingAllowed('worker', worker.id, 'new_assignment');
       const pendingRetirement = this.db.prepare(`
         SELECT id FROM approvals
         WHERE target_type = 'worker_retirement' AND target_id = ? AND status = 'pending'
@@ -26596,6 +27314,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const timestamp = nowIso();
       const direction = normalizeStatus(payload.direction, 'outbound');
       const status = normalizeStatus(payload.status, direction === 'outbound' ? 'draft' : 'received');
+      const clientId = payload.clientId || payload.client_id || job.client_id;
+      if (direction === 'outbound') {
+        this.assertDataSubjectProcessingAllowed('client', clientId, normalizeBoolean(payload.data?.directMarketing, false) ? 'direct_marketing' : 'outbound_communication');
+      }
       const requiresApproval = payload.requiresApproval !== false && direction === 'outbound' && !['approved', 'sent'].includes(status);
       const communicationData = {
         ...(payload.data || {}),
@@ -26611,7 +27333,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       `).run(
         id,
         jobId,
-        payload.clientId || payload.client_id || job.client_id,
+        clientId,
         normalizeText(payload.channel, 'portal'),
         direction,
         payload.subject || null,
@@ -47328,6 +48050,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             before.target_id
           );
         }
+      } else if (before.target_type === 'data_subject_request') {
+        this.restoreRejectedDataSubjectRequest(before, status, {
+          timestamp,
+          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          reason: payload.reason || payload.notes || null
+        });
       } else if (before.target_type === 'change_order') {
         const changeOrder = this.db.prepare('SELECT data_json FROM change_orders WHERE id = ?').get(before.target_id);
         if (changeOrder) {
@@ -48346,6 +49074,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const timestamp = nowIso();
     if (targetType === 'photo_evidence_set') {
       this.applyPhotoEvidenceApproval(targetId, timestamp);
+    } else if (targetType === 'data_subject_request') {
+      this.applyDataSubjectRequestDecision(targetId);
     } else if (targetType === 'bid_package_selection') {
       this.applyBidPackageSelection(targetId, timestamp);
     } else if (targetType === 'quote') {
@@ -50216,6 +50946,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   createClientPortalAccess(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       const job = this.requireJob(jobId);
+      this.assertDataSubjectProcessingAllowed('client', job.client_id, 'client_portal_access');
       const requestedExpiry = payload.expiresAt || payload.expires_at;
       const defaultExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       const expiresAt = new Date(requestedExpiry || defaultExpiry);
@@ -61789,6 +62520,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         organizationProfiles: this.count('organization_profile'),
         managedOperatorAccounts: this.count('managed_operator_accounts'),
         activeManagedOperatorAccounts: Number(this.db.prepare("SELECT COUNT(*) AS count FROM managed_operator_accounts WHERE status = 'active'").get().count || 0),
+        dataSubjectRequests: this.count('data_subject_requests'),
+        activeDataSubjectRequests: Number(this.db.prepare("SELECT COUNT(*) AS count FROM data_subject_requests WHERE status IN ('open', 'in_review', 'pending_approval')").get().count || 0),
         jobs: this.count('jobs'),
         approvals: this.count('approvals'),
         siteVisits: this.count('site_visits'),
@@ -66066,7 +66799,27 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       if (value) safeguards.push(value);
     };
 
-    if (targetType === 'crew_lookahead_plan') {
+    if (targetType === 'data_subject_request') {
+      const request = this.getDataSubjectRequest(approval.targetId || approval.target_id);
+      const action = request.assessment?.action || data.action || 'review_privacy_request';
+      primaryEffect = `${action.replaceAll('_', ' ')} for the verified ${request.subjectType} request.`;
+      addEffect(`Apply the retained ${request.requestType} decision only while the approved personal-data inventory remains current.`);
+      if (action === 'provide_access' || action === 'provide_portability') addEffect('Authorize an owner-downloaded, human-reviewed JSON package; nothing is sent automatically.');
+      if (action === 'apply_restriction') addEffect('Block new opportunities, assignments, outbound messages, or portal access for the restricted subject where applicable.');
+      if (action === 'pseudonymize_current_records') addEffect('Pseudonymize eligible current operational fields while retaining explicitly identified commercial, safety, financial, and audit evidence.');
+      addSafeguard('Approval fails closed if the subject or linked record inventory changed after assessment.');
+      addSafeguard('Identity references are retained without a full identity-document copy; immutable evidence is never silently deleted.');
+      addSafeguard('No compliance conclusion, external delivery, or complete-erasure claim is made automatically.');
+      riskLevel = 'high';
+      preview.requestType = request.requestType;
+      preview.subjectType = request.subjectType;
+      preview.subjectLabel = request.subjectLabel;
+      preview.action = action;
+      preview.sourceHash = request.sourceHash;
+      preview.blockers = request.assessment?.inventory?.blockers || [];
+      preview.retainedCategories = request.assessment?.inventory?.retainedCategories || [];
+      preview.externalCommitments = 0;
+    } else if (targetType === 'crew_lookahead_plan') {
       const row = this.db.prepare('SELECT * FROM crew_lookahead_plans WHERE id = ?').get(approval.targetId || approval.target_id);
       const plan = row ? this.mapCrewLookaheadPlan(row) : null;
       primaryEffect = `Approve internal two-week crew plan v${plan?.versionNumber || data.versionNumber || ''}.`;

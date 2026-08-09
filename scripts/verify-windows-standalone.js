@@ -120,7 +120,7 @@ async function verifyWindowsStandalone() {
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
     const readiness = await waitForReadiness(baseUrl, ownerToken, child, () => stderr);
-    assert.equal(readiness.ledger?.migrations?.currentVersion, '070_managed_operator_accounts');
+    assert.equal(readiness.ledger?.migrations?.currentVersion, '071_data_subject_request_governance');
     assert.deepEqual(readiness.ledger?.migrations?.pending, []);
 
     const operators = await requestJson(baseUrl, '/api/operations/operators', ownerToken);
@@ -128,6 +128,15 @@ async function verifyWindowsStandalone() {
     assert.equal(operators.body?.summary?.environment, 1);
     assert.equal(JSON.stringify(operators.body).includes(ownerToken), false);
     assert.equal(operators.body?.accounts?.some(account => Object.hasOwn(account, 'tokenHash')), false);
+
+    const privacyRequests = await requestJson(baseUrl, '/api/operations/privacy/requests?status=all&limit=10', ownerToken);
+    assert.equal(privacyRequests.response.status, 200);
+    assert.deepEqual(privacyRequests.body?.requests, []);
+
+    const capabilities = await requestJson(baseUrl, '/api/operations/capabilities', ownerToken);
+    assert.equal(capabilities.response.status, 200);
+    assert.equal(capabilities.body?.capabilities?.retention?.dataSubjectRequests, true);
+    assert.equal(capabilities.body?.capabilities?.retention?.fullErasureClaimed, false);
 
     const manifest = await requestJson(baseUrl, '/api/integrations/hai/manifest', ownerToken);
     assert.equal(manifest.response.status, 200);
@@ -141,6 +150,7 @@ async function verifyWindowsStandalone() {
       migration: readiness.ledger.migrations.currentVersion,
       pendingMigrations: readiness.ledger.migrations.pending.length,
       operatorRegisterRedacted: true,
+      privacyRegisterAvailable: true,
       haiReadOnly: true
     };
   } finally {

@@ -223,6 +223,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const frameworkCatalogSource = fs.readFileSync(path.join(root, 'framework-catalog.js'), 'utf8');
   const frameworkWorkspaceSource = fs.readFileSync(path.join(root, 'components', 'FrameworkWorkspace.jsx'), 'utf8');
   const teamAccessSource = fs.readFileSync(path.join(root, 'components', 'TeamAccessControl.jsx'), 'utf8');
+  const privacyRequestSource = fs.readFileSync(path.join(root, 'components', 'PrivacyRequestsControl.jsx'), 'utf8');
   const restoreSource = fs.readFileSync(path.join(root, 'scripts', 'restore-local-backup.js'), 'utf8');
   const hostedMigrationSource = fs.readFileSync(path.join(root, 'scripts', 'migrate-local-backup-to-hosted.js'), 'utf8');
   const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
@@ -233,10 +234,12 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     if (!windowsPackageSource.includes(`'${runtimePath}'`)) failures.push(`Windows runtime is missing framework dependency: ${runtimePath}`);
   }
   for (const verificationRequirement of [
-    '070_managed_operator_accounts',
+    '071_data_subject_request_governance',
     '/api/operations/operators',
+    '/api/operations/privacy/requests',
     '/api/integrations/hai/manifest',
     'operatorRegisterRedacted',
+    'privacyRegisterAvailable',
     'removeFixture(fixtureRoot)'
   ]) {
     if (!windowsPackageVerificationSource.includes(verificationRequirement)) {
@@ -312,6 +315,32 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '070_managed_operator_accounts'")) {
     failures.push('Canonical managed operator account migration is missing.');
   }
+  if (!ledgerSource.includes("version: '071_data_subject_request_governance'")) {
+    failures.push('Canonical data-subject request governance migration is missing.');
+  }
+  for (const privacyRequirement of [
+    'createDataSubjectRequest',
+    'verifyDataSubjectRequestIdentity',
+    'assessDataSubjectRequest',
+    'applyDataSubjectRequestDecision',
+    'dataSubjectExportPayload',
+    'assertDataSubjectProcessingAllowed'
+  ]) {
+    if (!ledgerSource.includes(privacyRequirement)) {
+      failures.push(`Data-subject request governance is missing required behavior: ${privacyRequirement}`);
+    }
+  }
+  for (const privacyEndpoint of [
+    '/api/operations/privacy/requests',
+    '/api/operations/privacy/requests/:requestId/identity',
+    '/api/operations/privacy/requests/:requestId/extend',
+    '/api/operations/privacy/requests/:requestId/assessment',
+    '/api/operations/privacy/requests/:requestId/export'
+  ]) {
+    if (!serverSource.includes(privacyEndpoint)) {
+      failures.push(`Owner privacy operations are missing endpoint: ${privacyEndpoint}`);
+    }
+  }
   for (const managedAccessRequirement of [
     'createManagedOperatorAccount',
     'rotateManagedOperatorAccess',
@@ -330,6 +359,21 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     || teamAccessSource.includes('localStorage')
     || teamAccessSource.includes('sessionStorage')) {
     failures.push('Managed operator keys must be shown once without browser-storage retention.');
+  }
+  if (!privacyRequestSource.includes('data-testid="privacy-requests-control"')
+    || !privacyRequestSource.includes('Do not upload or copy a full identity document')
+    || !privacyRequestSource.includes('full identity document')
+    || !privacyRequestSource.includes('Requester notification reference')
+    || privacyRequestSource.includes('localStorage')
+    || privacyRequestSource.includes('sessionStorage')) {
+    failures.push('Privacy requests must be operator-visible, data-minimized, and absent from browser storage.');
+  }
+  if (!ledgerSource.includes('data_subject_extension_notification_required')
+    || !serverSource.includes("extensionNotificationEvidence: 'requester_notification_reference_required'")) {
+    failures.push('Privacy deadline extensions must retain evidence that the requester was informed.');
+  }
+  for (const privacyTest of ['tests/data-subject-requests.test.js', 'e2e/privacy-requests.spec.js']) {
+    if (!fs.existsSync(path.join(root, privacyTest))) failures.push(`Privacy lifecycle coverage is missing: ${privacyTest}`);
   }
   if (!restoreSource.includes('deactivateRestoredManagedOperators')
     || !hostedMigrationSource.includes('deactivatedManagedOperators')) {

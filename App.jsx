@@ -96,6 +96,7 @@ const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
 const OrganizationOnboarding = lazy(() => import('./components/OrganizationOnboarding'))
 const TeamAccessControl = lazy(() => import('./components/TeamAccessControl'))
+const PrivacyRequestsControl = lazy(() => import('./components/PrivacyRequestsControl'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
 const AutomationControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.AutomationControl })))
 const CapabilitySetupControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.CapabilitySetupControl })))
@@ -1259,7 +1260,7 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
     }
   }
   if (section === 'operations') {
-    const [templates, scheduler, organization, backups, capabilities, archivedJobs, operatorRegister, workers, operatorScopeJobs] = await Promise.all([
+    const [templates, scheduler, organization, backups, capabilities, archivedJobs, operatorRegister, workers, operatorScopeJobs, privacyRequests, clientDirectory] = await Promise.all([
       api('/api/ledger/inspection-templates'),
       api('/api/ledger/scheduler').catch(() => null),
       api('/api/ledger/organization'),
@@ -1269,6 +1270,8 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       api('/api/operations/operators'),
       api('/api/ledger/workers?limit=500'),
       api('/api/ledger/jobs?limit=500'),
+      api('/api/operations/privacy/requests?status=all&limit=500'),
+      api('/api/ledger/clients?limit=500'),
     ])
     return {
       inspectionTemplates: templates.templates || [],
@@ -1279,6 +1282,8 @@ async function loadSectionPatch(section, resourceView = 'workforce', fieldScoped
       archivedJobs: archivedJobs.jobs || [],
       operatorRegister,
       operatorScopeJobs: operatorScopeJobs.jobs || [],
+      privacyRequests: { requests: privacyRequests.requests || [], summary: privacyRequests.summary || {} },
+      clientDirectory,
       workers: workers.workers || [],
       workerSummary: workers.summary || {},
     }
@@ -13231,6 +13236,18 @@ function App() {
                     workers={data.workers}
                     jobs={jobs}
                     onRegisterChange={(operatorRegister) => setData((current) => current ? { ...current, operatorRegister } : current)}
+                    onError={setError}
+                    onNotice={notify}
+                  />
+                </LazyControlBoundary>
+                <LazyControlBoundary label="privacy requests">
+                  <PrivacyRequestsControl
+                    request={api}
+                    register={data.privacyRequests}
+                    clients={data.clientDirectory?.clients || EMPTY_LIST}
+                    workers={data.workers}
+                    onRegisterChange={(privacyRequests) => setData((current) => current ? { ...current, privacyRequests } : current)}
+                    onOpenApprovals={openApprovals}
                     onError={setError}
                     onNotice={notify}
                   />

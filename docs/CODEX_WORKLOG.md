@@ -1,5 +1,23 @@
 # Codex Worklog
 
+## 2026-08-09 - Privacy rights operations pass
+
+- Added migration 071 and an owner-controlled register for client and worker
+  access, rectification, erasure, restriction, portability, and objection requests.
+- Added minimal identity-evidence references, calendar-month deadlines, bounded
+  extensions with requester-notification evidence, live source inventories, legal/retention assessment references,
+  independent source-current approval, and private checksummed JSON exports.
+- Enforced restriction and direct-marketing objections in relevant new processing;
+  rectification and blocker-aware partial pseudonymisation preserve immutable
+  financial, contractual, safety, approval, and audit evidence.
+- Wired diagnostics, operational export, backup/restore validation, hosted migration,
+  PostgreSQL parity, capability reporting, and the Windows standalone smoke to the
+  new lifecycle without claiming automatic disclosure or complete erasure.
+- Added the responsive Operations register and verified the full release gate:
+  zero-vulnerability production audit, lint, release contract, 524 Node tests,
+  83 Chromium workflows, build and bundle budgets, production-scale benchmark,
+  hardened container, live local readiness, and Node 22.23.2 Windows packaging.
+
 ## 2026-08-09 - Persistent owner onboarding pass
 
 - Replaced the first-run redirect with a four-step owner setup workflow for legal

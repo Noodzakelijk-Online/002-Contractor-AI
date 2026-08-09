@@ -1578,6 +1578,57 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('071_data_subject_request_governance')) {
+        if (!retainedTables.has('data_subject_requests')) {
+          throw new Error('Backup data-subject request schema is incomplete: data_subject_requests.');
+        }
+        const dataSubjectRequestColumns = new Set(
+          database.prepare('PRAGMA table_info(data_subject_requests)').all().map(row => row.name)
+        );
+        for (const column of [
+          'id',
+          'subject_type',
+          'subject_id',
+          'subject_label',
+          'request_type',
+          'status',
+          'received_at',
+          'due_at',
+          'identity_status',
+          'identity_method',
+          'identity_evidence_reference',
+          'identity_verified_at',
+          'identity_verified_by',
+          'request_json',
+          'assessment_json',
+          'source_hash',
+          'approval_id',
+          'result_json',
+          'completed_at',
+          'completed_by',
+          'created_by',
+          'created_at',
+          'updated_at'
+        ]) {
+          if (!dataSubjectRequestColumns.has(column)) {
+            throw new Error(`Backup data-subject request schema is incomplete: data_subject_requests.${column}.`);
+          }
+        }
+        const dataSubjectRequestIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_data_subject_requests_%'")
+            .all()
+            .map(row => row.name)
+        );
+        for (const index of [
+          'idx_data_subject_requests_status_due',
+          'idx_data_subject_requests_subject',
+          'idx_data_subject_requests_type'
+        ]) {
+          if (!dataSubjectRequestIndexes.has(index)) {
+            throw new Error(`Backup data-subject request constraints are incomplete: ${index}.`);
+          }
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

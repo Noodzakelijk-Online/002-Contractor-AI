@@ -1027,6 +1027,18 @@ function createBackupFixture(t, suffix = 'success') {
     testimonialConsent: false,
     evidenceReference: `migration-signed-client-survey-${suffix}`
   }, { actor: 'migration_fixture' }).feedback;
+  const dataSubjectRequest = source.createDataSubjectRequest({
+    subjectType: 'client',
+    subjectId: job.clientId,
+    requestType: 'access',
+    channel: 'email',
+    requesterReference: `migration-privacy-request-${suffix}`,
+    details: 'Retain the verified privacy request lifecycle through the hosted migration.'
+  }, { actor: 'migration_fixture' });
+  source.verifyDataSubjectRequestIdentity(dataSubjectRequest.id, {
+    method: 'existing_contact',
+    evidenceReference: `migration-existing-contact-verification-${suffix}`
+  }, { actor: 'migration_fixture' });
   source.close();
 
   const backupId = `2026-07-13T12-00-00-${suffix}`;
@@ -1061,7 +1073,7 @@ function createBackupFixture(t, suffix = 'success') {
     evidence: { included: true, fileCount: 4 },
     files
   }, null, 2));
-  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, energyDocument, energyEvidenceBytes, energyPerformance, energyStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, managedOperator, managedOperatorAccessKey, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
+  return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, dataSubjectRequest, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, energyDocument, energyEvidenceBytes, energyPerformance, energyStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, managedOperator, managedOperatorAccessKey, materialReceipt, nonconformance, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
 class FakeHostedStorage {
@@ -1190,7 +1202,7 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
   assert.equal(migration.deactivatedManagedOperators, 1);
   assert.equal(migration.clearedAuthenticationRateLimits, 1);
   assert.equal(migration.clearedApiRateLimits, 1);
-  assert.equal(migration.migrationVersion, '070_managed_operator_accounts');
+  assert.equal(migration.migrationVersion, '071_data_subject_request_governance');
   assert.equal(migration.sourceAuditIntegrity.supported, true);
   assert.equal(migration.sourceAuditIntegrity.valid, true);
   assert.equal(migration.auditIntegrity.valid, true);
@@ -1447,6 +1459,11 @@ test('verified local backup migrates losslessly to empty PostgreSQL and private 
     assert.equal(migratedManagedOperator.status, 'deactivated');
     assert.equal(migratedManagedOperator.keyVersion, fixture.managedOperator.keyVersion);
     assert.equal(hosted.authenticateManagedOperator(managedCredential(fixture.managedOperatorAccessKey).tokenHash), null);
+    const migratedDataSubjectRequest = hosted.getDataSubjectRequest(fixture.dataSubjectRequest.id);
+    assert.equal(migratedDataSubjectRequest.status, 'in_review');
+    assert.equal(migratedDataSubjectRequest.identity.status, 'verified');
+    assert.equal(migratedDataSubjectRequest.identity.fullIdentityDocumentStored, false);
+    assert.equal(migratedDataSubjectRequest.request.requesterReference, `migration-privacy-request-success`);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get().count), 0);
     assert.equal(Number(hosted.db.prepare('SELECT COUNT(*) AS count FROM api_rate_limits').get().count), 0);
     const receipt = hosted.listAudit({ entityType: 'operational_migration', limit: 100 })

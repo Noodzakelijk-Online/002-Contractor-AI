@@ -56,7 +56,7 @@ test('managed operator lifecycle retains only credential hashes and revokes sess
   const secondKey = 'cai_second-managed-access-key-with-more-than-32-characters';
 
   const ledger = new ContractorOperatingLedger({ dbFile });
-  assert.equal(ledger.migrationStatus().currentVersion, '070_managed_operator_accounts');
+  assert.equal(ledger.migrationStatus().currentVersion, '071_data_subject_request_governance');
   const worker = ledger.upsertWorker({ name: 'Managed field worker', status: 'available' });
   const fieldAccount = ledger.createManagedOperatorAccount({
     id: 'field-managed-1',

@@ -2244,6 +2244,82 @@ app.post('/api/operations/operators/:operatorId/deactivate', (req, res) => {
   });
 });
 
+app.get('/api/operations/privacy/requests', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => ({ success: true, ...operatingLedger.listDataSubjectRequests(req.query || {}) }));
+});
+
+app.post('/api/operations/privacy/requests', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    request: operatingLedger.createDataSubjectRequest(req.body || {}, { actor: actorFromRequest(req, 'privacy_operator') })
+  }), 201);
+});
+
+app.post('/api/operations/privacy/requests/:requestId/identity', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    request: operatingLedger.verifyDataSubjectRequestIdentity(req.params.requestId, req.body || {}, { actor: actorFromRequest(req, 'privacy_operator') })
+  }));
+});
+
+app.post('/api/operations/privacy/requests/:requestId/extend', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    request: operatingLedger.extendDataSubjectRequestDeadline(req.params.requestId, req.body || {}, { actor: actorFromRequest(req, 'privacy_operator') })
+  }));
+});
+
+app.post('/api/operations/privacy/requests/:requestId/assessment', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    ...operatingLedger.assessDataSubjectRequest(req.params.requestId, req.body || {}, { actor: actorFromRequest(req, 'privacy_owner') })
+  }), 201);
+});
+
+app.get('/api/operations/privacy/requests/:requestId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return handleLedgerRequest(req, res, () => {
+    const request = operatingLedger.getDataSubjectRequest(req.params.requestId);
+    return {
+      success: true,
+      request,
+      inventory: operatingLedger.dataSubjectInventory(request.subjectType, request.subjectId)
+    };
+  });
+});
+
+app.get('/api/operations/privacy/requests/:requestId/export', (req, res) => {
+  try {
+    const exported = operatingLedger.dataSubjectExportPayload(req.params.requestId);
+    operatingLedger.audit({
+      entityType: 'data_subject_request',
+      entityId: exported.request.id,
+      action: 'download_data_subject_export',
+      actor: actorFromRequest(req, 'privacy_owner'),
+      after: {
+        format: exported.payload.format,
+        sourceHash: exported.payload.sourceHash,
+        checksum: exported.checksum,
+        automaticallyDelivered: false
+      },
+      metadata: { thirdPartyRightsReviewRequired: true, externalCommitments: 0 }
+    });
+    const filename = `contractor-ai-privacy-${exported.request.id}.json`;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Contractor-AI-SHA256', exported.checksum);
+    return res.json(exported.payload);
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'data_subject_export_failed', error.statusCode ? error.message : 'Unable to prepare the approved privacy export.', serializeError(error));
+  }
+});
+
 function loadLegacyStateForMigration() {
   try {
     const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
@@ -7188,6 +7264,7 @@ function operationalExport() {
     performanceScorecardSnapshots: operatingLedger.listPerformanceScorecardSnapshots({ limit: 5_000 }),
     frameworkImplementations: operatingLedger.listFrameworkImplementations({ limit: 2_000 }),
     frameworkImplementationRevisions: operatingLedger.listAllFrameworkImplementationRevisions({ limit: 10_000 }),
+    dataSubjectRequests: operatingLedger.listDataSubjectRequests({ status: 'all', limit: 500 }).requests,
     clientFeedback: operatingLedger.listClientFeedback({ limit: 10_000 }),
     energyPerformanceRecords: operatingLedger.listEnergyPerformanceRecords({ limit: 10_000 }),
     productionBaselines: operatingLedger.listAllProductionBaselines({ limit: 5_000 }),
@@ -7279,6 +7356,7 @@ function validateOperationalExport(snapshot) {
     'performanceScorecardSnapshots',
     'frameworkImplementations',
     'frameworkImplementationRevisions',
+    'dataSubjectRequests',
     'marketFitProfiles',
     'opportunityFitAssessments',
     'bidDecisionPolicies',
@@ -7377,6 +7455,7 @@ function validateOperationalExport(snapshot) {
       performanceScorecardSnapshots: Array.isArray(snapshot.performanceScorecardSnapshots) ? snapshot.performanceScorecardSnapshots.length : 0,
       frameworkImplementations: Array.isArray(snapshot.frameworkImplementations) ? snapshot.frameworkImplementations.length : 0,
       frameworkImplementationRevisions: Array.isArray(snapshot.frameworkImplementationRevisions) ? snapshot.frameworkImplementationRevisions.length : 0,
+      dataSubjectRequests: Array.isArray(snapshot.dataSubjectRequests) ? snapshot.dataSubjectRequests.length : 0,
       clientFeedback: snapshot.clientFeedback.length,
       energyPerformanceRecords: Array.isArray(snapshot.energyPerformanceRecords) ? snapshot.energyPerformanceRecords.length : 0,
       marketFitProfiles: Array.isArray(snapshot.marketFitProfiles) ? snapshot.marketFitProfiles.length : 0,
@@ -8637,7 +8716,18 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
         policyConfigured: runtime.hosting.retentionPolicyConfigured,
         archiveMode: 'approval_gated_non_destructive',
         automatedDeletion: false,
-        legalReviewRequired: true
+        legalReviewRequired: true,
+        dataSubjectRequests: true,
+        requestTypes: ['access', 'rectification', 'erasure', 'restriction', 'portability', 'objection'],
+        identityVerification: 'reference_only_no_full_identity_document',
+        responseTarget: 'one_calendar_month',
+        extensionWindow: 'two_additional_calendar_months',
+        extensionNotificationEvidence: 'requester_notification_reference_required',
+        decisionApproval: 'source_current_owner_approval_required',
+        accessExport: 'owner_downloaded_json_human_review_required',
+        pseudonymization: 'approval_gated_partial_with_retained_categories',
+        automaticDelivery: false,
+        fullErasureClaimed: false
       }
     },
     runtime,
