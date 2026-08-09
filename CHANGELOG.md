@@ -21,6 +21,8 @@ Versioning for the application contract; database migrations remain append-only.
 - A four-step first-run owner wizard for legal identity, office/contact details,
   billing defaults, and server-validated readiness, with durable step saves and
   responsive keyboard-accessible interaction.
+- A deterministic disposable ledger benchmark with smoke and 63,500-row production
+  profiles, correctness/resource/latency thresholds, and a retained CI JSON report.
 
 ### Changed
 
@@ -34,6 +36,9 @@ Versioning for the application contract; database migrations remain append-only.
 - Windows standalone starts only display the owner key when the protected runtime
   configuration is first created; later starts report the configuration path.
 - Owner onboarding JS and CSS load only when the guided first-run flow is opened.
+- Job and opportunity search/filtering now executes before database limits, pipeline
+  forecasts aggregate every matching record, and autonomous dashboard queues avoid
+  full job-detail assembly for unassigned crews or ineligible handover records.
 
 ### Security
 

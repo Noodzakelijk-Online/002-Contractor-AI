@@ -64,6 +64,16 @@ jobs:
       - run: npm run verify:bundle
       - run: npm test
         timeout-minutes: 45
+      - name: Verify representative production-scale ledger performance
+        run: npm run benchmark:ledger -- --output artifacts/ledger-benchmark-ci.json
+        timeout-minutes: 10
+      - name: Upload ledger performance report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ledger-performance-report
+          path: artifacts/ledger-benchmark-ci.json
+          if-no-files-found: warn
       - run: npm run test:container
         timeout-minutes: 10
       - run: npx playwright install --with-deps chromium

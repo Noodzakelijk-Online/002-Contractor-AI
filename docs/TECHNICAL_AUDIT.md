@@ -10,7 +10,7 @@ Contractor.AI is a mature local-first contractor operating ledger, not a greenfi
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
 S3-compatible evidence storage. The audit found 365 declared HTTP routes, 69
-append-only migrations, 159 Node test files, 47 browser spec files, and 81 direct
+append-only migrations, 160 Node test files, 47 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
@@ -71,11 +71,16 @@ external-provider engines.
    Job-scoped sequence guards and native disabled loading controls now close those
    races, including programmatic browser interaction during loading.
 8. The previous browser runner reused runtime state between specs. It now discovers
-   all 80 tests from the Playwright AST and runs bounded isolated batches against
+   all 81 tests from the Playwright AST and runs bounded isolated batches against
    separate ports and databases after one production build.
 9. The broad framework inventory was documentation-only. Migration 069 and the
    framework workspace now retain every family membership and provide scoped,
    replay-safe, checksum-protected implementation records with due-review triage.
+10. Large-ledger behavior had only bounded-query assumptions. A deterministic
+    63,500-row benchmark now verifies full historical search and pipeline totals,
+    audit integrity, disk/memory use, and p50/p95 startup, read, dashboard, and
+    canonical-write thresholds in Node 22 and CI. Profiling also removed irrelevant
+    full job-detail assembly from unassigned crew and ineligible handover queues.
 
 ### Residual technical debt
 
@@ -87,9 +92,7 @@ external-provider engines.
    universal. Field offline queues are intentionally narrower and explicit.
 4. Pagination and advanced filters are not uniform across all long-lived lists.
 5. Dutch data conventions are present, but the UI copy is not yet fully bilingual.
-6. Large-dataset performance has indexes and bounded APIs but lacks a repeatable
-   production-scale benchmark fixture.
-7. Legal retention periods and data-subject erasure decisions remain operator and
+6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.
 

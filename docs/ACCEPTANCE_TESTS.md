@@ -31,6 +31,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A24 | Hosted mode refuses non-EU/non-TLS/non-private/non-backed-up configuration | startup-readiness tests |
 | A25 | Lint, dependency audit, release contract, Node tests, build, browser, and container gates pass | CI and final report |
 | A26 | All 23 framework families and 700 memberships are searchable; family playbooks expose guarded cadence and measure starters without fabricating evidence; scoped records retain immutable revisions and surface due reviews without execution authority | catalog, framework workspace, PostgreSQL, backup, HAI, and browser tests |
+| A27 | A deterministic production-scale local ledger preserves historical search, full pipeline totals, bounded responses, audit integrity, startup/write latency, memory, and disk thresholds | ledger benchmark unit contract, `npm run benchmark:ledger`, and CI JSON artifact |
 
 ## Manual provider acceptance
 

@@ -58,15 +58,15 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
 | 043 | End-to-end workflow tests | Implemented | 81 Playwright operator/client/field/framework/onboarding flows plus API vertical slices |
-| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 25 release outcomes |
+| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 27 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
 | 049 | Accessibility review | Partial | semantic controls, focus/labels and responsive browser review; no full external audit |
-| 050 | Responsive and browser compatibility | Implemented | 80 desktop/mobile operator and field Chromium tests in isolated batches |
-| 051 | Performance baseline and indexing | Partial | compression, immutable asset caching, split chunks, bundle budgets, bounded queries/indexes/rate buckets; no production-data benchmark |
-| 052 | Large dataset and pagination testing | Partial | bounded endpoint tests exist; no representative production-scale seeded benchmark |
+| 050 | Responsive and browser compatibility | Implemented | 81 desktop/mobile operator and field Chromium tests in isolated batches |
+| 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
+| 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
 | 054 | Data reconciliation and repair commands | Partial | integrity/reconciliation/restore/migration tools exist; no generic mutation repair CLI |
 | 055 | Product analytics local-first design | Implemented | retained contractor scorecard and operating metrics; no forced external telemetry |
@@ -90,7 +90,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 073 | UI action audit | Implemented | `UI_ACTION_AUDIT.md` maps actions and residual gaps |
 | 074 | Backend endpoint usage audit | Implemented | `API_USAGE_AUDIT.md`, route/call-site counts and release assertions |
 | 075 | Documentation truthfulness audit | Implemented | limitations, non-certification and pending verification are explicit |
-| 076 | Technical debt register | Implemented | technical audit records module size, tests, i18n, autosave and benchmark debt |
+| 076 | Technical debt register | Implemented | technical audit records module size, component tests, i18n, autosave and provider-bound load acceptance debt |
 | 077 | Bug hunt log | Implemented | worklog records findings, tests and scope decisions |
 | 078 | Red-team review loop one | Implemented | side-effect/provider/source-currentness boundaries rechecked |
 | 079 | Red-team review loop two | Implemented | auth/privacy/debug/support boundaries rechecked |

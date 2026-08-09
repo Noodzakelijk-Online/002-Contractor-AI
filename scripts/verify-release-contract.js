@@ -25,6 +25,7 @@ const REQUIRED_PATHS = [
   'docs/HAI_CONNECTOR.md',
   'docs/NGROK.md',
   'docs/OPERATOR_RUNBOOK.md',
+  'docs/PERFORMANCE_BENCHMARK.md',
   'docs/SECURITY.md',
   'docs/TASK_GRAPH.md',
   'docs/TECHNICAL_AUDIT.md',
@@ -44,6 +45,7 @@ const REQUIRED_PATHS = [
   'scripts/export-hai-feed.js',
   'scripts/generate-framework-catalog.js',
   'scripts/migrate-local-backup-to-hosted.js',
+  'scripts/benchmark-ledger.js',
   'scripts/doctor.js',
   'scripts/restore-local-backup.js',
   'scripts/run-node-tests.js',
@@ -88,7 +90,7 @@ const REQUIRED_HOSTED_ENV_KEYS = [
 
 function walkFiles(root, relative = '', unreadableDirectories = []) {
   const excluded = new Set([
-    '.git', '.pytest_cache', '.vite', 'coverage', 'data', 'dist', 'node_modules',
+    '.git', '.pytest_cache', '.vite', 'artifacts', 'coverage', 'data', 'dist', 'node_modules',
     'playwright-report', 'release', 'storage', 'test-results', 'tmp', 'uploads'
   ]);
   const directory = path.join(root, relative);
@@ -134,7 +136,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const packageFile = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   if (packageJson.main !== 'server.js') failures.push('package.json must use server.js as the sole runtime entrypoint.');
-  for (const script of ['build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'verify:bundle', 'verify:release']) {
+  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:performance', 'verify:bundle', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
   if (packageJson.scripts?.pretest) failures.push('package.json must not duplicate the full Node suite through an automatic pretest hook.');

@@ -118,3 +118,19 @@ Node 22 x64 packaging. Exact counts and external boundaries are retained in
 - Did not split the three largest modules during a stabilization release; the debt is
   recorded for contract-protected incremental extraction.
 - Did not introduce destructive automatic retention or data-subject erasure.
+
+## 2026-08-09 - Production-scale ledger performance pass
+
+- Added deterministic disposable smoke and production benchmark fixtures with
+  canonical schema, foreign keys, valid SHA-256 audit chains, and one measured
+  canonical intake write against retained scale.
+- The production profile retains 63,500 core rows: 5,000 requests/jobs, 20,000
+  tasks, 2,500 opportunities, 5,000 approvals, and 25,000 audit events.
+- Fixed job/opportunity filtering after a 500-row window and replaced bounded
+  in-memory opportunity forecasting with complete database aggregation.
+- Profiled dashboard command generation and moved assignment and handover
+  eligibility checks before expensive job-detail assembly.
+- Packaged Node 22.23.2 measurement reduced dashboard p95 from 5,951.57 ms to
+  620.83 ms; canonical intake p95 was 86.24 ms and every retained threshold passed.
+- Added smoke contract tests, CI production gate/report upload, release scripts,
+  operator guidance, acceptance outcome A27, and phase 051/052 completion evidence.

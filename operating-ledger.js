@@ -6923,6 +6923,9 @@ class ContractorOperatingLedger {
       );
 
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+      CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_clients_updated ON clients(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_trade_partners_status ON trade_partners(status, partner_type, updated_at);
       CREATE INDEX IF NOT EXISTS idx_jobs_type_status ON jobs(job_type, status);
       CREATE INDEX IF NOT EXISTS idx_jobs_client ON jobs(client_id);
@@ -6944,6 +6947,7 @@ class ContractorOperatingLedger {
       CREATE INDEX IF NOT EXISTS idx_sds_sheets_job ON sds_sheets(job_id);
       CREATE INDEX IF NOT EXISTS idx_site_access_logs_job ON site_access_logs(job_id);
       CREATE INDEX IF NOT EXISTS idx_assignments_worker ON assignments(worker_id, status);
+      CREATE INDEX IF NOT EXISTS idx_assignments_job_status ON assignments(job_id, status);
       CREATE INDEX IF NOT EXISTS idx_quality_checks_job ON quality_checks(job_id);
       CREATE INDEX IF NOT EXISTS idx_safety_checks_job ON safety_checks(job_id);
       CREATE INDEX IF NOT EXISTS idx_payments_job ON payments(job_id);
@@ -6966,6 +6970,8 @@ class ContractorOperatingLedger {
       CREATE INDEX IF NOT EXISTS idx_tool_reservations_tool ON tool_reservations(tool_id, tool_name, status);
       CREATE INDEX IF NOT EXISTS idx_learning_profiles_confidence ON job_learning_profiles(confidence, updated_at);
       CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+      CREATE INDEX IF NOT EXISTS idx_approvals_status_created ON approvals(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_approvals_job_created ON approvals(job_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_events(entity_type, entity_id);
     `);
   }
@@ -8620,20 +8626,39 @@ class ContractorOperatingLedger {
     const search = normalizeText(filters.search || filters.q, '').toLowerCase();
     const includeClosed = normalizeBoolean(filters.includeClosed ?? filters.include_closed, false);
     const limit = safeLimit(filters.limit, 100, 500);
+    const clauses = [];
+    const parameters = [];
+    if (stage) {
+      clauses.push('opportunities.stage = ?');
+      parameters.push(stage);
+    } else if (!includeClosed) {
+      const openStages = [...OPEN_OPPORTUNITY_STAGES];
+      clauses.push(`opportunities.stage IN (${openStages.map(() => '?').join(', ')})`);
+      parameters.push(...openStages);
+    }
+    if (search) {
+      clauses.push(`LOWER(
+        opportunities.id || ' ' || opportunities.title || ' ' || opportunities.stage || ' '
+        || COALESCE(opportunities.service, '') || ' ' || COALESCE(opportunities.description, '') || ' '
+        || COALESCE(opportunities.address, '') || ' ' || COALESCE(opportunities.city, '') || ' '
+        || COALESCE(opportunities.postal_code, '') || ' ' || COALESCE(opportunities.owner_name, '') || ' '
+        || COALESCE(opportunities.data_json, '') || ' ' || clients.name || ' '
+        || COALESCE(clients.company, '') || ' ' || COALESCE(clients.email, '') || ' ' || COALESCE(clients.phone, '')
+      ) LIKE ?`);
+      parameters.push(`%${search}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.prepare(`
       SELECT opportunities.*, clients.name AS client_name, clients.company AS client_company,
         clients.email AS client_email, clients.phone AS client_phone
       FROM opportunities
       JOIN clients ON clients.id = opportunities.client_id
-      WHERE (? = '' OR opportunities.stage = ?)
+      ${where}
       ORDER BY CASE WHEN opportunities.next_follow_up_at IS NULL THEN 1 ELSE 0 END,
         opportunities.next_follow_up_at ASC, opportunities.updated_at DESC
-      LIMIT 500
-    `).all(stage, stage).map(row => this.mapOpportunity(row));
-    return rows.filter(opportunity => (
-      (includeClosed || OPEN_OPPORTUNITY_STAGES.has(opportunity.stage))
-      && (!search || JSON.stringify(opportunity).toLowerCase().includes(search))
-    )).slice(0, limit);
+      LIMIT ?
+    `).all(...parameters, limit).map(row => this.mapOpportunity(row));
+    return rows;
   }
 
   getOpportunity(opportunityId) {
@@ -8657,29 +8682,68 @@ class ContractorOperatingLedger {
   }
 
   opportunityForecast(filters = {}) {
-    const opportunities = this.listOpportunities({ ...filters, includeClosed: true, limit: 500 });
-    const open = opportunities.filter(opportunity => OPEN_OPPORTUNITY_STAGES.has(opportunity.stage));
-    const overdue = open.filter(opportunity => opportunity.nextFollowUpAt && Date.parse(opportunity.nextFollowUpAt) <= Date.now());
-    const stages = [...OPPORTUNITY_STAGES].map(stage => {
-      const records = opportunities.filter(opportunity => opportunity.stage === stage);
+    const stage = normalizeText(filters.stage || filters.status, '').toLowerCase().replace(/[\s-]+/g, '_');
+    if (stage) normalizeOpportunityStage(stage);
+    const search = normalizeText(filters.search || filters.q, '').toLowerCase();
+    const clauses = [];
+    const parameters = [];
+    if (stage) {
+      clauses.push('opportunities.stage = ?');
+      parameters.push(stage);
+    }
+    if (search) {
+      clauses.push(`LOWER(
+        opportunities.id || ' ' || opportunities.title || ' ' || opportunities.stage || ' '
+        || COALESCE(opportunities.service, '') || ' ' || COALESCE(opportunities.description, '') || ' '
+        || COALESCE(opportunities.address, '') || ' ' || COALESCE(opportunities.city, '') || ' '
+        || COALESCE(opportunities.postal_code, '') || ' ' || COALESCE(opportunities.owner_name, '') || ' '
+        || COALESCE(opportunities.data_json, '') || ' ' || clients.name || ' '
+        || COALESCE(clients.company, '') || ' ' || COALESCE(clients.email, '') || ' ' || COALESCE(clients.phone, '')
+      ) LIKE ?`);
+      parameters.push(`%${search}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`
+      SELECT
+        opportunities.stage AS stage,
+        COUNT(*) AS count,
+        COALESCE(SUM(opportunities.estimated_value), 0) AS estimated_value,
+        COALESCE(SUM(opportunities.estimated_value * opportunities.probability_percent / 100.0), 0) AS weighted_value,
+        COALESCE(SUM(CASE WHEN opportunities.converted_job_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS converted_count,
+        COALESCE(SUM(CASE
+          WHEN opportunities.stage IN ('new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating')
+            AND opportunities.next_follow_up_at IS NOT NULL
+            AND opportunities.next_follow_up_at <= ?
+          THEN 1 ELSE 0 END), 0) AS overdue_count
+      FROM opportunities
+      JOIN clients ON clients.id = opportunities.client_id
+      ${where}
+      GROUP BY opportunities.stage
+    `).all(nowIso(), ...parameters);
+    const byStage = new Map(rows.map(row => [row.stage, row]));
+    const stages = [...OPPORTUNITY_STAGES].map(stageKey => {
+      const row = byStage.get(stageKey);
       return {
-        stage,
-        count: records.length,
-        estimatedValue: roundMoney(records.reduce((sum, opportunity) => sum + opportunity.estimatedValue, 0)),
-        weightedValue: roundMoney(records.reduce((sum, opportunity) => sum + opportunity.weightedValue, 0))
+        stage: stageKey,
+        count: Number(row?.count || 0),
+        estimatedValue: roundMoney(row?.estimated_value || 0),
+        weightedValue: roundMoney(row?.weighted_value || 0)
       };
     });
+    const openStages = stages.filter(item => OPEN_OPPORTUNITY_STAGES.has(item.stage));
+    const total = rows.reduce((sum, row) => sum + Number(row.count || 0), 0);
+    const overdue = rows.reduce((sum, row) => sum + Number(row.overdue_count || 0), 0);
     return {
       generatedAt: nowIso(),
       summary: {
-        total: opportunities.length,
-        open: open.length,
-        overdueFollowUps: overdue.length,
-        converted: opportunities.filter(opportunity => Boolean(opportunity.convertedJobId)).length,
-        won: opportunities.filter(opportunity => opportunity.stage === 'won').length,
-        lost: opportunities.filter(opportunity => opportunity.stage === 'lost').length,
-        estimatedValue: roundMoney(open.reduce((sum, opportunity) => sum + opportunity.estimatedValue, 0)),
-        weightedValue: roundMoney(open.reduce((sum, opportunity) => sum + opportunity.weightedValue, 0))
+        total,
+        open: openStages.reduce((sum, item) => sum + item.count, 0),
+        overdueFollowUps: overdue,
+        converted: rows.reduce((sum, row) => sum + Number(row.converted_count || 0), 0),
+        won: Number(byStage.get('won')?.count || 0),
+        lost: Number(byStage.get('lost')?.count || 0),
+        estimatedValue: roundMoney(openStages.reduce((sum, item) => sum + item.estimatedValue, 0)),
+        weightedValue: roundMoney(openStages.reduce((sum, item) => sum + item.weightedValue, 0))
       },
       stages
     };
@@ -49677,27 +49741,37 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     const limit = safeLimit(filters.limit, 100, 500);
     const includeArchived = archiveOnly || requestedStatus === 'archived'
       || normalizeBoolean(filters.includeArchived ?? filters.include_archived, false);
-    const archiveStatuses = new Set(['archived', 'pending_archive_approval']);
-    const inactiveStatuses = new Set(['archived', 'pending_archive_approval', 'cancelled', 'canceled', 'rejected', 'deleted', 'void']);
-    const queryLimit = search || archiveOnly || !includeArchived ? 500 : limit;
+    const clauses = [];
+    const parameters = [];
+    if (status) {
+      clauses.push('jobs.status = ?');
+      parameters.push(status);
+    }
+    if (archiveOnly || requestedStatus === 'archived') {
+      clauses.push("jobs.status IN ('archived', 'pending_archive_approval')");
+    } else if (!includeArchived) {
+      clauses.push("jobs.status NOT IN ('archived', 'pending_archive_approval', 'cancelled', 'canceled', 'rejected', 'deleted', 'void')");
+    }
+    if (search) {
+      clauses.push(`LOWER(
+        jobs.id || ' ' || jobs.title || ' ' || jobs.job_type || ' ' || COALESCE(jobs.description, '') || ' '
+        || COALESCE(jobs.address, '') || ' ' || COALESCE(jobs.city, '') || ' ' || COALESCE(jobs.region, '') || ' '
+        || jobs.country || ' ' || jobs.priority || ' ' || jobs.status || ' ' || jobs.phase || ' '
+        || COALESCE(jobs.data_json, '') || ' ' || clients.name || ' ' || COALESCE(clients.company, '') || ' '
+        || COALESCE(clients.email, '') || ' ' || COALESCE(clients.phone, '')
+      ) LIKE ?`);
+      parameters.push(`%${search}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.prepare(`
       SELECT jobs.*, clients.name AS client_name, clients.email AS client_email, clients.phone AS client_phone
       FROM jobs
       JOIN clients ON clients.id = jobs.client_id
-      WHERE (? = '' OR jobs.status = ?)
+      ${where}
       ORDER BY jobs.updated_at DESC
       LIMIT ?
-    `).all(status, status, queryLimit);
-    let mapped = rows.map(row => this.mapJob(row));
-    if (archiveOnly || requestedStatus === 'archived') {
-      mapped = mapped.filter(job => archiveStatuses.has(normalizeStatus(job.status, 'open')));
-    } else if (!includeArchived) {
-      mapped = mapped.filter(job => !inactiveStatuses.has(normalizeStatus(job.status, 'open')));
-    }
-    if (search) {
-      mapped = mapped.filter(job => JSON.stringify(job).toLowerCase().includes(search));
-    }
-    return mapped.slice(0, limit);
+    `).all(...parameters, limit);
+    return rows.map(row => this.mapJob(row));
   }
 
   listSupplierInvoices(filters = {}) {
@@ -56567,10 +56641,34 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     }
 
     const completedHandoverCandidates = this.db.prepare(`
-      SELECT id, title FROM jobs
+      SELECT jobs.id, jobs.title FROM jobs
       WHERE (status IN ('completed', 'closed', 'accepted') OR progress_percent >= 100)
         AND status NOT IN ('cancelled', 'canceled', 'rejected', 'archived', 'pending_archive_approval', 'deleted', 'void')
-      ORDER BY updated_at DESC
+        AND EXISTS (
+          SELECT 1 FROM organization_profile
+          WHERE COALESCE(legal_name, trading_name, '') <> ''
+            AND COALESCE(registration_number, '') <> ''
+            AND COALESCE(address, '') <> ''
+            AND COALESCE(city, '') <> ''
+        )
+        AND (
+          EXISTS (
+            SELECT 1 FROM documents
+            WHERE documents.job_id = jobs.id
+              AND documents.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+          )
+          OR EXISTS (
+            SELECT 1 FROM field_reports
+            WHERE field_reports.job_id = jobs.id
+              AND field_reports.status NOT IN ('cancelled', 'canceled', 'rejected', 'void')
+          )
+        )
+        AND EXISTS (
+          SELECT 1 FROM quality_checks
+          WHERE quality_checks.job_id = jobs.id
+            AND quality_checks.status IN ('approved', 'passed', 'completed', 'closed', 'accepted', 'verified')
+        )
+      ORDER BY jobs.updated_at DESC
       LIMIT 10
     `).all();
     for (const job of completedHandoverCandidates) {
@@ -56887,10 +56985,19 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       });
     }
     const assignmentScopedCrewActions = [];
-    const crewJobs = this.listJobs({ limit: 500 }).filter(job => (
-      ['planned', 'scheduled', 'in_progress'].includes(normalizeStatus(job.status, 'open'))
-      && actionableJobIds.has(job.id)
-    ));
+    const crewJobs = this.db.prepare(`
+      SELECT jobs.*, clients.name AS client_name, clients.email AS client_email, clients.phone AS client_phone
+      FROM jobs
+      JOIN clients ON clients.id = jobs.client_id
+      WHERE jobs.status IN ('planned', 'scheduled', 'in_progress')
+        AND EXISTS (
+          SELECT 1 FROM assignments
+          WHERE assignments.job_id = jobs.id
+            AND assignments.status IN ('planned', 'scheduled', 'active', 'in_progress', 'pending_approval')
+        )
+      ORDER BY jobs.updated_at DESC
+      LIMIT 500
+    `).all().map(row => this.mapJob(row));
     for (const job of crewJobs) {
       const detail = this.getJobDetail(job.id, { includeAudit: false, includeCapabilities: false });
       const crewEvidence = this.crewEvidenceReadiness(detail);

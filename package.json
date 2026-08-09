@@ -16,6 +16,8 @@
     "restore:local": "node scripts/restore-local-backup.js",
     "serve": "node server.js",
     "test": "node scripts/run-node-tests.js --test-concurrency=4",
+    "test:performance": "node scripts/benchmark-ledger.js --profile smoke --iterations 2",
+    "benchmark:ledger": "node scripts/benchmark-ledger.js --profile production",
     "test:browser": "node scripts/run-browser-tests.js",
     "test:container": "node scripts/verify-container-runtime.js",
     "start:standalone": "node standalone-launcher.js",

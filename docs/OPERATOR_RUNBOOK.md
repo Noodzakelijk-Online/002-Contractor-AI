@@ -101,13 +101,16 @@ npm audit
 npm run verify:release
 npm test
 npm run build
+npm run benchmark:ledger
 npm run test:browser
 npm run test:container
 ```
 
 Do not release when one gate fails. PostgreSQL tests require the CI service or an
 explicit disposable test URL. Browser and container gates require their local
-runtimes.
+runtimes. The production-scale benchmark uses only a disposable synthetic SQLite
+ledger and removes it after the run. Use `--output <path>` to retain the JSON
+report; use `npm run test:performance` for the smaller developer smoke profile.
 
 ## EU hosted deployment
 

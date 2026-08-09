@@ -143,11 +143,18 @@ npm run lint
 npm run build
 npm run verify:bundle
 npm test
+npm run benchmark:ledger
 npm run test:container
 npm run test:browser
 ```
 
 GitHub Actions runs the same checks for every push and pull request. A separate Windows job builds and uploads the portable Windows x64 package with Node.js 22. Its PostgreSQL service enables TLS before testing, verifies `SHOW ssl`, and supplies `sslmode=require`, so hosted-path tests cannot silently fall back to a plaintext or skipped contract. The container gate builds the exact production image, starts it with a read-only root filesystem, dropped capabilities, disabled privilege escalation, loopback-only publishing, and a durable data volume, then proves readiness, authentication, non-root execution, Docker health, restart persistence, and graceful shutdown. Every `.env*` file is excluded from the Docker build context.
+
+The ledger benchmark creates a disposable deterministic 63,500-row SQLite
+fixture, checks search and aggregate correctness beyond 500 rows, measures hot
+read/write paths, verifies the 25,000-event audit chain, and fails when retained
+thresholds are exceeded. CI uploads its JSON report as `ledger-performance-report`.
+See `docs/PERFORMANCE_BENCHMARK.md` for profiles and interpretation.
 
 ## Container and EU Hosting
 

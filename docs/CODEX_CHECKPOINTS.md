@@ -71,6 +71,22 @@ the repository rather than treating these statements as current by assumption.
 - Verification: 509 Node tests, 81 Chromium workflows, release/build/bundle,
   container runtime, and the rebuilt Node 22.23.2 Windows package passed.
 
+## CP-07 Production-scale ledger performance
+
+- Profiles: smoke exceeds 500 jobs/opportunities; production retains 63,500 core rows.
+- Correctness: historical search, complete pipeline aggregates, bounded results,
+  required indexes, and 25,000-event audit integrity are enforced.
+- Node 22.23.2 baseline: 1.51 s seed, 7.05 ms reopen, 620.83 ms dashboard p95,
+  86.24 ms canonical-intake p95, 352.02 ms audit verification, about 37 MiB DB.
+- Optimization: unassigned crew and handover-ineligible jobs no longer trigger full
+  job-detail assembly during dashboard command generation.
+- CI: `npm run benchmark:ledger` is a release gate and uploads its JSON evidence.
+- Full local gate: release/lint/audit/build/bundle, 512 Node tests, production
+  benchmark, hardened container, 81 isolated Chromium workflows, and rebuilt
+  Node 22.23.2 Windows runtime smoke all passed.
+- Hosted boundary: selected EU infrastructure still needs provider-specific load,
+  recovery, ingress, database, and object-storage acceptance.
+
 ## Resume procedure
 
 1. Read the newest user request and `git status --short`.
