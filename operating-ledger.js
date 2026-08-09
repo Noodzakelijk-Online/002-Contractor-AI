@@ -47417,6 +47417,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     return recommendation;
   }
 
+  approvalRequester(payload = {}, options = {}) {
+    return normalizeText(
+      options.actor || payload.actor || payload.requestedBy || payload.requested_by,
+      'Contractor.AI'
+    );
+  }
+
+  approvalResolver(payload = {}, options = {}) {
+    return normalizeText(
+      options.actor || payload.actor || payload.resolvedBy || payload.resolved_by,
+      'user'
+    );
+  }
+
   createApproval(payload = {}, options = {}) {
     const id = normalizeText(payload.id || payload.approvalId || payload.approval_id, '') || makeId('approval');
     const targetType = normalizeText(payload.targetType || payload.target_type, 'record');
@@ -47425,6 +47439,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       this.requireJob(jobId);
     }
     const timestamp = nowIso();
+    const requester = this.approvalRequester(payload, options);
     this.db.prepare(`
       INSERT INTO approvals (id, target_type, target_id, job_id, approval_type, status, requested_by, summary, reason, data_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -47435,7 +47450,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       jobId,
       normalizeText(payload.approvalType || payload.approval_type, 'approval'),
       normalizeStatus(payload.status, 'pending'),
-      payload.requestedBy || payload.requested_by || options.actor || 'Contractor.AI',
+      requester,
       payload.summary || null,
       payload.reason || null,
       toJson(payload.data || {}),
@@ -47444,7 +47459,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     );
     const approval = this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(id));
     if (options.audit !== false) {
-      this.audit({ entityType: 'approval', entityId: id, jobId: approval.jobId, action: 'create_approval', actor: options.actor || 'Contractor.AI', after: approval });
+      this.audit({ entityType: 'approval', entityId: id, jobId: approval.jobId, action: 'create_approval', actor: requester, after: approval });
     }
     return approval;
   }
@@ -47865,7 +47880,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (reason.length < 4) {
       throw ledgerInputError('installation_qc_approval_reason_required', 'Installation QC approval requires an explicit review reason.');
     }
-    const resolver = normalizeText(payload.resolvedBy || payload.actor || options.actor, 'user');
+    const resolver = this.approvalResolver(payload, options);
     if (options.enforceSeparation === true && normalizeText(latestSubmission.submittedBy, '') === resolver) {
       throw ledgerInputError(
         'installation_qc_independent_approval_required',
@@ -47915,7 +47930,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (reason.length < 4) {
       throw ledgerInputError('photo_evidence_approval_reason_required', 'Photo-evidence approval requires an explicit review reason.');
     }
-    const resolver = normalizeText(payload.resolvedBy || payload.actor || options.actor, 'user');
+    const resolver = this.approvalResolver(payload, options);
     const approvalData = fromJson(approvalRow.data_json, {});
     const captureActors = new Set(normalizeList(approvalData.captureActorIds).map(value => normalizeText(value, '')).filter(Boolean));
     if (
@@ -48024,6 +48039,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         error.code = 'approval_already_resolved';
         throw error;
       }
+      const resolver = this.approvalResolver(payload, options);
       if (status === 'approved') this.validateInstallationQcApproval(before, payload, options);
       if (before.target_type === 'photo_evidence_set') this.validatePhotoEvidenceApproval(before, payload, options);
       if (status === 'approved' && before.target_type === 'supplier_invoice') {
@@ -48045,20 +48061,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         UPDATE approvals
         SET status = ?, resolved_by = ?, resolved_at = ?, reason = COALESCE(?, reason), updated_at = ?
         WHERE id = ?
-      `).run(status, payload.resolvedBy || payload.actor || options.actor || 'user', timestamp, payload.reason || payload.notes || null, timestamp, approvalId);
+      `).run(status, resolver, timestamp, payload.reason || payload.notes || null, timestamp, approvalId);
 
       if (status === 'approved') {
         this.applyApprovalTarget(before.target_type, before.target_id);
       } else if (String(before.approval_type || '').endsWith('_lifecycle_transition')) {
         this.restoreRejectedLifecycleTarget(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'procurement_order') {
         this.restoreRejectedProcurementTarget(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'photo_evidence_set') {
@@ -48076,7 +48092,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
                 approvalId: before.id,
                 status,
                 resolvedAt: timestamp,
-                resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+                resolvedBy: resolver,
                 reason: payload.reason || payload.notes || null
               }
             }),
@@ -48087,7 +48103,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       } else if (before.target_type === 'data_subject_request') {
         this.restoreRejectedDataSubjectRequest(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'change_order') {
@@ -48105,7 +48121,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
                 approvalId,
                 status,
                 resolvedAt: timestamp,
-                resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+                resolvedBy: resolver,
                 reason: payload.reason || payload.notes || null
               }
             }),
@@ -48125,7 +48141,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             approvalId,
             status,
             resolvedAt: timestamp,
-            resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+            resolvedBy: resolver,
             reason: payload.reason || payload.notes || null
           },
           externalCommitments: 0
@@ -48139,37 +48155,37 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       } else if (before.target_type === 'worker_credential') {
         this.restoreRejectedWorkerCredential(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'job_qualification_requirement_retirement') {
         this.restoreRejectedQualificationRequirementRetirement(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'worker_availability_cancellation') {
         this.restoreRejectedWorkerAvailabilityCancellation(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'material_receipt_reversal') {
         this.restoreRejectedMaterialReceiptReversal(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'expense_reversal') {
         this.restoreRejectedExpenseReversal(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'environmental_activity_reversal') {
         this.restoreRejectedEnvironmentalActivityReversal(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'document' && before.approval_type === 'drawing_revision_publication') {
@@ -48184,7 +48200,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             isCurrent: false,
             approvalDecision: {
               status, approvalId, resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48199,7 +48215,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             ...fromJson(row.data_json, {}),
             approvalDecision: {
               status, approvalId, resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48214,7 +48230,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             ...fromJson(row.data_json, {}),
             approvalDecision: {
               status, approvalId, resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48232,7 +48248,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48250,7 +48266,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48269,7 +48285,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48288,7 +48304,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48307,7 +48323,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48326,7 +48342,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48344,7 +48360,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48362,7 +48378,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48380,7 +48396,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }), timestamp, before.target_id);
@@ -48402,7 +48418,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48431,7 +48447,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48446,7 +48462,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       } else if (before.target_type === 'bid_package_selection') {
         this.restoreRejectedBidPackageSelection(before, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'payment') {
@@ -48475,7 +48491,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
                 status,
                 approvalId,
                 resolvedAt: timestamp,
-                resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+                resolvedBy: resolver,
                 reason: payload.reason || payload.notes || null
               }
             }),
@@ -48525,7 +48541,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48545,7 +48561,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             },
             externalCommitments: 0
@@ -48566,7 +48582,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             },
             externalCommitments: 0
@@ -48587,7 +48603,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             },
             externalCommitments: 0
@@ -48608,7 +48624,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48628,7 +48644,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48648,7 +48664,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48668,7 +48684,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48688,7 +48704,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48708,7 +48724,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48728,7 +48744,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48748,7 +48764,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             },
             opportunityStageMutation: false,
@@ -48770,7 +48786,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             },
             externalCommitments: 0
@@ -48791,7 +48807,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48811,7 +48827,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48831,7 +48847,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48850,7 +48866,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48870,7 +48886,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48890,7 +48906,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               status,
               approvalId,
               resolvedAt: timestamp,
-              resolvedBy: payload.resolvedBy || payload.actor || options.actor || 'user',
+              resolvedBy: resolver,
               reason: payload.reason || payload.notes || null
             }
           }),
@@ -48923,7 +48939,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           .run(status, timestamp, before.target_id);
         this.recordBidPackageCommitmentDecision(before.target_id, status, {
           timestamp,
-          actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+          actor: resolver,
           reason: payload.reason || payload.notes || null
         });
       } else if (before.target_type === 'draw_request') {
@@ -48943,7 +48959,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         entityId: approvalId,
         jobId: before.job_id || null,
         action: `resolve_${status}`,
-        actor: payload.resolvedBy || payload.actor || options.actor || 'user',
+        actor: resolver,
         before: this.mapApproval(before),
         after: this.mapApproval(after)
       });

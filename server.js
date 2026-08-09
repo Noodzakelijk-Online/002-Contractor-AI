@@ -1214,16 +1214,12 @@ function resolveOperatorRole(req) {
   return verifyOperatorSession(requestCookie(req, operatorSessionCookieName));
 }
 
-function actorFromRequest(req, fallback = 'Contractor.AI') {
-  if (!req.operator?.authenticated) return fallback;
+function trustedRequestActor(req) {
+  if (isClientPortalApiPath(req.path)) return 'client_portal';
+  if (!req.operator?.authenticated) return 'local:owner';
   const role = req.operator.role;
   const id = req.operator.id;
   return id && id !== role ? `role:${role}:${id}` : `role:${role}`;
-}
-
-function trustedRequestActor(req) {
-  if (isClientPortalApiPath(req.path)) return 'client_portal';
-  return actorFromRequest(req, 'local:owner');
 }
 
 function bindTrustedRequestActor(req) {
@@ -2192,7 +2188,7 @@ app.post('/api/operations/operators', (req, res) => {
       ...req.body,
       tokenHash: managedOperatorTokenHash(accessKey),
       tokenFingerprint: operatorTokenFingerprint(accessKey)
-    }, { actor: actorFromRequest(req, 'local_owner') });
+    }, { actor: trustedRequestActor(req) });
     return {
       success: true,
       account,
@@ -2217,7 +2213,7 @@ app.post('/api/operations/operators/:operatorId/rotate', (req, res) => {
     const result = operatingLedger.rotateManagedOperatorAccess(req.params.operatorId, {
       tokenHash: managedOperatorTokenHash(accessKey),
       tokenFingerprint: operatorTokenFingerprint(accessKey)
-    }, { actor: actorFromRequest(req, 'local_owner') });
+    }, { actor: trustedRequestActor(req) });
     return {
       success: true,
       ...result,
@@ -2239,7 +2235,7 @@ app.post('/api/operations/operators/:operatorId/deactivate', (req, res) => {
       throw error;
     }
     const result = operatingLedger.deactivateManagedOperatorAccount(req.params.operatorId, {
-      actor: actorFromRequest(req, 'local_owner')
+      actor: trustedRequestActor(req)
     });
     return { success: true, ...result, register: operatorAccessRegister() };
   });
@@ -2254,7 +2250,7 @@ app.post('/api/operations/privacy/requests', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    request: operatingLedger.createDataSubjectRequest(req.body || {}, { actor: actorFromRequest(req, 'privacy_operator') })
+    request: operatingLedger.createDataSubjectRequest(req.body || {}, { actor: trustedRequestActor(req) })
   }), 201);
 });
 
@@ -2262,7 +2258,7 @@ app.post('/api/operations/privacy/requests/:requestId/identity', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    request: operatingLedger.verifyDataSubjectRequestIdentity(req.params.requestId, req.body || {}, { actor: actorFromRequest(req, 'privacy_operator') })
+    request: operatingLedger.verifyDataSubjectRequestIdentity(req.params.requestId, req.body || {}, { actor: trustedRequestActor(req) })
   }));
 });
 
@@ -2270,7 +2266,7 @@ app.post('/api/operations/privacy/requests/:requestId/extend', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    request: operatingLedger.extendDataSubjectRequestDeadline(req.params.requestId, req.body || {}, { actor: actorFromRequest(req, 'privacy_operator') })
+    request: operatingLedger.extendDataSubjectRequestDeadline(req.params.requestId, req.body || {}, { actor: trustedRequestActor(req) })
   }));
 });
 
@@ -2278,7 +2274,7 @@ app.post('/api/operations/privacy/requests/:requestId/assessment', (req, res) =>
   res.setHeader('Cache-Control', 'no-store');
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.assessDataSubjectRequest(req.params.requestId, req.body || {}, { actor: actorFromRequest(req, 'privacy_owner') })
+    ...operatingLedger.assessDataSubjectRequest(req.params.requestId, req.body || {}, { actor: trustedRequestActor(req) })
   }), 201);
 });
 
@@ -2301,7 +2297,7 @@ app.get('/api/operations/privacy/requests/:requestId/export', (req, res) => {
       entityType: 'data_subject_request',
       entityId: exported.request.id,
       action: 'download_data_subject_export',
-      actor: actorFromRequest(req, 'privacy_owner'),
+      actor: trustedRequestActor(req),
       after: {
         format: exported.payload.format,
         sourceHash: exported.payload.sourceHash,
@@ -2736,7 +2732,7 @@ app.get('/api/ledger/opportunity-evidence/:id/content', async (req, res) => {
       entityType: 'opportunity_evidence',
       entityId: retained.id,
       action: 'download_opportunity_evidence',
-      actor: actorFromRequest(req, 'authenticated_operator'),
+      actor: trustedRequestActor(req),
       after: { opportunityId: retained.opportunityId, storageRef: retained.storageRef, filename: retained.filename },
       metadata: { contentHash: retained.contentHash, private: true, externalCommitments: 0 }
     });
@@ -2761,7 +2757,7 @@ app.get('/api/ledger/opportunity-evidence/:id/content', async (req, res) => {
 app.get('/api/ledger/documents/:id/issue-package', (req, res) => {
   try {
     const issuePackage = operatingLedger.getIssuePackage(req.params.id, {
-      actor: actorFromRequest(req, 'authenticated_operator')
+      actor: trustedRequestActor(req)
     });
     res.setHeader('Content-Type', issuePackage.mimeType || 'application/octet-stream');
     res.setHeader('Content-Length', String(Buffer.byteLength(issuePackage.content, 'utf8')));
@@ -2864,7 +2860,7 @@ app.post('/api/ledger/opportunities', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     opportunity: operatingLedger.createOpportunity(req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     }),
     forecast: operatingLedger.opportunityForecast()
   }), 201);
@@ -2884,7 +2880,7 @@ app.post('/api/ledger/market-fit/profiles', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestMarketFitProfile(req.body || {}, {
-      actor: actorFromRequest(req, 'market_fit_policy')
+      actor: trustedRequestActor(req)
     }),
     marketFit: operatingLedger.marketFitRegister()
   }), 201);
@@ -2902,7 +2898,7 @@ app.post('/api/ledger/opportunities/:id/market-fit-assessments', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.retainOpportunityFitAssessment(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'market_fit_assessment')
+      actor: trustedRequestActor(req)
     }),
     evaluation: operatingLedger.assessOpportunityMarketFit(req.params.id)
   }), 201);
@@ -2922,7 +2918,7 @@ app.post('/api/ledger/bid-decisions/policies', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestBidDecisionPolicy(req.body || {}, {
-      actor: actorFromRequest(req, 'bid_decision_policy')
+      actor: trustedRequestActor(req)
     }),
     bidDecisions: operatingLedger.bidDecisionRegister()
   }), 201);
@@ -2942,7 +2938,7 @@ app.post('/api/ledger/estimate-rates/policies', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestEstimateRatePolicy(req.body || {}, {
-      actor: actorFromRequest(req, 'estimate_rate_policy')
+      actor: trustedRequestActor(req)
     }),
     estimateRates: operatingLedger.estimateRateRegister()
   }), 201);
@@ -2959,7 +2955,7 @@ app.post('/api/ledger/opportunities/:id/bid-decisions', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestOpportunityBidDecision(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'bid_decision')
+      actor: trustedRequestActor(req)
     }),
     bidDecision: operatingLedger.bidDecisionForOpportunity(req.params.id)
   }), 201);
@@ -2984,7 +2980,7 @@ app.post('/api/ledger/opportunities/:id/site-surveys', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestOpportunitySiteSurvey(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'site_survey_plan')
+      actor: trustedRequestActor(req)
     }),
     siteSurvey: operatingLedger.siteSurveyForOpportunity(req.params.id)
   }), 201);
@@ -2994,7 +2990,7 @@ app.post('/api/ledger/opportunities/:id/site-surveys/:surveyId/submissions', (re
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.submitOpportunitySiteSurvey(req.params.id, req.params.surveyId, req.body || {}, {
-      actor: actorFromRequest(req, 'site_survey_completion')
+      actor: trustedRequestActor(req)
     }),
     siteSurvey: operatingLedger.siteSurveyForOpportunity(req.params.id)
   }), 201);
@@ -3011,7 +3007,7 @@ app.patch('/api/ledger/opportunities/:id', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     opportunity: operatingLedger.updateOpportunity(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     }),
     forecast: operatingLedger.opportunityForecast()
   }));
@@ -3021,7 +3017,7 @@ app.post('/api/ledger/opportunities/:id/activities', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createOpportunityActivity(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     }),
     opportunity: operatingLedger.getOpportunity(req.params.id)
   }), 201);
@@ -3031,7 +3027,7 @@ app.patch('/api/ledger/opportunities/:id/activities/:activityId', (req, res) => 
   return handleLedgerRequest(req, res, () => ({
     success: true,
     activity: operatingLedger.updateOpportunityActivity(req.params.id, req.params.activityId, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     }),
     opportunity: operatingLedger.getOpportunity(req.params.id)
   }));
@@ -3041,7 +3037,7 @@ app.post('/api/ledger/opportunities/:id/convert', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.convertOpportunityToJob(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     }),
     forecast: operatingLedger.opportunityForecast()
   }), 201);
@@ -3068,7 +3064,7 @@ app.post('/api/ledger/bid-packages', (req, res) => {
       bidPackage: operatingLedger.createBidPackage(
         payload.opportunityId || payload.opportunity_id,
         payload,
-        { actor: actorFromRequest(req, 'pipeline') }
+        { actor: trustedRequestActor(req) }
       )
     };
   }, 201);
@@ -3085,7 +3081,7 @@ app.post('/api/ledger/bid-packages/:id/participants', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.addBidPackageParticipants(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     })
   }), 201);
 });
@@ -3094,7 +3090,7 @@ app.put('/api/ledger/bid-packages/:id/participants/:participantId/return', (req,
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.recordBidReturn(req.params.id, req.params.participantId, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     })
   }));
 });
@@ -3106,7 +3102,7 @@ app.post('/api/ledger/bid-packages/:id/selection', (req, res) => {
       req.params.id,
       req.body?.participantId || req.body?.participant_id,
       req.body || {},
-      { actor: actorFromRequest(req, 'pipeline') }
+      { actor: trustedRequestActor(req) }
     )
   }), 201);
 });
@@ -3114,7 +3110,7 @@ app.post('/api/ledger/bid-packages/:id/selection', (req, res) => {
 app.post('/api/ledger/bid-packages/:id/commitment', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const commitment = operatingLedger.createBidPackageCommitment(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'pipeline')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -3304,7 +3300,7 @@ app.post('/api/ledger/jobs/:id/takeoffs', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     takeoff: operatingLedger.createTakeoff(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
@@ -3321,7 +3317,7 @@ app.put('/api/ledger/jobs/:id/takeoffs/:takeoffId', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     takeoff: operatingLedger.updateTakeoff(req.params.id, req.params.takeoffId, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }));
@@ -3331,7 +3327,7 @@ app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.addTakeoffItem(req.params.id, req.params.takeoffId, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
@@ -3341,7 +3337,7 @@ app.put('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId', (req, res) => 
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.updateTakeoffItem(req.params.id, req.params.takeoffId, req.params.itemId, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }));
@@ -3351,7 +3347,7 @@ app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/rate-build-up',
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.applyTakeoffUnitRate(req.params.id, req.params.takeoffId, req.params.itemId, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }));
@@ -3361,7 +3357,7 @@ app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/items/:itemId/remove', (req, 
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.removeTakeoffItem(req.params.id, req.params.takeoffId, req.params.itemId, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }));
@@ -3371,7 +3367,7 @@ app.post('/api/ledger/jobs/:id/takeoffs/:takeoffId/convert', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.convertTakeoffToQuote(req.params.id, req.params.takeoffId, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     job: operatingLedger.getJobDetail(req.params.id)
   }), 201);
@@ -3388,7 +3384,7 @@ app.post('/api/ledger/jobs/:id/commercial-scope/revisions', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestCommercialScopeRevision(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     commercialScope: operatingLedger.commercialScopeForJob(req.params.id),
     job: operatingLedger.getJobDetail(req.params.id)
@@ -3406,7 +3402,7 @@ app.post('/api/ledger/jobs/:id/risk-register/revisions', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestRiskRegisterRevision(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     riskRegister: operatingLedger.riskRegisterForJob(req.params.id),
     job: operatingLedger.getJobDetail(req.params.id)
@@ -3424,7 +3420,7 @@ app.post('/api/ledger/jobs/:id/pricing-decisions', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.retainPricingBasisDecision(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'commercial')
+      actor: trustedRequestActor(req)
     }),
     pricingBasis: operatingLedger.pricingBasisForJob(req.params.id),
     job: operatingLedger.getJobDetail(req.params.id)
@@ -3862,7 +3858,7 @@ app.post('/api/ledger/jobs/:id/lmra', (req, res) => {
     const result = operatingLedger.createLmraAssessment(
       req.params.id,
       lmraPayloadForOperator(req, req.body || {}),
-      { actor: actorFromRequest(req, 'field_lmra_assessment') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -4475,7 +4471,7 @@ app.get('/api/ledger/timesheet-exports/:id/content', (req, res) => {
       entityType: 'timesheet_export',
       entityId: result.export.id,
       action: 'download_timesheet_export',
-      actor: actorFromRequest(req, 'authenticated_operator'),
+      actor: trustedRequestActor(req),
       after: { csvChecksum: result.export.csvChecksum, periodStart: result.export.periodStart, payrollExecuted: false }
     });
     const filename = `contractor-ai-timesheets-${result.export.periodStart}.csv`;
@@ -5201,7 +5197,7 @@ app.post('/api/ledger/jobs/:id/document-transmittals', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.createDocumentTransmittal(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -5215,7 +5211,7 @@ app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/issue', (req
       req.params.id,
       req.params.transmittalId,
       req.body || {},
-      { actor: actorFromRequest(req, 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5232,7 +5228,7 @@ app.post('/api/ledger/jobs/:id/document-transmittals/:transmittalId/receipts/:re
       req.params.transmittalId,
       req.params.receiptId,
       req.body || {},
-      { actor: actorFromRequest(req, 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -5243,7 +5239,7 @@ app.post('/api/ledger/jobs/:id/project-meetings', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     meeting: operatingLedger.createProjectMeeting(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5255,7 +5251,7 @@ app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/submit', (req, res) =
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.submitProjectMeetingMinutes(req.params.id, req.params.meetingId, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5270,7 +5266,7 @@ app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/issue', (req, res) =>
       req.params.id,
       req.params.meetingId,
       req.body || {},
-      { actor: actorFromRequest(req, 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5287,7 +5283,7 @@ app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/actions/:actionId/com
       req.params.meetingId,
       req.params.actionId,
       req.body || {},
-      { actor: actorFromRequest(req, 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req)
@@ -5301,7 +5297,7 @@ app.post('/api/ledger/jobs/:id/project-meetings/:meetingId/follow-up', (req, res
       req.params.id,
       req.params.meetingId,
       req.body || {},
-      { actor: actorFromRequest(req, 'dashboard') }
+      { actor: trustedRequestActor(req) }
     ),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5360,7 +5356,7 @@ app.post('/api/ledger/jobs/:id/daily-cycles', (req, res) => {
       };
     }
     const result = operatingLedger.createDailyStartHuddle(req.params.id, payload, {
-      actor: actorFromRequest(req, 'field_dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5376,7 +5372,7 @@ app.post('/api/ledger/jobs/:id/daily-cycles/:cycleId/end-of-day', (req, res) => 
   return handleLedgerRequest(req, res, () => {
     const payload = timeLogPayloadForOperator(req, req.body || {});
     const result = operatingLedger.closeDailyOperatingCycle(req.params.id, req.params.cycleId, payload, {
-      actor: actorFromRequest(req, 'field_dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5446,7 +5442,7 @@ app.post('/api/ledger/jobs/:id/expense-receipts', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = expenseReceiptPayloadForOperator(req, req.body || {});
     const result = operatingLedger.createExpenseReceipt(req.params.id, payload, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5465,7 +5461,7 @@ app.post('/api/ledger/jobs/:id/expense-receipts/:expenseId/reversal', (req, res)
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestExpenseReversal(req.params.id, req.params.expenseId, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5532,7 +5528,7 @@ app.post('/api/ledger/jobs/:id/environmental-activities', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const payload = environmentalActivityPayloadForOperator(req, req.body || {});
     const result = operatingLedger.createEnvironmentalActivity(req.params.id, payload, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5551,7 +5547,7 @@ app.post('/api/ledger/jobs/:id/environmental-activities/:activityId/reversal', (
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestEnvironmentalActivityReversal(req.params.id, req.params.activityId, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5564,7 +5560,7 @@ app.post('/api/ledger/jobs/:id/environmental-reports', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.requestEnvironmentalReport(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     }),
     job: jobForOperator(req, req.params.id),
     dashboard: dashboardForOperator(req),
@@ -5588,7 +5584,7 @@ app.get('/api/ledger/environmental-reports/:reportId/content', (req, res) => {
       entityId: result.report.id,
       jobId: result.report.jobId,
       action: 'download_environmental_report',
-      actor: actorFromRequest(req, 'authenticated_operator'),
+      actor: trustedRequestActor(req),
       after: {
         periodStart: result.report.periodStart,
         periodEnd: result.report.periodEnd,
@@ -5620,7 +5616,7 @@ app.get('/api/ledger/jobs/:id/energy-performance', (req, res) => {
 app.post('/api/ledger/jobs/:id/energy-performance', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.createEnergyPerformanceRecord(req.params.id, req.body || {}, {
-      actor: actorFromRequest(req, 'dashboard')
+      actor: trustedRequestActor(req)
     });
     return {
       success: true,
@@ -5639,7 +5635,7 @@ app.post('/api/ledger/jobs/:id/energy-performance', (req, res) => {
 app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    expense: operatingLedger.addExpense(req.params.id, req.body || {}, { actor: actorFromRequest(req, 'dashboard') }),
+    expense: operatingLedger.addExpense(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5648,7 +5644,7 @@ app.post('/api/ledger/jobs/:id/expenses', (req, res) => {
 app.post('/api/ledger/jobs/:id/finance-costs', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    costs: operatingLedger.recordJobCosts(req.params.id, req.body || {}, { actor: actorFromRequest(req, 'dashboard') }),
+    costs: operatingLedger.recordJobCosts(req.params.id, req.body || {}, { actor: trustedRequestActor(req) }),
     job: operatingLedger.getJobDetail(req.params.id),
     dashboard: operatingLedger.dashboardSummary()
   }), 201);
@@ -5831,7 +5827,7 @@ app.post('/api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package', 
       req.params.id,
       req.params.purchaseOrderId,
       req.body || {},
-      { actor: actorFromRequest(req, 'finance') }
+      { actor: trustedRequestActor(req) }
     );
     return {
       success: true,
@@ -6011,9 +6007,7 @@ app.get('/api/ledger/approvals', (req, res) => {
 app.post('/api/ledger/approvals/:id/resolve', (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const actor = trustedRequestActor(req);
-    const payload = req.operator?.authenticated
-      ? { ...(req.body || {}), actor, resolvedBy: actor }
-      : (req.body || {});
+    const payload = { ...(req.body || {}), actor, resolvedBy: actor };
     const approval = operatingLedger.resolveApproval(req.params.id, payload, {
       actor,
       enforceSeparation: req.operator?.authenticated === true
@@ -7025,7 +7019,7 @@ app.post('/api/ledger/upload', async (req, res) => {
             'Authenticated governed photo evidence must be captured by the retained assigned field worker.'
           );
         }
-        if (!resolveUploadLedgerJobDetail(payload, actorFromRequest(req, 'upload_api'))?.id) {
+        if (!resolveUploadLedgerJobDetail(payload, trustedRequestActor(req))?.id) {
           throw new UploadRequestError(404, 'ledger_job_not_found', 'The requested operating-ledger job was not found.');
         }
       }
@@ -7058,7 +7052,7 @@ app.post('/api/ledger/upload', async (req, res) => {
         sha256: storedFile.sha256 || null
       } : null
     };
-    const actor = actorFromRequest(req, 'upload_api');
+    const actor = trustedRequestActor(req);
     const responseBody = operatingLedger.transaction(() => {
       const opportunityId = payload.opportunityId || payload.opportunity_id || null;
       if (opportunityId) {
@@ -8029,7 +8023,7 @@ app.get('/api/operations/backups/:backupId/download', asyncHandler(async (req, r
     log('info', 'backup_package_download', {
       requestId: req.requestId,
       backupId: manifest.backupId,
-      actor: actorFromRequest(req, 'local_owner'),
+      actor: trustedRequestActor(req),
       files: verification.checkedFiles
     });
     await pipeline(
@@ -8823,7 +8817,7 @@ app.post('/api/operations/control/suspend', (req, res) => {
     success: true,
     ...operatingLedger.setAutomationControl(
       { status: 'suspended', reason: req.body?.reason },
-      { actor: actorFromRequest(req, 'owner_safety_stop') }
+      { actor: trustedRequestActor(req) }
     ),
     scheduler: autonomousSchedulerStatus()
   }));
@@ -8837,7 +8831,7 @@ app.post('/api/operations/control/resume', (req, res) => {
     success: true,
     ...operatingLedger.setAutomationControl(
       { status: 'active', reason: req.body?.reason },
-      { actor: actorFromRequest(req, 'owner_safety_resume') }
+      { actor: trustedRequestActor(req) }
     ),
     scheduler: autonomousSchedulerStatus()
   }));
@@ -8934,7 +8928,7 @@ app.post('/api/operations/reset-qa', (req, res) => {
     return sendError(req, res, 400, 'qa_reset_reason_invalid', 'Record an operational reason between 8 and 500 characters.');
   }
   try {
-    const actor = actorFromRequest(req, 'operations_reset');
+    const actor = trustedRequestActor(req);
     const initialPlan = assertCurrentQaResetPlan(expectedPlanHash);
     if (initialPlan.totalRecords === 0) {
       return sendError(req, res, 409, 'qa_reset_empty', 'No eligible QA or demo records are currently active.');

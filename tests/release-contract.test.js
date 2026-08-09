@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  findApprovalPrincipalPriorityViolations,
   findRequestDerivedActorExpressions,
   verifyReleaseContract,
   walkFiles
@@ -38,5 +39,18 @@ test('release actor guard rejects request-derived identities and accepts the tru
   assert.deepEqual(findRequestDerivedActorExpressions(`
     operation({ actor: trustedRequestActor(req) });
     const actor = trustedRequestActor(req);
+  `), []);
+});
+
+test('release approval-principal guard rejects submitted-first requester and resolver expressions', () => {
+  const unsafe = findApprovalPrincipalPriorityViolations(`
+    const requester = payload.requestedBy || payload.requested_by || options.actor || 'Contractor.AI';
+    const resolver = payload.resolvedBy || payload.actor || options.actor || 'user';
+  `);
+  assert.equal(unsafe.length, 2);
+  assert.deepEqual(unsafe.map(finding => finding.line), [2, 3]);
+  assert.deepEqual(findApprovalPrincipalPriorityViolations(`
+    const requester = options.actor || payload.actor || payload.requestedBy || payload.requested_by;
+    const resolver = options.actor || payload.actor || payload.resolvedBy || payload.resolved_by;
   `), []);
 });

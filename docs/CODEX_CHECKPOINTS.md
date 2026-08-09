@@ -3,6 +3,20 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-16 Canonical approval principals
+
+- Boundary: approval requester and resolver identity prefer the trusted route or
+  internal caller principal before any submitted compatibility field
+- Propagation: the canonical resolver is reused by retained approval decisions,
+  downstream release metadata, chained audit events, and separation-of-duty checks
+- Routes: 65 remaining workflow-label actor fallbacks now use the same
+  `trustedRequestActor(req)` boundary as every other mutation
+- Prevention: the release contract rejects legacy route fallbacks, submitted-first
+  approval principal expressions, and approval routes that do not overwrite identity
+- Verification: 530 Node tests and 89 Chromium workflows pass with zero failures;
+  lint, zero-vulnerability audit, release/build/bundle, maintained HAI parser,
+  smoke and 63,500-row performance, container, and Node 22 Windows gates pass
+
 ## CP-15 Route-level audit principals
 
 - Coverage: all 164 explicit mutation actor sites in the HTTP layer consume

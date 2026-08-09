@@ -40,6 +40,10 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Changed
 
+- Approval requests and resolutions now retain one canonical server-selected
+  principal across decision records, downstream releases, audit events, and
+  independent-review checks. Local callers cannot substitute `requestedBy`,
+  `resolvedBy`, `actor`, or a workflow-label fallback for `local:owner`.
 - Governed work-permit creation, readiness, and approval expiry checks now use the
   ledger clock consistently. Expired permits still fail closed, while deterministic
   lifecycle tests no longer depend on sub-second wall-clock timing.

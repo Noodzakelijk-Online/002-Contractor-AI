@@ -674,7 +674,7 @@ test('QA reset requires explicit confirmation and preserves non-QA work', async 
   const maintenanceAudit = await request(baseUrl, '/api/ledger/audit?action=archive_qa_records&limit=10');
   assert.equal(maintenanceAudit.response.status, 200);
   assert.equal(maintenanceAudit.body.events.length, 1);
-  assert.equal(maintenanceAudit.body.events[0].actor, 'operations_reset');
+  assert.equal(maintenanceAudit.body.events[0].actor, 'local:owner');
   assert.equal(maintenanceAudit.body.events[0].metadata.reason, resetReason);
   assert.equal(maintenanceAudit.body.events[0].after.planHash, currentPreview.body.planHash);
 

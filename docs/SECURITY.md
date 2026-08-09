@@ -39,7 +39,11 @@ Rotate the role key to invalidate its sessions after suspected disclosure.
   object body to `local:owner`, the authenticated role principal, or the scoped
   `client_portal` identity and keeps that field out of retained business payloads.
   Mutation routes use that trusted request principal directly, including handlers
-  that clone or reshape input; the release verifier rejects body-derived actors.
+  that clone or reshape input; workflow-label fallbacks are not identities. Approval
+  requester and resolver fields use the same principal before they enter retained
+  decisions, downstream release records, chained audit history, or separation-of-duty
+  checks. The release verifier rejects body-derived actors, legacy route fallbacks,
+  and submitted-first approval principal expressions.
 - SHA-256 chained audit events are committed with the underlying mutation.
 - Exact idempotency and lease ownership prevent changed retries and stale workers.
 - External commitments require a separate approval and an allowlisted verified

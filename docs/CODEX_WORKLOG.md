@@ -1,5 +1,19 @@
 # Codex Worklog
 
+- Canonicalized approval requester and resolver provenance. The trusted caller now
+  wins before identity is persisted or reused by downstream releases, chained audit
+  history, or independent-review checks; direct internal compatibility fallbacks
+  remain available only when no trusted caller principal is supplied.
+- Removed 65 residual route workflow-label fallbacks and bound those mutations to
+  `local:owner`, the authenticated role principal, or `client_portal`. The release
+  verifier now rejects both fallback routes and submitted-first approval principals.
+- Added direct-ledger and local HTTP regressions proving submitted requester,
+  resolver, and actor labels cannot enter the approval or audit record. The focused
+  source, authentication, installation-QC, and photo-evidence set passes.
+- The exact-source release gate passes with 530 Node tests, 89 Chromium workflows
+  in 23 batches, zero dependency vulnerabilities, production build and bundle,
+  native and maintained-parser HAI checks, smoke and 63,500-row performance,
+  hardened container, and Node 22.23.2 Windows standalone verification.
 - Normalized all 164 explicit HTTP mutation actor sites to the canonical trusted
   request principal. This closes the residual consistency gap in handlers that
   clone or reshape a parsed body before invoking the ledger.

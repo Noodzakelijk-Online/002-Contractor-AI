@@ -137,6 +137,15 @@ function findRequestDerivedActorExpressions(source = '') {
   ));
 }
 
+function findApprovalPrincipalPriorityViolations(source = '') {
+  const pattern = /\bpayload\.(?:requestedBy|requested_by|resolvedBy|resolved_by)\b.*\boptions\.actor\b/;
+  return String(source).split(/\r?\n/).flatMap((line, index) => (
+    pattern.test(line)
+      ? [{ line: index + 1, source: line.trim() }]
+      : []
+  ));
+}
+
 function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const failures = [];
   const unreadableDirectories = [];
@@ -188,6 +197,16 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   for (const finding of findRequestDerivedActorExpressions(serverSource)) {
     failures.push(`Server route derives its audit actor from request data at server.js:${finding.line}: ${finding.source}`);
+  }
+  if (serverSource.includes('actorFromRequest')) {
+    failures.push('Server routes must use trustedRequestActor(req) without workflow-label identity fallbacks.');
+  }
+  if (!serverSource.includes('const payload = { ...(req.body || {}), actor, resolvedBy: actor };')) {
+    failures.push('Approval resolution route must overwrite submitted actor and resolver identities with the trusted request principal.');
+  }
+  const approvalLedgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
+  for (const finding of findApprovalPrincipalPriorityViolations(approvalLedgerSource)) {
+    failures.push(`Approval principal trusts submitted identity before the server-selected actor at operating-ledger.js:${finding.line}: ${finding.source}`);
   }
   for (const liveFacade of ["app.get('/api/dashboard'", "app.post('/api/upload'"]) {
     if (serverSource.includes(liveFacade)) failures.push(`Live non-ledger facade is still present: ${liveFacade}`);
@@ -695,4 +714,9 @@ if (require.main === module) {
   }
 }
 
-module.exports = { findRequestDerivedActorExpressions, verifyReleaseContract, walkFiles };
+module.exports = {
+  findApprovalPrincipalPriorityViolations,
+  findRequestDerivedActorExpressions,
+  verifyReleaseContract,
+  walkFiles
+};

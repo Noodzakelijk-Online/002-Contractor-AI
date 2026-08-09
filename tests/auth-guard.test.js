@@ -101,6 +101,51 @@ test('local mode assigns a trusted audit actor and does not retain a submitted a
     )));
     assert.equal(detail.body.job.audit.some(event => event.actor === 'role:owner:spoofed'), false);
 
+    const scopeRequest = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}/commercial-scope/revisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        entryKey: 'local-actor-commercial-scope-0001',
+        title: 'Local actor governed scope',
+        scopeSummary: 'Deliver the retained maintenance work.',
+        inclusions: ['Complete the retained maintenance scope.'],
+        assumptions: ['Site access remains available as recorded.'],
+        exclusions: ['Latent hazardous materials are excluded.'],
+        clientResponsibilities: ['Provide access before mobilisation.'],
+        contractorResponsibilities: ['Retain completion evidence.'],
+        allowanceMode: 'none',
+        noAllowanceReason: 'No allowances apply to the retained maintenance scope.',
+        reason: 'Prove that local approval principals cannot be supplied by a caller.',
+        actor: 'role:owner:spoofed'
+      })
+    });
+    assert.equal(scopeRequest.response.status, 201);
+    const scopeApproval = scopeRequest.body.approval;
+    assert.equal(scopeApproval.requestedBy, 'local:owner');
+
+    const scopeResolution = await request(baseUrl, `/api/ledger/approvals/${scopeApproval.id}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'approved',
+        resolvedBy: 'role:approver:spoofed',
+        actor: 'role:owner:spoofed',
+        reason: 'The retained scope and its operating assumptions were verified.'
+      })
+    });
+    assert.equal(scopeResolution.response.status, 200);
+    assert.equal(scopeResolution.body.approval.resolvedBy, 'local:owner');
+
+    const approvalDetail = await request(baseUrl, `/api/ledger/jobs/${intake.body.job.id}`);
+    assert.ok(approvalDetail.body.job.audit.some(event => (
+      event.entityId === scopeApproval.id
+      && event.action === 'resolve_approved'
+      && event.actor === 'local:owner'
+    )));
+    assert.equal(approvalDetail.body.job.audit.some(event => (
+      event.actor === 'role:approver:spoofed' || event.actor === 'role:owner:spoofed'
+    )), false);
+
     const jsonHeaders = { 'Content-Type': 'application/json' };
     const worker = await request(baseUrl, '/api/ledger/workers', {
       method: 'POST',
