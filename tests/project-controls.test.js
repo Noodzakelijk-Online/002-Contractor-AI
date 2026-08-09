@@ -128,10 +128,16 @@ test('project-control API retains approval-gated document revisions and enforces
 
   const firstReview = await request(baseUrl, `/api/ledger/jobs/${jobId}/lifecycle/document/${first.body.document.id}`, tokens.office_operator, {
     method: 'PATCH',
-    body: JSON.stringify({ status: 'approved', verificationReference: 'check:A-101-P01', notes: 'Dimensions and coordination checked.' })
+    body: JSON.stringify({
+      status: 'approved',
+      verificationReference: 'check:A-101-P01',
+      notes: 'Dimensions and coordination checked.',
+      reviewedBy: 'role:owner:spoofed-reviewer'
+    })
   });
   assert.equal(firstReview.response.status, 200);
   assert.equal(firstReview.body.record.status, 'pending_approval');
+  assert.equal(firstReview.body.record.data.reviewedBy, 'role:office_operator');
   await resolveApproval(baseUrl, firstReview.body.approval.id, 'P01 source and checker record verified.');
 
   const missingReason = await request(baseUrl, `/api/ledger/jobs/${jobId}/controlled-document-revisions`, tokens.office_operator, {

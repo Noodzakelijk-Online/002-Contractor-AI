@@ -77,7 +77,8 @@ test('field expense API enforces worker scope, exact replay, approval, and offic
     taxTreatment: 'recoverable',
     paymentMethod: 'personal_card',
     costCode: 'API-MAT-100',
-    notes: 'Fixings purchased during the assigned field shift.'
+    notes: 'Fixings purchased during the assigned field shift.',
+    submittedBy: 'submitted:spoofed-expense-operator'
   };
   const created = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/expense-receipts`, {
     token: tokens.field.token,
@@ -111,6 +112,7 @@ test('field expense API enforces worker scope, exact replay, approval, and offic
   const officeList = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/expense-receipts`);
   assert.equal(officeList.response.status, 200);
   assert.equal(officeList.body.expenses[0].integrityValid, true);
+  assert.equal(officeList.body.expenses[0].data.submittedBy, 'role:field_worker');
   assert.ok(officeList.body.expenses[0].approvalId);
 
   const approvalId = officeList.body.expenses[0].approvalId;

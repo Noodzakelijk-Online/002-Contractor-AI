@@ -146,6 +146,15 @@ function findApprovalPrincipalPriorityViolations(source = '') {
   ));
 }
 
+function findOperationalPrincipalPriorityViolations(source = '') {
+  const text = String(source);
+  const pattern = /\bpayload\.(?:createdBy|created_by|submittedBy|submitted_by|completedBy|completed_by|releasedBy|released_by|reviewedBy|reviewed_by|issuedBy|issued_by|recordedBy|recorded_by|updatedBy|updated_by)\b(?:(?!;)[\s\S]){0,500}?\b(?:options\.actor|actor)\b/g;
+  return [...text.matchAll(pattern)].map(match => ({
+    line: text.slice(0, match.index).split(/\r?\n/).length,
+    source: match[0].replace(/\s+/g, ' ').trim()
+  }));
+}
+
 function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const failures = [];
   const unreadableDirectories = [];
@@ -207,6 +216,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const approvalLedgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
   for (const finding of findApprovalPrincipalPriorityViolations(approvalLedgerSource)) {
     failures.push(`Approval principal trusts submitted identity before the server-selected actor at operating-ledger.js:${finding.line}: ${finding.source}`);
+  }
+  for (const finding of findOperationalPrincipalPriorityViolations(approvalLedgerSource)) {
+    failures.push(`Operational provenance trusts submitted identity before the server-selected actor at operating-ledger.js:${finding.line}: ${finding.source}`);
   }
   for (const liveFacade of ["app.get('/api/dashboard'", "app.post('/api/upload'"]) {
     if (serverSource.includes(liveFacade)) failures.push(`Live non-ledger facade is still present: ${liveFacade}`);
@@ -716,6 +728,7 @@ if (require.main === module) {
 
 module.exports = {
   findApprovalPrincipalPriorityViolations,
+  findOperationalPrincipalPriorityViolations,
   findRequestDerivedActorExpressions,
   verifyReleaseContract,
   walkFiles

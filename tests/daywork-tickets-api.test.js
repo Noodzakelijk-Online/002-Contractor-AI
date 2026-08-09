@@ -104,7 +104,8 @@ test('daywork API enforces field scope and separate acknowledgement and commerci
         unit: 'hour',
         costCode: 'EQ-MEP'
       }
-    ]
+    ],
+    submittedBy: 'submitted:spoofed-daywork-operator'
   };
   const created = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/daywork-tickets`, {
     token: tokens.field.token,
@@ -170,6 +171,7 @@ test('daywork API enforces field scope and separate acknowledgement and commerci
   });
   assert.equal(ownerList.response.status, 200);
   assert.equal(ownerList.body.dayworkTickets[0].integrityValid, true);
+  assert.equal(ownerList.body.dayworkTickets[0].data.submittedBy, 'role:field_worker');
   const ticketApprovalId = ownerList.body.dayworkTickets[0].approvalId;
   const approved = await request(baseUrl, `/api/ledger/approvals/${encodeURIComponent(ticketApprovalId)}/resolve`, {
     token: tokens.approver,

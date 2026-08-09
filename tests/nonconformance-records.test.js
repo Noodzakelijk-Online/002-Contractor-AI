@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -73,6 +74,17 @@ function closurePayload() {
   };
 }
 
+function sha256Json(value) {
+  const canonicalJson = input => {
+    if (Array.isArray(input)) return `[${input.map(canonicalJson).join(',')}]`;
+    if (input && typeof input === 'object') {
+      return `{${Object.keys(input).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(input[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(input ?? null);
+  };
+  return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
 test('NCR flows through replay-safe capture, corrective-action approval, and independent closure approval', t => {
   const { ledger, job, worker } = fixture(t, 'lifecycle');
   const payload = recordPayload(worker, 'lifecycle-001');
@@ -139,7 +151,12 @@ test('NCR flows through replay-safe capture, corrective-action approval, and ind
   assert.equal(closure.nonconformance.status, 'pending_closure_approval');
   assert.equal(closure.approval.targetType, 'nonconformance_closure');
   assert.equal(closure.externalCommitments, 0);
-  const closureReplay = ledger.requestNonconformanceClosure(job.id, created.nonconformance.id, retainedClosure);
+  const closureReplay = ledger.requestNonconformanceClosure(
+    job.id,
+    created.nonconformance.id,
+    retainedClosure,
+    { actor: 'office_operator' }
+  );
   assert.equal(closureReplay.replayed, true);
   assert.equal(closureReplay.approval.id, closure.approval.id);
   assert.throws(
@@ -150,14 +167,25 @@ test('NCR flows through replay-safe capture, corrective-action approval, and ind
     error => error.code === 'nonconformance_closure_pending_conflict' && error.statusCode === 409
   );
 
+  assert.equal(closure.approval.decision.preview.verifiedByPrincipal, 'office_operator');
+  assert.throws(
+    () => ledger.resolveApproval(closure.approval.id, {
+      status: 'approved',
+      resolvedBy: 'submitted:spoofed-approver',
+      reason: 'A verifier cannot approve the same closure.'
+    }, { actor: 'office_operator', enforceSeparation: true }),
+    error => error.code === 'nonconformance_independent_approval_required' && error.statusCode === 409
+  );
   ledger.resolveApproval(closure.approval.id, {
     status: 'approved',
     resolvedBy: 'quality_approver',
     reason: 'Independent verification matches the approved correction and original NCR.'
-  });
+  }, { actor: 'quality_approver', enforceSeparation: true });
   const closed = ledger.getNonconformance(created.nonconformance.id);
   assert.equal(closed.status, 'closed');
-  assert.equal(closed.closedBy, retainedClosure.verifiedBy);
+  assert.equal(closed.closedBy, 'office_operator');
+  assert.equal(closed.closure.verifiedBy, retainedClosure.verifiedBy);
+  assert.equal(closed.closure.verifiedByPrincipal, 'office_operator');
   assert.equal(closed.closureIntegrityValid, true);
   assert.equal(closed.closure.verificationResult, 'passed');
   assert.equal(ledger.getJobDetail(job.id).nonconformances[0].id, closed.id);
@@ -170,6 +198,76 @@ test('NCR flows through replay-safe capture, corrective-action approval, and ind
   assert.equal(diagnostics.counts.openNonconformances, 0);
   assert.equal(ledger.dashboardSummary().metrics.nonconformances, 1);
   assert.equal(ledger.verifyAuditIntegrity().valid, true);
+});
+
+test('pending legacy NCR closure retains replay and independent approval after upgrade', t => {
+  const { ledger, job, worker } = fixture(t, 'legacy-closure');
+  const created = ledger.createNonconformance(
+    job.id,
+    recordPayload(worker, 'legacy-closure-001'),
+    { actor: 'field_worker' }
+  );
+  const correction = ledger.requestNonconformanceCorrectiveAction(
+    job.id,
+    created.nonconformance.id,
+    correctionPayload(),
+    { actor: 'office_operator' }
+  );
+  ledger.resolveApproval(correction.approval.id, {
+    status: 'approved',
+    reason: 'Legacy fixture correction approved.'
+  }, { actor: 'quality_approver' });
+
+  const retainedClosure = closurePayload();
+  const closure = ledger.requestNonconformanceClosure(
+    job.id,
+    created.nonconformance.id,
+    retainedClosure,
+    { actor: 'office_operator' }
+  );
+  const approvalRow = ledger.db.prepare('SELECT data_json FROM approvals WHERE id = ?').get(closure.approval.id);
+  const approvalData = JSON.parse(approvalRow.data_json);
+  const legacyClosure = { ...approvalData.closure };
+  delete legacyClosure.verifiedByPrincipal;
+  const legacyRequest = {
+    verificationResult: legacyClosure.verificationResult,
+    verificationEvidence: legacyClosure.verificationEvidence,
+    evidenceDocumentId: legacyClosure.evidenceDocumentId,
+    verifiedBy: legacyClosure.verifiedBy,
+    verifiedAt: legacyClosure.verifiedAt,
+    notes: legacyClosure.notes
+  };
+  ledger.db.prepare('UPDATE approvals SET data_json = ? WHERE id = ?').run(JSON.stringify({
+    ...approvalData,
+    requestFingerprint: sha256Json(legacyRequest),
+    closureHash: sha256Json(legacyClosure),
+    closure: legacyClosure
+  }), closure.approval.id);
+
+  const replay = ledger.requestNonconformanceClosure(
+    job.id,
+    created.nonconformance.id,
+    retainedClosure,
+    { actor: 'office_operator' }
+  );
+  assert.equal(replay.replayed, true);
+  assert.throws(
+    () => ledger.resolveApproval(closure.approval.id, {
+      status: 'approved',
+      reason: 'Verifier must not approve the retained legacy closure.'
+    }, { actor: 'office_operator', enforceSeparation: true }),
+    error => error.code === 'nonconformance_independent_approval_required'
+  );
+  ledger.resolveApproval(closure.approval.id, {
+    status: 'approved',
+    reason: 'Independent approver accepted the retained legacy closure.'
+  }, { actor: 'quality_approver', enforceSeparation: true });
+  const closed = ledger.getNonconformance(created.nonconformance.id);
+  assert.equal(closed.status, 'closed');
+  assert.equal(closed.closedBy, 'office_operator');
+  assert.equal(closed.closure.verifiedBy, retainedClosure.verifiedBy);
+  assert.equal(closed.closure.verifiedByPrincipal, undefined);
+  assert.equal(closed.closureIntegrityValid, true);
 });
 
 test('rejected NCR decisions return to actionable states without losing retained decisions', t => {

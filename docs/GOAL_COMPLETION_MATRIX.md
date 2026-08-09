@@ -33,7 +33,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 016 | Background jobs, schedulers, and workers | Implemented | durable opt-in scheduler, database leases, ledger-only cycle |
 | 017 | Idempotency and duplicate action prevention | Implemented | exact replay keys, source identities, hashes and atomic constraints |
 | 018 | Rate limits, cooldowns, and provider quotas | Implemented | durable bounded API/login limits; provider action remains disabled until verified |
-| 019 | Audit logging and event history | Implemented | transaction-bound SHA-256 chain, direct trusted-principal use across all explicit mutation routes, source guard against body-derived actors, history UI, integrity/readiness checks |
+| 019 | Audit logging and event history | Implemented | transaction-bound SHA-256 chain, direct trusted-principal use across all explicit mutation routes and authoritative operational provenance, source guards against body-derived actors and submitted-first `...By` principals, source-hashed NCR verifier principal, history UI, integrity/readiness checks |
 | 020 | User-facing dashboard and next-action design | Implemented | Today exception/command queue, approvals, safety and readiness indicators |
 | 021 | Forms, validation, and autosave behavior | Partial | validation/submission states and field offline queue; universal draft autosave absent |
 | 022 | Search, filters, sorting, and pagination | Partial | major queues are filterable/bounded; behavior is not uniform across every list |

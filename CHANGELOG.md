@@ -83,6 +83,14 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Security
 
+- Governed progress, field-submission, assignment-release, meeting-action, and
+  document/instruction-review records now retain the trusted operator before any
+  submitted creator, submitter, completer, releaser, or reviewer label. NCR closure
+  also retains a source-hashed authenticated verifier principal and blocks that
+  operator from approving the same closure. Pending closures from the prior format
+  retain their original hash while replay and independent approval use the trusted
+  requester principal. The release contract rejects future submitted-first
+  operational provenance expressions.
 - Local and hosted request bodies can no longer choose their retained audit actor.
   The server assigns `local:owner`, the authenticated role principal, or the
   token-scoped `client_portal` identity; every explicit mutation route consumes

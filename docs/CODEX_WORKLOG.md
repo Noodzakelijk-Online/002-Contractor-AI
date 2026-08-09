@@ -1,5 +1,23 @@
 # Codex Worklog
 
+- Audited every retained request-supplied `...By` identity after approval-principal
+  hardening. Internal creator, submitter, completer, releaser, and reviewer
+  provenance now always prefers the trusted caller; external recipient, custodian,
+  technician, inspector, and named-worker evidence remains distinct from the
+  immutable audit actor.
+- NCR closure now retains the named verifier and authenticated verifier principal
+  together, hashes that principal into the pending decision, records it as the
+  closing principal, and prevents that operator from approving the same closure.
+- Pending closures from the preceding schema retain their original decision hash;
+  replay is limited to the retained requester principal and an independent
+  authenticated resolver can complete the upgraded closure.
+- Extended the release source guard and domain/API regressions across progress,
+  daywork, expenses, environmental reporting, assignments, meetings, controlled
+  documents, worker instructions, and NCR closure.
+- Current gates pass: 532 Node tests with 496 passes and 36 service skips, 89
+  Chromium workflows in 23 batches, zero dependency vulnerabilities, lint,
+  release/build/bundle, maintained HAI parser, smoke and production performance,
+  hardened container, and rebuilt Node 22.23.2 Windows standalone verification.
 - Canonicalized approval requester and resolver provenance. The trusted caller now
   wins before identity is persisted or reused by downstream releases, chained audit
   history, or independent-review checks; direct internal compatibility fallbacks

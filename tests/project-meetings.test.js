@@ -117,6 +117,7 @@ test('project meeting minutes require approval before tasks and issue evidence a
   }, { actor: 'office:test' });
   assert.equal(completed.action.status, 'completed');
   assert.equal(completed.action.completionEvidence, 'supplier-confirmation:delivery-2026-07-16');
+  assert.equal(completed.action.data.completedBy, 'office:test');
   assert.equal(ledger.getJobDetail(job.id).tasks.find(task => task.id === approved.actions[0].linkedTaskId).status, 'completed');
 
   const issued = ledger.recordProjectMeetingIssue(job.id, meeting.id, {

@@ -549,10 +549,12 @@ test('replacement crew cannot inherit released worker instructions, orientation,
     assert.equal(resolution.response.status, 200);
     return transition;
   };
-  await approveTransition('worker_instruction', instructionA.id, {
+  const instructionTransition = await approveTransition('worker_instruction', instructionA.id, {
     status: 'published',
-    notes: 'Crew A scope, route, tools, PPE, and stop-work controls were reviewed for approval.'
+    notes: 'Crew A scope, route, tools, PPE, and stop-work controls were reviewed for approval.',
+    reviewedBy: 'submitted:spoofed-instruction-reviewer'
   });
+  assert.notEqual(instructionTransition.body.record.data.reviewedBy, 'submitted:spoofed-instruction-reviewer');
   await approveTransition('orientation', orientationA.id, {
     status: 'completed',
     verificationReference: 'CREW-A-ORIENTATION-001',

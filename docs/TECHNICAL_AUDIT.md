@@ -107,6 +107,12 @@ external-provider engines.
     600 ms sleep, which failed under full-suite load before approval could finish.
     Permit creation, readiness, and approval expiry now use the ledger's injectable
     clock consistently, preserving strict expiry rejection with deterministic tests.
+16. Several governed records still preferred submitted `createdBy`, `submittedBy`,
+    `completedBy`, `releasedBy`, or `reviewedBy` labels over the trusted caller.
+    Those records now retain the canonical operator principal, the release scanner
+    rejects submitted-first operational provenance, and NCR closure separately
+    retains its named verifier plus a source-hashed authenticated verifier principal
+    that cannot approve its own closure.
 
 ### Residual technical debt
 

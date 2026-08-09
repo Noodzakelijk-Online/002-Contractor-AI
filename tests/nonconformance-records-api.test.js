@@ -172,6 +172,7 @@ test('NCR API enforces field identity and office-only correction and closure gat
   assert.equal(closure.response.status, 201, JSON.stringify(closure.body));
   assert.equal(closure.body.nonconformance.status, 'pending_closure_approval');
   assert.equal(closure.body.approval.targetType, 'nonconformance_closure');
+  assert.equal(closure.body.approval.decision.preview.verifiedByPrincipal, 'role:office_operator');
 
   const closureDecision = await request(baseUrl, `/api/ledger/approvals/${closure.body.approval.id}/resolve`, {
     token: tokens.approver,
@@ -186,6 +187,8 @@ test('NCR API enforces field identity and office-only correction and closure gat
   assert.equal(detail.body.job.nonconformances[0].integrityValid, true);
   assert.equal(detail.body.job.nonconformances[0].correctionIntegrityValid, true);
   assert.equal(detail.body.job.nonconformances[0].closureIntegrityValid, true);
+  assert.equal(detail.body.job.nonconformances[0].closedBy, 'role:office_operator');
+  assert.equal(detail.body.job.nonconformances[0].closure.verifiedBy, closurePayload.verifiedBy);
 
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);

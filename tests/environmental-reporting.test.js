@@ -54,13 +54,17 @@ function activityPayload(worker, suffix = '001') {
 test('environmental activity is replay-safe, source-verified, calculated, and approval-gated', t => {
   const { ledger, job, worker } = fixture(t, 'governed');
   const payload = activityPayload(worker, 'GOV-001');
-  const created = ledger.createEnvironmentalActivity(job.id, payload, { actor: 'field_worker' });
+  const created = ledger.createEnvironmentalActivity(job.id, {
+    ...payload,
+    submittedBy: 'submitted:spoofed-environmental-operator'
+  }, { actor: 'field_worker' });
 
   assert.equal(created.replayed, false);
   assert.equal(created.activity.status, 'pending_approval');
   assert.equal(created.activity.emissionsKgCo2e, 135);
   assert.equal(created.activity.recognizedKgCo2e, 0);
   assert.equal(created.activity.integrityValid, true);
+  assert.equal(created.activity.data.submittedBy, 'field_worker');
   assert.equal(created.approval.targetType, 'environmental_activity');
   assert.equal(ledger.calculateEnvironmentalRegister(job.id).summary.totalKgCo2e, 0);
 

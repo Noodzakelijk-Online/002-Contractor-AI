@@ -77,7 +77,8 @@ test('environmental API enforces field scope, approval, report integrity, and of
     factorSource: 'Retained company factor library',
     factorReference: `factor-library:delivery-van:${suffix}`,
     evidenceReference: `delivery-route:${suffix}`,
-    notes: 'Distance and vehicle class retained from the delivery evidence.'
+    notes: 'Distance and vehicle class retained from the delivery evidence.',
+    submittedBy: 'submitted:spoofed-environmental-operator'
   };
   const created = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/environmental-activities`, {
     token: tokens.field.token,
@@ -111,6 +112,7 @@ test('environmental API enforces field scope, approval, report integrity, and of
   const officeList = await request(baseUrl, `/api/ledger/jobs/${encodeURIComponent(jobId)}/environmental-activities`);
   assert.equal(officeList.response.status, 200);
   assert.equal(officeList.body.activities[0].integrityValid, true);
+  assert.equal(officeList.body.activities[0].data.submittedBy, 'role:field_worker');
   assert.ok(officeList.body.activities[0].approvalId);
   assert.equal(officeList.body.register.readyForReport, false);
 

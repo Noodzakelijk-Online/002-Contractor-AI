@@ -5,6 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   findApprovalPrincipalPriorityViolations,
+  findOperationalPrincipalPriorityViolations,
   findRequestDerivedActorExpressions,
   verifyReleaseContract,
   walkFiles
@@ -52,5 +53,28 @@ test('release approval-principal guard rejects submitted-first requester and res
   assert.deepEqual(findApprovalPrincipalPriorityViolations(`
     const requester = options.actor || payload.actor || payload.requestedBy || payload.requested_by;
     const resolver = options.actor || payload.actor || payload.resolvedBy || payload.resolved_by;
+  `), []);
+});
+
+test('release operational-principal guard rejects submitted-first audit identities', () => {
+  const unsafe = findOperationalPrincipalPriorityViolations(`
+    const createdBy = payload.createdBy || options.actor || 'Contractor.AI';
+    releasedBy: payload.releasedBy || actor,
+    submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+    reviewedBy: payload.reviewedBy || payload.reviewed_by || actor;
+    const issuedBy = normalizeText(
+      payload.issuedBy ||
+      payload.issued_by ||
+      options.actor,
+      'Contractor.AI'
+    );
+  `);
+  assert.equal(unsafe.length, 5);
+  assert.deepEqual(unsafe.map(finding => finding.line), [2, 3, 4, 5, 7]);
+  assert.deepEqual(findOperationalPrincipalPriorityViolations(`
+    const createdBy = options.actor || payload.createdBy || 'Contractor.AI';
+    releasedBy: actor,
+    submittedBy: actor,
+    reviewedBy: actor
   `), []);
 });

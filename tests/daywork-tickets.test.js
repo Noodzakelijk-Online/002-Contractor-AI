@@ -68,13 +68,17 @@ function ticketPayload(worker, suffix = '001') {
 test('daywork quantities flow through source-bound approval, receipt acknowledgement, and change control', t => {
   const { ledger, job, worker } = fixture(t, 'lifecycle');
   const payload = ticketPayload(worker, 'lifecycle-001');
-  const created = ledger.createDayworkTicket(job.id, payload, { actor: 'field_worker' });
+  const created = ledger.createDayworkTicket(job.id, {
+    ...payload,
+    submittedBy: 'submitted:spoofed-daywork-operator'
+  }, { actor: 'field_worker' });
 
   assert.equal(created.replayed, false);
   assert.match(created.ticket.ticketNumber, /^DW-\d{4}-\d{6}$/);
   assert.equal(created.ticket.status, 'pending_approval');
   assert.equal(created.ticket.integrityValid, true);
   assert.equal(created.ticket.lineCount, 2);
+  assert.equal(created.ticket.data.submittedBy, 'field_worker');
   assert.equal(created.approval.targetType, 'daywork_ticket');
   assert.equal(created.externalCommitments, 0);
 

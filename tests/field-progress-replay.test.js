@@ -37,7 +37,8 @@ test('progress updates are exact-replay safe and reject changed content for one 
     progressPercent: 42,
     note: 'First floor framing completed and checked.',
     blockers: ['Window delivery pending'],
-    source: 'field_outbox'
+    source: 'field_outbox',
+    createdBy: 'submitted:spoofed-creator'
   };
 
   const first = ledger.addProgressUpdate(job.id, payload, { actor: 'role:field_worker' });
@@ -46,6 +47,7 @@ test('progress updates are exact-replay safe and reject changed content for one 
   assert.equal(first.replayed, false);
   assert.equal(replay.replayed, true);
   assert.equal(replay.id, first.id);
+  assert.equal(first.createdBy, 'role:field_worker');
   const detail = ledger.getJobDetail(job.id, { includeAudit: true });
   assert.equal(detail.progress.filter(update => update.data?.entryKey === payload.entryKey).length, 1);
   assert.equal(detail.audit.filter(event => event.action === 'record_progress' && event.entityId === first.id).length, 1);

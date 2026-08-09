@@ -3,6 +3,25 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-17 Governed operational principals
+
+- Provenance: progress creation, field daywork, expense and environmental
+  submissions, assignment release, meeting-action completion, and governed
+  document/instruction review now prefer the trusted caller before compatibility
+  identity fields
+- NCR closure: the named verifier remains human-readable evidence while the
+  authenticated verifier principal is retained in the source hash and `closedBy`;
+  that principal cannot approve its own closure in authenticated operation
+- Upgrade compatibility: pending NCR closures created before authenticated
+  verifier retention preserve their original source hash, bind replay to the
+  retained requester principal, and still require an independent resolver
+- Prevention: the release contract rejects submitted-first operational provenance
+  expressions for authoritative creator, submitter, completer, releaser, reviewer,
+  issuer, recorder, and updater fields
+- Verification: 532 Node tests, 89 Chromium workflows, lint, zero-vulnerability
+  audit, release/build/bundle, maintained HAI parser, smoke and 63,500-row
+  performance, hardened container, and Node 22.23.2 Windows gates pass
+
 ## CP-16 Canonical approval principals
 
 - Boundary: approval requester and resolver identity prefer the trusted route or

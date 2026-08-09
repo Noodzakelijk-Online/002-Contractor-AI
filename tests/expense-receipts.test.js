@@ -54,13 +54,17 @@ function receiptPayload(job, worker, suffix = '001') {
 test('expense receipts are replay-safe, duplicate-resistant, VAT-aware, and approval-gated', t => {
   const { ledger, job, worker } = fixture(t, 'governed');
   const payload = receiptPayload(job, worker, 'GOV-001');
-  const created = ledger.createExpenseReceipt(job.id, payload, { actor: 'field_worker' });
+  const created = ledger.createExpenseReceipt(job.id, {
+    ...payload,
+    submittedBy: 'submitted:spoofed-expense-operator'
+  }, { actor: 'field_worker' });
   assert.equal(created.replayed, false);
   assert.equal(created.expense.status, 'pending_approval');
   assert.equal(created.expense.totalAmount, 121);
   assert.equal(created.expense.netAmount, 100);
   assert.equal(created.expense.taxAmount, 21);
   assert.equal(created.expense.costAmount, 100);
+  assert.equal(created.expense.data.submittedBy, 'field_worker');
   assert.equal(created.expense.integrityValid, true);
   assert.equal(created.approval.targetType, 'expense');
   assert.equal(ledger.calculateCostForecast(job.id).summary.actual, 0);

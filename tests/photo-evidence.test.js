@@ -344,9 +344,11 @@ test('active photo evidence fails closed when its retained assignment is release
   const retained = fixture(t);
   const set = schedule(retained, 'photo-evidence-schedule-released-assignment');
   retained.ledger.releaseAssignment(retained.job.id, retained.assignment.id, {
-    reason: 'Worker moved off the task before field capture.'
+    reason: 'Worker moved off the task before field capture.',
+    releasedBy: 'submitted:spoofed-releaser'
   }, { actor: 'photo_evidence_test' });
 
+  assert.equal(retained.ledger.getJobDetail(retained.job.id).assignments[0].data.releasedBy, 'photo_evidence_test');
   assert.equal(retained.ledger.getPhotoEvidenceSet(set.id).sourceCurrent, false);
   assert.throws(
     () => capture(

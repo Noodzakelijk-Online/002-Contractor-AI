@@ -21078,6 +21078,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   requestNonconformanceClosure(jobId, recordId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId);
+      const actor = normalizeText(options.actor || payload.actor, 'Contractor.AI');
       const before = this.getNonconformance(recordId, { jobId });
       if (before.status === 'pending_closure_approval' && before.closureApprovalId) {
         const existing = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(before.closureApprovalId);
@@ -21086,15 +21087,20 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           const requestedVerifiedAt = normalizeRetainedDate(payload.verifiedAt || payload.verified_at, {
             required: true, label: 'Verification date', code: 'nonconformance_verified_at_required'
           });
-          const requestedHash = sha256Json({
+          const requestedClosure = {
             verificationResult: normalizeStatus(payload.verificationResult || payload.verification_result, ''),
             verificationEvidence: normalizeText(payload.verificationEvidence || payload.verification_evidence || payload.evidenceReference || payload.evidence_reference, ''),
             evidenceDocumentId: normalizeText(payload.evidenceDocumentId || payload.evidence_document_id, '') || null,
             verifiedBy: normalizeText(payload.verifiedBy || payload.verified_by, ''),
             verifiedAt: requestedVerifiedAt,
             notes: normalizeText(payload.notes, '') || null
-          });
-          if (retained.requestFingerprint === requestedHash) return { nonconformance: before, approval: this.mapApproval(existing), replayed: true, externalCommitments: 0 };
+          };
+          const requestedHash = sha256Json({ ...requestedClosure, verifiedByPrincipal: actor });
+          const legacyRequestedHash = sha256Json(requestedClosure);
+          const sameLegacyRequester = normalizeText(existing.requested_by, '') === actor;
+          if (retained.requestFingerprint === requestedHash || (retained.requestFingerprint === legacyRequestedHash && sameLegacyRequester)) {
+            return { nonconformance: before, approval: this.mapApproval(existing), replayed: true, externalCommitments: 0 };
+          }
           throw ledgerInputError('nonconformance_closure_pending_conflict', 'A different closure request is already pending approval.', { recordId, approvalId: existing.id }, 409);
         }
       }
@@ -21119,10 +21125,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
       if (notes && notes.length > 2_000) throw ledgerInputError('nonconformance_notes_invalid', 'Verification notes must be 2,000 characters or fewer.');
       const evidenceDocumentId = this.requireNonconformanceEvidenceDocument(jobId, payload.evidenceDocumentId || payload.evidence_document_id, 'nonconformance_closure_document_invalid');
-      const actor = options.actor || 'Contractor.AI';
-      const requestFingerprint = sha256Json({ verificationResult, verificationEvidence, evidenceDocumentId, verifiedBy, verifiedAt, notes });
+      const verifiedByPrincipal = actor;
+      const requestFingerprint = sha256Json({ verificationResult, verificationEvidence, evidenceDocumentId, verifiedBy, verifiedByPrincipal, verifiedAt, notes });
       const closure = {
-        verificationResult, verificationEvidence, evidenceDocumentId, verifiedBy, verifiedAt, notes,
+        verificationResult, verificationEvidence, evidenceDocumentId, verifiedBy, verifiedByPrincipal, verifiedAt, notes,
         sourceHash: before.sourceHash, snapshotHash: before.snapshotHash, correctiveActionHash: before.correctiveActionHash,
         requestedAt: nowIso(), requestedBy: actor
       };
@@ -21185,7 +21191,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       SET status = 'closed', closure_json = ?, closure_hash = ?, closed_at = ?, closed_by = ?, data_json = ?, updated_at = ?
       WHERE id = ? AND status = 'pending_closure_approval'
     `).run(
-      toJson(closure), approvalData.closureHash, closure.verifiedAt, closure.verifiedBy,
+      toJson(closure), approvalData.closureHash, closure.verifiedAt,
+      normalizeText(closure.verifiedByPrincipal || closure.requestedBy || approval.requested_by, closure.verifiedBy || 'approval'),
       toJson({ ...(before.data || {}), pendingClosure: null, closureDecision: { approvalId: approval.id, resolvedAt: approval.resolved_at, resolvedBy: approval.resolved_by } }),
       timestamp, recordId
     );
@@ -21402,7 +21409,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         entryKey, entryFingerprint, toJson({
           workerName,
           notes: notes || null,
-          submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+          submittedBy: actor,
           source: normalizeText(payload.source, 'daywork_ticket'),
           pricingControlledByOffice: true,
           externalCommitments: 0,
@@ -24346,6 +24353,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   releaseAssignment(jobId, assignmentId, payload = {}, options = {}) {
     return this.transaction(() => {
       this.requireJob(jobId, { allowInactive: true });
+      const actor = normalizeText(options.actor || payload.actor, 'dashboard');
       const row = this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE assignments.id = ? AND assignments.job_id = ?').get(assignmentId, jobId);
       if (!row) {
         const error = new Error('Assignment not found');
@@ -24379,7 +24387,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         toJson({
           ...data,
           releasedAt: payload.releasedAt || timestamp,
-          releasedBy: payload.releasedBy || payload.actor || options.actor || 'dashboard',
+          releasedBy: actor,
           releaseReason: payload.reason || payload.notes || null
         }),
         timestamp,
@@ -24389,7 +24397,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const invalidatedCrewEvidence = ['released', 'cancelled'].includes(status)
         ? this.invalidateAssignmentCrewEvidence(jobId, before, {
             timestamp,
-            actor: options.actor || payload.actor || 'dashboard'
+            actor
           })
         : { instructions: 0, orientations: 0, siteAccess: 0, approvalTargets: 0 };
       const after = this.mapAssignment(this.db.prepare('SELECT assignments.*, workers.name AS worker_name FROM assignments LEFT JOIN workers ON workers.id = assignments.worker_id WHERE assignments.id = ?').get(assignmentId));
@@ -24399,7 +24407,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           entityId: assignmentId,
           jobId,
           action: 'release_assignment',
-          actor: options.actor || payload.actor || 'dashboard',
+          actor,
           before,
           after,
           metadata: { invalidatedCrewEvidence }
@@ -26783,6 +26791,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   addProgressUpdate(jobId, payload = {}, options = {}) {
     return this.transaction(() => {
       const before = this.requireJob(jobId);
+      const actor = normalizeText(
+        options.actor || payload.actor || payload.createdBy || payload.created_by,
+        'Contractor.AI'
+      );
       const timestamp = nowIso();
       const progressPercent = Math.max(0, Math.min(100, normalizeNumber(payload.progressPercent ?? payload.progress_percent, before.progress_percent || 0)));
       const status = normalizeStatus(payload.status, before.status || 'note');
@@ -26830,7 +26842,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         weather || null,
         toJson(blockers, []),
         toJson(photos, []),
-        payload.createdBy || payload.created_by || options.actor || 'Contractor.AI',
+        actor,
         toJson({
           source: payload.source || 'manual',
           entryKey: entryKey || null,
@@ -26849,7 +26861,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           entityId: id,
           jobId,
           action: 'record_progress',
-          actor: options.actor || 'Contractor.AI',
+          actor,
           before: this.mapJob(before),
           after: { job: this.mapJob(after), update },
           metadata: { entryKey: entryKey || null, externalCommitments: 0 }
@@ -29136,7 +29148,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         throw error;
       }
       const evidence = normalizeText(payload.evidenceReference || payload.evidence_reference || payload.completionEvidence || payload.completion_evidence, '');
-      const completedBy = normalizeText(payload.completedBy || payload.completed_by || options.actor, '');
+      const completedBy = normalizeText(
+        options.actor || payload.actor || payload.completedBy || payload.completed_by,
+        ''
+      );
       if (evidence.length < 3 || evidence.length > 500) {
         throw ledgerInputError('meeting_action_evidence_required', 'Completing a meeting action requires an evidence reference between 3 and 500 characters.');
       }
@@ -29200,7 +29215,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             entityId: row.linked_task_id,
             jobId,
             action: 'complete_task_from_meeting_action',
-            actor: options.actor || completedBy,
+            actor: completedBy,
             before: beforeTask,
             after: this.mapTask(this.db.prepare('SELECT * FROM job_tasks WHERE id = ?').get(row.linked_task_id)),
             metadata: { meetingId, meetingActionId: actionId, completionEvidence: evidence }
@@ -29213,7 +29228,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         entityId: actionId,
         jobId,
         action: 'complete_project_meeting_action',
-        actor: options.actor || completedBy,
+        actor: completedBy,
         before,
         after: action,
         metadata: { meetingId, linkedTaskId: row.linked_task_id || null, completionEvidence: evidence }
@@ -31915,7 +31930,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           paymentMethod,
           evidenceDocumentId,
           workerName: worker?.name || normalizeText(payload.workerName || payload.worker_name, '') || null,
-          submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+          submittedBy: actor,
           source: normalizeText(payload.source, 'expense_receipt'),
           externalCommitments: 0,
           fundsMoved: false
@@ -32376,7 +32391,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         toJson({
           governedEnvironmentalActivity: true,
           workerName: worker?.name || normalizeText(payload.workerName || payload.worker_name, '') || null,
-          submittedBy: normalizeText(payload.submittedBy || payload.submitted_by, actor),
+          submittedBy: actor,
           source: normalizeText(payload.source, 'environmental_activity'),
           factorPolicy: 'operator_supplied_with_retained_provenance',
           reportUnit: 'kg_co2e',
@@ -45264,7 +45279,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
               tags: normalizeList(existingData.tags),
               analysis: existingData.analysis || null,
               verificationReference: payload.verificationReference || payload.verification_reference || payload.reference || existingData.verificationReference || null,
-              reviewedBy: payload.reviewedBy || payload.reviewed_by || actor
+              reviewedBy: actor
             },
             type: normalizeStatus(payload.documentType || payload.document_type, row.type),
             title: normalizeText(payload.title, row.title)
@@ -45399,7 +45414,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
             approvalId: next.approvalId,
             data: {
               ...next.data,
-              reviewedBy: payload.reviewedBy || payload.reviewed_by || actor,
+              reviewedBy: actor,
               deliveryConfirmed: false
             },
             title: normalizeText(payload.title, row.title),
@@ -48042,6 +48057,21 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       const resolver = this.approvalResolver(payload, options);
       if (status === 'approved') this.validateInstallationQcApproval(before, payload, options);
       if (before.target_type === 'photo_evidence_set') this.validatePhotoEvidenceApproval(before, payload, options);
+      if (status === 'approved' && before.target_type === 'nonconformance_closure' && options.enforceSeparation === true) {
+        const approvalData = fromJson(before.data_json, {});
+        const verifierPrincipal = normalizeText(
+          approvalData.closure?.verifiedByPrincipal || approvalData.closure?.requestedBy || before.requested_by,
+          ''
+        );
+        if (verifierPrincipal && verifierPrincipal === resolver) {
+          throw ledgerInputError(
+            'nonconformance_independent_approval_required',
+            'NCR closure must be approved by a different authenticated operator than the verifier.',
+            { recordId: before.target_id, verifiedByPrincipal: verifierPrincipal },
+            409
+          );
+        }
+      }
       if (status === 'approved' && before.target_type === 'supplier_invoice') {
         const supplierInvoice = this.db.prepare('SELECT data_json FROM supplier_invoices WHERE id = ?').get(before.target_id);
         const matchExceptions = fromJson(supplierInvoice?.data_json, {}).match?.exceptions || [];
@@ -67190,6 +67220,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       preview.title = record?.title || null;
       preview.severity = record?.severity || null;
       preview.verifiedBy = closure.verifiedBy || null;
+      preview.verifiedByPrincipal = closure.verifiedByPrincipal || null;
       preview.verifiedAt = closure.verifiedAt || null;
       preview.verificationEvidence = closure.verificationEvidence || null;
       preview.verificationResult = closure.verificationResult || null;
