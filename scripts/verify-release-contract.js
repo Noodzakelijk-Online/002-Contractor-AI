@@ -9,6 +9,8 @@ const REQUIRED_PATHS = [
   'components/CashFlowForecastControl.jsx',
   'components/AutomationSafetyDialog.css',
   'components/AutomationSafetyDialog.jsx',
+  'components/QaResetDialog.css',
+  'components/QaResetDialog.jsx',
   'components/BidDecisionControl.jsx',
   'components/MarketFitControl.jsx',
   'components/PerformanceScorecard.jsx',

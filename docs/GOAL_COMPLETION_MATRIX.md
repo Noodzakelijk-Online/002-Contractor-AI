@@ -51,20 +51,20 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 034 | CLI and doctor/self-diagnostic command | Implemented | privacy-minimized `npm run doctor` |
 | 035 | Observability, health, and readiness endpoints | Implemented | minimal public health plus authenticated detailed readiness/capabilities |
 | 036 | Admin/operator diagnostics | Implemented | integrity, migrations, backups, exports, control and support bundle |
-| 037 | Demo mode with explicit labelling | Implemented | QA/demo records are labelled and controlled reset/archive tools exist |
+| 037 | Demo mode with explicit labelling | Implemented | QA/demo records are labelled; owner maintenance previews the complete set, rejects stale plans, verifies recovery, and archives atomically |
 | 038 | Fake provider lab for tests only | Implemented | test doubles remain under tests; production requires verified allowlisted provider |
 | 039 | Test-data factories and fixtures | Implemented | isolated temp data, per-test server/ledger fixtures, QA records |
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
 | 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 88 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety-control flows plus API vertical slices |
-| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 32 release outcomes |
+| 043 | End-to-end workflow tests | Implemented | 89 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety/maintenance flows plus API vertical slices |
+| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 33 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
 | 049 | Accessibility review | Partial | pinned axe gate reports zero selected WCAG A/AA violations across sign-in, all primary workspaces, representative dialogs, mobile navigation, and the mobile/desktop client portal; independent assistive-technology and user audit remains external |
-| 050 | Responsive and browser compatibility | Implemented | 88 desktop/mobile operator, client and field Chromium tests in isolated batches |
+| 050 | Responsive and browser compatibility | Implemented | 89 desktop/mobile operator, client and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
@@ -108,7 +108,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 091 | Feature-level definition of done | Implemented | acceptance requires persistence, role, replay, UI, test and truthful side-effect state |
 | 092 | Fresh-clone dry run | Partial | package/build/container and Node 22 Windows packaging gates emulate clone; external hosted stack not available locally |
 | 093 | Manual verification evidence | Partial | automated real-browser, local runtime and Windows package evidence passed; independent operator/provider/hosted evidence remains external |
-| 094 | Final no-excuses search | Implemented | release scan covers canonical/retired paths, hosted keys and 314 canonical source files; dependency audit reports zero vulnerabilities |
+| 094 | Final no-excuses search | Implemented | release scan covers 61 canonical paths, 12 retired paths, 16 hosted keys and 319 canonical source files; dependency audit reports zero vulnerabilities |
 | 095 | Completion matrix | Implemented | this file contains every phase 000-115 |
 | 096 | Final verification report | Implemented | report records exact local command, browser, runtime, package and container results plus external boundaries |
 | 097 | Final response requirements | N/A | final user response will list revision, tests, limitations, blockers and push state |

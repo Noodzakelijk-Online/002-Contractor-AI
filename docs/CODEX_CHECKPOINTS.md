@@ -3,6 +3,24 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-13 Previewed QA maintenance
+
+- UI: dedicated lazy-loaded Operations dialog with exact record counts, bounded
+  samples, reason and phrase confirmation, inline reload/error state, and explicit
+  recovery/no-external-effect boundaries
+- Consistency: the server hashes the complete eligible ID set; missing, empty, or
+  changed plans fail before mutation, including a second check inside the ledger
+  transaction
+- Recovery: the local SQLite backup is independently verified before the atomic
+  archive/retirement and pending-approval rejection; hosted mode remains blocked
+  until a provider recovery point exists
+- Accessibility: heading focus, trapped Tab/Shift+Tab, Escape cancellation,
+  post-refresh initiating-focus restoration, axe coverage, and mobile containment
+- Verification: the 525-test Node gate and all 89 Chromium workflows passed; the
+  final cancellation-race/audit-actor hardening also passed focused Node, source,
+  browser, lint, build, and bundle checks. Remaining gates are retained in
+  `FINAL_VERIFICATION_REPORT.md`
+
 ## CP-12 Owner automation decision dialog
 
 - UI: dedicated lazy-loaded suspend/resume dialog with retained status, revision,

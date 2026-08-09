@@ -34,11 +34,18 @@ Versioning for the application contract; database migrations remain append-only.
   navigation, and the mobile/desktop client portal.
 - A dedicated owner automation suspend/resume dialog with retained control context,
   explicit acknowledgement, keyboard focus management, and responsive layout.
+- A dedicated owner QA-maintenance dialog with a server-derived record preview,
+  bounded samples, exact confirmation, retained reason, keyboard focus management,
+  inline stale-plan recovery, verified-backup boundary, and responsive empty state.
 
 ### Changed
 
 - Owner automation control no longer relies on browser-native prompt and confirm
   surfaces; validation and API failures remain inside the auditable decision flow.
+- QA/demo cleanup no longer relies on a browser-native confirmation or a bounded
+  dashboard list. The server inventories every eligible active record, hashes the
+  exact plan, rejects stale or empty submissions, verifies the recovery package,
+  and applies approval rejection plus archive/retirement in one transaction.
 - Compact supporting text and control palettes now meet the automated contrast
   gate across planning, finance, resources, field assurance, analytics, onboarding,
   Operations, and client-facing project facts. The Operations restore-file input

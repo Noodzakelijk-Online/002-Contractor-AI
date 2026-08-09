@@ -9,7 +9,9 @@ WCAG 2.2 AA rules.
 
 `e2e/accessibility.spec.js` verifies all twelve primary owner workspaces, the
 opportunity, business-setup, and framework dialogs, mobile navigation, and the
-client portal at mobile and desktop widths. `e2e/auth-session.spec.js` applies the
+client portal at mobile and desktop widths. The Operations safety workflow also
+scans the autonomous-control and QA-maintenance decision dialogs in populated
+states and verifies their focus containment/restoration. `e2e/auth-session.spec.js` applies the
 same rules to the production sign-in screen. Any matched axe violation fails the
 browser release gate; rules are not disabled or excluded for individual controls.
 

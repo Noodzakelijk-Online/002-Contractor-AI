@@ -8705,6 +8705,40 @@ class ContractorOperatingLedger {
     return Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count || 0);
   }
 
+  qaResetInventory() {
+    const jobs = this.db.prepare(`
+      SELECT jobs.*, clients.name AS client_name, clients.email AS client_email, clients.phone AS client_phone
+      FROM jobs
+      JOIN clients ON clients.id = jobs.client_id
+      WHERE jobs.status <> 'archived'
+      ORDER BY jobs.updated_at DESC
+    `).all().map(row => this.mapJob(row));
+    const opportunities = this.db.prepare(`
+      SELECT opportunities.*, clients.name AS client_name, clients.company AS client_company,
+        clients.email AS client_email, clients.phone AS client_phone
+      FROM opportunities
+      JOIN clients ON clients.id = opportunities.client_id
+      WHERE opportunities.stage NOT IN ('archived', 'won')
+      ORDER BY opportunities.updated_at DESC
+    `).all().map(row => this.mapOpportunity(row));
+    const workers = this.db.prepare(`
+      SELECT * FROM workers
+      WHERE status <> 'retired'
+      ORDER BY updated_at DESC
+    `).all().map(row => this.mapWorker(row));
+    const tools = this.db.prepare(`
+      SELECT * FROM tools
+      WHERE status <> 'retired'
+      ORDER BY updated_at DESC
+    `).all().map(row => this.mapTool(row));
+    const approvals = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE status = 'pending'
+      ORDER BY created_at DESC
+    `).all().map(row => this.mapApproval(row));
+    return { jobs, opportunities, workers, tools, approvals };
+  }
+
   operationalJobStatusSql(alias = 'jobs') {
     const inactive = [...INACTIVE_JOB_STATUSES].map(status => `'${status}'`).join(', ');
     return `${alias}.status NOT IN (${inactive})`;

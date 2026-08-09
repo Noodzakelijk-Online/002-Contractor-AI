@@ -9,7 +9,7 @@ Starting revision: `d1a89fbc73be714b6cb05bb7fbf554309c3387ea`
 Contractor.AI is a mature local-first contractor operating ledger, not a greenfield
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
-S3-compatible evidence storage. The audit found 376 declared HTTP routes, 71
+S3-compatible evidence storage. The audit found 377 declared HTTP routes, 71
 append-only migrations, 162 Node test files, 51 browser spec files, and 81 direct
 client API call sites in the main dashboard.
 
@@ -19,9 +19,10 @@ takeoff and rate build-up, commercial scope, risk, variations, crew capacity,
 Last Planner, daily cycles, 5S, LMRA, installation quality, photo evidence, project
 controls, procurement, finance handoffs, handover, feedback, and scorecards.
 
-This pass closes four material control gaps: a durable autonomous-work safety stop,
+This pass closes five material control gaps: a durable autonomous-work safety stop,
 owner-only privacy-minimized diagnostics, hosted retention-policy enforcement, and
-first-run business-identity visibility. It also delivers the portable Windows
+first-run business-identity visibility, plus source-current backup-verified QA
+maintenance. It also delivers the portable Windows
 runtime, loopback-only ngrok launcher, maintained-parser-compatible read-only HAI connector, compressed and
 budgeted production assets, isolated browser runner, phase evidence, and refreshed
 dependency lockfile.
@@ -91,6 +92,12 @@ external-provider engines.
     lazy-loaded, focus-trapped decision dialog now retains the reason, requires an
     explicit acknowledgement, restores initiating focus, and is covered across
     API blocking, axe, keyboard, desktop, and mobile behavior.
+13. QA cleanup used the final browser-native confirmation and built its archive set
+    through bounded list methods, allowing eligible records beyond the list limit
+    to remain active. Operations now obtains a complete deterministic preview,
+    requires a source-current plan hash and retained reason, independently verifies
+    the recovery package, and performs approval rejection plus archive/retirement
+    in one transaction. Empty and changed plans fail without partial mutation.
 
 ### Residual technical debt
 

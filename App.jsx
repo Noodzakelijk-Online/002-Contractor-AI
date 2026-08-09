@@ -96,6 +96,7 @@ const LastPlannerBoard = lazy(() => import('./components/LastPlannerBoard'))
 const FiveSWorkspace = lazy(() => import('./components/FiveSWorkspace'))
 const OrganizationOnboarding = lazy(() => import('./components/OrganizationOnboarding'))
 const AutomationSafetyDialog = lazy(() => import('./components/AutomationSafetyDialog'))
+const QaResetDialog = lazy(() => import('./components/QaResetDialog'))
 const TeamAccessControl = lazy(() => import('./components/TeamAccessControl'))
 const PrivacyRequestsControl = lazy(() => import('./components/PrivacyRequestsControl'))
 const loadJobWorkspaceControls = () => import('./components/JobWorkspaceControls')
@@ -2987,6 +2988,10 @@ function App() {
   const [automationControlDialog, setAutomationControlDialog] = useState(null)
   const [automationControlError, setAutomationControlError] = useState('')
   const automationControlOpenerRef = useRef(null)
+  const [qaResetDialog, setQaResetDialog] = useState(null)
+  const [qaResetError, setQaResetError] = useState('')
+  const qaResetOpenerRef = useRef(null)
+  const qaResetPreviewRequestRef = useRef(0)
   const [resourceAction, setResourceAction] = useState(null)
   const [resourceActionDraft, setResourceActionDraft] = useState(emptyResourceActionDraft)
   const [workerEditor, setWorkerEditor] = useState(null)
@@ -10834,18 +10839,64 @@ function App() {
     window.setTimeout(() => fieldCaptureRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0)
   }
 
-  async function resetQa() {
-    if (!window.confirm('Archive Browser QA and demo records after creating a backup?')) return
+  async function loadQaResetPreview() {
+    const requestId = ++qaResetPreviewRequestRef.current
+    setQaResetError('')
+    setQaResetDialog((current) => ({ ...(current || {}), loading: true }))
+    try {
+      const preview = await api('/api/operations/reset-qa/preview')
+      if (requestId !== qaResetPreviewRequestRef.current) return null
+      setQaResetDialog({ loading: false, plan: preview })
+      return preview
+    } catch (requestError) {
+      if (requestId !== qaResetPreviewRequestRef.current) return null
+      setQaResetDialog((current) => ({ ...(current || {}), loading: false, plan: null }))
+      setQaResetError(requestError.message)
+      return null
+    }
+  }
+
+  async function openQaResetDialog(opener) {
+    qaResetOpenerRef.current = opener || document.activeElement
+    setQaResetError('')
+    setQaResetDialog({ loading: true, plan: null })
+    await loadQaResetPreview()
+  }
+
+  function closeQaResetDialog() {
+    if (submitting) return
+    qaResetPreviewRequestRef.current += 1
+    setQaResetDialog(null)
+    setQaResetError('')
+    window.setTimeout(() => qaResetOpenerRef.current?.focus(), 0)
+  }
+
+  async function resetQa({ reason, planHash }) {
     setSubmitting(true)
+    setQaResetError('')
     try {
       const result = await api('/api/operations/reset-qa', {
         method: 'POST',
-        body: JSON.stringify({ confirmation: 'RESET_QA', actor: 'office_operator' }),
+        body: JSON.stringify({ confirmation: 'RESET_QA', planHash, reason }),
       })
-      notify(`${result.archivedCount} QA/demo record(s) archived or retired. Backup created first.`)
+      notify(`${result.archivedCount} QA/demo record(s) archived or retired after backup ${result.backup?.backupId || 'verification'}.`)
+      qaResetPreviewRequestRef.current += 1
+      setQaResetDialog(null)
       await refresh()
+      window.setTimeout(() => qaResetOpenerRef.current?.focus(), 0)
+      return true
     } catch (requestError) {
-      setError(requestError.message)
+      if (requestError.code === 'qa_reset_plan_changed') {
+        const refreshed = await loadQaResetPreview()
+        setQaResetError(
+          refreshed
+            ? `${requestError.message} The preview is current now; review it and confirm again.`
+            : requestError.message,
+        )
+      } else {
+        setQaResetError(requestError.message)
+      }
+      return false
     } finally {
       setSubmitting(false)
     }
@@ -13686,12 +13737,13 @@ function App() {
                       Validate export
                     </button>
                     <button
+                      ref={qaResetOpenerRef}
                       className="danger-button"
                       disabled={submitting || !localBackupAvailable}
                       title={
                         localBackupAvailable ? 'Archive QA records after backup' : 'Hosted maintenance requires a provider recovery point'
                       }
-                      onClick={resetQa}
+                      onClick={(event) => openQaResetDialog(event.currentTarget)}
                     >
                       <Archive size={16} />
                       Archive QA records
@@ -19514,6 +19566,19 @@ function App() {
             error={automationControlError}
             onClose={closeAutomationControlDialog}
             onSubmit={changeAutomationControl}
+          />
+        </Suspense>
+      ) : null}
+      {qaResetDialog ? (
+        <Suspense fallback={null}>
+          <QaResetDialog
+            plan={qaResetDialog.plan}
+            loading={qaResetDialog.loading}
+            busy={submitting}
+            error={qaResetError}
+            onClose={closeQaResetDialog}
+            onReload={loadQaResetPreview}
+            onSubmit={resetQa}
           />
         </Suspense>
       ) : null}

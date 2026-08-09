@@ -588,16 +588,58 @@ test('QA reset requires explicit confirmation and preserves non-QA work', async 
   assert.equal(realTool.response.status, 201);
   assert.equal(qaTool.response.status, 201);
 
+  const preview = await request(baseUrl, '/api/operations/reset-qa/preview');
+  assert.equal(preview.response.status, 200);
+  assert.equal(preview.body.format, 'contractor-ai-qa-reset-preview/v1');
+  assert.match(preview.body.planHash, /^[a-f0-9]{64}$/);
+  assert.equal(preview.body.counts.jobs, 1);
+  assert.equal(preview.body.counts.opportunities, 1);
+  assert.equal(preview.body.counts.workers, 1);
+  assert.equal(preview.body.counts.tools, 1);
+  assert.equal(preview.body.totalRecords, 4);
+  assert.equal(preview.body.backupRequired, true);
+  assert.equal(preview.body.externalCommitments, 0);
+
   const missingConfirmation = await request(baseUrl, '/api/operations/reset-qa', { method: 'POST', body: '{}' });
   assert.equal(missingConfirmation.response.status, 400);
   assert.equal(missingConfirmation.body.error.code, 'confirmation_required');
 
-  const reset = await request(baseUrl, '/api/operations/reset-qa', { method: 'POST', body: JSON.stringify({ confirmation: 'RESET_QA' }) });
+  const missingPlan = await request(baseUrl, '/api/operations/reset-qa', { method: 'POST', body: JSON.stringify({ confirmation: 'RESET_QA' }) });
+  assert.equal(missingPlan.response.status, 400);
+  assert.equal(missingPlan.body.error.code, 'qa_reset_plan_required');
+
+  const changedQa = await request(baseUrl, '/api/ledger/intake', { method: 'POST', body: JSON.stringify({ title: 'Browser QA changed after preview', client: { name: 'QA Changed Client' } }) });
+  assert.equal(changedQa.response.status, 201);
+  const staleReset = await request(baseUrl, '/api/operations/reset-qa', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation: 'RESET_QA', planHash: preview.body.planHash, reason: 'Release browser fixtures after verification.' })
+  });
+  assert.equal(staleReset.response.status, 409);
+  assert.equal(staleReset.body.error.code, 'qa_reset_plan_changed');
+  assert.equal(staleReset.body.error.details.preview.counts.jobs, 2);
+  const unchangedAfterStale = await request(baseUrl, `/api/ledger/jobs/${qa.body.job.id}`);
+  assert.equal(unchangedAfterStale.response.status, 200);
+  assert.equal(unchangedAfterStale.body.job.status, 'intake');
+
+  const currentPreview = await request(baseUrl, '/api/operations/reset-qa/preview');
+  assert.equal(currentPreview.response.status, 200);
+  assert.equal(currentPreview.body.counts.jobs, 2);
+  assert.notEqual(currentPreview.body.planHash, preview.body.planHash);
+  const resetReason = 'Release browser fixtures after verification.';
+  const reset = await request(baseUrl, '/api/operations/reset-qa', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation: 'RESET_QA', planHash: currentPreview.body.planHash, reason: resetReason, actor: 'spoofed_owner' })
+  });
   assert.equal(reset.response.status, 200);
+  assert.equal(reset.body.planHash, currentPreview.body.planHash);
   assert.ok(reset.body.archivedLedgerJobIds.includes(qa.body.job.id));
+  assert.ok(reset.body.archivedLedgerJobIds.includes(changedQa.body.job.id));
   assert.ok(reset.body.archivedOpportunityIds.includes(qaOpportunity.body.opportunity.id));
   assert.ok(reset.body.retiredWorkerIds.includes(qaWorker.body.worker.id));
   assert.ok(reset.body.retiredToolIds.includes(qaTool.body.tool.id));
+  assert.ok(reset.body.backup.backupId);
+  assert.equal(reset.body.backup.verification.valid, true);
+  assert.equal(reset.body.backup.verification.backupId, reset.body.backup.backupId);
 
   const jobs = await request(baseUrl, '/api/ledger/jobs?includeArchived=true&limit=100');
   const realJob = jobs.body.jobs.find(job => job.id === real.body.job.id);
@@ -628,6 +670,23 @@ test('QA reset requires explicit confirmation and preserves non-QA work', async 
   const commandPlan = await request(baseUrl, '/api/ledger/command-plan?limit=100');
   assert.equal(commandPlan.response.status, 200);
   assert.ok(!commandPlan.body.actions.some(action => /\b(browser|qa|demo|sample)\b/i.test(action.message || '')));
+
+  const maintenanceAudit = await request(baseUrl, '/api/ledger/audit?action=archive_qa_records&limit=10');
+  assert.equal(maintenanceAudit.response.status, 200);
+  assert.equal(maintenanceAudit.body.events.length, 1);
+  assert.equal(maintenanceAudit.body.events[0].actor, 'operations_reset');
+  assert.equal(maintenanceAudit.body.events[0].metadata.reason, resetReason);
+  assert.equal(maintenanceAudit.body.events[0].after.planHash, currentPreview.body.planHash);
+
+  const emptyPreview = await request(baseUrl, '/api/operations/reset-qa/preview');
+  assert.equal(emptyPreview.response.status, 200);
+  assert.equal(emptyPreview.body.totalRecords, 0);
+  const emptyReset = await request(baseUrl, '/api/operations/reset-qa', {
+    method: 'POST',
+    body: JSON.stringify({ confirmation: 'RESET_QA', planHash: emptyPreview.body.planHash, reason: 'No active fixtures should remain.' })
+  });
+  assert.equal(emptyReset.response.status, 409);
+  assert.equal(emptyReset.body.error.code, 'qa_reset_empty');
 });
 
 test('manual scheduler requests use a persisted lease and do not immediately repeat', async t => {
@@ -766,6 +825,9 @@ test('hosted readiness uses the PostgreSQL ledger adapter when durable services 
   const hostedBackupList = await request(baseUrl, '/api/operations/backups', { headers: authHeaders });
   assert.equal(hostedBackupList.response.status, 409);
   assert.equal(hostedBackupList.body.error.code, 'provider_recovery_required');
+  const hostedResetPreview = await request(baseUrl, '/api/operations/reset-qa/preview', { headers: authHeaders });
+  assert.equal(hostedResetPreview.response.status, 409);
+  assert.equal(hostedResetPreview.body.error.code, 'provider_recovery_required');
   const hostedReset = await request(baseUrl, '/api/operations/reset-qa', {
     method: 'POST',
     headers: authHeaders,

@@ -7891,6 +7891,72 @@ function isQaRecord(record) {
   return exactTestFixtureSignatures.has(fixtureSignature);
 }
 
+function qaResetPlan() {
+  const inventory = operatingLedger.qaResetInventory();
+  const jobs = inventory.jobs.filter(isQaRecord);
+  const opportunities = inventory.opportunities.filter(isQaRecord);
+  const workers = inventory.workers.filter(isQaRecord);
+  const tools = inventory.tools.filter(isQaRecord);
+  const jobIds = new Set(jobs.map(job => job.id));
+  const approvals = inventory.approvals
+    .filter(approval => jobIds.has(approval.jobId) || isQaRecord(approval));
+  const identities = {
+    jobs: jobs.map(job => job.id).sort(),
+    opportunities: opportunities.map(opportunity => opportunity.id).sort(),
+    workers: workers.map(worker => worker.id).sort(),
+    tools: tools.map(tool => tool.id).sort(),
+    approvals: approvals.map(approval => approval.id).sort()
+  };
+  const planHash = crypto.createHash('sha256')
+    .update('contractor-ai-qa-reset-plan/v1\0')
+    .update(JSON.stringify(identities))
+    .digest('hex');
+  const counts = {
+    jobs: jobs.length,
+    opportunities: opportunities.length,
+    workers: workers.length,
+    tools: tools.length,
+    approvals: approvals.length
+  };
+  return {
+    planHash,
+    counts,
+    totalRecords: counts.jobs + counts.opportunities + counts.workers + counts.tools,
+    records: { jobs, opportunities, workers, tools, approvals }
+  };
+}
+
+function qaResetPreview(plan = qaResetPlan()) {
+  const samples = [
+    ...plan.records.jobs.map(record => ({ type: 'Job', id: record.id, label: record.title || record.id })),
+    ...plan.records.opportunities.map(record => ({ type: 'Opportunity', id: record.id, label: record.title || record.id })),
+    ...plan.records.workers.map(record => ({ type: 'Worker', id: record.id, label: record.name || record.id })),
+    ...plan.records.tools.map(record => ({ type: 'Equipment', id: record.id, label: record.name || record.id }))
+  ].slice(0, 12);
+  return {
+    format: 'contractor-ai-qa-reset-preview/v1',
+    generatedAt: new Date().toISOString(),
+    planHash: plan.planHash,
+    counts: plan.counts,
+    totalRecords: plan.totalRecords,
+    samples,
+    sampleLimit: 12,
+    backupRequired: true,
+    reversibleThroughVerifiedBackup: true,
+    externalCommitments: 0
+  };
+}
+
+function assertCurrentQaResetPlan(expectedPlanHash) {
+  const currentPlan = qaResetPlan();
+  if (expectedPlanHash === currentPlan.planHash) return currentPlan;
+  const error = new Error('The QA/demo record set changed after the preview. Review the refreshed counts before confirming again.');
+  error.statusCode = 409;
+  error.code = 'qa_reset_plan_changed';
+  error.details = { preview: qaResetPreview(currentPlan) };
+  throw error;
+}
+
 app.get('/api/operations/export', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="contractor-ai-operational-export.json"');
   res.setHeader('Cache-Control', 'no-store');
@@ -8841,63 +8907,104 @@ app.get('/api/operations/support-bundle', asyncHandler(async (req, res) => {
   return res.json(bundle);
 }));
 
+app.get('/api/operations/reset-qa/preview', (req, res) => {
+  try {
+    assertLocalBackupMode();
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json(qaResetPreview());
+  } catch (error) {
+    return sendError(req, res, error.statusCode || 500, error.code || 'qa_reset_preview_failed', error.statusCode ? error.message : 'Unable to preview QA and demo records.', serializeError(error));
+  }
+});
+
 app.post('/api/operations/reset-qa', (req, res) => {
   if (req.body?.confirmation !== 'RESET_QA') {
     return sendError(req, res, 400, 'confirmation_required', 'Set confirmation to RESET_QA before archiving QA and demo records.');
   }
+  if (operatingLedger.databaseMode !== 'sqlite') {
+    return sendError(req, res, 409, 'provider_recovery_required', 'Hosted recovery uses the configured PostgreSQL backup policy and versioned object storage.');
+  }
+  const expectedPlanHash = String(req.body?.planHash || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(expectedPlanHash)) {
+    return sendError(req, res, 400, 'qa_reset_plan_required', 'Load the current QA reset preview before archiving records.');
+  }
+  const reason = String(req.body?.reason || '').trim();
+  if (reason.length < 8 || reason.length > 500) {
+    return sendError(req, res, 400, 'qa_reset_reason_invalid', 'Record an operational reason between 8 and 500 characters.');
+  }
   try {
-    const actor = req.body?.actor || 'operations_reset';
+    const actor = actorFromRequest(req, 'operations_reset');
+    const initialPlan = assertCurrentQaResetPlan(expectedPlanHash);
+    if (initialPlan.totalRecords === 0) {
+      return sendError(req, res, 409, 'qa_reset_empty', 'No eligible QA or demo records are currently active.');
+    }
     const backup = backupOperationalState();
-    const ledgerJobs = operatingLedger.listJobs({ includeArchived: true, limit: 500 })
-      .filter(job => job.status !== 'archived' && isQaRecord(job));
-    const qaOpportunities = operatingLedger.listOpportunities({ includeClosed: true, limit: 500 })
-      .filter(opportunity => !['archived', 'won'].includes(opportunity.stage) && isQaRecord(opportunity));
-    const qaWorkers = operatingLedger.listWorkers({ limit: 500 })
-      .filter(worker => worker.status !== 'retired' && isQaRecord(worker));
-    const qaTools = operatingLedger.listTools({ limit: 500 })
-      .filter(tool => tool.status !== 'retired' && isQaRecord(tool));
-    const qaJobIds = new Set(ledgerJobs.map(job => job.id));
-    const qaApprovals = operatingLedger.listApprovals({ status: 'pending', limit: 500 })
-      .filter(approval => qaJobIds.has(approval.jobId) || isQaRecord(approval));
-    for (const approval of qaApprovals) {
-      operatingLedger.resolveApproval(approval.id, {
-        status: 'rejected',
-        resolvedBy: actor,
-        reason: 'QA/demo record archived by the controlled local reset.'
-      }, { actor });
+    const backupVerification = verifyOperationalBackup(backup.backupId);
+    if (!backupVerification.valid) {
+      const error = new Error('The recovery package failed checksum verification, so no QA or demo record was archived.');
+      error.statusCode = 500;
+      error.code = 'qa_reset_backup_verification_failed';
+      throw error;
     }
-    for (const job of ledgerJobs) {
-      operatingLedger.updateJob(job.id, {
-        status: 'archived',
-        phase: 'archived',
-        data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
-      }, { actor });
-    }
-    for (const opportunity of qaOpportunities) {
-      operatingLedger.updateOpportunity(opportunity.id, {
-        stage: 'archived',
-        data: { qaResetAt: new Date().toISOString(), qaResetBy: actor }
-      }, { actor });
-    }
-    for (const worker of qaWorkers) {
-      operatingLedger.retireWorker(worker.id, { actor });
-    }
-    for (const tool of qaTools) {
-      operatingLedger.retireTool(tool.id, { actor });
-    }
+    backup.verification = backupVerification;
+    const applied = operatingLedger.transaction(() => {
+      const plan = assertCurrentQaResetPlan(expectedPlanHash);
+      const resetAt = new Date().toISOString();
+      for (const approval of plan.records.approvals) {
+        operatingLedger.resolveApproval(approval.id, {
+          status: 'rejected',
+          resolvedBy: actor,
+          reason
+        }, { actor });
+      }
+      for (const job of plan.records.jobs) {
+        operatingLedger.updateJob(job.id, {
+          status: 'archived',
+          phase: 'archived',
+          data: { qaResetAt: resetAt, qaResetBy: actor, qaResetReason: reason, qaResetPlanHash: plan.planHash }
+        }, { actor });
+      }
+      for (const opportunity of plan.records.opportunities) {
+        operatingLedger.updateOpportunity(opportunity.id, {
+          stage: 'archived',
+          data: { qaResetAt: resetAt, qaResetBy: actor, qaResetReason: reason, qaResetPlanHash: plan.planHash }
+        }, { actor });
+      }
+      for (const worker of plan.records.workers) {
+        operatingLedger.retireWorker(worker.id, { actor });
+      }
+      for (const tool of plan.records.tools) {
+        operatingLedger.retireTool(tool.id, { actor });
+      }
+      operatingLedger.audit({
+        entityType: 'operations_maintenance',
+        entityId: plan.planHash,
+        action: 'archive_qa_records',
+        actor,
+        after: {
+          backupId: backup.backupId,
+          planHash: plan.planHash,
+          counts: plan.counts,
+          totalRecords: plan.totalRecords
+        },
+        metadata: { reason, externalCommitments: 0 }
+      });
+      return plan;
+    });
     return res.json({
       success: true,
       backup,
-      archivedLedgerJobIds: ledgerJobs.map(job => job.id),
-      archivedOpportunityIds: qaOpportunities.map(opportunity => opportunity.id),
-      retiredWorkerIds: qaWorkers.map(worker => worker.id),
-      retiredToolIds: qaTools.map(tool => tool.id),
-      rejectedApprovalIds: qaApprovals.map(approval => approval.id),
-      archivedCount: ledgerJobs.length + qaOpportunities.length + qaWorkers.length + qaTools.length,
+      planHash: applied.planHash,
+      archivedLedgerJobIds: applied.records.jobs.map(job => job.id),
+      archivedOpportunityIds: applied.records.opportunities.map(opportunity => opportunity.id),
+      retiredWorkerIds: applied.records.workers.map(worker => worker.id),
+      retiredToolIds: applied.records.tools.map(tool => tool.id),
+      rejectedApprovalIds: applied.records.approvals.map(approval => approval.id),
+      archivedCount: applied.totalRecords,
       dashboard: operatingLedger.dashboardSummary()
     });
   } catch (error) {
-    return sendError(req, res, error.statusCode || 500, error.code || 'qa_reset_failed', error.statusCode ? error.message : 'Unable to archive QA and demo records.', serializeError(error));
+    return sendError(req, res, error.statusCode || 500, error.code || 'qa_reset_failed', error.statusCode ? error.message : 'Unable to archive QA and demo records.', error.details || serializeError(error));
   }
 });
 

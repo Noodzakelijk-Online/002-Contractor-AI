@@ -1,5 +1,23 @@
 # Codex Worklog
 
+- Replaced the final browser-native confirmation in the canonical dashboard with
+  a lazy-loaded QA-maintenance dialog that previews exact server-derived counts and
+  samples, requires a retained reason and exact phrase, traps focus, restores the
+  initiating control, and contains loading, stale-plan, empty, and error states.
+- Removed a 500-row maintenance blind spot by inventorying all eligible active QA
+  records directly. The owner-only write now rejects changed or empty plans,
+  independently verifies its backup, rechecks membership inside one transaction,
+  and archives or retires records together with pending-approval rejection and a
+  plan-hashed audit event.
+- Focused Node/source tests and desktop/mobile in-app Browser checks passed. The
+  isolated Chromium workflow proves axe, keyboard cancellation, successful focus
+  restoration, backend state, mobile containment, and the empty follow-up state;
+  the browser inventory is now 89 workflows.
+- The full release gate passed with zero dependency vulnerabilities, 525 Node
+  tests, 89 Chromium workflows in 23 isolated batches, production build/bundle,
+  63,500-row benchmark, hardened container, maintained HAI parser, and Node 22.23.2
+  Windows standalone. A final cancellation-race and audit-actor hardening pass was
+  then rechecked by its focused Node, source, browser, lint, build, and bundle gates.
 - Replaced the owner automation-stop browser prompt/confirm sequence with a
   lazy-loaded reason-and-acknowledgement dialog that traps focus, supports Escape,
   restores initiating focus, shows retained control context, and keeps API errors

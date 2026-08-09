@@ -6,6 +6,7 @@ const path = require('node:path');
 const dashboardRootSource = fs.readFileSync(path.join(__dirname, '..', 'App.jsx'), 'utf8');
 const fiveSWorkspaceSource = fs.readFileSync(path.join(__dirname, '..', 'components', 'FiveSWorkspace.jsx'), 'utf8');
 const lmraControlSource = fs.readFileSync(path.join(__dirname, '..', 'components', 'LmraControl.jsx'), 'utf8');
+const qaResetDialogSource = fs.readFileSync(path.join(__dirname, '..', 'components', 'QaResetDialog.jsx'), 'utf8');
 const dashboardSource = [
   dashboardRootSource,
   fs.readFileSync(path.join(__dirname, '..', 'dashboard-format.js'), 'utf8'),
@@ -14,6 +15,7 @@ const dashboardSource = [
   fs.readFileSync(path.join(__dirname, '..', 'components', 'AuditHistory.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'CashFlowForecastControl.jsx'), 'utf8'),
   fs.readFileSync(path.join(__dirname, '..', 'components', 'PerformanceScorecard.jsx'), 'utf8'),
+  qaResetDialogSource,
 ].join('\n');
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
@@ -95,7 +97,13 @@ test('dashboard mutations remain API-backed and confirmation-gated where they af
   assert.match(dashboardSource, /approvalReview\.item\.decision\?\.safeguards/);
   assert.match(dashboardSource, /required=\{approvalReview\.status === 'rejected' \|\| approvalReview\.item\.data\?\.requiresExceptionOverride === true\}/);
   assert.match(dashboardSource, /confirmation: 'RESET_QA'/);
-  assert.match(dashboardSource, /window\.confirm\('Archive Browser QA and demo records/);
+  assert.match(dashboardSource, /api\('\/api\/operations\/reset-qa\/preview'\)/);
+  assert.match(dashboardSource, /planHash/);
+  assert.match(qaResetDialogSource, /const CONFIRMATION_PHRASE = 'ARCHIVE QA'/);
+  assert.match(qaResetDialogSource, /aria-modal="true"/);
+  assert.match(qaResetDialogSource, /headingRef\.current\?\.focus\(\)/);
+  assert.match(dashboardRootSource, /qaResetPreviewRequestRef\.current/);
+  assert.doesNotMatch(dashboardSource, /window\.(confirm|prompt|alert)\(/);
 });
 
 test('finance dashboard plans and invoices retained billing milestones without editable source values', () => {
