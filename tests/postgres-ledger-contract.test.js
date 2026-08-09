@@ -485,7 +485,11 @@ test('PostgreSQL framework workspace preserves governed revision parity', { skip
     assert.equal(ledger.migrationStatus().currentVersion, '069_governed_framework_workspace');
     assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
   } finally {
-    ledger.close();
+    try {
+      ledger.db.exec('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    } finally {
+      ledger.close();
+    }
   }
 });
 
@@ -1700,7 +1704,8 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
     const migrationCount = verification.query('SELECT COUNT(*) AS count FROM ledger_schema_migrations').rows[0];
-    assert.equal(Number(migrationCount.count), 68);
+    const expectedMigrationCount = Number(versions[0].split('_', 1)[0]);
+    assert.equal(Number(migrationCount.count), expectedMigrationCount);
     const availabilityTableCount = verification.query(`
       SELECT COUNT(*) AS count
       FROM information_schema.tables
