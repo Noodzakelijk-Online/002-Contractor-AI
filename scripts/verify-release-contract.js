@@ -143,8 +143,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const nodeTestRunner = fs.readFileSync(path.join(root, 'scripts', 'run-node-tests.js'), 'utf8');
-  for (const cleanupRequirement of ['fs.mkdtempSync', 'allTestFiles()', 'TEMP: runtimeDirectory', 'TMP: runtimeDirectory', 'TMPDIR: runtimeDirectory', 'cleanupRuntimeDirectory(runtimeDirectory)']) {
-    if (!nodeTestRunner.includes(cleanupRequirement)) failures.push(`Node test runner is missing temporary-state cleanup: ${cleanupRequirement}`);
+  for (const cleanupRequirement of ['fs.mkdtempSync', 'allTestFiles()', 'postgresTestFiles(discovered)', 'withTestConcurrency(args, 1)', 'TEMP: runtimeDirectory', 'TMP: runtimeDirectory', 'TMPDIR: runtimeDirectory', 'cleanupRuntimeDirectory(runtimeDirectory)']) {
+    if (!nodeTestRunner.includes(cleanupRequirement)) failures.push(`Node test runner is missing required isolation control: ${cleanupRequirement}`);
   }
 
   const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');

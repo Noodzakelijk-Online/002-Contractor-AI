@@ -26,22 +26,59 @@ function allTestFiles() {
     .sort((left, right) => left.localeCompare(right));
 }
 
+function postgresTestFiles(testFiles = allTestFiles()) {
+  return testFiles.filter(file => fs.readFileSync(path.join(projectRoot, file), 'utf8')
+    .includes('CONTRACTOR_AI_POSTGRES_TEST_URL'));
+}
+
+function withTestConcurrency(args, concurrency) {
+  const normalized = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--test-concurrency') {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('--test-concurrency=')) continue;
+    normalized.push(argument);
+  }
+  return [`--test-concurrency=${concurrency}`, ...normalized];
+}
+
+function executeTests(testArguments, runtimeDirectory) {
+  return spawnSync(process.execPath, ['--test', ...testArguments], {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      TEMP: runtimeDirectory,
+      TMP: runtimeDirectory,
+      TMPDIR: runtimeDirectory
+    },
+    stdio: 'inherit'
+  });
+}
+
 function runNodeTests(args = process.argv.slice(2)) {
   const runtimeDirectory = createRuntimeDirectory();
   const hasExplicitTestFile = args.some(argument => /(?:^|[\\/])[^\\/]+\.test\.js$/i.test(argument));
-  const testArguments = hasExplicitTestFile ? args : [...args, ...allTestFiles()];
   let result;
   try {
-    result = spawnSync(process.execPath, ['--test', ...testArguments], {
-      cwd: projectRoot,
-      env: {
-        ...process.env,
-        TEMP: runtimeDirectory,
-        TMP: runtimeDirectory,
-        TMPDIR: runtimeDirectory
-      },
-      stdio: 'inherit'
-    });
+    const discovered = hasExplicitTestFile ? [] : allTestFiles();
+    const sharedPostgresFiles = process.env.CONTRACTOR_AI_POSTGRES_TEST_URL && !hasExplicitTestFile
+      ? postgresTestFiles(discovered)
+      : [];
+    if (sharedPostgresFiles.length) {
+      const sharedSet = new Set(sharedPostgresFiles);
+      const parallelFiles = discovered.filter(file => !sharedSet.has(file));
+      console.log(`Running ${parallelFiles.length} isolated test files in parallel, then ${sharedPostgresFiles.length} shared PostgreSQL files serially.`);
+      result = executeTests([...args, ...parallelFiles], runtimeDirectory);
+      if (!result.error && result.status === 0) {
+        result = executeTests([...withTestConcurrency(args, 1), ...sharedPostgresFiles], runtimeDirectory);
+      }
+    } else {
+      const testArguments = hasExplicitTestFile ? args : [...args, ...discovered];
+      result = executeTests(testArguments, runtimeDirectory);
+    }
   } finally {
     cleanupRuntimeDirectory(runtimeDirectory);
   }
@@ -59,4 +96,11 @@ if (require.main === module) {
   }
 }
 
-module.exports = { allTestFiles, cleanupRuntimeDirectory, createRuntimeDirectory, runNodeTests };
+module.exports = {
+  allTestFiles,
+  cleanupRuntimeDirectory,
+  createRuntimeDirectory,
+  postgresTestFiles,
+  runNodeTests,
+  withTestConcurrency
+};
