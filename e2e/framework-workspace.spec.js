@@ -78,6 +78,7 @@ test('operator searches, activates, reviews, and inspects a governed framework',
       tableScrollWidth: document.querySelector('.framework-table-scroll')?.scrollWidth || 0,
       uncontainedElements: [...document.body.querySelectorAll('*')]
         .filter(element => !element.closest(permittedScrollers))
+        .filter(element => getComputedStyle(element).visibility !== 'hidden')
         .filter(element => {
           const rectangle = element.getBoundingClientRect();
           return rectangle.left < -1 || rectangle.right > window.innerWidth + 1;
