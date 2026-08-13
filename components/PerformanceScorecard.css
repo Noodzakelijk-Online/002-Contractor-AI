@@ -1,8 +1,18 @@
 .performance-scorecard {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   padding-top: 24px;
+}
+
+.performance-scorecard > *,
+.performance-heading > div,
+.performance-period > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .performance-scorecard .tag-blue { color: #2e6eb9; background: #eaf2fc; }
@@ -95,6 +105,9 @@
   display: grid;
   grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 1px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   background: #dfe7e3;
   border: 1px solid #dfe7e3;
@@ -132,6 +145,8 @@
 }
 
 .performance-table-scroll {
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   overflow-x: auto;
   border-block: 1px solid #dfe7e3;
@@ -235,6 +250,10 @@
 @media (max-width: 620px) {
   .performance-heading,
   .performance-perspective-heading { align-items: flex-start; flex-direction: column; }
+  .performance-heading h2,
+  .performance-heading p,
+  .performance-perspective-heading h3,
+  .performance-perspective-heading p { overflow-wrap: anywhere; }
   .performance-period label { flex: 1 1 130px; min-width: 0; }
   .performance-period button { flex: 1 1 160px; justify-content: center; }
   .performance-summary { grid-template-columns: 1fr 1fr; }
