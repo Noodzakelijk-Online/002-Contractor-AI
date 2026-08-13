@@ -59,6 +59,7 @@ test('operator searches, activates, reviews, and inspects a governed framework',
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(workspace.getByRole('heading', { name: 'Operating framework register' })).toBeVisible();
+  await expect(page.locator('.side-nav')).toHaveCSS('visibility', 'hidden');
   const containment = await page.evaluate(() => {
     const permittedScrollers = '.framework-table-scroll, .framework-status-filter, .performance-table-scroll, .performance-tabs';
     const describe = element => {
