@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { CalendarDays, CircleAlert, CircleCheckBig, Download, FileSignature, FileText, HardHat, ListChecks, LoaderCircle, MessageSquareText, Send, ShieldCheck, Star } from 'lucide-react'
+import { draftScopeFingerprint, useSessionDraftRecovery } from './draft-recovery'
 import './ClientPortal.css'
 
 function formatPortalDate(value) {
@@ -177,6 +178,14 @@ export default function ClientPortal() {
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const [feedbackResult, setFeedbackResult] = useState('')
+  const portalDraftScope = `client-portal:${draftScopeFingerprint(token)}`
+  const portalDraftRecoveryEnabled = token.length >= 32
+
+  useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'message-subject', value: subject, setValue: setSubject })
+  useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'message-body', value: body, setValue: setBody })
+  useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'selections', value: selectionDrafts, setValue: setSelectionDrafts })
+  useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'variations', value: variationDrafts, setValue: setVariationDrafts })
+  useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'feedback', value: feedbackDraft, setValue: setFeedbackDraft })
 
   useEffect(() => {
     const previousTitle = document.title
@@ -212,12 +221,12 @@ export default function ClientPortal() {
         if (!response.ok) throw new Error(payload?.error?.message || 'Deze projectlink is niet beschikbaar.')
         setJob(payload.job)
         setFeedbackSubmitted(payload.portal?.feedback?.submitted === true)
-        setSelectionDrafts(Object.fromEntries((payload.job?.selections || [])
+        setSelectionDrafts(current => Object.fromEntries((payload.job?.selections || [])
           .filter(selection => selection.responseAllowed)
-          .map(selection => [selection.id, emptySelectionDraft(selection)])))
-        setVariationDrafts(Object.fromEntries((payload.job?.variations || [])
+          .map(selection => [selection.id, { ...emptySelectionDraft(selection), ...(current[selection.id] || {}) }])))
+        setVariationDrafts(current => Object.fromEntries((payload.job?.variations || [])
           .filter(variation => variation.responseAllowed)
-          .map(variation => [variation.id, emptyVariationDraft()])))
+          .map(variation => [variation.id, { ...emptyVariationDraft(), ...(current[variation.id] || {}) }])))
       } catch (requestError) {
         if (requestError.name !== 'AbortError') setError(requestError.message || 'Deze projectlink is niet beschikbaar.')
       } finally {
@@ -256,6 +265,7 @@ export default function ClientPortal() {
           ? { ...item, responseAllowed: false, response: { ...payload.response, status: 'pending_review' } }
           : item)
       }))
+      setSelectionDrafts(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== selection.id)))
       setSelectionResults(current => ({ ...current, [selection.id]: 'Uw reactie wacht op interne controle.' }))
     } catch (requestError) {
       setSelectionResults(current => ({ ...current, [selection.id]: requestError.message || 'Uw reactie kon niet worden opgeslagen.' }))
@@ -292,6 +302,7 @@ export default function ClientPortal() {
           ? { ...item, responseAllowed: false, response: { ...payload.response, status: 'pending_review' } }
           : item)
       }))
+      setVariationDrafts(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== variation.id)))
       setVariationResults(current => ({ ...current, [variation.id]: 'Uw besluit wacht op interne verificatie.' }))
     } catch (requestError) {
       setVariationResults(current => ({ ...current, [variation.id]: requestError.message || 'Uw besluit kon niet worden opgeslagen.' }))
@@ -336,6 +347,7 @@ export default function ClientPortal() {
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(payload?.error?.message || 'Uw feedback kon niet worden opgeslagen.')
       setFeedbackSubmitted(true)
+      setFeedbackDraft(emptyFeedbackDraft())
       setFeedbackResult('Bedankt. Uw feedback is toegevoegd aan het projectdossier.')
     } catch (requestError) {
       setFeedbackResult(requestError.message || 'Uw feedback kon niet worden opgeslagen.')

@@ -3,6 +3,23 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-18 Bounded draft recovery and frontend gate
+
+- Recovery: central operator and client-portal form drafts survive reload inside
+  the same tab without creating ledger records; job workspace navigation remains
+  explicit and an intentional close clears recovered editor state
+- Privacy/resource bounds: session-only storage is operator- or portal-fingerprint
+  scoped, expires after 12 hours, strips secret-shaped fields and binary files,
+  and enforces 128 KiB per-draft and 1 MiB total limits
+- Delivery: CI now runs a dedicated Vitest/Testing Library gate; the release
+  contract requires its source, scripts, workflow command, and storage boundaries
+- Windows: a package refresh can preserve a locked, exact-version bundled Node
+  executable while replacing every other release artifact, avoiding preview
+  interruption and partial-package residue
+- Verification: 6 frontend tests, 532 Node tests, 90 Chromium workflows, lint,
+  zero-vulnerability audit, release/build/bundle, maintained HAI parser, smoke and
+  63,500-row performance, hardened container, and Node 22.23.2 Windows gates pass
+
 ## CP-17 Governed operational principals
 
 - Provenance: progress creation, field daywork, expense and environmental

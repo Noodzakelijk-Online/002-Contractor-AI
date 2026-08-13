@@ -6,6 +6,7 @@ const REQUIRED_PATHS = [
   'App.jsx',
   'ClientPortal.css',
   'ClientPortal.jsx',
+  'draft-recovery.js',
   'components/CashFlowForecastControl.jsx',
   'components/AutomationSafetyDialog.css',
   'components/AutomationSafetyDialog.jsx',
@@ -41,7 +42,11 @@ const REQUIRED_PATHS = [
   'evidence-storage.js',
   'e2e/accessibility-helpers.js',
   'e2e/accessibility.spec.js',
+  'e2e/draft-recovery.spec.js',
   'e2e/operations-safety.spec.js',
+  'frontend-tests/draft-recovery.test.jsx',
+  'frontend-tests/qa-reset-dialog.test.jsx',
+  'frontend-tests/setup.js',
   'framework-catalog.js',
   'hai-connector.js',
   'operating-ledger.js',
@@ -62,7 +67,8 @@ const REQUIRED_PATHS = [
   'scripts/run-node-tests.js',
   'scripts/start-ngrok.js',
   'scripts/verify-bundle-budget.js',
-  'scripts/verify-container-runtime.js'
+  'scripts/verify-container-runtime.js',
+  'vitest.config.js'
 ];
 
 const RETIRED_PATHS = [
@@ -178,7 +184,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const packageFile = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
   if (packageJson.main !== 'server.js') failures.push('package.json must use server.js as the sole runtime entrypoint.');
-  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:performance', 'test:windows-package', 'verify:bundle', 'verify:hai-contract', 'verify:release']) {
+  for (const script of ['benchmark:ledger', 'build', 'doctor', 'export:hai', 'lint', 'migrate:hosted', 'package:windows', 'restore:local', 'start:standalone', 'start:tunnel', 'test', 'test:browser', 'test:container', 'test:frontend', 'test:performance', 'test:windows-package', 'verify:bundle', 'verify:hai-contract', 'verify:release']) {
     if (!packageJson.scripts?.[script]) failures.push(`package.json is missing required script: ${script}`);
   }
   if (packageJson.scripts?.pretest) failures.push('package.json must not duplicate the full Node suite through an automatic pretest hook.');
@@ -288,6 +294,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
   const ledgerSource = fs.readFileSync(path.join(root, 'operating-ledger.js'), 'utf8');
   const appSource = fs.readFileSync(path.join(root, 'App.jsx'), 'utf8');
+  const clientPortalSource = fs.readFileSync(path.join(root, 'ClientPortal.jsx'), 'utf8');
+  const draftRecoverySource = fs.readFileSync(path.join(root, 'draft-recovery.js'), 'utf8');
   const frameworkCatalogSource = fs.readFileSync(path.join(root, 'framework-catalog.js'), 'utf8');
   const frameworkWorkspaceSource = fs.readFileSync(path.join(root, 'components', 'FrameworkWorkspace.jsx'), 'utf8');
   const teamAccessSource = fs.readFileSync(path.join(root, 'components', 'TeamAccessControl.jsx'), 'utf8');
@@ -297,8 +305,45 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   const windowsPackageSource = fs.readFileSync(path.join(root, 'scripts', 'build-windows-standalone.js'), 'utf8');
   const windowsPackageVerificationSource = fs.readFileSync(path.join(root, 'scripts', 'verify-windows-standalone.js'), 'utf8');
+  for (const lockedRuntimeRequirement of [
+    'prepareTarget(resolvedTarget)',
+    "error?.code !== 'EPERM'",
+    'version.stdout.trim() !== process.version',
+    'if (!reusedLockedRuntime) fs.copyFileSync'
+  ]) {
+    if (!windowsPackageSource.includes(lockedRuntimeRequirement)) {
+      failures.push(`Windows package refresh is missing locked-runtime safety: ${lockedRuntimeRequirement}`);
+    }
+  }
   const accessibilitySource = fs.readFileSync(path.join(root, 'e2e', 'accessibility.spec.js'), 'utf8');
   const accessibilityHelperSource = fs.readFileSync(path.join(root, 'e2e', 'accessibility-helpers.js'), 'utf8');
+  for (const draftRecoveryRequirement of [
+    'window.sessionStorage',
+    'DRAFT_TTL_MS',
+    'MAX_DRAFT_BYTES',
+    'MAX_DRAFT_STORAGE_BYTES',
+    'SENSITIVE_KEY',
+    'item instanceof File',
+    'item instanceof Blob',
+    'ArrayBuffer.isView(item)'
+  ]) {
+    if (!draftRecoverySource.includes(draftRecoveryRequirement)) {
+      failures.push(`Session draft recovery is missing a safety boundary: ${draftRecoveryRequirement}`);
+    }
+  }
+  if (draftRecoverySource.includes('localStorage')) {
+    failures.push('Recoverable form drafts must remain tab-scoped and must not use localStorage.');
+  }
+  for (const operatorDraftRequirement of ['useSessionDraftRecovery', 'fieldOutboxOperatorScope(operator)', 'clearSessionDraftScope(browserDraftStorage(), outboxScope)']) {
+    if (!appSource.includes(operatorDraftRequirement)) {
+      failures.push(`Operator draft recovery is missing required lifecycle wiring: ${operatorDraftRequirement}`);
+    }
+  }
+  for (const portalDraftRequirement of ['draftScopeFingerprint(token)', 'portalDraftRecoveryEnabled', 'useSessionDraftRecovery']) {
+    if (!clientPortalSource.includes(portalDraftRequirement)) {
+      failures.push(`Client portal draft recovery is missing token-safe scoping: ${portalDraftRequirement}`);
+    }
+  }
   for (const accessibilityRequirement of [
     'owner primary workspaces meet automated WCAG A and AA rules',
     'representative owner dialogs meet automated WCAG A and AA rules',
@@ -687,7 +732,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'verify.yml'), 'utf8');
-  for (const command of ['npm run verify:release', 'npm run verify:hai-contract', 'npm run lint', 'npm test', 'npm run build', 'npm run verify:bundle', 'npm run test:browser', 'npm run test:container']) {
+  for (const command of ['npm run verify:release', 'npm run verify:hai-contract', 'npm run lint', 'npm run test:frontend', 'npm test', 'npm run build', 'npm run verify:bundle', 'npm run test:browser', 'npm run test:container']) {
     if (!workflow.includes(command)) failures.push(`CI workflow is missing required gate: ${command}`);
   }
   if (!/push:\s*\n\s+branches:\s*\n\s+- main/.test(workflow)) {

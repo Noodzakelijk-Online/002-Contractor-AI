@@ -54,6 +54,30 @@ function writeLaunchers() {
   for (const [name, contents] of Object.entries(launchers)) fs.writeFileSync(path.join(target, name), contents, 'ascii');
 }
 
+function prepareTarget(resolvedTarget) {
+  try {
+    fs.rmSync(resolvedTarget, { recursive: true, force: true });
+    return false;
+  } catch (error) {
+    const bundledNode = path.join(resolvedTarget, 'runtime', 'node.exe');
+    if (process.platform !== 'win32' || error?.code !== 'EPERM' || !fs.existsSync(bundledNode)) throw error;
+    const version = spawnSync(bundledNode, ['--version'], { encoding: 'utf8', windowsHide: true });
+    if (version.status !== 0 || version.stdout.trim() !== process.version) {
+      throw new Error(`Locked packaged runtime cannot be reused; expected ${process.version}.`, { cause: error });
+    }
+    for (const entry of fs.readdirSync(resolvedTarget, { withFileTypes: true })) {
+      const entryPath = path.join(resolvedTarget, entry.name);
+      if (entry.name !== 'runtime') fs.rmSync(entryPath, { recursive: true, force: true });
+    }
+    for (const entry of fs.readdirSync(path.join(resolvedTarget, 'runtime'), { withFileTypes: true })) {
+      if (entry.name.toLowerCase() !== 'node.exe') {
+        fs.rmSync(path.join(resolvedTarget, 'runtime', entry.name), { recursive: true, force: true });
+      }
+    }
+    return true;
+  }
+}
+
 function copyProductionDependencies() {
   const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
   const packageEntries = Object.entries(lock.packages || {})
@@ -84,11 +108,11 @@ function buildWindowsStandalone() {
   const resolvedTarget = path.resolve(target);
   if (path.dirname(resolvedTarget) !== path.resolve(releaseRoot)) throw new Error('Refusing to replace an unexpected standalone target directory.');
   run(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'build']);
-  fs.rmSync(resolvedTarget, { recursive: true, force: true });
+  const reusedLockedRuntime = prepareTarget(resolvedTarget);
   fs.mkdirSync(path.join(target, 'runtime'), { recursive: true });
   fs.cpSync(path.join(root, 'dist'), path.join(target, 'dist'), { recursive: true });
   for (const file of runtimeFiles) copyRuntimeFile(file);
-  fs.copyFileSync(process.execPath, path.join(target, 'runtime', 'node.exe'));
+  if (!reusedLockedRuntime) fs.copyFileSync(process.execPath, path.join(target, 'runtime', 'node.exe'));
   writeLaunchers();
   const productionDependencyCount = copyProductionDependencies();
   fs.writeFileSync(path.join(target, 'BUILD.json'), `${JSON.stringify({
@@ -110,4 +134,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertBuildHost, buildWindowsStandalone, copyProductionDependencies, runtimeFiles };
+module.exports = { assertBuildHost, buildWindowsStandalone, copyProductionDependencies, prepareTarget, runtimeFiles };

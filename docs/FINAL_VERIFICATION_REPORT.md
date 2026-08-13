@@ -1,6 +1,6 @@
 # Final Verification Report
 
-Report date: 2026-08-09
+Report date: 2026-08-13
 Release candidate: `1.1.0`
 Starting revision: `0326813f214a1ea38771566213ed645421b53f45`
 Release revision: the Git commit containing this report; record the resulting SHA
@@ -18,17 +18,18 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --audit-level=low`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 61 canonical paths, 12 retired paths, 16 hosted keys, 320 canonical source files; generated release/runtime/artifact directories excluded |
+| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 326 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier passed; maintained HAI `ParseGenericFeed` accepted the generated fixture in an isolated Docker Go runtime and derived read-only `review_document` work |
-| Node tests | Passed | Node 22.23.2 isolated suite: 532 tests, 496 passed, 36 PostgreSQL/environment skips, 0 failed, 327.9 s |
-| Production build | Passed | `npm run build`: main application JS 526.22 kB and CSS 274.38 kB before gzip; the automation decision dialog loads separately as 4.38 kB JS and 2.03 kB CSS, and QA maintenance as 5.46 kB JS and 2.46 kB CSS |
-| Bundle budget | Passed | `npm run verify:bundle`: 370,168 total gzip bytes across 37 assets |
-| Production-scale ledger | Passed | Deterministic 63,500-row production profile: seed 1,368.01 ms; startup 728.13 ms; reopen 5.15 ms; dashboard p95 424.63 ms; intake p95 145.57 ms; audit verification 232.37 ms; all correctness, resource, response-size, and latency thresholds passed |
-| Browser tests | Passed | All 89 Playwright Chromium workflows passed on current source in 23 bounded isolated batches in 623.2 s |
+| Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 2 files, 6 behavioral hook/component tests, 0 failed |
+| Node tests | Passed | Node 22.23.2 isolated suite: 532 tests, 496 passed, 36 PostgreSQL/environment skips, 0 failed, 73.45 s |
+| Production build | Passed | `npm run build`: main application JS 528.74 kB and CSS 274.38 kB before gzip; bounded draft recovery loads separately as 2.89 kB JS, automation as 4.38 kB JS/2.03 kB CSS, and QA maintenance as 5.46 kB JS/2.46 kB CSS |
+| Bundle budget | Passed | `npm run verify:bundle`: 372,626 total gzip bytes across 38 assets |
+| Production-scale ledger | Passed | Deterministic 63,500-row production profile: seed 1,060.16 ms; startup 263.46 ms; reopen 5.49 ms; dashboard p95 306.38 ms; intake p95 36.02 ms; audit verification 197.67 ms; all correctness, resource, response-size, and latency thresholds passed |
+| Browser tests | Passed | All 90 Playwright Chromium workflows passed on current source in 23 bounded isolated batches in 433 s |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart-persistent session, graceful shutdown and migration 071 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
-| Windows standalone | Passed | `npm run test:windows-package`: bundled Node 22.23.2 x64 runtime passed authenticated isolated-profile startup, migration 071/zero pending, redacted owner register, available privacy register, `accountfeed.GenericItem` HAI manifest, credential-safe logs, shutdown and fixture cleanup |
+| Windows standalone | Passed | A running preview kept its bundled Node executable locked; the hardened builder verified and preserved that exact Node 22.23.2 runtime, replaced the remaining package, then `npm run test:windows-package` passed authenticated isolated-profile startup, migration 071/zero pending, redacted owner register, available privacy register, `accountfeed.GenericItem` HAI manifest, credential-safe logs, shutdown and fixture cleanup |
 | PostgreSQL parity | CI service gate | The migration 071 privacy lifecycle and shared ledger contract tests are present; 36 PostgreSQL/environment tests were skipped without local provider services |
 
 ## Manual results
@@ -47,8 +48,10 @@ decisions outside this repository.
 | Material, safety, permit and LMRA load races | Passed with job-scoped sequence guards and disabled form controls |
 | Audit actor integrity | Passed for authenticated role principals, scoped client portal identity, and local `local:owner`; all explicit mutation sites plus 65 former workflow-label fallbacks consume the trusted principal directly. Approval and authoritative operational provenance preserve that principal through retained decisions, downstream releases, chained history, and separation-of-duty checks. NCR closure retains both named and authenticated verifier identities and rejects self-approval. The release contract rejects body-derived actors, fallback routes, and submitted-first approval or operational principals |
 | Work-permit timing integrity | Passed with creation, readiness, and approval expiry bound to the injected ledger clock; deterministic expiry tests retain fail-closed approval behavior without wall-clock sleeps |
+| Draft recovery | Passed for reload restoration, operator isolation, portal-token fingerprinting, expiry/size bounds, secret/file exclusion, logout and intentional-close cleanup, no implicit ledger write, and explicit job-workspace navigation |
 | In-app Browser QA | Passed against the current built runtime: Operations and the QA-maintenance dialog rendered exact counts/samples, disabled incomplete submission, exact-phrase activation, verified-backup completion notice, responsive empty state, heading focus, Escape restoration, and no page/dialog overflow; the inspected error/warning log was clean before interaction |
-| Responsive evidence | Desktop and narrow-screen QA-maintenance geometry was inspected in the in-app browser; 89 automated workflows retain repeatable desktop/mobile interaction evidence |
+| In-app Browser draft QA | Passed against the current built runtime: an unfinished opportunity restored exact values after reload, an intentional close cleared it, and no visible error state remained |
+| Responsive evidence | Desktop and narrow-screen QA-maintenance geometry was inspected in the in-app browser; 90 automated workflows retain repeatable desktop/mobile interaction evidence |
 
 ## Confirmed limitations
 
@@ -57,8 +60,8 @@ decisions outside this repository.
 - EU hosted production remains blocked until an operator supplies and verifies the
   provider, region, DPA, ingress, database, object storage, backup, retention, and
   recovery requirements described in `EU_HOSTING.md`.
-- Full bilingual NL/EN UI, universal autosave/pagination, and dedicated component
-  tests remain partial.
+- Full bilingual NL/EN UI, universal component-internal draft recovery, and uniform
+  pagination remain partial.
 - The ngrok launcher and fail-closed tests are complete, but no live tunnel was
   opened because no `NGROK_AUTHTOKEN` was available.
 - The HAI connector is read-only, exportable, and accepted by the maintained HAI

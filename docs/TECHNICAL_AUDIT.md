@@ -119,9 +119,11 @@ external-provider engines.
 1. `operating-ledger.js`, `server.js`, and `App.jsx` remain large modules. They are
    stable but expensive to review. Split by domain only with contract tests around
    every extracted boundary; a speculative rewrite would increase release risk.
-2. The UI has broad browser coverage but no dedicated component-unit test suite.
-3. Forms have validation and idempotency, but general draft autosave is not
-   universal. Field offline queues are intentionally narrower and explicit.
+2. The UI has broad browser coverage and a dedicated component-unit gate, but the
+   focused component inventory should grow as large domain components are split.
+3. Forms have validation, idempotency, bounded central draft recovery, and field
+   offline queues, but component-internal recovery is not universal. Offline
+   queues remain intentionally narrower and explicit.
 4. Pagination and advanced filters are not uniform across all long-lived lists.
 5. Dutch data conventions are present, but the UI copy is not yet fully bilingual.
 6. Legal retention periods and data-subject erasure decisions remain operator and

@@ -7,6 +7,12 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Added
 
+- Tab-scoped, operator-isolated recovery for unfinished intake, opportunity, bid,
+  commercial, workforce, equipment, client, scheduling, field, and client-portal
+  forms, with bounded retention, secret/file stripping, expiry, and logout cleanup.
+- A dedicated Vitest/Testing Library frontend gate with behavioral coverage for
+  draft recovery and the QA archive decision dialog, plus a reload-based browser
+  regression proving drafts do not create ledger records and clear on close.
 - A checked-in catalog of 23 contractor operating families, 671 unique
   frameworks, and all 700 source family memberships.
 - Migration `069_governed_framework_workspace` with organization/project scope,
@@ -40,6 +46,9 @@ Versioning for the application contract; database migrations remain append-only.
 
 ### Changed
 
+- Windows standalone packaging can refresh a verified release folder while its
+  matching bundled Node executable is in use, preserving only that locked runtime
+  and replacing every application, dependency, launcher, and build file.
 - Approval requests and resolutions now retain one canonical server-selected
   principal across decision records, downstream releases, audit events, and
   independent-review checks. Local callers cannot substitute `requestedBy`,

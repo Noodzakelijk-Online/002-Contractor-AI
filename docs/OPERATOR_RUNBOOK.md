@@ -99,6 +99,7 @@ browser sessions. Restart the process after success.
 npm run lint
 npm audit
 npm run verify:release
+npm run test:frontend
 npm test
 npm run build
 npm run benchmark:ledger

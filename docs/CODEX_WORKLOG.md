@@ -1,5 +1,24 @@
 # Codex Worklog
 
+- Added bounded tab-scoped draft recovery across central operator, field, and
+  client-portal forms. Drafts are principal-scoped, expire after 12 hours, exclude
+  secret-shaped fields/files, enforce per-entry/total limits, clear on sign-out,
+  and cannot create a ledger record without explicit submission.
+- Added the dedicated Vitest/Testing Library frontend gate and CI/release-contract
+  enforcement. Six component/hook tests and a new Chromium reload workflow cover
+  restoration, scope isolation, privacy limits, QA dialog behavior, no implicit
+  ledger write, and intentional lifecycle clearing.
+- The full browser run exposed and fixed overly broad selected-job recovery that
+  reopened a workspace over explicit Today navigation. All 90 workflows now pass
+  in 23 isolated batches, including the commercial and daywork reload regressions.
+- Hardened Windows packaging for a running standalone preview: a locked bundled
+  Node binary is reused only when its version exactly matches, while every other
+  package artifact is cleaned and rebuilt. The refreshed package passed its full
+  Node 22.23.2 runtime verification without stopping the existing preview.
+- Current gates pass: 6 frontend tests, 532 Node tests, 90 Chromium workflows,
+  zero dependency vulnerabilities, lint, release/build/bundle, maintained HAI
+  parser, smoke and production performance, hardened container, and Windows
+  standalone verification.
 - Audited every retained request-supplied `...By` identity after approval-principal
   hardening. Internal creator, submitter, completer, releaser, and reviewer
   provenance now always prefers the trusted caller; external recipient, custodian,

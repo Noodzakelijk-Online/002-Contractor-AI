@@ -35,7 +35,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 018 | Rate limits, cooldowns, and provider quotas | Implemented | durable bounded API/login limits; provider action remains disabled until verified |
 | 019 | Audit logging and event history | Implemented | transaction-bound SHA-256 chain, direct trusted-principal use across all explicit mutation routes and authoritative operational provenance, source guards against body-derived actors and submitted-first `...By` principals, source-hashed NCR verifier principal, history UI, integrity/readiness checks |
 | 020 | User-facing dashboard and next-action design | Implemented | Today exception/command queue, approvals, safety and readiness indicators |
-| 021 | Forms, validation, and autosave behavior | Partial | validation/submission states and field offline queue; universal draft autosave absent |
+| 021 | Forms, validation, and autosave behavior | Partial | validation/submission states, field offline queue, and bounded operator/client draft recovery for central workflows; component-internal forms are not universally recoverable |
 | 022 | Search, filters, sorting, and pagination | Partial | major queues are filterable/bounded; behavior is not uniform across every list |
 | 023 | Import and export workflows | Implemented | operational export/validation, backup download, hosted migration and CSV packages |
 | 024 | Templates, presets, and reusable user defaults | Partial | all 23 framework families have guarded method playbooks and cadence/measure starters; checklist templates and rate policies exist; user presets are not universal |
@@ -55,10 +55,10 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 038 | Fake provider lab for tests only | Implemented | test doubles remain under tests; production requires verified allowlisted provider |
 | 039 | Test-data factories and fixtures | Implemented | isolated temp data, per-test server/ledger fixtures, QA records |
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
-| 041 | Frontend and component test suite | Partial | full browser workflows and source assertions; no dedicated component-unit framework |
+| 041 | Frontend and component test suite | Implemented | dedicated Vitest/Testing Library behavioral gate plus full browser workflows and source assertions |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 89 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety/maintenance flows plus API vertical slices |
-| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 33 release outcomes |
+| 043 | End-to-end workflow tests | Implemented | 90 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety/maintenance/recovery flows plus API vertical slices |
+| 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 34 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |

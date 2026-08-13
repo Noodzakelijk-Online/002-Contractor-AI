@@ -75,6 +75,11 @@ import {
   toIsoDateTime,
   toLocalDateTimeInput,
 } from './dashboard-format'
+import {
+  browserDraftStorage,
+  clearSessionDraftScope,
+  useSessionDraftRecovery,
+} from './draft-recovery'
 import Empty from './components/EmptyState'
 import './App.css'
 
@@ -3303,6 +3308,43 @@ function App() {
   const operator = data?.session?.operator || { role: 'owner' }
   const fieldScoped = operator.fieldScoped === true
   const outboxScope = fieldOutboxOperatorScope(operator)
+  const draftRecoveryEnabled = authState === 'active' && Boolean(data?.session?.operator)
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'intake-open', value: showIntake, setValue: setShowIntake })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'intake', value: intake, setValue: setIntake })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'opportunity-editor', value: opportunityEditor, setValue: setOpportunityEditor })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'opportunity', value: opportunityDraft, setValue: setOpportunityDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'bid-package-open', value: bidPackageEditor, setValue: setBidPackageEditor })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'bid-package', value: bidPackageDraft, setValue: setBidPackageDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'task', value: taskDraft, setValue: setTaskDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'takeoff', value: takeoffDraft, setValue: setTakeoffDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'takeoff-item', value: takeoffItemDraft, setValue: setTakeoffItemDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'takeoff-conversion', value: takeoffConversionDraft, setValue: setTakeoffConversionDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'commercial-mode', value: commercialDraftMode, setValue: setCommercialDraftMode })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'quote', value: quoteDraft, setValue: setQuoteDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'change-order', value: changeOrderDraft, setValue: setChangeOrderDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'worker-editor', value: workerEditor, setValue: setWorkerEditor })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'worker', value: workerDraft, setValue: setWorkerDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'equipment-editor', value: equipmentEditor, setValue: setEquipmentEditor })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'equipment', value: equipmentDraft, setValue: setEquipmentDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'trade-partner-editor', value: tradePartnerEditor, setValue: setTradePartnerEditor })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'trade-partner', value: tradePartnerDraft, setValue: setTradePartnerDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'client-editor', value: clientEditor, setValue: setClientEditor })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'client', value: clientDraft, setValue: setClientDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'schedule', value: scheduleDraft, setValue: setScheduleDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'weather', value: weatherDraft, setValue: setWeatherDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'resource', value: resourceDraft, setValue: setResourceDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'communication', value: communicationDraft, setValue: setCommunicationDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'portal-link', value: portalDraft, setValue: setPortalDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'field-progress', value: fieldProgress, setValue: setFieldProgress })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'daily-huddle', value: dailyHuddle, setValue: setDailyHuddle })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'daily-log', value: fieldDailyLog, setValue: setFieldDailyLog })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'material-receipt', value: fieldMaterialReceipt, setValue: setFieldMaterialReceipt })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'expense-receipt', value: fieldExpenseReceipt, setValue: setFieldExpenseReceipt })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'environmental-activity', value: fieldEnvironmentalActivity, setValue: setFieldEnvironmentalActivity })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'attendance', value: attendanceDraft, setValue: setAttendanceDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'safety-briefing', value: safetyBriefingDraft, setValue: setSafetyBriefingDraft })
+  useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'work-permit', value: workPermitDraft, setValue: setWorkPermitDraft })
+
   const sessionCapabilities = data?.session?.operator?.capabilities
   const capabilities = useMemo(() => sessionCapabilities || {}, [sessionCapabilities])
   const canCoordinate = !fieldScoped && capabilities.intake === true
@@ -3655,6 +3697,7 @@ function App() {
     setSubmitting(true)
     try {
       await api('/api/auth/logout', { method: 'POST' })
+      clearSessionDraftScope(browserDraftStorage(), outboxScope)
       setData(null)
       setAuthError('')
       setAuthState('required')
@@ -3667,7 +3710,7 @@ function App() {
     } finally {
       setSubmitting(false)
     }
-  }, [])
+  }, [outboxScope])
 
   const refreshOutboxState = useCallback(async () => {
     const snapshot = await fieldOutboxSnapshot(outboxScope)
