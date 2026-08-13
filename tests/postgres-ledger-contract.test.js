@@ -1828,7 +1828,7 @@ test('PostgreSQL startup lock serializes fresh concurrent replicas and releases 
   });
 
   const versions = await Promise.all(Array.from({ length: 4 }, () => startReplica()));
-  assert.deepEqual(versions, Array(4).fill('071_data_subject_request_governance'));
+  assert.deepEqual(versions, Array(4).fill('072_operator_locale_preferences'));
 
   const verification = new PostgresSyncDatabase({ connectionString });
   try {
