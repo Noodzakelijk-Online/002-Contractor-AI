@@ -1,9 +1,19 @@
 .framework-workspace {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   padding-top: 32px;
   border-top: 1px solid #dfe7e3;
+}
+
+.framework-workspace > *,
+.framework-heading > div,
+.framework-toolbar > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .framework-heading,
@@ -92,7 +102,7 @@
 .framework-status-filter button:last-child { border-right: 0; }
 .framework-status-filter button[aria-pressed="true"] { background: #eaf4f0; color: #175d42; box-shadow: inset 0 -3px #237a57; }
 
-.framework-table-scroll { max-width: 100%; overflow-x: auto; border-block: 1px solid #dfe7e3; }
+.framework-table-scroll { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; border-block: 1px solid #dfe7e3; }
 .framework-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: .86rem; }
 .framework-table th,
 .framework-table td { padding: 11px 10px; border-bottom: 1px solid #e5ebe8; text-align: left; vertical-align: top; }
@@ -200,6 +210,8 @@
 
 @media (max-width: 620px) {
   .framework-heading { align-items: flex-start; flex-direction: column; }
+  .framework-heading h2,
+  .framework-heading p { overflow-wrap: anywhere; }
   .framework-summary > div { padding: 11px; }
   .framework-toolbar > label:not(.framework-search) { flex: 1 1 100%; }
   .framework-toolbar select { width: 100%; }
