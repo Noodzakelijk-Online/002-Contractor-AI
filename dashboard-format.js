@@ -1,9 +1,51 @@
-export const currency = new Intl.NumberFormat('nl-NL', {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-})
+import { normalizeLocale } from './locale'
+
+let dashboardLocale = 'en-GB'
+const numberFormatters = new Map()
+const dateFormatters = new Map()
+
+function numberFormatter(locale, options) {
+  const key = `${locale}:${JSON.stringify(options)}`
+  if (!numberFormatters.has(key)) numberFormatters.set(key, new Intl.NumberFormat(locale, options))
+  return numberFormatters.get(key)
+}
+
+function dateFormatter(locale, options) {
+  const key = `${locale}:${JSON.stringify(options)}`
+  if (!dateFormatters.has(key)) dateFormatters.set(key, new Intl.DateTimeFormat(locale, options))
+  return dateFormatters.get(key)
+}
+
+export function setDashboardLocale(locale) {
+  dashboardLocale = normalizeLocale(locale)
+}
+
+export const currency = {
+  format(value) {
+    return formatCurrency(value)
+  },
+}
+
+export function formatCurrency(value, currencyCode = 'EUR') {
+  const code = /^[A-Z]{3}$/.test(String(currencyCode || '').toUpperCase())
+    ? String(currencyCode).toUpperCase()
+    : 'EUR'
+  try {
+    return numberFormatter(dashboardLocale, {
+      style: 'currency',
+      currency: code,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(value)
+  } catch {
+    return `${code} ${Number(value || 0).toFixed(2)}`
+  }
+}
+
+export function formatNumber(value, options = {}) {
+  const number = Number(value)
+  return numberFormatter(dashboardLocale, options).format(Number.isFinite(number) ? number : 0)
+}
 
 export const EMPTY_LIST = []
 
@@ -24,7 +66,7 @@ export function formatDate(value) {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime())
     ? String(value)
-    : new Intl.DateTimeFormat('nl-NL', { day: 'numeric', month: 'short' }).format(parsed)
+    : dateFormatter(dashboardLocale, { day: 'numeric', month: 'short' }).format(parsed)
 }
 
 export function formatDateTime(value) {
@@ -32,7 +74,7 @@ export function formatDateTime(value) {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime())
     ? String(value)
-    : new Intl.DateTimeFormat('nl-NL', {
+    : dateFormatter(dashboardLocale, {
         day: 'numeric',
         month: 'short',
         year: 'numeric',
@@ -41,10 +83,27 @@ export function formatDateTime(value) {
       }).format(parsed)
 }
 
+export function formatReadableDate(value, includeTime = false) {
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return String(value)
+  return dateFormatter(dashboardLocale, includeTime
+    ? { dateStyle: 'medium', timeStyle: 'short' }
+    : { dateStyle: 'medium' }).format(parsed)
+}
+
+export function formatWeekday(value) {
+  if (!value) return ''
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime())
+    ? String(value)
+    : dateFormatter(dashboardLocale, { weekday: 'short', timeZone: 'UTC' }).format(parsed)
+}
+
 export function roundDisplay(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return '0'
-  return new Intl.NumberFormat('nl-NL', { maximumFractionDigits: 2 }).format(number)
+  return formatNumber(number, { maximumFractionDigits: 2 })
 }
 
 export function shortHash(value) {

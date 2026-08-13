@@ -31,6 +31,11 @@ test('office operator signs in through an HTTP-only role session and signs out c
   await expect(page.getByRole('button', { name: 'New opportunity' }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approvals' })).toHaveCount(0);
 
+  await page.getByLabel('Language').selectOption('nl-NL');
+  await expect(page.getByRole('heading', { name: 'Vandaag' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Nieuwe kans' }).first()).toBeVisible();
+  expect(await page.locator('html').getAttribute('lang')).toBe('nl');
+
   const cookies = await context.cookies();
   const sessionCookie = cookies.find(cookie => cookie.name === 'contractor_ai_session');
   expect(sessionCookie).toBeTruthy();
@@ -41,8 +46,12 @@ test('office operator signs in through an HTTP-only role session and signs out c
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Vandaag' })).toBeVisible();
   await expect(page.locator('.operator-session')).toContainText('office operator');
+
+  await page.getByLabel('Taal').selectOption('en-GB');
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  expect(await page.locator('html').getAttribute('lang')).toBe('en');
 
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Operator sign in' })).toBeVisible();

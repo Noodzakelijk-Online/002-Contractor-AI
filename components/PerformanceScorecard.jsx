@@ -11,7 +11,7 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import { formatDate, formatStatus } from '../dashboard-format'
+import { formatDate, formatNumber, formatStatus } from '../dashboard-format'
 import './PerformanceScorecard.css'
 
 const EMPTY_LIST = Object.freeze([])
@@ -35,8 +35,8 @@ function targetEntryKey(metricKey) {
 
 function metricValue(value, unit) {
   if (value === null || value === undefined) return 'No data'
-  if (unit === 'percent') return `${Number(value).toLocaleString('nl-NL', { maximumFractionDigits: 1 })}%`
-  return Number(value).toLocaleString('nl-NL', { maximumFractionDigits: 2 })
+  if (unit === 'percent') return `${formatNumber(value, { maximumFractionDigits: 1 })}%`
+  return formatNumber(value, { maximumFractionDigits: 2 })
 }
 
 function statusLabel(status) {
@@ -222,8 +222,8 @@ export default function PerformanceScorecard({
       ))}
 
       <div className="performance-summary" aria-label="Scorecard summary">
-        <div><span>Overall score</span><strong>{Number(summary.overallScore || 0).toLocaleString('nl-NL', { maximumFractionDigits: 1 })}</strong><progress max="100" value={summary.overallScore || 0} /></div>
-        <div><span>Evidence coverage</span><strong>{Number(summary.dataCoveragePct || 0).toLocaleString('nl-NL', { maximumFractionDigits: 1 })}%</strong><small>{summary.metricCount || 23} governed KPIs</small></div>
+        <div><span>Overall score</span><strong>{formatNumber(summary.overallScore || 0, { maximumFractionDigits: 1 })}</strong><progress max="100" value={summary.overallScore || 0} /></div>
+        <div><span>Evidence coverage</span><strong>{formatNumber(summary.dataCoveragePct || 0, { maximumFractionDigits: 1 })}%</strong><small>{summary.metricCount || 23} governed KPIs</small></div>
         <div><span>On track</span><strong>{summary.onTrack || 0}</strong><small>{summary.watch || 0} watch</small></div>
         <div><span>Attention</span><strong>{summary.offTrack || 0}</strong><small>{summary.noData || 0} without evidence</small></div>
       </div>
@@ -239,7 +239,7 @@ export default function PerformanceScorecard({
             onClick={() => setPerspective(item.key)}
           >
             <span>{PERSPECTIVE_LABELS[item.key] || formatStatus(item.key)}</span>
-            <b>{Number(item.score || 0).toLocaleString('nl-NL', { maximumFractionDigits: 1 })}</b>
+            <b>{formatNumber(item.score || 0, { maximumFractionDigits: 1 })}</b>
           </button>
         ))}
       </div>

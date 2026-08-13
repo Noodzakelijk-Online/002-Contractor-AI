@@ -56,7 +56,7 @@ test('operator approves a production baseline, records output offline, and reque
   await entryForm.getByLabel('Field note').fill('First wall zone measured after installation.');
   await entryForm.getByRole('button', { name: 'Record output' }).click();
   await expect(page.getByText('Installed quantity and crew hours were recorded against the approved production baseline.')).toBeVisible();
-  await expect(production.getByText('0,5', { exact: true }).first()).toBeVisible();
+  await expect(production.getByText('0.5', { exact: true }).first()).toBeVisible();
 
   await entryForm.getByLabel('Installed quantity').fill('10');
   await entryForm.getByLabel('Crew hours').fill('8');

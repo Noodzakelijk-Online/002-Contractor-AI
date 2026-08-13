@@ -1,9 +1,9 @@
 # API Usage Audit
 
-Audit date: 2026-08-09
+Audit date: 2026-08-13
 
-The source declares 377 Express routes. The primary React dashboard has 81 direct
-API call sites plus child-component calls. Route presence alone is not considered
+The source declares 379 Express routes. The primary React dashboard has 86 unique
+literal API path prefixes plus dynamic and child-component calls. Route presence alone is not considered
 evidence of usability; release evidence combines route contract tests, UI action
 mapping, browser flows, and the release-contract scan.
 
@@ -11,7 +11,7 @@ mapping, browser flows, and the release-contract scan.
 
 | Surface | Purpose | Access |
 | --- | --- | --- |
-| `/api/auth/*`, `/api/session` | Browser session creation/revocation/status | public login; authenticated session actions |
+| `/api/auth/*`, `/api/session`, `/api/preferences` | Browser sessions and self-scoped locale preference | public login; authenticated session actions |
 | `/api/ledger/*` | Canonical operational and business records | role and resource scoped |
 | `/api/client-portal/:token/*` | Narrow client evidence and responses | scoped opaque portal token |
 | `/api/operations/*` | backup, export, identity, audit, safety, diagnostics | owner/approver according to route |
@@ -66,7 +66,7 @@ guidance. The production service serves the built Vite client for non-API routes
 
 - A generated OpenAPI schema is not currently the source of truth; contract tests
   and route assertions are. Introducing one should be incremental and checked
-  against all 377 routes rather than publishing a partial schema.
+  against all 379 routes rather than publishing a partial schema.
 - Some components build endpoint paths dynamically, so static call-site counts are
   an audit indicator, not a proof that every path is reached.
 - Real external provider endpoints remain disabled until provider-specific receipt

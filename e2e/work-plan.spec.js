@@ -57,7 +57,7 @@ test('operator calculates, approves, and revises a critical-path work plan', asy
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const reopenedPlan = page.getByTestId('job-workspace').getByTestId('job-task-control');
   await expect(reopenedPlan.getByText('Baseline v1 current')).toBeVisible();
-  await expect(reopenedPlan.getByText('7 sep 2026', { exact: false }).first()).toBeVisible();
+  await expect(reopenedPlan.getByText('7 Sept 2026', { exact: false }).first()).toBeVisible();
 
   await reopenedPlan.getByLabel('Duration hours for Install work').fill('20');
   await reopenedPlan.getByRole('button', { name: 'Save duration for Install work' }).click();

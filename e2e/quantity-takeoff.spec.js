@@ -138,7 +138,7 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await itemModal.getByLabel('Work package').fill('Floor finishes');
   await itemModal.getByLabel('Drawing / source reference').fill('A-101 P02');
   await expect(itemModal.getByLabel('Calculated measurement preview')).toContainText('22 m2');
-  await expect(itemModal.getByLabel('Calculated measurement preview')).toContainText('€ 770,00');
+  await expect(itemModal.getByLabel('Calculated measurement preview')).toContainText('€770.00');
   await itemModal.getByRole('button', { name: 'Retain measurement' }).click();
   await expect(page.getByText('Takeoff measurement calculated and retained.')).toBeVisible();
   await expect(sheet.getByText('22 m2')).toBeVisible();
@@ -146,7 +146,7 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   const workBreakdown = sheet.getByRole('table', { name: 'Ground floor measured scope work breakdown' });
   await expect(workBreakdown).toContainText('03.20');
   await expect(workBreakdown).toContainText('Floor finishes');
-  await expect(workBreakdown).toContainText('770,00');
+  await expect(workBreakdown).toContainText('770.00');
   await expect(sheet.getByText('03.20 / Floor finishes')).toBeVisible();
 
   await sheet.getByRole('button', { name: 'Edit Ceramic floor tiles' }).click();
@@ -165,14 +165,14 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await unitRateDialog.getByLabel('Subcontract / unit').fill('0');
   await unitRateDialog.getByLabel('Other direct / unit').fill('2');
   const ratePreview = unitRateDialog.getByLabel('Unit-rate calculation preview');
-  await expect(ratePreview).toContainText('82,00');
-  await expect(ratePreview).toContainText('102,50');
+  await expect(ratePreview).toContainText('82.00');
+  await expect(ratePreview).toContainText('102.50');
   await expect(ratePreview).toContainText('25%');
   await unitRateDialog.getByRole('button', { name: 'Apply build-up' }).click();
   await expect(page.getByText('Unit-rate build-up calculated and retained on the draft measurement.')).toBeVisible();
   await expect(sheet.getByText('Rate v1')).toBeVisible();
-  await expect(sheet.getByText(/Labour.*40,00.*overhead.*15,00.*cost.*82,00.*margin 20%/)).toBeVisible();
-  await expect(workBreakdown).toContainText('2.818,75');
+  await expect(sheet.getByText(/Labour.*40\.00.*overhead.*15\.00.*cost.*82\.00.*margin 20%/)).toBeVisible();
+  await expect(workBreakdown).toContainText('2,818.75');
 
   const commercialScope = await approveCommercialScope(request, intake.job.id, `browser-takeoff-scope-${key}`);
   const riskResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/risk-register/revisions`, {
@@ -204,7 +204,7 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   await expect(sheet.getByText('converted', { exact: true })).toBeVisible();
   await expect(sheet.getByText('Snapshot verified')).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Measurement' })).toHaveCount(0);
-  await expect(workspace.getByTestId('commercial-control')).toContainText('2.818,75');
+  await expect(workspace.getByTestId('commercial-control')).toContainText('2,818.75');
 
   const detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();

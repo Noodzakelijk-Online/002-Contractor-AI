@@ -136,7 +136,7 @@ test('LMRA readiness is worker-scoped, source-current, time-bounded, and exact-r
   )
   const diagnostics = ledger.diagnose()
   assert.equal(diagnostics.valid, true, JSON.stringify(diagnostics.issues))
-  assert.equal(diagnostics.migrations.currentVersion, '071_data_subject_request_governance')
+  assert.equal(diagnostics.migrations.currentVersion, '072_operator_locale_preferences')
   assert.equal(diagnostics.counts.lmraAssessments, 1)
 })
 

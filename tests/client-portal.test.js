@@ -54,12 +54,13 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
 
   const created = await request(baseUrl, `/api/ledger/jobs/${jobId}/client-portal-access`, {
     method: 'POST',
-    body: JSON.stringify({ label: 'Portal Client project', expiresAt: '2027-01-01' })
+    body: JSON.stringify({ label: 'Portal Client project', expiresAt: '2027-01-01', locale: 'en-GB' })
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.access.status, 'pending_approval');
   assert.ok(created.body.access.portalToken);
   assert.ok(created.body.access.approval.id);
+  assert.equal(created.body.access.data.locale, 'en-GB');
   assert.equal(JSON.stringify(created.body.access).includes('tokenHash'), false);
 
   const beforeApproval = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}`);
@@ -85,6 +86,7 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
   assert.equal(portal.body.job.id, jobId);
   assert.equal(portal.body.job.title, 'Client portal paving job');
   assert.equal(portal.body.job.address, 'Utrecht');
+  assert.equal(portal.body.portal.locale, 'en-GB');
   assert.equal(Object.hasOwn(portal.body.job, 'client'), false);
   assert.equal(Object.hasOwn(portal.body.job, 'invoices'), false);
   assert.equal(Object.hasOwn(portal.body.job, 'expenses'), false);
@@ -102,6 +104,22 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
   });
   assert.ok(portalLogs.some(line => line.includes('/api/client-portal/[redacted]')));
   assert.equal(portalLogs.some(line => line.includes(created.body.access.portalToken)), false);
+
+  const portalPreference = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}/preferences`, {
+    method: 'PATCH',
+    body: JSON.stringify({ locale: 'nl-NL' })
+  });
+  assert.equal(portalPreference.response.status, 200);
+  assert.equal(portalPreference.body.preferences.locale, 'nl-NL');
+  const localizedPortal = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}`);
+  assert.equal(localizedPortal.body.portal.locale, 'nl-NL');
+
+  const unsupportedLocale = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}/preferences`, {
+    method: 'PATCH',
+    body: JSON.stringify({ locale: 'de-DE' })
+  });
+  assert.equal(unsupportedLocale.response.status, 400);
+  assert.equal(unsupportedLocale.body.error.code, 'portal_locale_unsupported');
 
   const message = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}/messages`, {
     method: 'POST',

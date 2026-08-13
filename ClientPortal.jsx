@@ -1,20 +1,31 @@
 import { useEffect, useState } from 'react'
 import { CalendarDays, CircleAlert, CircleCheckBig, Download, FileSignature, FileText, HardHat, ListChecks, LoaderCircle, MessageSquareText, Send, ShieldCheck, Star } from 'lucide-react'
 import { draftScopeFingerprint, useSessionDraftRecovery } from './draft-recovery'
+import { DEFAULT_PORTAL_LOCALE, normalizeLocale, portalText, SUPPORTED_LOCALES } from './locale'
 import './ClientPortal.css'
 
-function formatPortalDate(value) {
-  if (!value) return 'Nog niet gepland'
+function formatPortalDate(value, locale) {
+  if (!value) return portalText(locale, 'Nog niet gepland')
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Nog niet gepland'
-  return new Intl.DateTimeFormat('nl-NL', {
+  if (Number.isNaN(date.getTime())) return portalText(locale, 'Nog niet gepland')
+  return new Intl.DateTimeFormat(locale, {
     dateStyle: 'medium',
     timeStyle: String(value).includes('T') ? 'short' : undefined
   }).format(date)
 }
 
-function formatPortalStatus(value, fallback = 'in behandeling') {
-  return String(value || fallback).replace(/_/g, ' ')
+const PORTAL_STATUS_LABELS = {
+  'nl-NL': {
+    active: 'actief', approved: 'goedgekeurd', changes_requested: 'aanpassing gevraagd', completed: 'afgerond',
+    in_progress: 'in uitvoering', issued: 'uitgegeven', open: 'open', pending: 'in behandeling',
+    pending_client: 'wacht op klant', pending_review: 'wacht op controle', planned: 'gepland', recorded: 'verwerkt',
+    rejected: 'afgewezen', rejected_by_client: 'afgewezen door klant', scheduled: 'gepland'
+  }
+}
+
+function formatPortalStatus(value, locale, fallback = 'in behandeling') {
+  const status = String(value || fallback).toLowerCase().replace(/[ -]+/g, '_')
+  return PORTAL_STATUS_LABELS[locale]?.[status] || status.replace(/_/g, ' ')
 }
 
 function createResponseId() {
@@ -22,9 +33,9 @@ function createResponseId() {
   return `response-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function formatPortalMoney(value, currency = 'EUR') {
+function formatPortalMoney(value, currency = 'EUR', locale = DEFAULT_PORTAL_LOCALE) {
   try {
-    return new Intl.NumberFormat('nl-NL', { style: 'currency', currency }).format(Number(value || 0))
+    return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(Number(value || 0))
   } catch {
     return `${Number(value || 0).toFixed(2)} ${currency}`
   }
@@ -66,101 +77,104 @@ function PortalList({ items, empty, render }) {
   return <ul className="client-portal-list">{items.map((item, index) => <li key={item.id || `${index}-${render(item)}`}>{render(item)}</li>)}</ul>
 }
 
-function SelectionResponseState({ response }) {
+function SelectionResponseState({ response, t }) {
   if (!response) return null
   const recorded = response.status === 'recorded'
   const pending = response.status === 'pending_review'
   return <div className={`client-selection-response client-selection-response-${response.status}`} role="status">
     {recorded ? <CircleCheckBig size={18} /> : <CircleAlert size={18} />}
     <div>
-      <strong>{recorded ? 'Reactie verwerkt' : pending ? 'Wacht op interne controle' : 'Reactie kan opnieuw worden ingediend'}</strong>
+      <strong>{recorded ? t('Reactie verwerkt') : pending ? t('Wacht op interne controle') : t('Reactie kan opnieuw worden ingediend')}</strong>
       <span>{response.decision === 'accepted'
-        ? `Keuze: ${response.selectedOption || 'bevestigd'}`
-        : response.note || 'Uw verzoek om aanpassing is vastgelegd.'}</span>
+        ? `${t('Keuze')}: ${response.selectedOption || t('bevestigd')}`
+        : response.note || t('Uw verzoek om aanpassing is vastgelegd.')}</span>
     </div>
   </div>
 }
 
-function ClientSelection({ selection, draft, result, submitting, onDraftChange, onSubmit }) {
+function ClientSelection({ selection, draft, result, submitting, onDraftChange, onSubmit, locale, t }) {
   return <article className="client-portal-selection">
     <div className="client-selection-heading">
-      <div><h3>{selection.title || 'Projectkeuze'}</h3><p>{selection.dueAt ? `Reageer uiterlijk ${formatPortalDate(selection.dueAt)}` : 'Geen reactiedatum ingesteld'}</p></div>
-      <span className={`client-selection-status client-selection-status-${selection.status}`}>{formatPortalStatus(selection.status, 'open')}</span>
+      <div><h3>{selection.title || t('Projectkeuze')}</h3><p>{selection.dueAt ? t('Reageer uiterlijk {date}', { date: formatPortalDate(selection.dueAt, locale) }) : t('Geen reactiedatum ingesteld')}</p></div>
+      <span className={`client-selection-status client-selection-status-${selection.status}`}>{formatPortalStatus(selection.status, locale, 'open')}</span>
     </div>
-    {selection.options?.length ? <div className="client-selection-options" aria-label="Beschikbare opties">{selection.options.map(option => <span key={option}>{option}</span>)}</div> : null}
-    {selection.selectedOption && !selection.responseAllowed ? <p className="client-selection-confirmed"><strong>Vastgelegde keuze:</strong> {selection.selectedOption}</p> : null}
-    <SelectionResponseState response={selection.response} />
+    {selection.options?.length ? <div className="client-selection-options" aria-label={t('Beschikbare opties')}>{selection.options.map(option => <span key={option}>{option}</span>)}</div> : null}
+    {selection.selectedOption && !selection.responseAllowed ? <p className="client-selection-confirmed"><strong>{t('Vastgelegde keuze:')}</strong> {selection.selectedOption}</p> : null}
+    <SelectionResponseState response={selection.response} t={t} />
     {selection.responseAllowed && draft ? <form className="client-selection-form" onSubmit={event => onSubmit(event, selection)}>
       <fieldset>
-        <legend>Uw reactie</legend>
-        <label><input type="radio" name={`decision-${selection.id}`} value="accepted" checked={draft.decision === 'accepted'} onChange={event => onDraftChange(selection.id, { decision: event.target.value })} />Ik bevestig deze keuze</label>
-        <label><input type="radio" name={`decision-${selection.id}`} value="changes_requested" checked={draft.decision === 'changes_requested'} onChange={event => onDraftChange(selection.id, { decision: event.target.value })} />Ik wil een aanpassing</label>
+        <legend>{t('Uw reactie')}</legend>
+        <label><input type="radio" name={`decision-${selection.id}`} value="accepted" checked={draft.decision === 'accepted'} onChange={event => onDraftChange(selection.id, { decision: event.target.value })} />{t('Ik bevestig deze keuze')}</label>
+        <label><input type="radio" name={`decision-${selection.id}`} value="changes_requested" checked={draft.decision === 'changes_requested'} onChange={event => onDraftChange(selection.id, { decision: event.target.value })} />{t('Ik wil een aanpassing')}</label>
       </fieldset>
-      {draft.decision === 'accepted' && selection.options?.length ? <label>Gekozen optie<select required aria-label={`Gekozen optie voor ${selection.title}`} value={draft.selectedOption} onChange={event => onDraftChange(selection.id, { selectedOption: event.target.value })}>{selection.options.map(option => <option key={option} value={option}>{option}</option>)}</select></label> : null}
-      <label>{draft.decision === 'changes_requested' ? 'Welke aanpassing wilt u?' : 'Toelichting (optioneel)'}<textarea required={draft.decision === 'changes_requested'} maxLength="2000" value={draft.note} onChange={event => onDraftChange(selection.id, { note: event.target.value })} /></label>
-      <p className="client-portal-note">Uw reactie wordt eerst intern gecontroleerd. Hiermee wijzigt u geen prijs, planning, opdracht of bestelling.</p>
-      <div className="client-portal-submit"><button type="submit" disabled={submitting || !draft.decision || (draft.decision === 'changes_requested' && !draft.note.trim())}><ShieldCheck size={16} />{submitting ? 'Indienen...' : 'Ter beoordeling indienen'}</button><span aria-live="polite">{result}</span></div>
+      {draft.decision === 'accepted' && selection.options?.length ? <label>{t('Gekozen optie')}<select required aria-label={t('Gekozen optie voor {title}', { title: selection.title })} value={draft.selectedOption} onChange={event => onDraftChange(selection.id, { selectedOption: event.target.value })}>{selection.options.map(option => <option key={option} value={option}>{option}</option>)}</select></label> : null}
+      <label>{draft.decision === 'changes_requested' ? t('Welke aanpassing wilt u?') : t('Toelichting (optioneel)')}<textarea required={draft.decision === 'changes_requested'} maxLength="2000" value={draft.note} onChange={event => onDraftChange(selection.id, { note: event.target.value })} /></label>
+      <p className="client-portal-note">{t('Uw reactie wordt eerst intern gecontroleerd. Hiermee wijzigt u geen prijs, planning, opdracht of bestelling.')}</p>
+      <div className="client-portal-submit"><button type="submit" disabled={submitting || !draft.decision || (draft.decision === 'changes_requested' && !draft.note.trim())}><ShieldCheck size={16} />{submitting ? t('Indienen...') : t('Ter beoordeling indienen')}</button><span aria-live="polite">{result}</span></div>
     </form> : null}
   </article>
 }
 
-function VariationResponseState({ response }) {
+function VariationResponseState({ response, t }) {
   if (!response) return null
   const recorded = response.status === 'recorded'
   const pending = response.status === 'pending_review'
   const label = response.decision === 'accepted'
-    ? 'Akkoord geregistreerd'
+    ? t('Akkoord geregistreerd')
     : response.decision === 'changes_requested'
-      ? 'Aanpassing gevraagd'
-      : 'Voorstel afgewezen'
+      ? t('Aanpassing gevraagd')
+      : t('Voorstel afgewezen')
   return <div className={`client-selection-response client-selection-response-${response.status}`} role="status">
     {recorded ? <CircleCheckBig size={18} /> : <CircleAlert size={18} />}
     <div>
-      <strong>{pending ? 'Wacht op interne verificatie' : recorded ? label : 'Reactie kan opnieuw worden ingediend'}</strong>
-      <span>{response.note || (response.signerName ? `Ondertekend door ${response.signerName}` : 'Uw reactie is vastgelegd.')}</span>
+      <strong>{pending ? t('Wacht op interne verificatie') : recorded ? label : t('Reactie kan opnieuw worden ingediend')}</strong>
+      <span>{response.note || (response.signerName ? t('Ondertekend door {name}', { name: response.signerName }) : t('Uw reactie is vastgelegd.'))}</span>
     </div>
   </div>
 }
 
-function ClientVariation({ variation, token, draft, result, submitting, onDraftChange, onSubmit }) {
-  const identity = `${variation.variationNumber || 'Variatie'} / R${variation.revisionNumber || 1}`
+function ClientVariation({ variation, token, draft, result, submitting, onDraftChange, onSubmit, locale, t }) {
+  const identity = `${variation.variationNumber || t('Variatie')} / R${variation.revisionNumber || 1}`
   const responseDueAt = variation.formalControl?.responseDueAt
   return <article className="client-portal-selection client-portal-variation">
     <div className="client-selection-heading">
-      <div><h3>{identity} - {variation.title}</h3><p>{responseDueAt ? `Reageer uiterlijk ${formatPortalDate(responseDueAt)}` : 'Geen reactiedatum ingesteld'}</p></div>
-      <span className={`client-selection-status client-selection-status-${variation.status}`}>{formatPortalStatus(variation.status, 'uitgegeven')}</span>
+      <div><h3>{identity} - {variation.title}</h3><p>{responseDueAt ? t('Reageer uiterlijk {date}', { date: formatPortalDate(responseDueAt, locale) }) : t('Geen reactiedatum ingesteld')}</p></div>
+      <span className={`client-selection-status client-selection-status-${variation.status}`}>{formatPortalStatus(variation.status, locale, 'uitgegeven')}</span>
     </div>
     <p className="client-variation-scope">{variation.scopeDelta}</p>
     <div className="client-variation-facts">
-      <span><small>Bedrag incl. btw</small><strong>{formatPortalMoney(variation.total, variation.currency)}</strong></span>
-      <span><small>Planning</small><strong>{Number(variation.scheduleDeltaDays || 0) === 0 ? 'Geen wijziging' : `${variation.scheduleDeltaDays} kalenderdag(en)`}</strong></span>
-      <span><small>Type</small><strong>{formatPortalStatus(variation.formalControl?.variationType, 'scopewijziging')}</strong></span>
+      <span><small>{t('Bedrag incl. btw')}</small><strong>{formatPortalMoney(variation.total, variation.currency, locale)}</strong></span>
+      <span><small>{t('Planning')}</small><strong>{Number(variation.scheduleDeltaDays || 0) === 0 ? t('Geen wijziging') : t('{days} kalenderdag(en)', { days: variation.scheduleDeltaDays })}</strong></span>
+      <span><small>{t('Type')}</small><strong>{formatPortalStatus(variation.formalControl?.variationType, locale, t('scopewijziging'))}</strong></span>
     </div>
-    <a className="client-variation-download" href={`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/package`}><Download size={16} />Download genummerd voorstel</a>
-    <VariationResponseState response={variation.response} />
+    <a className="client-variation-download" href={`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/package`}><Download size={16} />{t('Download genummerd voorstel')}</a>
+    <VariationResponseState response={variation.response} t={t} />
     {result ? <p className="client-variation-result" role="status" aria-live="polite">{result}</p> : null}
     {variation.responseAllowed && draft ? <form className="client-selection-form" onSubmit={event => onSubmit(event, variation)}>
       <fieldset>
-        <legend>Uw besluit</legend>
-        <label><input type="radio" name={`variation-decision-${variation.id}`} value="accepted" checked={draft.decision === 'accepted'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />Ik ga akkoord</label>
-        <label><input type="radio" name={`variation-decision-${variation.id}`} value="changes_requested" checked={draft.decision === 'changes_requested'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />Ik vraag een aanpassing</label>
-        <label><input type="radio" name={`variation-decision-${variation.id}`} value="rejected" checked={draft.decision === 'rejected'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />Ik wijs dit voorstel af</label>
+        <legend>{t('Uw besluit')}</legend>
+        <label><input type="radio" name={`variation-decision-${variation.id}`} value="accepted" checked={draft.decision === 'accepted'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />{t('Ik ga akkoord')}</label>
+        <label><input type="radio" name={`variation-decision-${variation.id}`} value="changes_requested" checked={draft.decision === 'changes_requested'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />{t('Ik vraag een aanpassing')}</label>
+        <label><input type="radio" name={`variation-decision-${variation.id}`} value="rejected" checked={draft.decision === 'rejected'} onChange={event => onDraftChange(variation.id, { decision: event.target.value })} />{t('Ik wijs dit voorstel af')}</label>
       </fieldset>
       <div className="client-variation-response-fields">
         {draft.decision === 'accepted' ? <>
-          <label>Naam bevoegde ondertekenaar<input required maxLength="160" value={draft.signerName} onChange={event => onDraftChange(variation.id, { signerName: event.target.value })} /></label>
-          <label className="client-variation-authority"><input type="checkbox" checked={draft.authorityConfirmed} onChange={event => onDraftChange(variation.id, { authorityConfirmed: event.target.checked })} />Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren.</label>
+          <label>{t('Naam bevoegde ondertekenaar')}<input required maxLength="160" value={draft.signerName} onChange={event => onDraftChange(variation.id, { signerName: event.target.value })} /></label>
+          <label className="client-variation-authority"><input type="checkbox" checked={draft.authorityConfirmed} onChange={event => onDraftChange(variation.id, { authorityConfirmed: event.target.checked })} />{t('Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren.')}</label>
         </> : null}
-        <label>{draft.decision === 'accepted' ? 'Toelichting (optioneel)' : 'Reden en gewenste wijziging'}<textarea required={draft.decision !== 'accepted'} maxLength="2000" value={draft.note} onChange={event => onDraftChange(variation.id, { note: event.target.value })} /></label>
+        <label>{draft.decision === 'accepted' ? t('Toelichting (optioneel)') : t('Reden en gewenste wijziging')}<textarea required={draft.decision !== 'accepted'} maxLength="2000" value={draft.note} onChange={event => onDraftChange(variation.id, { note: event.target.value })} /></label>
       </div>
-      <p className="client-portal-note">Uw besluit wordt eerst intern geverifieerd tegen het genummerde voorstel. Tot die verificatie wijzigt geen contractsom en is het extra werk niet geautoriseerd.</p>
-      <div className="client-portal-submit"><button type="submit" disabled={submitting || !draft.decision || (draft.decision === 'accepted' && (!draft.signerName.trim() || !draft.authorityConfirmed)) || (draft.decision !== 'accepted' && draft.note.trim().length < 5)}><ShieldCheck size={16} />{submitting ? 'Indienen...' : 'Besluit indienen'}</button></div>
+      <p className="client-portal-note">{t('Uw besluit wordt eerst intern geverifieerd tegen het genummerde voorstel. Tot die verificatie wijzigt geen contractsom en is het extra werk niet geautoriseerd.')}</p>
+      <div className="client-portal-submit"><button type="submit" disabled={submitting || !draft.decision || (draft.decision === 'accepted' && (!draft.signerName.trim() || !draft.authorityConfirmed)) || (draft.decision !== 'accepted' && draft.note.trim().length < 5)}><ShieldCheck size={16} />{submitting ? t('Indienen...') : t('Besluit indienen')}</button></div>
     </form> : null}
   </article>
 }
 
 export default function ClientPortal() {
   const [token] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('token') || '')
+  const [locale, setLocale] = useState(DEFAULT_PORTAL_LOCALE)
+  const [localeSaving, setLocaleSaving] = useState(false)
+  const [localeError, setLocaleError] = useState('')
   const [job, setJob] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -180,6 +194,7 @@ export default function ClientPortal() {
   const [feedbackResult, setFeedbackResult] = useState('')
   const portalDraftScope = `client-portal:${draftScopeFingerprint(token)}`
   const portalDraftRecoveryEnabled = token.length >= 32
+  const t = (key, variables) => portalText(locale, key, variables)
 
   useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'message-subject', value: subject, setValue: setSubject })
   useSessionDraftRecovery({ enabled: portalDraftRecoveryEnabled, scope: portalDraftScope, name: 'message-body', value: body, setValue: setBody })
@@ -197,18 +212,19 @@ export default function ClientPortal() {
       document.head.append(robots)
     }
     const previousRobots = robots.content
-    document.title = 'Contractor.AI - Uw project'
+    document.title = `Contractor.AI - ${portalText(locale, 'Uw project')}`
+    document.documentElement.lang = locale.slice(0, 2)
     robots.content = 'noindex, nofollow'
     return () => {
       document.title = previousTitle
       if (createdRobots) robots.remove()
       else robots.content = previousRobots
     }
-  }, [])
+  }, [locale])
 
   useEffect(() => {
     if (token.length < 32) {
-      setError('Deze projectlink is ongeldig of verlopen. Vraag om een nieuwe link.')
+      setError(portalText(DEFAULT_PORTAL_LOCALE, 'Deze projectlink is ongeldig of verlopen. Vraag om een nieuwe link.'))
       setLoading(false)
       return undefined
     }
@@ -218,7 +234,12 @@ export default function ClientPortal() {
       try {
         const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}`, { signal: controller.signal })
         const payload = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(payload?.error?.message || 'Deze projectlink is niet beschikbaar.')
+        if (!response.ok) throw new Error(payload?.error?.message || portalText(DEFAULT_PORTAL_LOCALE, 'Deze projectlink is niet beschikbaar.'))
+        const retainedLocale = normalizeLocale(payload.portal?.locale, DEFAULT_PORTAL_LOCALE)
+        setLocale(retainedLocale)
+        setSubject(current => current === 'Vraag over mijn project' || current === 'Question about my project'
+          ? portalText(retainedLocale, 'Vraag over mijn project')
+          : current)
         setJob(payload.job)
         setFeedbackSubmitted(payload.portal?.feedback?.submitted === true)
         setSelectionDrafts(current => Object.fromEntries((payload.job?.selections || [])
@@ -228,7 +249,7 @@ export default function ClientPortal() {
           .filter(variation => variation.responseAllowed)
           .map(variation => [variation.id, { ...emptyVariationDraft(), ...(current[variation.id] || {}) }])))
       } catch (requestError) {
-        if (requestError.name !== 'AbortError') setError(requestError.message || 'Deze projectlink is niet beschikbaar.')
+        if (requestError.name !== 'AbortError') setError(requestError.message || portalText(DEFAULT_PORTAL_LOCALE, 'Deze projectlink is niet beschikbaar.'))
       } finally {
         if (!controller.signal.aborted) setLoading(false)
       }
@@ -236,6 +257,29 @@ export default function ClientPortal() {
     loadPortal()
     return () => controller.abort()
   }, [token])
+
+  async function updatePortalLocale(nextLocale) {
+    const normalized = normalizeLocale(nextLocale, DEFAULT_PORTAL_LOCALE)
+    if (normalized === locale || localeSaving) return
+    const previous = locale
+    setLocaleError('')
+    setLocale(normalized)
+    setLocaleSaving(true)
+    try {
+      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/preferences`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ locale: normalized })
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload?.error?.message || portalText(normalized, 'Deze projectlink is niet beschikbaar.'))
+    } catch (requestError) {
+      setLocale(previous)
+      setLocaleError(requestError.message)
+    } finally {
+      setLocaleSaving(false)
+    }
+  }
 
   function updateSelectionDraft(selectionId, patch) {
     setSelectionDrafts(current => ({
@@ -250,7 +294,7 @@ export default function ClientPortal() {
     const draft = selectionDrafts[selection.id]
     if (!draft?.decision || selectionSubmitting) return
     setSelectionSubmitting(selection.id)
-    setSelectionResults(current => ({ ...current, [selection.id]: 'Uw reactie wordt opgeslagen...' }))
+    setSelectionResults(current => ({ ...current, [selection.id]: t('Uw reactie wordt opgeslagen...') }))
     try {
       const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/selections/${encodeURIComponent(selection.id)}/responses`, {
         method: 'POST',
@@ -258,7 +302,7 @@ export default function ClientPortal() {
         body: JSON.stringify(draft)
       })
       const payload = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(payload?.error?.message || 'Uw reactie kon niet worden opgeslagen.')
+      if (!response.ok) throw new Error(payload?.error?.message || t('Uw reactie kon niet worden opgeslagen.'))
       setJob(current => ({
         ...current,
         selections: current.selections.map(item => item.id === selection.id
@@ -266,9 +310,9 @@ export default function ClientPortal() {
           : item)
       }))
       setSelectionDrafts(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== selection.id)))
-      setSelectionResults(current => ({ ...current, [selection.id]: 'Uw reactie wacht op interne controle.' }))
+      setSelectionResults(current => ({ ...current, [selection.id]: t('Uw reactie wacht op interne controle.') }))
     } catch (requestError) {
-      setSelectionResults(current => ({ ...current, [selection.id]: requestError.message || 'Uw reactie kon niet worden opgeslagen.' }))
+      setSelectionResults(current => ({ ...current, [selection.id]: requestError.message || t('Uw reactie kon niet worden opgeslagen.') }))
     } finally {
       setSelectionSubmitting('')
     }
@@ -287,7 +331,7 @@ export default function ClientPortal() {
     const draft = variationDrafts[variation.id]
     if (!draft?.decision || variationSubmitting) return
     setVariationSubmitting(variation.id)
-    setVariationResults(current => ({ ...current, [variation.id]: 'Uw besluit wordt veilig opgeslagen...' }))
+    setVariationResults(current => ({ ...current, [variation.id]: t('Uw besluit wordt veilig opgeslagen...') }))
     try {
       const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/responses`, {
         method: 'POST',
@@ -295,7 +339,7 @@ export default function ClientPortal() {
         body: JSON.stringify(draft)
       })
       const payload = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(payload?.error?.message || 'Uw besluit kon niet worden opgeslagen.')
+      if (!response.ok) throw new Error(payload?.error?.message || t('Uw besluit kon niet worden opgeslagen.'))
       setJob(current => ({
         ...current,
         variations: current.variations.map(item => item.id === variation.id
@@ -303,9 +347,9 @@ export default function ClientPortal() {
           : item)
       }))
       setVariationDrafts(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== variation.id)))
-      setVariationResults(current => ({ ...current, [variation.id]: 'Uw besluit wacht op interne verificatie.' }))
+      setVariationResults(current => ({ ...current, [variation.id]: t('Uw besluit wacht op interne verificatie.') }))
     } catch (requestError) {
-      setVariationResults(current => ({ ...current, [variation.id]: requestError.message || 'Uw besluit kon niet worden opgeslagen.' }))
+      setVariationResults(current => ({ ...current, [variation.id]: requestError.message || t('Uw besluit kon niet worden opgeslagen.') }))
     } finally {
       setVariationSubmitting('')
     }
@@ -315,7 +359,7 @@ export default function ClientPortal() {
     event.preventDefault()
     if (!body.trim() || submitting) return
     setSubmitting(true)
-    setMessageResult('Bericht wordt opgeslagen...')
+    setMessageResult(t('Bericht wordt opgeslagen...'))
     try {
       const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/messages`, {
         method: 'POST',
@@ -323,11 +367,11 @@ export default function ClientPortal() {
         body: JSON.stringify({ subject: subject.trim(), body: body.trim() })
       })
       const payload = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(payload?.error?.message || 'Bericht kon niet worden opgeslagen.')
+      if (!response.ok) throw new Error(payload?.error?.message || t('Bericht kon niet worden opgeslagen.'))
       setBody('')
-      setMessageResult('Uw bericht is toegevoegd aan het projectdossier.')
+      setMessageResult(t('Uw bericht is toegevoegd aan het projectdossier.'))
     } catch (requestError) {
-      setMessageResult(requestError.message || 'Bericht kon niet worden opgeslagen.')
+      setMessageResult(requestError.message || t('Bericht kon niet worden opgeslagen.'))
     } finally {
       setSubmitting(false)
     }
@@ -337,7 +381,7 @@ export default function ClientPortal() {
     event.preventDefault()
     if (feedbackSubmitting || feedbackSubmitted) return
     setFeedbackSubmitting(true)
-    setFeedbackResult('Uw feedback wordt veilig opgeslagen...')
+    setFeedbackResult(t('Uw feedback wordt veilig opgeslagen...'))
     try {
       const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/feedback`, {
         method: 'POST',
@@ -345,12 +389,12 @@ export default function ClientPortal() {
         body: JSON.stringify(feedbackDraft)
       })
       const payload = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(payload?.error?.message || 'Uw feedback kon niet worden opgeslagen.')
+      if (!response.ok) throw new Error(payload?.error?.message || t('Uw feedback kon niet worden opgeslagen.'))
       setFeedbackSubmitted(true)
       setFeedbackDraft(emptyFeedbackDraft())
-      setFeedbackResult('Bedankt. Uw feedback is toegevoegd aan het projectdossier.')
+      setFeedbackResult(t('Bedankt. Uw feedback is toegevoegd aan het projectdossier.'))
     } catch (requestError) {
-      setFeedbackResult(requestError.message || 'Uw feedback kon niet worden opgeslagen.')
+      setFeedbackResult(requestError.message || t('Uw feedback kon niet worden opgeslagen.'))
     } finally {
       setFeedbackSubmitting(false)
     }
@@ -359,39 +403,48 @@ export default function ClientPortal() {
   return <div className="client-portal-shell">
     <header className="client-portal-header">
       <div><span className="client-portal-mark"><HardHat size={19} /></span><strong>Contractor.AI</strong></div>
-      <p><ShieldCheck size={15} />Veilige projectinzage</p>
+      <div className="client-portal-header-actions">
+        <p><ShieldCheck size={15} />{t('Veilige projectinzage')}</p>
+        <label className="client-portal-locale">
+          <span className="visually-hidden">{t('Taal')}</span>
+          <select aria-label={t('Taal')} value={locale} disabled={localeSaving || loading || !job} onChange={event => updatePortalLocale(event.target.value)}>
+            {SUPPORTED_LOCALES.map(option => <option key={option.value} value={option.value}>{option.shortLabel}</option>)}
+          </select>
+        </label>
+        <span className="visually-hidden" role="status" aria-live="polite">{localeError}</span>
+      </div>
     </header>
     <main className="client-portal-main">
-      {loading ? <div className="client-portal-state" role="status"><LoaderCircle className="spin" size={24} />Uw project wordt geladen...</div> : null}
-      {!loading && error ? <div className="client-portal-state client-portal-error" role="alert"><ShieldCheck size={22} /><div><strong>Projectlink niet beschikbaar</strong><p>{error}</p></div></div> : null}
+      {loading ? <div className="client-portal-state" role="status"><LoaderCircle className="spin" size={24} />{t('Uw project wordt geladen...')}</div> : null}
+      {!loading && error ? <div className="client-portal-state client-portal-error" role="alert"><ShieldCheck size={22} /><div><strong>{t('Projectlink niet beschikbaar')}</strong><p>{error}</p></div></div> : null}
       {!loading && !error && job ? <>
         <section className="client-portal-intro" aria-labelledby="client-project-title">
           <div>
-            <span className="client-portal-kicker">Uw project</span>
-            <h1 id="client-project-title">{job.title || 'Uw project'}</h1>
-            <p>{job.description || 'Projectinformatie wordt bijgewerkt.'}</p>
+            <span className="client-portal-kicker">{t('Uw project')}</span>
+            <h1 id="client-project-title">{job.title || t('Uw project')}</h1>
+            <p>{job.description || t('Projectinformatie wordt bijgewerkt.')}</p>
           </div>
-          <span className="client-portal-status">{formatPortalStatus(job.status)}</span>
+          <span className="client-portal-status">{formatPortalStatus(job.status, locale)}</span>
         </section>
 
-        <section className="client-portal-facts" aria-label="Projectoverzicht">
-          <div><span>Werkadres</span><strong>{job.address || 'Wordt bevestigd'}</strong></div>
-          <div><span>Voortgang</span><strong>{Math.round(Number(job.progressPercent || 0))}%</strong></div>
-          <div><span>Gepland</span><strong>{job.scheduledStart ? `${formatPortalDate(job.scheduledStart)}${job.scheduledEnd ? ` tot ${formatPortalDate(job.scheduledEnd)}` : ''}` : 'Nog niet gepland'}</strong></div>
-          <div><span>Verwachte afronding</span><strong>{formatPortalDate(job.targetCompletion)}</strong></div>
+        <section className="client-portal-facts" aria-label={t('Projectoverzicht')}>
+          <div><span>{t('Werkadres')}</span><strong>{job.address || t('Wordt bevestigd')}</strong></div>
+          <div><span>{t('Voortgang')}</span><strong>{Math.round(Number(job.progressPercent || 0))}%</strong></div>
+          <div><span>{t('Gepland')}</span><strong>{job.scheduledStart ? `${formatPortalDate(job.scheduledStart, locale)}${job.scheduledEnd ? ` ${t('tot')} ${formatPortalDate(job.scheduledEnd, locale)}` : ''}` : t('Nog niet gepland')}</strong></div>
+          <div><span>{t('Verwachte afronding')}</span><strong>{formatPortalDate(job.targetCompletion, locale)}</strong></div>
         </section>
 
         <div className="client-portal-grid">
           <section className="client-portal-panel">
-            <div className="client-portal-panel-title"><CalendarDays size={18} /><h2>Afspraken</h2></div>
-            <PortalList items={job.siteVisits} empty="Nog geen afspraak gepland." render={item => `${item.visitType || 'Afspraak'}: ${formatPortalStatus(item.status, 'gepland')} - ${formatPortalDate(item.scheduledAt)}`} />
+            <div className="client-portal-panel-title"><CalendarDays size={18} /><h2>{t('Afspraken')}</h2></div>
+            <PortalList items={job.siteVisits} empty={t('Nog geen afspraak gepland.')} render={item => `${item.visitType || t('Afspraak')}: ${formatPortalStatus(item.status, locale, 'gepland')} - ${formatPortalDate(item.scheduledAt, locale)}`} />
           </section>
           <section className="client-portal-panel">
-            <div className="client-portal-panel-title"><ListChecks size={18} /><h2>Besluitvorming</h2></div>
-            <p className="client-portal-note">Open keuzes kunnen hieronder worden bevestigd of teruggestuurd voor aanpassing.</p>
+            <div className="client-portal-panel-title"><ListChecks size={18} /><h2>{t('Besluitvorming')}</h2></div>
+            <p className="client-portal-note">{t('Open keuzes kunnen hieronder worden bevestigd of teruggestuurd voor aanpassing.')}</p>
           </section>
           <section className="client-portal-panel client-portal-wide client-portal-selections">
-            <div className="client-portal-panel-title"><ShieldCheck size={18} /><h2>Projectkeuzes</h2></div>
+            <div className="client-portal-panel-title"><ShieldCheck size={18} /><h2>{t('Projectkeuzes')}</h2></div>
             {job.selections?.length ? job.selections.map(selection => <ClientSelection
               key={selection.id}
               selection={selection}
@@ -400,11 +453,13 @@ export default function ClientPortal() {
               submitting={selectionSubmitting === selection.id}
               onDraftChange={updateSelectionDraft}
               onSubmit={submitSelectionResponse}
-            />) : <p className="client-portal-empty">Er staan geen keuzes open.</p>}
+              locale={locale}
+              t={t}
+            />) : <p className="client-portal-empty">{t('Er staan geen keuzes open.')}</p>}
           </section>
           <section className="client-portal-panel client-portal-wide client-portal-selections">
-            <div className="client-portal-panel-title"><FileSignature size={18} /><h2>Meer- en minderwerk</h2></div>
-            <p className="client-portal-note">Bekijk steeds het genummerde voorstel voordat u akkoord geeft, een wijziging vraagt of het voorstel afwijst.</p>
+            <div className="client-portal-panel-title"><FileSignature size={18} /><h2>{t('Meer- en minderwerk')}</h2></div>
+            <p className="client-portal-note">{t('Bekijk steeds het genummerde voorstel voordat u akkoord geeft, een wijziging vraagt of het voorstel afwijst.')}</p>
             {job.variations?.length ? job.variations.map(variation => <ClientVariation
               key={variation.id}
               variation={variation}
@@ -414,38 +469,40 @@ export default function ClientPortal() {
               submitting={variationSubmitting === variation.id}
               onDraftChange={updateVariationDraft}
               onSubmit={submitVariationResponse}
-            />) : <p className="client-portal-empty client-portal-section-empty">Er zijn geen uitgegeven voorstellen voor meer- of minderwerk.</p>}
+              locale={locale}
+              t={t}
+            />) : <p className="client-portal-empty client-portal-section-empty">{t('Er zijn geen uitgegeven voorstellen voor meer- of minderwerk.')}</p>}
           </section>
           <section className="client-portal-panel client-portal-wide">
-            <div className="client-portal-panel-title"><MessageSquareText size={18} /><h2>Projectupdates</h2></div>
-            <PortalList items={job.updates} empty="Er zijn nog geen gepubliceerde projectupdates." render={item => `${item.subject || 'Projectupdate'}: ${item.body || ''}`} />
+            <div className="client-portal-panel-title"><MessageSquareText size={18} /><h2>{t('Projectupdates')}</h2></div>
+            <PortalList items={job.updates} empty={t('Er zijn nog geen gepubliceerde projectupdates.')} render={item => `${item.subject || t('Projectupdate')}: ${item.body || ''}`} />
           </section>
           <section className="client-portal-panel client-portal-wide">
-            <div className="client-portal-panel-title"><FileText size={18} /><h2>Beschikbare documenten</h2></div>
-            <PortalList items={job.documents} empty="Er zijn nog geen documenten beschikbaar." render={item => `${item.title || 'Document'} (${item.type || 'document'})`} />
+            <div className="client-portal-panel-title"><FileText size={18} /><h2>{t('Beschikbare documenten')}</h2></div>
+            <PortalList items={job.documents} empty={t('Er zijn nog geen documenten beschikbaar.')} render={item => `${item.title || 'Document'} (${item.type || 'document'})`} />
           </section>
           <section className="client-portal-panel client-portal-wide" data-testid="client-feedback-panel">
-            <div className="client-portal-panel-title"><Star size={18} /><h2>Uw ervaring</h2></div>
-            {feedbackSubmitted ? <div className="client-feedback-thanks" role="status"><CircleCheckBig size={20} /><div><strong>Feedback ontvangen</strong><p>{feedbackResult || 'Uw eerdere reactie is veilig vastgelegd in het projectdossier.'}</p></div></div> : <>
-              <p className="client-portal-note">Met drie korte scores helpt u ons de uitvoering en service te verbeteren. Een reactie wijzigt geen contract, planning of garantie.</p>
+            <div className="client-portal-panel-title"><Star size={18} /><h2>{t('Uw ervaring')}</h2></div>
+            {feedbackSubmitted ? <div className="client-feedback-thanks" role="status"><CircleCheckBig size={20} /><div><strong>{t('Feedback ontvangen')}</strong><p>{feedbackResult || t('Uw eerdere reactie is veilig vastgelegd in het projectdossier.')}</p></div></div> : <>
+              <p className="client-portal-note">{t('Met drie korte scores helpt u ons de uitvoering en service te verbeteren. Een reactie wijzigt geen contract, planning of garantie.')}</p>
               <form className="client-portal-form client-feedback-form" onSubmit={submitFeedback}>
-                <label>Aanbeveling (0-10)<select required aria-label="Hoe waarschijnlijk is het dat u ons aanbeveelt?" value={feedbackDraft.npsScore} onChange={event => setFeedbackDraft(current => ({ ...current, npsScore: Number(event.target.value) }))}><option value="" disabled>Selecteer een score</option>{Array.from({ length: 11 }, (_, score) => <option key={score} value={score}>{score}{score === 0 ? ' - zeer onwaarschijnlijk' : score === 10 ? ' - zeer waarschijnlijk' : ''}</option>)}</select></label>
-                <label>Tevredenheid (1-5)<select required aria-label="Hoe tevreden bent u?" value={feedbackDraft.csatScore} onChange={event => setFeedbackDraft(current => ({ ...current, csatScore: Number(event.target.value) }))}><option value="" disabled>Selecteer een score</option>{[1, 2, 3, 4, 5].map(score => <option key={score} value={score}>{score}{score === 1 ? ' - zeer ontevreden' : score === 5 ? ' - zeer tevreden' : ''}</option>)}</select></label>
-                <label>Gemak (1-5)<select required aria-label="Hoe gemakkelijk was samenwerken?" value={feedbackDraft.effortScore} onChange={event => setFeedbackDraft(current => ({ ...current, effortScore: Number(event.target.value) }))}><option value="" disabled>Selecteer een score</option>{[1, 2, 3, 4, 5].map(score => <option key={score} value={score}>{score}{score === 1 ? ' - zeer moeilijk' : score === 5 ? ' - zeer gemakkelijk' : ''}</option>)}</select></label>
-                <label className="client-feedback-comment">Toelichting (optioneel)<textarea maxLength="4000" value={feedbackDraft.comment} onChange={event => setFeedbackDraft(current => ({ ...current, comment: event.target.value }))} placeholder="Wat ging goed en wat kan beter?" /></label>
-                <label className="client-feedback-consent"><input type="checkbox" checked={feedbackDraft.followUpConsent} onChange={event => setFeedbackDraft(current => ({ ...current, followUpConsent: event.target.checked }))} />U mag contact met mij opnemen over deze feedback.</label>
-                <label className="client-feedback-consent"><input type="checkbox" checked={feedbackDraft.testimonialConsent} onChange={event => setFeedbackDraft(current => ({ ...current, testimonialConsent: event.target.checked }))} />Mijn reactie mag intern worden beoordeeld voor een mogelijke referentie. Publicatie vraagt altijd aparte afstemming.</label>
-                <div className="client-portal-submit client-feedback-submit"><button type="submit" disabled={feedbackSubmitting}><ShieldCheck size={16} />{feedbackSubmitting ? 'Opslaan...' : 'Feedback opslaan'}</button><span role="status" aria-live="polite">{feedbackResult}</span></div>
+                <label>{t('Aanbeveling (0-10)')}<select required aria-label={t('Hoe waarschijnlijk is het dat u ons aanbeveelt?')} value={feedbackDraft.npsScore} onChange={event => setFeedbackDraft(current => ({ ...current, npsScore: Number(event.target.value) }))}><option value="" disabled>{t('Selecteer een score')}</option>{Array.from({ length: 11 }, (_, score) => <option key={score} value={score}>{score}{score === 0 ? ` - ${t('zeer onwaarschijnlijk')}` : score === 10 ? ` - ${t('zeer waarschijnlijk')}` : ''}</option>)}</select></label>
+                <label>{t('Tevredenheid (1-5)')}<select required aria-label={t('Hoe tevreden bent u?')} value={feedbackDraft.csatScore} onChange={event => setFeedbackDraft(current => ({ ...current, csatScore: Number(event.target.value) }))}><option value="" disabled>{t('Selecteer een score')}</option>{[1, 2, 3, 4, 5].map(score => <option key={score} value={score}>{score}{score === 1 ? ` - ${t('zeer ontevreden')}` : score === 5 ? ` - ${t('zeer tevreden')}` : ''}</option>)}</select></label>
+                <label>{t('Gemak (1-5)')}<select required aria-label={t('Hoe gemakkelijk was samenwerken?')} value={feedbackDraft.effortScore} onChange={event => setFeedbackDraft(current => ({ ...current, effortScore: Number(event.target.value) }))}><option value="" disabled>{t('Selecteer een score')}</option>{[1, 2, 3, 4, 5].map(score => <option key={score} value={score}>{score}{score === 1 ? ` - ${t('zeer moeilijk')}` : score === 5 ? ` - ${t('zeer gemakkelijk')}` : ''}</option>)}</select></label>
+                <label className="client-feedback-comment">{t('Toelichting (optioneel)')}<textarea maxLength="4000" value={feedbackDraft.comment} onChange={event => setFeedbackDraft(current => ({ ...current, comment: event.target.value }))} placeholder={t('Wat ging goed en wat kan beter?')} /></label>
+                <label className="client-feedback-consent"><input type="checkbox" checked={feedbackDraft.followUpConsent} onChange={event => setFeedbackDraft(current => ({ ...current, followUpConsent: event.target.checked }))} />{t('U mag contact met mij opnemen over deze feedback.')}</label>
+                <label className="client-feedback-consent"><input type="checkbox" checked={feedbackDraft.testimonialConsent} onChange={event => setFeedbackDraft(current => ({ ...current, testimonialConsent: event.target.checked }))} />{t('Mijn reactie mag intern worden beoordeeld voor een mogelijke referentie. Publicatie vraagt altijd aparte afstemming.')}</label>
+                <div className="client-portal-submit client-feedback-submit"><button type="submit" disabled={feedbackSubmitting}><ShieldCheck size={16} />{feedbackSubmitting ? t('Opslaan...') : t('Feedback opslaan')}</button><span role="status" aria-live="polite">{feedbackResult}</span></div>
               </form>
             </>}
           </section>
           <section className="client-portal-panel client-portal-wide">
-            <div className="client-portal-panel-title"><MessageSquareText size={18} /><h2>Stuur een bericht</h2></div>
-            <p className="client-portal-note">Uw bericht komt als verzoek in het projectdossier. Het bevestigt geen prijs, planning, extra werk of veiligheid.</p>
+            <div className="client-portal-panel-title"><MessageSquareText size={18} /><h2>{t('Stuur een bericht')}</h2></div>
+            <p className="client-portal-note">{t('Uw bericht komt als verzoek in het projectdossier. Het bevestigt geen prijs, planning, extra werk of veiligheid.')}</p>
             <form className="client-portal-form" onSubmit={submitMessage}>
-              <label>Onderwerp<input maxLength="240" required value={subject} onChange={event => setSubject(event.target.value)} /></label>
-              <label>Bericht<textarea maxLength="5000" required value={body} onChange={event => setBody(event.target.value)} /></label>
-              <div className="client-portal-submit"><button type="submit" disabled={submitting || !body.trim()}><Send size={16} />{submitting ? 'Opslaan...' : 'Verstuur bericht'}</button><span role="status" aria-live="polite">{messageResult}</span></div>
+              <label>{t('Onderwerp')}<input maxLength="240" required value={subject} onChange={event => setSubject(event.target.value)} /></label>
+              <label>{t('Bericht')}<textarea maxLength="5000" required value={body} onChange={event => setBody(event.target.value)} /></label>
+              <div className="client-portal-submit"><button type="submit" disabled={submitting || !body.trim()}><Send size={16} />{submitting ? t('Opslaan...') : t('Verstuur bericht')}</button><span role="status" aria-live="polite">{messageResult}</span></div>
             </form>
           </section>
         </div>

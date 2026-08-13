@@ -64,14 +64,14 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
 | 049 | Accessibility review | Partial | pinned axe gate reports zero selected WCAG A/AA violations across sign-in, all primary workspaces, representative dialogs, mobile navigation, and the mobile/desktop client portal; independent assistive-technology and user audit remains external |
-| 050 | Responsive and browser compatibility | Implemented | 89 desktop/mobile operator, client and field Chromium tests in isolated batches |
+| 050 | Responsive and browser compatibility | Implemented | 90 desktop/mobile operator, client and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
 | 054 | Data reconciliation and repair commands | Partial | integrity/reconciliation/restore/migration tools exist; no generic mutation repair CLI |
 | 055 | Product analytics local-first design | Implemented | retained contractor scorecard and operating metrics; no forced external telemetry |
 | 056 | SaaS readiness without forced billing | Implemented | portable hosted contract with local-first mode; billing is not required |
-| 057 | Internationalization and Dutch/English readiness | Partial | Dutch/EU formats and concepts; interface copy lacks full locale switching |
+| 057 | Internationalization and Dutch/English readiness | Partial | persisted per-operator NL/EN shell preference, locale-aware dashboard formatting, and complete token-scoped NL/EN client portal; specialist operator workspaces still contain English-only copy |
 | 058 | Feature flags and rollout controls | Partial | provider/scheduler/storage controls and owner stop; no generic flag service |
 | 059 | Formal state machines | Partial | guarded explicit statuses/transitions across domains; not one central state DSL |
 | 060 | Domain model specification | Implemented | migrations, ledger methods, README safety model and API contracts |

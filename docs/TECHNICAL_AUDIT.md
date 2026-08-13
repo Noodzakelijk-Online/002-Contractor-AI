@@ -9,9 +9,9 @@ Starting revision: `d1a89fbc73be714b6cb05bb7fbf554309c3387ea`
 Contractor.AI is a mature local-first contractor operating ledger, not a greenfield
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
-S3-compatible evidence storage. The audit found 377 declared HTTP routes, 71
-append-only migrations, 162 Node test files, 51 browser spec files, and 81 direct
-client API call sites in the main dashboard.
+S3-compatible evidence storage. The current audit found 379 declared HTTP routes,
+72 append-only migrations, 163 Node test files, 52 browser spec files, and 86
+unique literal API path prefixes in the main dashboard, plus dynamic child-component calls.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
 contractor core is already represented: qualification, bid/no-bid, site survey,
@@ -125,7 +125,10 @@ external-provider engines.
    offline queues, but component-internal recovery is not universal. Offline
    queues remain intentionally narrower and explicit.
 4. Pagination and advanced filters are not uniform across all long-lived lists.
-5. Dutch data conventions are present, but the UI copy is not yet fully bilingual.
+5. Per-principal operator language and token-scoped client-portal language are
+   retained in the ledger. The shell and client portal are bilingual and formatting
+   follows the selected locale, but specialist operator workspace copy is not yet
+   fully translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.

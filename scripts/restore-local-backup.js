@@ -1629,6 +1629,27 @@ function verifySqliteBackupDatabase(ledgerFile) {
           }
         }
       }
+      if (appliedMigrations.has('072_operator_locale_preferences')) {
+        if (!retainedTables.has('operator_preferences')) {
+          throw new Error('Backup operator-preference schema is incomplete: operator_preferences.');
+        }
+        const operatorPreferenceColumns = new Set(
+          database.prepare('PRAGMA table_info(operator_preferences)').all().map(row => row.name)
+        );
+        for (const column of ['principal_id', 'locale', 'updated_by', 'created_at', 'updated_at']) {
+          if (!operatorPreferenceColumns.has(column)) {
+            throw new Error(`Backup operator-preference schema is incomplete: operator_preferences.${column}.`);
+          }
+        }
+        const operatorPreferenceIndexes = new Set(
+          database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_operator_preferences_%'")
+            .all()
+            .map(row => row.name)
+        );
+        if (!operatorPreferenceIndexes.has('idx_operator_preferences_locale')) {
+          throw new Error('Backup operator-preference constraints are incomplete: idx_operator_preferences_locale.');
+        }
+      }
       const auditColumns = new Set(database.prepare('PRAGMA table_info(audit_events)').all().map(row => row.name));
       let auditIntegrity = { supported: false, valid: null, status: 'legacy_unchained_backup' };
       if (['sequence_number', 'previous_hash', 'event_hash'].every(column => auditColumns.has(column))) {

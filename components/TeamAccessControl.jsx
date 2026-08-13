@@ -10,6 +10,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import { formatReadableDate } from '../dashboard-format'
 import Empty from './EmptyState'
 
 const ROLE_LABELS = {
@@ -25,12 +26,7 @@ function emptyDraft() {
 
 function readableDate(value) {
   if (!value) return 'Not used yet'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Unknown'
-  return new Intl.DateTimeFormat('en-NL', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(date)
+  return formatReadableDate(value, true) || 'Unknown'
 }
 
 function accessScope(account, workersById, jobsById) {

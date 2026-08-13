@@ -1807,6 +1807,17 @@ function normalizeText(value, fallback = '') {
   return text || fallback;
 }
 
+function parseSupportedLocale(value) {
+  const locale = normalizeText(value).toLowerCase().replace(/_/g, '-');
+  if (locale === 'en' || locale === 'en-gb') return 'en-GB';
+  if (locale === 'nl' || locale === 'nl-nl') return 'nl-NL';
+  return null;
+}
+
+function normalizeLocale(value, fallback = 'en-GB') {
+  return parseSupportedLocale(value) || fallback;
+}
+
 function normalizeNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -6091,6 +6102,24 @@ const LEDGER_SCHEMA_MIGRATIONS = [
           ON data_subject_requests(request_type, status, created_at DESC);
       `);
     }
+  },
+  {
+    version: '072_operator_locale_preferences',
+    description: 'Retain a self-scoped NL or EN interface preference for each trusted operator principal.',
+    apply(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS operator_preferences (
+          principal_id TEXT PRIMARY KEY,
+          locale TEXT NOT NULL DEFAULT 'en-GB',
+          updated_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(locale IN ('en-GB', 'nl-NL'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_operator_preferences_locale
+          ON operator_preferences(locale, updated_at DESC);
+      `);
+    }
   }
 ];
 
@@ -7244,6 +7273,62 @@ class ContractorOperatingLedger {
           before,
           after,
           metadata: { readyForCommercialIssue: after.readiness.ready, externalCommitments: 0 }
+        });
+      }
+      return after;
+    });
+  }
+
+  getOperatorPreferences(principalId) {
+    const id = normalizeText(principalId);
+    if (!id) throw ledgerInputError('operator_principal_required', 'A trusted operator principal is required.');
+    const row = this.db.prepare('SELECT * FROM operator_preferences WHERE principal_id = ?').get(id);
+    return row
+      ? {
+          principalId: row.principal_id,
+          locale: normalizeLocale(row.locale),
+          updatedBy: row.updated_by,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at
+        }
+      : {
+          principalId: id,
+          locale: 'en-GB',
+          updatedBy: null,
+          createdAt: null,
+          updatedAt: null
+        };
+  }
+
+  updateOperatorPreferences(principalId, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const before = this.getOperatorPreferences(principalId);
+      const locale = parseSupportedLocale(payload.locale);
+      if (!locale) {
+        throw ledgerInputError('operator_locale_unsupported', 'Locale must be en-GB or nl-NL.', {
+          supportedLocales: ['en-GB', 'nl-NL']
+        });
+      }
+      const actor = normalizeText(options.actor, principalId);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        INSERT INTO operator_preferences (principal_id, locale, updated_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(principal_id) DO UPDATE SET
+          locale = excluded.locale,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at
+      `).run(principalId, locale, actor, before.createdAt || timestamp, timestamp);
+      const after = this.getOperatorPreferences(principalId);
+      if (before.locale !== after.locale || before.createdAt === null) {
+        this.audit({
+          entityType: 'operator_preference',
+          entityId: principalId,
+          action: 'update_operator_locale',
+          actor,
+          before,
+          after,
+          metadata: { selfScoped: actor === principalId, externalCommitments: 0 }
         });
       }
       return after;
@@ -51057,6 +51142,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         expiresAt.toISOString(),
         toJson({
           label: normalizeText(payload.label, 'Client job portal'),
+          locale: normalizeLocale(payload.locale, 'nl-NL'),
           scope: 'client_job_status',
           createdFrom: payload.source || 'operator_dashboard'
         }),
@@ -51072,7 +51158,11 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         requestedBy: options.actor || 'Contractor.AI',
         summary: `Approve client portal access for ${normalizeText(job.title, 'job')}`,
         reason: 'A portal link exposes a restricted client-facing job view. Confirm the intended client and expiry before enabling access.',
-        data: { expiresAt: expiresAt.toISOString(), label: normalizeText(payload.label, 'Client job portal') }
+        data: {
+          expiresAt: expiresAt.toISOString(),
+          label: normalizeText(payload.label, 'Client job portal'),
+          locale: normalizeLocale(payload.locale, 'nl-NL')
+        }
       }, { actor: options.actor || 'Contractor.AI' });
       this.db.prepare('UPDATE client_portal_access SET approval_id = ?, updated_at = ? WHERE id = ?')
         .run(approval.id, nowIso(), id);
@@ -51138,6 +51228,39 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         metadata: { reason: reason || null, externalCommitments: 0 }
       });
       return after;
+    });
+  }
+
+  updateClientPortalPreferences(portalToken, payload = {}, options = {}) {
+    return this.transaction(() => {
+      const snapshot = this.getClientPortalSnapshot(portalToken);
+      const row = this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(snapshot.portal.accessId);
+      if (!row) throw this.portalAccessError();
+      const locale = parseSupportedLocale(payload.locale);
+      if (!locale) {
+        throw ledgerInputError('portal_locale_unsupported', 'Locale must be en-GB or nl-NL.', {
+          supportedLocales: ['en-GB', 'nl-NL']
+        });
+      }
+      const before = this.mapClientPortalAccess(row);
+      const data = { ...(before.data || {}), locale };
+      const timestamp = nowIso();
+      this.db.prepare('UPDATE client_portal_access SET data_json = ?, updated_at = ? WHERE id = ?')
+        .run(toJson(data), timestamp, before.id);
+      const after = this.mapClientPortalAccess(this.db.prepare('SELECT * FROM client_portal_access WHERE id = ?').get(before.id));
+      if (before.data?.locale !== locale) {
+        this.audit({
+          entityType: 'client_portal_access',
+          entityId: before.id,
+          jobId: before.jobId,
+          action: 'update_client_portal_locale',
+          actor: options.actor || 'client_portal',
+          before: { locale: normalizeLocale(before.data?.locale, 'nl-NL') },
+          after: { locale },
+          metadata: { tokenScoped: true, externalCommitments: 0 }
+        });
+      }
+      return { locale, updatedAt: after.updatedAt };
     });
   }
 
@@ -51299,6 +51422,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         accessId: row.id,
         expiresAt: row.expires_at,
         label: fromJson(row.data_json).label || 'Client job portal',
+        locale: normalizeLocale(fromJson(row.data_json).locale, 'nl-NL'),
         feedback: retainedFeedback
           ? {
               submitted: true,

@@ -19,6 +19,7 @@ const dashboardSource = [
 ].join('\n');
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
+const localeSource = fs.readFileSync(path.join(__dirname, '..', 'locale.js'), 'utf8');
 
 test('React dashboard uses ledger endpoints instead of cached or simulated contractor records', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/dashboard'\)/);
@@ -78,7 +79,9 @@ test('performance workspace renders ten evidence-backed perspectives with govern
 });
 
 test('portfolio schedule is role-gated, ledger-backed, rendered, and connected to operating workflows', () => {
-  assert.match(dashboardSource, /\['schedule', 'Schedule', CalendarDays\]/);
+  assert.match(dashboardRootSource, /\['schedule', CalendarDays\]/);
+  assert.match(localeSource, /'nav\.schedule': 'Schedule'/);
+  assert.match(localeSource, /'nav\.schedule': 'Planning'/);
   assert.match(dashboardSource, /api\('\/api\/ledger\/schedule\?horizonDays=180&limit=500'\)/);
   assert.match(dashboardSource, /if \(key === 'schedule'\) return capabilities\.schedule/);
   assert.match(dashboardSource, /section === 'schedule' && capabilities\.schedule/);
@@ -202,7 +205,9 @@ test('field updates use a bounded operator-scoped IndexedDB outbox only for inte
   assert.match(dashboardSource, /shouldQueueFieldMutation\(requestError\)/);
   assert.match(dashboardSource, /window\.addEventListener\('online', handleOnline\)/);
   assert.match(dashboardSource, /window\.addEventListener\('offline', updateNetworkState\)/);
-  assert.match(dashboardSource, /networkOnline \? \(fieldScoped \? 'Field scope' : 'Local-first'\) : 'Offline queue'/);
+  assert.match(dashboardRootSource, /networkOnline\s*\? \(fieldScoped \? appText\(operatorLocale, 'shell\.fieldScope'\) : appText\(operatorLocale, 'shell\.localFirst'\)\)\s*: appText\(operatorLocale, 'shell\.offlineQueue'\)/);
+  assert.match(localeSource, /'shell\.offlineQueue': 'Offline queue'/);
+  assert.match(localeSource, /'shell\.offlineQueue': 'Offline wachtrij'/);
   assert.match(dashboardSource, /navigator\.onLine === false && hasLoadedDataRef\.current/);
   assert.match(dashboardSource, /Save huddle offline/);
   assert.match(dashboardSource, /Save EOD report offline/);

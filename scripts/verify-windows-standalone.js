@@ -120,8 +120,9 @@ async function verifyWindowsStandalone() {
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
     const readiness = await waitForReadiness(baseUrl, ownerToken, child, () => stderr);
-    assert.equal(readiness.ledger?.migrations?.currentVersion, '071_data_subject_request_governance');
+    assert.equal(readiness.ledger?.migrations?.currentVersion, '072_operator_locale_preferences');
     assert.deepEqual(readiness.ledger?.migrations?.pending, []);
+    assert.ok(readiness.ledger?.migrations?.applied?.some(migration => migration.version === '071_data_subject_request_governance'));
 
     const operators = await requestJson(baseUrl, '/api/operations/operators', ownerToken);
     assert.equal(operators.response.status, 200);

@@ -10,6 +10,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react'
+import { formatReadableDate } from '../dashboard-format'
 import Empty from './EmptyState'
 
 const REQUEST_LABELS = {
@@ -69,9 +70,7 @@ function dateInput(value = new Date()) {
 
 function readableDate(value) {
   if (!value) return 'No date'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Unknown'
-  return new Intl.DateTimeFormat('en-NL', { dateStyle: 'medium' }).format(date)
+  return formatReadableDate(value) || 'Unknown'
 }
 
 function emptyCreateDraft() {

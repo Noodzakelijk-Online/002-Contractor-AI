@@ -12,7 +12,7 @@ import {
   WalletCards,
   X,
 } from 'lucide-react'
-import { formatDate, formatStatus } from '../dashboard-format'
+import { formatCurrency, formatDate, formatStatus } from '../dashboard-format'
 
 const EMPTY_LIST = Object.freeze([])
 
@@ -42,21 +42,8 @@ function queryPath(asOfDate, openingBalance) {
   return `/api/ledger/cash-flow?${query.toString()}`
 }
 
-const moneyFormatters = new Map()
-
 function money(value, currencyCode = 'EUR') {
-  const code = /^[A-Z]{3}$/.test(String(currencyCode || '').toUpperCase())
-    ? String(currencyCode).toUpperCase()
-    : 'EUR'
-  if (!moneyFormatters.has(code)) {
-    moneyFormatters.set(code, new Intl.NumberFormat('nl-NL', {
-      style: 'currency',
-      currency: code,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }))
-  }
-  return moneyFormatters.get(code).format(Number(value || 0))
+  return formatCurrency(value, currencyCode)
 }
 
 export default function CashFlowForecastControl({

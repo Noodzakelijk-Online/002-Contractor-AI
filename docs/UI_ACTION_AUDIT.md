@@ -73,8 +73,10 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 
 ## Residual UX work
 
-- Most copy is English. Dutch formats and domain concepts exist, but full NL/EN
-  translation and locale switching remain incomplete.
+- The operator shell and complete client portal provide persisted NL/EN switching;
+  dates, numbers, and EUR values follow the selected locale. Specialist operator
+  workspaces still contain English-only copy, so application-wide translation
+  remains incomplete.
 - General draft autosave is not universal. Field offline capture has a dedicated
   queue; broad silent local caching would need privacy and conflict design.
 - Large lists do not all offer the same advanced filters and pagination.

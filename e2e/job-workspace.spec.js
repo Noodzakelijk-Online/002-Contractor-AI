@@ -1997,9 +1997,9 @@ test('finance workspace plans a billing milestone and locks its values into the 
   await control.getByLabel('Payment due date').fill(dueDate);
   await control.getByLabel('Milestone description').fill('Contract completion milestone');
   await control.getByLabel('Internal evidence and notes').fill('Signed contract and completion evidence checked for staged billing.');
-  await expect(control.getByLabel('Billing milestone calculation')).toContainText(/Total\s*€\s*2\.178,00/);
+  await expect(control.getByLabel('Billing milestone calculation')).toContainText(/Total\s*€\s*2,178\.00/);
   await control.getByRole('button', { name: 'Request milestone approval' }).click();
-  await expect(page.getByText(/Billing milestone retained for €\s*2\.178,00/)).toBeVisible();
+  await expect(page.getByText(/Billing milestone retained for €\s*2,178\.00/)).toBeVisible();
 
   let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();
@@ -2250,7 +2250,7 @@ test('finance workspace creates, approves, and packages a partial credit note ag
   await modal.getByLabel('Net credit amount (EUR)').fill('200');
   await modal.getByLabel('Credit-line description').fill('Duplicate material line correction');
   await modal.getByLabel('Internal evidence and notes').fill('Signed scope correction and original invoice line were checked against the retained project record.');
-  await expect(modal.getByLabel('Credit note calculation')).toContainText(/Total credit\s*€\s*242,00/);
+  await expect(modal.getByLabel('Credit note calculation')).toContainText(/Total credit\s*€\s*242\.00/);
 
   await page.setViewportSize({ width: 390, height: 844 });
   const modalGeometry = await page.evaluate(() => {
@@ -2265,7 +2265,7 @@ test('finance workspace creates, approves, and packages a partial credit note ag
   expect(modalGeometry.pageWidth).toBeLessThanOrEqual(modalGeometry.viewportWidth);
   expect(modalGeometry.modalWidth).toBeLessThanOrEqual(modalGeometry.modalClientWidth);
   await modal.getByRole('button', { name: 'Request credit-note approval' }).click();
-  await expect(page.getByText(/Credit-note draft retained for €\s*242,00/)).toBeVisible();
+  await expect(page.getByText(/Credit-note draft retained for €\s*242\.00/)).toBeVisible();
 
   let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();
@@ -2283,7 +2283,7 @@ test('finance workspace creates, approves, and packages a partial credit note ag
   row = finance.locator('.finance-item').filter({ hasText: intake.job.title });
   await row.getByRole('button', { name: `Prepare credit note package for ${intake.job.title}` }).click();
   await expect(page.getByText(/Credit note CRN-.* retained with HTML and UBL attachments\. The receivable was adjusted/i)).toBeVisible();
-  await expect(row.getByText(/€\s*242,00 credited/)).toBeVisible();
+  await expect(row.getByText(/€\s*242\.00 credited/)).toBeVisible();
   await expect(row.getByRole('link', { name: `Download credit note for ${intake.job.title}` })).toBeVisible();
   await expect(row.getByRole('link', { name: `Download credit note UBL for ${intake.job.title}` })).toBeVisible();
 
@@ -3045,18 +3045,25 @@ test('client portal records an inbound message and approval-gated selection resp
   await expect(page.getByText('Veilige projectinzage')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Bestratingskleur kiezen' })).toBeVisible();
 
-  await page.getByLabel('Ik bevestig deze keuze').check();
-  await page.getByLabel('Gekozen optie voor Bestratingskleur kiezen').selectOption('Lichtgrijs');
-  const selectionCard = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Bestratingskleur kiezen' }) });
-  await selectionCard.getByLabel('Toelichting (optioneel)').fill('De lichtgrijze steen komt overeen met het getoonde monster.');
-  await page.getByRole('button', { name: 'Ter beoordeling indienen' }).click();
-  await expect(page.getByText('Wacht op interne controle')).toBeVisible();
-  await expect(page.getByText('Keuze: Lichtgrijs')).toBeVisible();
+  await page.getByLabel('Taal').selectOption('en-GB');
+  await expect(page.getByText('Secure project view')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Project selections' })).toBeVisible();
+  expect(await page.locator('html').getAttribute('lang')).toBe('en');
+  await page.reload();
+  await expect(page.getByText('Secure project view')).toBeVisible();
 
-  await page.getByLabel('Onderwerp').fill('Afstemming bestratingskeuze');
-  await page.getByLabel('Bericht').fill('Kunt u bevestigen wanneer de grijze steenkeuze wordt beoordeeld?');
-  await page.getByRole('button', { name: 'Verstuur bericht' }).click();
-  await expect(page.getByText('Uw bericht is toegevoegd aan het projectdossier.')).toBeVisible();
+  await page.getByLabel('I confirm this selection').check();
+  await page.getByLabel('Selected option for Bestratingskleur kiezen').selectOption('Lichtgrijs');
+  const selectionCard = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Bestratingskleur kiezen' }) });
+  await selectionCard.getByLabel('Comments (optional)').fill('De lichtgrijze steen komt overeen met het getoonde monster.');
+  await page.getByRole('button', { name: 'Submit for review' }).click();
+  await expect(page.getByText('Awaiting internal review')).toBeVisible();
+  await expect(page.getByText('Selection: Lichtgrijs')).toBeVisible();
+
+  await page.getByLabel('Subject').fill('Afstemming bestratingskeuze');
+  await page.getByLabel('Message').fill('Kunt u bevestigen wanneer de grijze steenkeuze wordt beoordeeld?');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByText('Your message was added to the project record.')).toBeVisible();
 
   const detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();
@@ -3093,8 +3100,8 @@ test('client portal records an inbound message and approval-gated selection resp
   await expect(page.getByText('Approval approved. The ledger and audit trail were updated.')).toBeVisible();
 
   await page.goto(`/client-portal.html#token=${access.access.portalToken}`);
-  await expect(page.getByText('Reactie verwerkt')).toBeVisible();
-  await expect(page.getByText('Vastgelegde keuze:')).toBeVisible();
+  await expect(page.getByText('Response processed')).toBeVisible();
+  await expect(page.getByText('Recorded selection:')).toBeVisible();
   await expect(page.getByText('Lichtgrijs', { exact: true })).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });

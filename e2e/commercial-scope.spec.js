@@ -43,7 +43,9 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   const openJob = async () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
-    await page.getByRole('button', { name: `Open ${title}` }).first().click();
+    const openButton = page.getByRole('button', { name: `Open ${title}` }).first();
+    await expect(openButton).toBeEnabled();
+    await openButton.click();
     await expect(page.getByTestId('job-workspace').getByRole('heading', { name: title })).toBeVisible();
   };
 
@@ -129,6 +131,7 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
   await scopeDialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(scopeDialog).toBeHidden();
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await riskControl.getByRole('button', { name: 'Run premortem' }).click();
@@ -211,6 +214,7 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   await expect(estimateDialog.getByTestId('commercial-draft-scope')).toContainText('Kitchen renovation commercial scope');
   await expect(estimateDialog.getByTestId('commercial-draft-scope')).toContainText('1 allowances');
   await estimateDialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(estimateDialog).toBeHidden();
 
   const takeoffResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/takeoffs`, {
     data: {

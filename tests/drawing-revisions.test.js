@@ -170,7 +170,7 @@ test('governed drawings retain immutable PDF evidence, supersede atomically, dis
 
   assert.equal(ledger.nextActions().some(action => action.type === 'review_drawing_distribution' && action.drawingRevisionId === second.id), false);
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '071_data_subject_request_governance');
+  assert.equal(ledger.migrationStatus().currentVersion, '072_operator_locale_preferences');
 
   ledger.close();
   const restarted = new ContractorOperatingLedger({ dbFile });

@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import Empty from './EmptyState'
-import { formatDate, formatStatus } from '../dashboard-format'
+import { formatDate, formatStatus, formatWeekday } from '../dashboard-format'
 
 const EMPTY_LIST = Object.freeze([])
 const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
@@ -316,7 +316,7 @@ export default function CrewCapacityBoard({
         <div className="crew-board" style={{ '--crew-day-count': board?.window?.dates?.length || 14 }}>
           <div className="crew-board-corner"><span>Crew member</span><small>Available / planned</small></div>
           {(board?.window?.dates || EMPTY_LIST).map((date) => (
-            <div className="crew-board-date" key={date}><strong>{new Date(`${date}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short' })}</strong><span>{formatDate(date)}</span></div>
+            <div className="crew-board-date" key={date}><strong>{formatWeekday(`${date}T00:00:00Z`)}</strong><span>{formatDate(date)}</span></div>
           ))}
           {workers.map((worker) => (
             <div className="crew-board-row" key={worker.id}>

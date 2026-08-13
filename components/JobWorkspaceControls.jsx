@@ -39,6 +39,7 @@ import { createFieldEvidenceDraftId } from '../field-outbox'
 import {
   currency,
   EMPTY_LIST,
+  formatCurrency,
   formatDate,
   formatDateTime,
   formatStatus,
@@ -436,11 +437,7 @@ function calculateRatePreview(activePolicy, draft) {
 }
 
 function rateMoney(value, currencyCode = 'EUR') {
-  try {
-    return new Intl.NumberFormat('nl-NL', { style: 'currency', currency: currencyCode }).format(Number(value || 0))
-  } catch {
-    return `${currencyCode} ${Number(value || 0).toFixed(2)}`
-  }
+  return formatCurrency(value, currencyCode)
 }
 
 const FALLBACK_PRICING_BASIS_FACTORS = [

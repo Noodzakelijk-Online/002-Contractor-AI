@@ -12,6 +12,7 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
+import { formatReadableDate } from '../dashboard-format'
 import './SiteSurveyControl.css'
 
 function localDateTime(value = Date.now() + 24 * 60 * 60 * 1000) {
@@ -181,7 +182,7 @@ export default function SiteSurveyControl({
       {latestSurvey ? (
         <div className="site-survey-summary">
           <div><span>Surveyor</span><strong>{latestSurvey.surveyor || 'Unassigned'}</strong></div>
-          <div><span>Planned</span><strong>{latestSurvey.scheduledAt ? new Date(latestSurvey.scheduledAt).toLocaleString() : 'Not set'}</strong></div>
+          <div><span>Planned</span><strong>{latestSurvey.scheduledAt ? formatReadableDate(latestSurvey.scheduledAt, true) : 'Not set'}</strong></div>
           <div><span>Measurements</span><strong>{latestSurvey.snapshot?.submission?.measurements?.length || 0}</strong></div>
           <div><span>Evidence</span><strong>{latestSurvey.snapshot?.submission?.evidenceIds?.length || evidence.length}</strong></div>
         </div>

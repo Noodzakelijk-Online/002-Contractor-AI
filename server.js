@@ -1268,6 +1268,7 @@ function allowsOperatorRequest(role, req) {
   const isRead = ['GET', 'HEAD'].includes(req.method);
   const pathName = req.path;
   if (isRead && pathName === '/api/session') return true;
+  if (req.method === 'PATCH' && pathName === '/api/preferences') return true;
   const ledgerRead = pathName.startsWith('/api/ledger/');
 
   if (role === 'approver') {
@@ -2069,6 +2070,7 @@ app.get('/api/session', (req, res) => {
   const role = req.operator?.role || 'owner';
   const fieldWorker = role === 'field_worker';
   const fieldIdentity = fieldWorker ? fieldWorkerIdentity(req) : null;
+  const principalId = trustedRequestActor(req);
   return res.json({
     authentication: {
       required: dashboardAuthRequired,
@@ -2083,6 +2085,7 @@ app.get('/api/session', (req, res) => {
       authenticated: Boolean(req.operator?.authenticated),
       fieldScoped: fieldWorker,
       worker: fieldIdentity ? { id: fieldIdentity.workerId, name: fieldIdentity.workerName } : null,
+      preferences: operatingLedger.getOperatorPreferences(principalId),
       capabilities: {
         dashboard: !fieldWorker,
         intake: role === 'owner' || role === 'office_operator',
@@ -2109,6 +2112,14 @@ app.get('/api/session', (req, res) => {
       }
     }
   });
+});
+
+app.patch('/api/preferences', (req, res) => {
+  const principalId = trustedRequestActor(req);
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    preferences: operatingLedger.updateOperatorPreferences(principalId, req.body || {}, { actor: principalId })
+  }));
 });
 
 function environmentOperatorAccount(principal) {
@@ -5090,6 +5101,13 @@ app.get('/api/client-portal/:token', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
     ...operatingLedger.getClientPortalSnapshot(req.params.token)
+  }));
+});
+
+app.patch('/api/client-portal/:token/preferences', (req, res) => {
+  return handleLedgerRequest(req, res, () => ({
+    success: true,
+    preferences: operatingLedger.updateClientPortalPreferences(req.params.token, req.body || {}, { actor: 'client_portal' })
   }));
 });
 

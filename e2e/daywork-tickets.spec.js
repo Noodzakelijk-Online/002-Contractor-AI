@@ -121,7 +121,7 @@ test('daywork moves from offline quantity capture through acknowledgement and so
   const pricingForm = ticketCard.getByTestId('daywork-pricing-form');
   await pricingForm.locator('.daywork-price-lines input').nth(0).fill('80');
   await pricingForm.locator('.daywork-price-lines input').nth(1).fill('20');
-  await expect(pricingForm.getByText('€ 440,00')).toBeVisible();
+  await expect(pricingForm.getByText('€440.00')).toBeVisible();
   await pricingForm.getByLabel('Schedule impact (days)').fill('1');
   await pricingForm.getByRole('button', { name: 'Prepare change order' }).click();
   await expect(page.getByText('A source-bound change order was prepared for approval. Contract value and external commitments remain unchanged.')).toBeVisible();

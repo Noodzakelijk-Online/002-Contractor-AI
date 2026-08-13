@@ -71,10 +71,12 @@ import {
   mondayDateInput,
   RESOURCE_ACTION_LABELS,
   roundDisplay,
+  setDashboardLocale,
   shortHash,
   toIsoDateTime,
   toLocalDateTimeInput,
 } from './dashboard-format'
+import { appText, normalizeLocale, SUPPORTED_LOCALES } from './locale'
 import {
   browserDraftStorage,
   clearSessionDraftScope,
@@ -122,18 +124,18 @@ const TakeoffControl = lazy(() => loadJobWorkspaceControls().then((module) => ({
 const WorkPlanControl = lazy(() => loadJobWorkspaceControls().then((module) => ({ default: module.WorkPlanControl })))
 
 const navItems = [
-  ['today', 'Today', LayoutDashboard],
-  ['pipeline', 'Pipeline', Target],
-  ['jobs', 'Jobs', BriefcaseBusiness],
-  ['schedule', 'Schedule', CalendarDays],
-  ['approvals', 'Approvals', ClipboardCheck],
-  ['dispatch', 'Dispatch', MapPin],
-  ['resources', 'Resources', Wrench],
-  ['finance', 'Finance', ReceiptEuro],
-  ['performance', 'Performance', Activity],
-  ['clients', 'Clients', BadgeCheck],
-  ['field', 'Field updates', HardHat],
-  ['operations', 'Operations', Gauge],
+  ['today', LayoutDashboard],
+  ['pipeline', Target],
+  ['jobs', BriefcaseBusiness],
+  ['schedule', CalendarDays],
+  ['approvals', ClipboardCheck],
+  ['dispatch', MapPin],
+  ['resources', Wrench],
+  ['finance', ReceiptEuro],
+  ['performance', Activity],
+  ['clients', BadgeCheck],
+  ['field', HardHat],
+  ['operations', Gauge],
 ]
 
 const EQUIPMENT_EDITABLE_STATUSES = new Set(['available', 'in_use', 'maintenance', 'inspection_due', 'inactive', 'lost'])
@@ -3059,9 +3061,10 @@ function App() {
   const [resourceDraft, setResourceDraft] = useState({ workerId: '', toolId: '' })
   const [resourceOptions, setResourceOptions] = useState({ workers: [], tools: [] })
   const [communicationDraft, setCommunicationDraft] = useState({ channel: 'email', subject: '', body: '', expectsReply: true })
-  const [portalDraft, setPortalDraft] = useState({ label: 'Client job portal', expiresAt: futureDateInput(30) })
+  const [portalDraft, setPortalDraft] = useState({ label: 'Client job portal', expiresAt: futureDateInput(30), locale: 'nl-NL' })
   const [portalLink, setPortalLink] = useState('')
   const [notice, setNotice] = useState(null)
+  const [localeSaving, setLocaleSaving] = useState(false)
   const [intake, setIntake] = useState({ clientName: '', title: '', service: '', address: '', description: '', priority: 'medium' })
   const [evidence, setEvidence] = useState(() => emptyFieldEvidenceDraft())
   const [fieldPhotoEvidenceSets, setFieldPhotoEvidenceSets] = useState([])
@@ -3306,9 +3309,14 @@ function App() {
 
   const dashboard = data?.dashboard
   const operator = data?.session?.operator || { role: 'owner' }
+  const operatorLocale = normalizeLocale(operator.preferences?.locale)
+  setDashboardLocale(operatorLocale)
   const fieldScoped = operator.fieldScoped === true
   const outboxScope = fieldOutboxOperatorScope(operator)
   const draftRecoveryEnabled = authState === 'active' && Boolean(data?.session?.operator)
+  useEffect(() => {
+    document.documentElement.lang = operatorLocale.slice(0, 2)
+  }, [operatorLocale])
   useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'intake-open', value: showIntake, setValue: setShowIntake })
   useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'intake', value: intake, setValue: setIntake })
   useSessionDraftRecovery({ enabled: draftRecoveryEnabled, scope: outboxScope, name: 'opportunity-editor', value: opportunityEditor, setValue: setOpportunityEditor })
@@ -3517,8 +3525,8 @@ function App() {
         if (key === 'field') return capabilities.fieldEvidence
         if (key === 'operations') return capabilities.maintenance
         return true
-      }),
-    [capabilities],
+      }).map(([key, icon]) => [key, appText(operatorLocale, `nav.${key}`), icon]),
+    [capabilities, operatorLocale],
   )
 
   async function refreshOperationsCommandPlan(sequence = sectionLoadSequenceRef.current) {
@@ -3711,6 +3719,29 @@ function App() {
       setSubmitting(false)
     }
   }, [outboxScope])
+
+  async function updateOperatorLocale(nextLocale) {
+    const locale = normalizeLocale(nextLocale)
+    if (locale === operatorLocale || localeSaving) return
+    setLocaleSaving(true)
+    try {
+      const result = await api('/api/preferences', {
+        method: 'PATCH',
+        body: JSON.stringify({ locale }),
+      })
+      setData((current) => current ? {
+        ...current,
+        session: {
+          ...current.session,
+          operator: { ...current.session.operator, preferences: result.preferences },
+        },
+      } : current)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setLocaleSaving(false)
+    }
+  }
 
   const refreshOutboxState = useCallback(async () => {
     const snapshot = await fieldOutboxSnapshot(outboxScope)
@@ -6586,7 +6617,7 @@ function App() {
     })
     setResourceDraft({ workerId: '', toolId: '' })
     setCommunicationDraft({ channel: 'email', subject: '', body: '', expectsReply: true })
-    setPortalDraft({ label: 'Client job portal', expiresAt: futureDateInput(30) })
+    setPortalDraft({ label: 'Client job portal', expiresAt: futureDateInput(30), locale: 'nl-NL' })
     setPortalLink('')
     setTaskDraft(emptyTaskDraft())
     setTaskAction(null)
@@ -8285,6 +8316,7 @@ function App() {
         body: JSON.stringify({
           label: portalDraft.label.trim(),
           expiresAt: new Date(`${portalDraft.expiresAt}T23:59:59`).toISOString(),
+          locale: portalDraft.locale,
           source: 'job_workspace',
           actor: 'office_operator',
         }),
@@ -10951,13 +10983,13 @@ function App() {
     )
   }
 
-  const pageTitle = visibleNavItems.find(([key]) => key === section)?.[1] || 'Today'
+  const pageTitle = visibleNavItems.find(([key]) => key === section)?.[1] || appText(operatorLocale, 'nav.today')
 
   return (
     <div className="app-shell">
       <aside
         className={`side-nav ${mobileNavOpen ? 'side-nav-open' : ''}`}
-        aria-label="Primary navigation"
+        aria-label={appText(operatorLocale, 'shell.primaryNavigation')}
         onKeyDown={(event) => {
           if (event.key === 'Escape') setMobileNavOpen(false)
         }}
@@ -10970,7 +11002,7 @@ function App() {
           <button
             type="button"
             className="nav-close mobile-only"
-            aria-label="Close navigation"
+            aria-label={appText(operatorLocale, 'shell.closeNavigation')}
             onClick={() => setMobileNavOpen(false)}
           >
             <X size={19} />
@@ -10992,8 +11024,8 @@ function App() {
         </div>
         <div className="nav-footer">
           <CloudOff size={16} />
-          <span>{networkOnline ? 'Local-first ledger' : 'Offline ledger'}</span>
-          <small>External actions require approval</small>
+          <span>{networkOnline ? appText(operatorLocale, 'shell.localLedger') : appText(operatorLocale, 'shell.offlineLedger')}</span>
+          <small>{appText(operatorLocale, 'shell.approvalNotice')}</small>
         </div>
       </aside>
 
@@ -11003,40 +11035,53 @@ function App() {
         inert={loading || sectionLoading ? true : undefined}
       >
         <header className="topbar">
-          <button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}>
+          <button className="icon-button mobile-only" aria-label={appText(operatorLocale, 'shell.openNavigation')} onClick={() => setMobileNavOpen(true)}>
             <Menu size={20} />
           </button>
           <div>
             <h1>{pageTitle}</h1>
             <p>
               {dashboard
-                ? `${metrics.openJobs || 0} active jobs, ${metrics.pendingApprovals || 0} decisions awaiting review`
-                : 'Loading the local operating ledger'}
+                ? appText(operatorLocale, 'shell.activeSummary', { jobs: metrics.openJobs || 0, approvals: metrics.pendingApprovals || 0 })
+                : appText(operatorLocale, 'shell.loadingLedger')}
             </p>
           </div>
           <div className="topbar-actions">
             <span className="sync-state">
               <CloudOff size={15} />
-              {networkOnline ? (fieldScoped ? 'Field scope' : 'Local-first') : 'Offline queue'}
+              {networkOnline
+                ? (fieldScoped ? appText(operatorLocale, 'shell.fieldScope') : appText(operatorLocale, 'shell.localFirst'))
+                : appText(operatorLocale, 'shell.offlineQueue')}
             </span>
+            <label className="locale-select">
+              <span className="visually-hidden">{appText(operatorLocale, 'shell.language')}</span>
+              <select
+                aria-label={appText(operatorLocale, 'shell.language')}
+                value={operatorLocale}
+                disabled={localeSaving}
+                onChange={(event) => updateOperatorLocale(event.target.value)}
+              >
+                {SUPPORTED_LOCALES.map((option) => <option key={option.value} value={option.value}>{option.shortLabel}</option>)}
+              </select>
+            </label>
             {operator.authenticated ? (
               <span className="operator-session" title={formatStatus(operator.role)}>
                 <ShieldCheck size={14} />
                 <span>{operator.name || formatStatus(operator.role)}</span>
               </span>
             ) : null}
-            <button className="icon-button" aria-label="Refresh data" onClick={refreshCurrentView} disabled={loading || sectionLoading}>
+            <button className="icon-button" aria-label={appText(operatorLocale, 'shell.refresh')} onClick={refreshCurrentView} disabled={loading || sectionLoading}>
               <RefreshCw size={18} className={loading || sectionLoading ? 'spin' : ''} />
             </button>
             {operator.authenticated ? (
-              <button className="icon-button" aria-label="Sign out" title="Sign out" onClick={logoutOperator} disabled={submitting}>
+              <button className="icon-button" aria-label={appText(operatorLocale, 'shell.signOut')} title={appText(operatorLocale, 'shell.signOut')} onClick={logoutOperator} disabled={submitting}>
                 <LogOut size={17} />
               </button>
             ) : null}
             {capabilities.intake && capabilities.pipeline ? (
               <button className="primary-button" onClick={() => openOpportunityEditor()} disabled={initialDataLoading}>
                 <Plus size={17} />
-                New opportunity
+                {appText(operatorLocale, 'shell.newOpportunity')}
               </button>
             ) : null}
           </div>
@@ -11046,7 +11091,7 @@ function App() {
           <div className="notice">
             <Check size={16} />
             {notice.message}
-            <button aria-label="Dismiss notice" onClick={() => setNotice(null)}>
+            <button aria-label={appText(operatorLocale, 'shell.dismissNotice')} onClick={() => setNotice(null)}>
               <X size={15} />
             </button>
           </div>
@@ -11055,7 +11100,7 @@ function App() {
           <div className="error-banner">
             <TriangleAlert size={18} />
             <span>{error}</span>
-            <button onClick={refreshCurrentView}>Retry</button>
+            <button onClick={refreshCurrentView}>{appText(operatorLocale, 'shell.retry')}</button>
           </div>
         ) : null}
         {automationSuspended ? (
@@ -11088,7 +11133,7 @@ function App() {
             {sectionLoading ? (
               <div className="loading section-loading" role="status">
                 <LoaderCircle className="spin" size={26} />
-                Loading {pageTitle.toLowerCase()}
+                {appText(operatorLocale, 'shell.loadingPage', { page: pageTitle.toLowerCase() })}
               </div>
             ) : null}
               <>
@@ -16101,6 +16146,15 @@ function App() {
                             onChange={(event) => setPortalDraft({ ...portalDraft, expiresAt: event.target.value })}
                           />
                         </label>
+                        <label>
+                          Portal language
+                          <select
+                            value={portalDraft.locale}
+                            onChange={(event) => setPortalDraft({ ...portalDraft, locale: event.target.value })}
+                          >
+                            {SUPPORTED_LOCALES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                          </select>
+                        </label>
                         <div className="form-actions form-span">
                           <button className="secondary-button" disabled={submitting}>
                             <Link2 size={16} />
@@ -16131,7 +16185,7 @@ function App() {
                               <div>
                                 <strong>{access.data?.label || 'Client job portal'}</strong>
                                 <small>
-                                  Expires {formatDate(access.expiresAt)} · {formatStatus(access.status)}
+                                  {access.data?.locale === 'en-GB' ? 'EN' : 'NL'} / Expires {formatDate(access.expiresAt)} / {formatStatus(access.status)}
                                 </small>
                               </div>
                               {!['revoked', 'expired'].includes(access.status) ? (

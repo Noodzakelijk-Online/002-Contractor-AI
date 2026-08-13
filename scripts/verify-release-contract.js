@@ -450,6 +450,22 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!ledgerSource.includes("version: '071_data_subject_request_governance'")) {
     failures.push('Canonical data-subject request governance migration is missing.');
   }
+  if (!ledgerSource.includes("version: '072_operator_locale_preferences'")) {
+    failures.push('Canonical operator locale preference migration is missing.');
+  }
+  for (const localeRequirement of [
+    'getOperatorPreferences',
+    'updateOperatorPreferences',
+    'updateClientPortalPreferences',
+    "locale: normalizeLocale(payload.locale, 'nl-NL')"
+  ]) {
+    if (!ledgerSource.includes(localeRequirement)) {
+      failures.push(`Persisted locale contract is missing required behavior: ${localeRequirement}`);
+    }
+  }
+  for (const localeEndpoint of ['/api/preferences', '/api/client-portal/:token/preferences']) {
+    if (!serverSource.includes(localeEndpoint)) failures.push(`Persisted locale endpoint is missing: ${localeEndpoint}`);
+  }
   for (const privacyRequirement of [
     'createDataSubjectRequest',
     'verifyDataSubjectRequestIdentity',

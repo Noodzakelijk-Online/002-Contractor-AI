@@ -2,6 +2,8 @@
 
 Contractor.AI runs locally by default with SQLite and a local evidence directory. The Docker image is portable so the same build can run in an EU-region container platform.
 
+The current schema head is migration `072_operator_locale_preferences`. Hosted migration must retain each trusted principal's `en-GB` or `nl-NL` operator preference in addition to the migration 071 privacy lifecycle described below.
+
 Hosted mode is intentionally fail-closed. Set `CONTRACTOR_AI_RUNTIME_MODE=hosted` only after the deployment provides an HTTPS `CONTRACTOR_AI_PUBLIC_URL`, a strong `CONTRACTOR_AI_AUTH_TOKEN`, an EU S3-compatible evidence store, and a reachable managed PostgreSQL target in `CONTRACTOR_AI_DATABASE_URL`. The database URL must require TLS with `sslmode=require` or, preferably, `sslmode=verify-full`. At startup the ledger applies schema creation, versioned migrations, and legacy seeding under a PostgreSQL advisory lock; concurrent replicas wait on the same database connection boundary instead of applying a migration twice. A failed or timed-out startup closes that connection so the lock cannot survive the failed process. Hosted mode never falls back to a local SQLite file.
 
 Production readiness also requires `CONTRACTOR_AI_HOSTING_PROVIDER`, `CONTRACTOR_AI_HOSTING_REGION`, `CONTRACTOR_AI_DATA_RESIDENCY=EU`, a retained `CONTRACTOR_AI_DPA_REFERENCE`, and a retained `CONTRACTOR_AI_RETENTION_POLICY_REFERENCE`. These fields are operator declarations, not provider attestations; preserve the referenced contract, retention schedule, and residency evidence outside the application. `CORS_ORIGINS` must include the exact public HTTPS origin.

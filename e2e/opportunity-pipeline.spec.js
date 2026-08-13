@@ -31,8 +31,8 @@ test('operator qualifies an opportunity, retains internal activity, and converts
   await expect(pipeline.getByRole('heading', { name: 'Preconstruction pipeline' })).toBeVisible();
   const row = pipeline.locator('.pipeline-row').filter({ hasText: title });
   await expect(row).toHaveCount(1);
-  await expect(row).toContainText('€ 24.000,00');
-  await expect(row).toContainText('€ 2.400,00');
+  await expect(row).toContainText('€24,000.00');
+  await expect(row).toContainText('€2,400.00');
 
   await row.getByRole('button', { name: 'Follow-up' }).click();
   const activityModal = page.getByTestId('opportunity-activity-modal');

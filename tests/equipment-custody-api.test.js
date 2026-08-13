@@ -147,5 +147,5 @@ test('equipment custody API gives assigned field workers replay-safe checkout an
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner });
   assert.equal(diagnostics.response.status, 200);
   assert.equal(diagnostics.body.diagnostics.valid, true);
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '071_data_subject_request_governance');
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '072_operator_locale_preferences');
 });

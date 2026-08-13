@@ -3,6 +3,10 @@
 .client-portal-header > div, .client-portal-header p { display: flex; align-items: center; gap: 9px; }
 .client-portal-header strong { font-size: 15px; }
 .client-portal-header p { margin: 0; color: #d5e8e2; font-size: 12px; }
+.client-portal-header .client-portal-header-actions { display: flex; align-items: center; gap: 14px; }
+.client-portal-locale { display: inline-flex; }
+.client-portal-locale select { width: 54px; height: 30px; padding: 0 6px; color: #173f38; font-size: 11px; font-weight: 750; background: #fff; border: 1px solid #b8d1c9; border-radius: 5px; }
+.client-portal-locale select:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .client-portal-mark { display: grid; width: 34px; height: 34px; place-items: center; background: #286357; border-radius: 6px; }
 .client-portal-main { width: min(1040px, 100%); margin: 0 auto; padding: 34px 18px 48px; }
 .client-portal-state { display: flex; min-height: 260px; align-items: center; justify-content: center; gap: 10px; color: #49665e; }

@@ -182,7 +182,7 @@ test('LMRA API enforces field identity, exact replay, source validation, project
   const diagnostics = await request(baseUrl, '/api/ledger/debug', { token: tokens.owner })
   assert.equal(diagnostics.response.status, 200)
   assert.equal(diagnostics.body.diagnostics.valid, true, JSON.stringify(diagnostics.body.diagnostics.issues))
-  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '071_data_subject_request_governance')
+  assert.equal(diagnostics.body.diagnostics.migrations.currentVersion, '072_operator_locale_preferences')
   assert.equal(diagnostics.body.diagnostics.counts.lmraAssessments, 1)
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities', { token: tokens.owner })

@@ -2,6 +2,8 @@
 
 Contractor.AI is a local-first operating system for Dutch and European contractor teams. It keeps opportunities, jobs, project controls, approvals, dispatch, field evidence, finance handoffs and autonomous internal drafts in one persisted operating ledger.
 
+Operator shell language is retained per trusted principal (`en-GB` or `nl-NL`). Each approval-gated client portal link has its own retained language and the client can switch it from the portal. Locale changes affect interface copy and number/date/currency presentation; they do not translate retained project content supplied by operators or clients.
+
 The Node application is the sole product runtime. The dashboard is a React/Vite client that uses only the ledger API. Python prototypes, simulated dashboards and separate mock databases are retired.
 
 The manifest-level comparison of the supplied legacy archives and the decisions

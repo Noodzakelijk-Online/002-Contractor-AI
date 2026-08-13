@@ -139,13 +139,13 @@ test('energy-performance evidence is replay-safe, approval-gated, revisioned, an
   assert.ok(register.blockers.some(blocker => blocker.code === 'energy_performance_threshold_gap'));
   assert.equal(ledger.dashboardSummary().metrics.energyPerformanceThresholdGaps, 1);
   assert.equal(ledger.diagnose().valid, true, JSON.stringify(ledger.diagnose().issues));
-  assert.equal(ledger.migrationStatus().currentVersion, '071_data_subject_request_governance');
+  assert.equal(ledger.migrationStatus().currentVersion, '072_operator_locale_preferences');
 
   ledger.close();
   const restarted = new ContractorOperatingLedger({ dbFile });
   assert.equal(restarted.energyPerformanceForJob(job.id).records.length, 3);
   assert.equal(restarted.getEnergyPerformanceRecord(revision.record.id).integrityValid, true);
-  assert.equal(restarted.migrationStatus().currentVersion, '071_data_subject_request_governance');
+  assert.equal(restarted.migrationStatus().currentVersion, '072_operator_locale_preferences');
   restarted.close();
 });
 

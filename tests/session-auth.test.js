@@ -107,6 +107,35 @@ test('browser operator session preserves role authorization without storing the 
     assert.equal(authenticatedSession.body.operator.capabilities.intake, true);
     assert.equal(authenticatedSession.body.operator.capabilities.tenders, true);
     assert.equal(authenticatedSession.body.operator.capabilities.approvals, false);
+    assert.equal(authenticatedSession.body.operator.preferences.locale, 'en-GB');
+
+    const preferenceWithoutOrigin = await request(baseUrl, '/api/preferences', {
+      method: 'PATCH',
+      headers: { Cookie: issued.cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locale: 'nl-NL' })
+    });
+    assert.equal(preferenceWithoutOrigin.response.status, 403);
+    assert.equal(preferenceWithoutOrigin.body.error.code, 'session_origin_required');
+
+    const preference = await request(baseUrl, '/api/preferences', {
+      method: 'PATCH',
+      headers: { Cookie: issued.cookie, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locale: 'nl-NL', principalId: 'owner' })
+    });
+    assert.equal(preference.response.status, 200);
+    assert.equal(preference.body.preferences.locale, 'nl-NL');
+    assert.equal(preference.body.preferences.principalId, 'role:office_operator');
+
+    const localeSession = await request(baseUrl, '/api/session', { headers: { Cookie: issued.cookie } });
+    assert.equal(localeSession.body.operator.preferences.locale, 'nl-NL');
+
+    const unsupportedPreference = await request(baseUrl, '/api/preferences', {
+      method: 'PATCH',
+      headers: { Cookie: issued.cookie, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locale: 'de-DE' })
+    });
+    assert.equal(unsupportedPreference.response.status, 400);
+    assert.equal(unsupportedPreference.body.error.code, 'operator_locale_unsupported');
 
     const permittedRead = await request(baseUrl, '/api/ledger/jobs', { headers: { Cookie: issued.cookie } });
     assert.equal(permittedRead.response.status, 200);
