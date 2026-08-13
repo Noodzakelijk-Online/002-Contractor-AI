@@ -59,12 +59,32 @@ test('operator searches, activates, reviews, and inspects a governed framework',
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(workspace.getByRole('heading', { name: 'Operating framework register' })).toBeVisible();
-  const containment = await page.evaluate(() => ({
-    viewportWidth: window.innerWidth,
-    documentWidth: document.documentElement.scrollWidth,
-    tableClientWidth: document.querySelector('.framework-table-scroll')?.clientWidth || 0,
-    tableScrollWidth: document.querySelector('.framework-table-scroll')?.scrollWidth || 0,
-  }));
-  expect(containment.documentWidth).toBeLessThanOrEqual(containment.viewportWidth + 1);
+  const containment = await page.evaluate(() => {
+    const permittedScrollers = '.framework-table-scroll, .framework-status-filter, .performance-table-scroll, .performance-tabs';
+    const describe = element => {
+      const rectangle = element.getBoundingClientRect();
+      return {
+        element: `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ''}${[...element.classList].map(name => `.${name}`).join('')}`,
+        left: Math.round(rectangle.left),
+        right: Math.round(rectangle.right),
+        width: Math.round(rectangle.width),
+      };
+    };
+    return {
+      viewportWidth: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      tableClientWidth: document.querySelector('.framework-table-scroll')?.clientWidth || 0,
+      tableScrollWidth: document.querySelector('.framework-table-scroll')?.scrollWidth || 0,
+      uncontainedElements: [...document.body.querySelectorAll('*')]
+        .filter(element => !element.closest(permittedScrollers))
+        .filter(element => {
+          const rectangle = element.getBoundingClientRect();
+          return rectangle.left < -1 || rectangle.right > window.innerWidth + 1;
+        })
+        .slice(0, 12)
+        .map(describe),
+    };
+  });
+  expect(containment.documentWidth, JSON.stringify(containment.uncontainedElements)).toBeLessThanOrEqual(containment.viewportWidth + 1);
   expect(containment.tableScrollWidth).toBeGreaterThan(containment.tableClientWidth);
 });
