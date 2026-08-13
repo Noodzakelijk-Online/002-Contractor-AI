@@ -2694,11 +2694,14 @@ test('owner investigates cursor-paged audit history with retained chain proof', 
   const newestSequence = (await rows.first().locator('.audit-sequence strong').innerText()).replace('#', '');
   await panel.getByRole('button', { name: 'Load older events' }).click();
   await expect.poll(() => rows.count()).toBeGreaterThan(initialRowCount);
+  await expect(panel).not.toHaveAttribute('aria-busy', 'true');
   const oldestSequence = (await rows.last().locator('.audit-sequence strong').innerText()).replace('#', '');
   await expect(panel.locator('.audit-history-summary code')).toHaveText(`#${newestSequence} to #${oldestSequence}`);
 
   await panel.getByTestId('audit-action-filter').selectOption('create_intake_job');
-  await panel.getByRole('button', { name: 'Apply', exact: true }).click();
+  const applyAuditFilters = panel.getByRole('button', { name: 'Apply', exact: true });
+  await expect(applyAuditFilters).toBeEnabled();
+  await applyAuditFilters.click();
   const visibleActions = panel.locator('.audit-event-copy > div > strong');
   await expect.poll(async () => {
     const actions = await visibleActions.allTextContents();
