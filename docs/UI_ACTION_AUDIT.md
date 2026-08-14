@@ -16,7 +16,7 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 | Jobs | choose job, inspect lifecycle, scope, risk, changes, closeout | Wired and persisted |
 | Planning | schedule, capacity, assignments, constraints, commitments | Wired and persisted |
 | Field | assigned work, attendance, daily evidence, safety and quality | Wired; mobile/offline states covered |
-| Procurement | bidder/partner, commitment, receiving, equipment | Wired with compliance/approval gates |
+| Procurement | bidder/partner, comparison, preferred selection, commitment, immutable PO package, verified receipt, receiving, equipment | Wired and bilingual through approved order delivery; compliance, approval, and provider-receipt gated |
 | Finance | job costing, cost-to-complete, forecasts, billing, invoice/credit/payable evidence | Wired and bilingual for the practical-core cost review; no transfer or ledger posting claim |
 | Performance | scorecard and governed framework search, method basis, scope, evidence, measures, review and history | Wired and persisted; starters never fabricate evidence and make no method certification claim |
 | Approvals | inspect source, approve/reject, follow resulting action | Wired; source changes fail closed |
@@ -56,7 +56,12 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
   commitments, CTC/EAC/VAC, source warnings, forecasts, and approval-gated actions
   in Dutch or English without rewriting retained cost evidence. Its scrollable table
   is keyboard focusable and axe-clean at desktop and mobile widths.
-- The responsive production UI is exercised by 96 isolated Chromium tests across
+- Tender comparison and purchasing now present bid-package filters, retained
+  returns, preferred selection, commitments, immutable PO packages, and verified
+  provider receipts in Dutch or English without rewriting commercial evidence.
+  No supplier contact, award, order, payment, or signature is claimed before its
+  independent approval and provider evidence boundary.
+- The responsive production UI is exercised by 97 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised

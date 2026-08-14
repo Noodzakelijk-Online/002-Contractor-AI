@@ -148,6 +148,16 @@ test('finance dashboard completes standalone purchase orders through approved im
   assert.match(dashboardSource, /This records an existing delivery receipt; it does not contact the supplier or initiate payment/);
 });
 
+test('tender comparison and purchasing controls share the retained operator locale', () => {
+  assert.match(dashboardRootSource, /<PipelineWorkspace[\s\S]*text=\{ot\}/);
+  assert.match(dashboardRootSource, /<BidPackageWorkspace[\s\S]*text=\{t\}/);
+  assert.match(dashboardRootSource, /function BidPackageWorkspace\(\{[\s\S]*text,/);
+  assert.match(dashboardRootSource, /ot\('Internal bid package retained\. No invitation or message was sent\.'\)/);
+  assert.match(dashboardRootSource, /ot\('Selected bid frozen into purchasing approval\. No supplier contact, award, order, or payment occurred\.'\)/);
+  assert.match(dashboardRootSource, /ot\('Verified provider receipt retained for \{reference\}\. The order is now an external commitment; no payment was initiated\.'/);
+  assert.match(dashboardRootSource, /t\('No supplier contact, award, order transmission, subcontract signature, or payment occurred\.'\)/);
+});
+
 test('finance dashboard freezes server-derived cost forecasts through approval-backed snapshots', () => {
   assert.match(dashboardSource, /function localizedFinanceActionLabel/);
   assert.match(dashboardSource, /function localizedCostForecastWarning/);

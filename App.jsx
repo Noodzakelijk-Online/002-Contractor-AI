@@ -1406,6 +1406,7 @@ function LazyControlBoundary({ label, mode = 'section', children }) {
 const PIPELINE_STAGES = ['new', 'qualifying', 'site_visit', 'estimating', 'proposal', 'negotiating', 'won', 'lost', 'archived']
 
 function BidPackageWorkspace({
+  text,
   bidPackages,
   selectedBidPackage,
   canCoordinate,
@@ -1423,6 +1424,7 @@ function BidPackageWorkspace({
   onReviewOrderDelivery,
   onRecordOrderDelivery,
 }) {
+  const t = text || ((value) => value)
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('open')
   const normalizedQuery = query.trim().toLowerCase()
@@ -1447,25 +1449,25 @@ function BidPackageWorkspace({
       <section className="panel bid-register" data-testid="bid-package-workspace">
         <div className="panel-heading pipeline-heading">
           <div>
-            <h2>Bid package register</h2>
-            <p>Compare retained trade-partner returns before a preferred bidder enters approval.</p>
+            <h2>{t('Bid package register')}</h2>
+            <p>{t('Compare retained trade-partner returns before a preferred bidder enters approval.')}</p>
           </div>
           {canCoordinate ? (
             <button className="primary-button" onClick={onCreate}>
               <Plus size={16} />
-              New bid package
+              {t('New bid package')}
             </button>
           ) : null}
         </div>
         <div className="pipeline-toolbar">
           <label className="search-control">
             <Search size={15} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search package, client, trade or bidder" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search package, client, trade or bidder')} />
           </label>
-          <div className="pipeline-stage-tabs bid-status-tabs" role="group" aria-label="Filter bid packages by status">
+          <div className="pipeline-stage-tabs bid-status-tabs" role="group" aria-label={t('Filter bid packages by status')}>
             {['open', 'under_review', 'pending_selection_approval', 'selected', 'all'].map((option) => (
               <button key={option} className={status === option ? 'active' : ''} onClick={() => setStatus(option)}>
-                {formatStatus(option)}
+                {t(String(option).replaceAll('_', ' '))}
               </button>
             ))}
           </div>
@@ -1474,29 +1476,29 @@ function BidPackageWorkspace({
           <div className="bid-package-list">
             {rows.map((bidPackage) => (
               <article className={`bid-package-row ${selectedBidPackage?.id === bidPackage.id ? 'bid-package-row-selected' : ''}`} key={bidPackage.id}>
-                <button className="bid-package-main" onClick={() => onSelect(bidPackage)} aria-label={`Open bid package ${bidPackage.packageNumber}`}>
+                <button className="bid-package-main" onClick={() => onSelect(bidPackage)} aria-label={t('Open bid package {number}', { number: bidPackage.packageNumber })}>
                   <span className="bid-package-icon"><ClipboardList size={17} /></span>
                   <span>
                     <span className="pipeline-title">
                       <strong>{bidPackage.packageNumber} / {bidPackage.title}</strong>
-                      <span className={`status status-${bidPackage.status}`}>{formatStatus(bidPackage.status)}</span>
+                      <span className={`status status-${bidPackage.status}`}>{t(String(bidPackage.status || 'draft').replaceAll('_', ' '))}</span>
                     </span>
-                    <small>{bidPackage.client?.name || 'Client pending'} / {bidPackage.trade} / {bidPackage.opportunity?.title || 'Opportunity pending'}</small>
+                    <small>{bidPackage.client?.name || t('Client pending')} / {bidPackage.trade} / {bidPackage.opportunity?.title || t('Opportunity pending')}</small>
                   </span>
                 </button>
                 <dl className="bid-package-values">
-                  <div><dt>Due</dt><dd className={bidPackage.flags?.overdue ? 'pipeline-overdue' : ''}>{bidPackage.dueAt ? formatDate(bidPackage.dueAt) : 'Not set'}</dd></div>
-                  <div><dt>Returns</dt><dd>{bidPackage.comparison?.returned || 0} / {bidPackage.comparison?.invited || 0}</dd></div>
-                  <div><dt>Lowest</dt><dd>{bidPackage.comparison?.returned ? currency.format(bidPackage.comparison.lowestTotal || 0) : 'Pending'}</dd></div>
+                  <div><dt>{t('Due')}</dt><dd className={bidPackage.flags?.overdue ? 'pipeline-overdue' : ''}>{bidPackage.dueAt ? formatDate(bidPackage.dueAt) : t('Not set')}</dd></div>
+                  <div><dt>{t('Returns')}</dt><dd>{bidPackage.comparison?.returned || 0} / {bidPackage.comparison?.invited || 0}</dd></div>
+                  <div><dt>{t('Lowest')}</dt><dd>{bidPackage.comparison?.returned ? currency.format(bidPackage.comparison.lowestTotal || 0) : t('Pending')}</dd></div>
                 </dl>
-                <button className="icon-button table-action" aria-label={`Open bid package details for ${bidPackage.packageNumber}`} onClick={() => onSelect(bidPackage)}>
+                <button className="icon-button table-action" aria-label={t('Open bid package details for {number}', { number: bidPackage.packageNumber })} onClick={() => onSelect(bidPackage)}>
                   <ArrowUpRight size={16} />
                 </button>
               </article>
             ))}
           </div>
         ) : (
-          <Empty title="No bid packages in this view" detail="Adjust the status filter or retain a new internal tender package." />
+          <Empty title={t('No bid packages in this view')} detail={t('Adjust the status filter or retain a new internal tender package.')} />
         )}
       </section>
 
@@ -1505,73 +1507,78 @@ function BidPackageWorkspace({
           <div className="panel-heading">
             <div>
               <h2>{selectedBidPackage.packageNumber} / {selectedBidPackage.title}</h2>
-              <p>{selectedBidPackage.trade} / {formatStatus(selectedBidPackage.status)} / {selectedBidPackage.comparison?.returned || 0} retained return(s)</p>
+              <p>
+                {selectedBidPackage.trade} / {t(String(selectedBidPackage.status || 'draft').replaceAll('_', ' '))} /{' '}
+                {(selectedBidPackage.comparison?.returned || 0) === 1
+                  ? t('{count} retained return', { count: selectedBidPackage.comparison?.returned || 0 })
+                  : t('{count} retained returns', { count: selectedBidPackage.comparison?.returned || 0 })}
+              </p>
             </div>
             <div className="bid-package-heading-actions">
               {canCoordinate && ['draft', 'open_for_returns', 'under_review'].includes(selectedBidPackage.status) ? (
                 <button className="secondary-button" onClick={() => onAddBidders(selectedBidPackage)}>
-                  <Users size={15} /> Add bidders
+                  <Users size={15} /> {t('Add bidders')}
                 </button>
               ) : null}
               {selectedBidPackage.approvalId && selectedBidPackage.status === 'pending_selection_approval' && canApprove ? (
                 <button className="primary-button" onClick={() => onReviewApproval(selectedBidPackage)}>
-                  <ShieldCheck size={15} /> Review approval
+                  <ShieldCheck size={15} /> {t('Review approval')}
                 </button>
               ) : null}
               {selectedBidPackage.status === 'selected' && canCoordinate && (!selectedBidPackage.commitment || selectedBidPackage.flags?.commitmentRejected) ? (
                 <button
                   className="primary-button"
                   disabled={!selectedBidPackage.jobId || submitting}
-                  title={selectedBidPackage.jobId ? 'Prepare the selected return for purchasing approval' : 'Convert the opportunity to a job first'}
+                  title={selectedBidPackage.jobId ? t('Prepare the selected return for purchasing approval') : t('Convert the opportunity to a job first')}
                   onClick={() => onPrepareCommitment(selectedBidPackage)}
                 >
-                  <ReceiptEuro size={15} /> {selectedBidPackage.flags?.commitmentRejected ? 'Revise commitment' : selectedBidPackage.jobId ? 'Prepare commitment' : 'Job required'}
+                  <ReceiptEuro size={15} /> {selectedBidPackage.flags?.commitmentRejected ? t('Revise commitment') : selectedBidPackage.jobId ? t('Prepare commitment') : t('Job required')}
                 </button>
               ) : null}
               {selectedBidPackage.commitment?.status === 'pending_approval' && canApprove ? (
                 <button className="primary-button" onClick={() => onReviewCommitment(selectedBidPackage)}>
-                  <ShieldCheck size={15} /> Review commitment
+                  <ShieldCheck size={15} /> {t('Review commitment')}
                 </button>
               ) : null}
               {selectedBidPackage.flags?.orderPackageReady && canCoordinate ? (
                 <button className="primary-button" disabled={submitting} onClick={() => onPrepareOrderPackage(selectedBidPackage)}>
-                  <PackageCheck size={15} /> Prepare order package
+                  <PackageCheck size={15} /> {t('Prepare order package')}
                 </button>
               ) : null}
               {selectedBidPackage.flags?.orderDeliveryApprovalPending && canApprove ? (
                 <button className="primary-button" disabled={submitting} onClick={() => onReviewOrderDelivery(selectedBidPackage)}>
-                  <ShieldCheck size={15} /> Review transmission
+                  <ShieldCheck size={15} /> {t('Review transmission')}
                 </button>
               ) : null}
               {selectedBidPackage.flags?.orderDeliveryApproved && canCoordinate ? (
                 <button className="primary-button" disabled={submitting} onClick={() => onRecordOrderDelivery(selectedBidPackage)}>
-                  <MailCheck size={15} /> Record delivery receipt
+                  <MailCheck size={15} /> {t('Record delivery receipt')}
                 </button>
               ) : null}
-              <button className="icon-button" aria-label="Close bid package detail" onClick={() => onSelect(null)}><X size={17} /></button>
+              <button className="icon-button" aria-label={t('Close bid package detail')} onClick={() => onSelect(null)}><X size={17} /></button>
             </div>
           </div>
           <div className="bid-package-summary">
-            <div><span>Scope</span><strong>{selectedBidPackage.scope}</strong></div>
-            <div><span>Comparison</span><strong>{selectedBidPackage.comparison?.returned ? `${currency.format(selectedBidPackage.comparison.lowestTotal)} to ${currency.format(selectedBidPackage.comparison.highestTotal)}` : 'No returns retained'}</strong></div>
+            <div><span>{t('Scope')}</span><strong>{selectedBidPackage.scope}</strong></div>
+            <div><span>{t('Comparison')}</span><strong>{selectedBidPackage.comparison?.returned ? t('{lowest} to {highest}', { lowest: currency.format(selectedBidPackage.comparison.lowestTotal), highest: currency.format(selectedBidPackage.comparison.highestTotal) }) : t('No returns retained')}</strong></div>
             <div>
-              <span>Control</span>
+              <span>{t('Control')}</span>
               <strong>
                 {selectedBidPackage.flags?.orderIssued
-                  ? 'Order issued with verified provider receipt'
+                  ? t('Order issued with verified provider receipt')
                   : selectedBidPackage.flags?.orderDeliveryApproved
-                    ? 'Transmission approved; provider receipt required'
+                    ? t('Transmission approved; provider receipt required')
                     : selectedBidPackage.flags?.orderDeliveryApprovalPending
-                      ? 'Order package retained; transmission approval pending'
+                      ? t('Order package retained; transmission approval pending')
                       : selectedBidPackage.commitment?.status === 'ready_to_order'
-                        ? 'Purchasing envelope approved; no award sent'
+                        ? t('Purchasing envelope approved; no award sent')
                   : selectedBidPackage.commitment?.status === 'pending_approval'
-                    ? 'Commitment approval pending; no award sent'
+                    ? t('Commitment approval pending; no award sent')
                     : selectedBidPackage.flags?.commitmentRejected
-                      ? 'Commitment rejected; retained for revision'
+                      ? t('Commitment rejected; retained for revision')
                       : selectedBidPackage.status === 'selected'
-                        ? 'Preferred bidder retained; no commitment prepared'
-                        : 'Internal only; no invitations sent'}
+                        ? t('Preferred bidder retained; no commitment prepared')
+                        : t('Internal only; no invitations sent')}
               </strong>
             </div>
           </div>
@@ -1579,54 +1586,54 @@ function BidPackageWorkspace({
             <div className={`bid-commitment ${selectedBidPackage.commitment.integrityValid ? '' : 'bid-commitment-invalid'}`} data-testid="bid-commitment">
               <div className="bid-commitment-heading">
                 <div>
-                  <span className="eyebrow">Purchasing commitment</span>
+                  <span className="eyebrow">{t('Purchasing commitment')}</span>
                   <strong>{selectedBidPackage.commitment.purchaseOrder.supplier}</strong>
                 </div>
                 <div className="bid-commitment-tags">
-                  <span className={`status status-${selectedBidPackage.commitment.status}`}>{formatStatus(selectedBidPackage.commitment.status)}</span>
+                  <span className={`status status-${selectedBidPackage.commitment.status}`}>{t(String(selectedBidPackage.commitment.status || 'pending_approval').replaceAll('_', ' '))}</span>
                   <span className={`tag ${selectedBidPackage.commitment.integrityValid ? 'tag-green' : 'tag-red'}`}>
-                    {selectedBidPackage.commitment.integrityValid ? 'Source verified' : 'Integrity failed'}
+                    {selectedBidPackage.commitment.integrityValid ? t('Source verified') : t('Integrity failed')}
                   </span>
                 </div>
               </div>
               <dl className="bid-commitment-values">
-                <div><dt>Net envelope</dt><dd>{currency.format(selectedBidPackage.commitment.purchaseOrder.amount || 0)}</dd></div>
-                <div><dt>Required by</dt><dd>{formatDate(selectedBidPackage.commitment.purchaseOrder.requiredBy)}</dd></div>
-                <div><dt>Cost code</dt><dd>{selectedBidPackage.commitment.purchaseOrder.data?.source?.terms?.costCode || 'SUBCONTRACT'}</dd></div>
-                <div><dt>Hash</dt><dd><code>{shortHash(selectedBidPackage.commitmentHash)}</code></dd></div>
+                <div><dt>{t('Net envelope')}</dt><dd>{currency.format(selectedBidPackage.commitment.purchaseOrder.amount || 0)}</dd></div>
+                <div><dt>{t('Required by')}</dt><dd>{formatDate(selectedBidPackage.commitment.purchaseOrder.requiredBy)}</dd></div>
+                <div><dt>{t('Cost code')}</dt><dd>{selectedBidPackage.commitment.purchaseOrder.data?.source?.terms?.costCode || 'SUBCONTRACT'}</dd></div>
+                <div><dt>{t('Hash')}</dt><dd><code>{shortHash(selectedBidPackage.commitmentHash)}</code></dd></div>
               </dl>
               <p>
                 {selectedBidPackage.commitment.orderIssued
-                  ? 'The retained order was issued only after transmission approval and a configured provider receipt. No payment or subcontract signature was performed.'
+                  ? t('The retained order was issued only after transmission approval and a configured provider receipt. No payment or subcontract signature was performed.')
                   : <>{selectedBidPackage.commitment.spendAuthorized
-                    ? 'The exact internal spend envelope is approved and ready for a separate ordering action.'
-                    : 'Approval is required before this exact internal spend envelope becomes ready to order.'}{' '}
-                    No supplier contact, award, order transmission, subcontract signature, or payment occurred.</>}
+                    ? t('The exact internal spend envelope is approved and ready for a separate ordering action.')
+                    : t('Approval is required before this exact internal spend envelope becomes ready to order.')}{' '}
+                    {t('No supplier contact, award, order transmission, subcontract signature, or payment occurred.')}</>}
               </p>
               {selectedBidPackage.commitment.issuePackage ? (
                 <div className="bid-order-package" data-testid="bid-order-package">
                   <div>
-                    <span className="eyebrow">Controlled order package</span>
+                    <span className="eyebrow">{t('Controlled order package')}</span>
                     <strong>{selectedBidPackage.commitment.issuePackage.issueReference}</strong>
                     <small>
-                      {selectedBidPackage.commitment.issuePackage.communication?.data?.recipient || 'Supplier recipient retained'} / {formatStatus(selectedBidPackage.commitment.issuePackage.transportStatus)}
+                      {selectedBidPackage.commitment.issuePackage.communication?.data?.recipient || t('Supplier recipient retained')} / {t(String(selectedBidPackage.commitment.issuePackage.transportStatus || 'draft').replaceAll('_', ' '))}
                     </small>
                   </div>
                   <div className="bid-order-package-actions">
                     <span className={`tag ${selectedBidPackage.commitment.orderIssued ? 'tag-green' : 'tag-amber'}`}>
-                      {selectedBidPackage.commitment.orderIssued ? 'Provider receipt retained' : formatStatus(selectedBidPackage.commitment.issuePackage.communicationStatus || 'draft')}
+                      {selectedBidPackage.commitment.orderIssued ? t('Provider receipt retained') : t(String(selectedBidPackage.commitment.issuePackage.communicationStatus || 'draft').replaceAll('_', ' '))}
                     </span>
                     <a
                       className="secondary-button"
-                      aria-label={`Download purchase order ${selectedBidPackage.commitment.issuePackage.issueReference}`}
+                      aria-label={t('Download purchase order {reference}', { reference: selectedBidPackage.commitment.issuePackage.issueReference })}
                       href={`/api/ledger/documents/${encodeURIComponent(selectedBidPackage.commitment.issuePackage.htmlDocumentId)}/issue-package`}
                       download
                     >
-                      <FileDown size={15} /> Order
+                      <FileDown size={15} /> {t('Order')}
                     </a>
                     <a
                       className="secondary-button"
-                      aria-label={`Download purchase order UBL ${selectedBidPackage.commitment.issuePackage.issueReference}`}
+                      aria-label={t('Download purchase order UBL {reference}', { reference: selectedBidPackage.commitment.issuePackage.issueReference })}
                       href={`/api/ledger/documents/${encodeURIComponent(selectedBidPackage.commitment.issuePackage.ublDocumentId)}/issue-package`}
                       download
                     >
@@ -1645,29 +1652,29 @@ function BidPackageWorkspace({
                 <article className="bid-participant-row" key={participant.id}>
                   <div className="bid-participant-copy">
                     <span className="pipeline-title">
-                      <strong>{participant.partner?.name || 'Trade partner unavailable'}</strong>
-                      <span className={`status status-${participant.status}`}>{formatStatus(participant.status)}</span>
+                      <strong>{participant.partner?.name || t('Trade partner unavailable')}</strong>
+                      <span className={`status status-${participant.status}`}>{t(String(participant.status || 'internal_invite').replaceAll('_', ' '))}</span>
                     </span>
-                    <small>{formatStatus(participant.partner?.compliance?.status || 'needs_review')} compliance / {participant.data?.deliveryStatus === 'not_sent' ? 'internal invite only' : 'retained record'}</small>
-                    {participant.evidenceReference ? <p>Evidence: {participant.evidenceReference}</p> : null}
+                    <small>{t(String(participant.partner?.compliance?.status || 'needs_review').replaceAll('_', ' '))} {t('compliance')} / {participant.data?.deliveryStatus === 'not_sent' ? t('internal invite only') : t('retained record')}</small>
+                    {participant.evidenceReference ? <p>{t('Evidence')}: {participant.evidenceReference}</p> : null}
                   </div>
                   <dl className="bid-participant-values">
-                    <div><dt>Total</dt><dd>{participant.status === 'internal_invite' ? 'Awaiting return' : currency.format(participant.total || 0)}</dd></div>
-                    <div><dt>Duration</dt><dd>{participant.durationDays === null ? 'Not retained' : `${participant.durationDays} days`}</dd></div>
-                    <div><dt>Valid until</dt><dd>{participant.validUntil ? formatDate(participant.validUntil) : 'Not retained'}</dd></div>
+                    <div><dt>{t('Total')}</dt><dd>{participant.status === 'internal_invite' ? t('Awaiting return') : currency.format(participant.total || 0)}</dd></div>
+                    <div><dt>{t('Duration')}</dt><dd>{participant.durationDays === null ? t('Not retained') : t('{count} days', { count: participant.durationDays })}</dd></div>
+                    <div><dt>{t('Valid until')}</dt><dd>{participant.validUntil ? formatDate(participant.validUntil) : t('Not retained')}</dd></div>
                   </dl>
                   <div className="bid-participant-actions">
                     {canEditReturn && ['internal_invite', 'returned'].includes(participant.status) ? (
                       <button className="secondary-button" disabled={submitting} onClick={() => onRecordReturn(selectedBidPackage, participant)}>
-                        <ReceiptEuro size={15} /> {participant.status === 'returned' ? 'Update return' : 'Record return'}
+                        <ReceiptEuro size={15} /> {participant.status === 'returned' ? t('Update return') : t('Record return')}
                       </button>
                     ) : null}
                     {canSelect ? (
                       <button className="primary-button" disabled={submitting || participant.partner?.compliance?.compliant !== true} onClick={() => onRequestSelection(selectedBidPackage, participant)}>
-                        <ShieldCheck size={15} /> Request selection approval
+                        <ShieldCheck size={15} /> {t('Request selection approval')}
                       </button>
                     ) : null}
-                    {participant.status === 'selected' ? <span className="tag tag-green">Preferred / no award sent</span> : null}
+                    {participant.status === 'selected' ? <span className="tag tag-green">{t('Preferred / no award sent')}</span> : null}
                   </div>
                 </article>
               )
@@ -1681,6 +1688,7 @@ function BidPackageWorkspace({
 
 function PipelineWorkspace({
   locale,
+  text,
   view,
   onViewChange,
   opportunities,
@@ -1722,6 +1730,7 @@ function PipelineWorkspace({
   onReviewBidOrderDelivery,
   onRecordBidOrderDelivery,
 }) {
+  const t = text || ((value) => value)
   const [query, setQuery] = useState('')
   const [stage, setStage] = useState('open')
   const normalizedQuery = query.trim().toLowerCase()
@@ -1752,20 +1761,20 @@ function PipelineWorkspace({
           </>
         ) : (
           <>
-            <Metric icon={ClipboardList} label="Bid packages" value={tenderSummary.total || 0} hint={`${tenderSummary.invited || 0} internal bidders`} />
-            <Metric icon={ReceiptEuro} label="Returns retained" value={tenderSummary.returns || 0} hint="Comparable evidence" tone="green" />
-            <Metric icon={Timer} label="Overdue" value={tenderSummary.overdue || 0} hint="Return deadline passed" tone={tenderSummary.overdue ? 'amber' : 'green'} />
-            <Metric icon={ShieldCheck} label="Selections" value={tenderSummary.selected || 0} hint={`${tenderSummary.pendingApproval || 0} awaiting approval`} tone="blue" />
+            <Metric icon={ClipboardList} label={t('Bid packages')} value={tenderSummary.total || 0} hint={t('{count} internal bidders', { count: tenderSummary.invited || 0 })} />
+            <Metric icon={ReceiptEuro} label={t('Returns retained')} value={tenderSummary.returns || 0} hint={t('Comparable evidence')} tone="green" />
+            <Metric icon={Timer} label={t('Overdue')} value={tenderSummary.overdue || 0} hint={t('Return deadline passed')} tone={tenderSummary.overdue ? 'amber' : 'green'} />
+            <Metric icon={ShieldCheck} label={t('Selections')} value={tenderSummary.selected || 0} hint={t('{count} awaiting approval', { count: tenderSummary.pendingApproval || 0 })} tone="blue" />
           </>
         )}
       </div>
 
-      <div className="pipeline-view-tabs" role="tablist" aria-label="Preconstruction views">
+      <div className="pipeline-view-tabs" role="tablist" aria-label={t('Preconstruction views')}>
         <button role="tab" aria-selected={view === 'opportunities'} className={view === 'opportunities' ? 'active' : ''} onClick={() => onViewChange('opportunities')}>
-          <Target size={15} /> Opportunities
+          <Target size={15} /> {t('Opportunities')}
         </button>
         <button role="tab" aria-selected={view === 'bids'} className={view === 'bids' ? 'active' : ''} onClick={() => onViewChange('bids')}>
-          <ClipboardList size={15} /> Bid packages
+          <ClipboardList size={15} /> {t('Bid packages')}
         </button>
       </div>
 
@@ -2008,6 +2017,7 @@ function PipelineWorkspace({
         </>
       ) : (
         <BidPackageWorkspace
+          text={t}
           bidPackages={bidPackages}
           selectedBidPackage={selectedBidPackage}
           canCoordinate={canCoordinate}
@@ -4465,7 +4475,7 @@ function App() {
       setBidPackageDraft(emptyBidPackageDraft())
       setSelectedBidPackage(result.bidPackage)
       setData((current) => current ? { ...current, bidPackages: upsertById(current.bidPackages, result.bidPackage) } : current)
-      notify('Internal bid package retained. No invitation or message was sent.')
+      notify(ot('Internal bid package retained. No invitation or message was sent.'))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -4528,7 +4538,7 @@ function App() {
       setBidReturnDraft(emptyBidReturnDraft())
       setSelectedBidPackage(result.bidPackage)
       setData((current) => current ? { ...current, bidPackages: upsertById(current.bidPackages, result.bidPackage) } : current)
-      notify('Bid return evidence retained for internal comparison. No bidder was contacted.')
+      notify(ot('Bid return evidence retained for internal comparison. No bidder was contacted.'))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -4561,7 +4571,7 @@ function App() {
         bidPackages: upsertById(current.bidPackages, result.bidPackage),
         approvals: upsertById(current.approvals, result.approval),
       } : current)
-      notify('Preferred-bidder selection added to approvals. No award, order, or message was issued.')
+      notify(ot('Preferred-bidder selection added to approvals. No award, order, or message was issued.'))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -4589,7 +4599,7 @@ function App() {
       setBidAddPartnerIds([])
       setSelectedBidPackage(result.bidPackage)
       setData((current) => current ? { ...current, bidPackages: upsertById(current.bidPackages, result.bidPackage) } : current)
-      notify(result.replayed ? 'All selected bidders were already retained.' : 'Bidders added internally. No invitation or message was sent.')
+      notify(result.replayed ? ot('All selected bidders were already retained.') : ot('Bidders added internally. No invitation or message was sent.'))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -4609,7 +4619,7 @@ function App() {
   function openBidCommitment(bidPackage) {
     setBidCommitmentDraft({
       ...emptyBidCommitmentDraft(),
-      notes: `Prepare the exact selected return for ${bidPackage.packageNumber} as an internal purchasing commitment.`,
+      notes: ot('Prepare the exact selected return for {number} as an internal purchasing commitment.', { number: bidPackage.packageNumber }),
     })
     setBidPackageAction({ type: 'commitment', bidPackage })
   }
@@ -4638,8 +4648,8 @@ function App() {
         return result.job ? reconcileJobCollections(next, result.job) : next
       })
       notify(result.replayed
-        ? 'The existing verified purchasing commitment was reopened. No award or order was sent.'
-        : 'Selected bid frozen into purchasing approval. No supplier contact, award, order, or payment occurred.')
+        ? ot('The existing verified purchasing commitment was reopened. No award or order was sent.')
+        : ot('Selected bid frozen into purchasing approval. No supplier contact, award, order, or payment occurred.'))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -4652,7 +4662,7 @@ function App() {
     openApprovals({
       approvalId: bidPackage.commitment?.approvalId,
       jobId: bidPackage.jobId || null,
-      jobTitle: `${bidPackage.packageNumber} purchasing commitment`,
+      jobTitle: ot('{number} purchasing commitment', { number: bidPackage.packageNumber }),
     })
   }
 
@@ -4699,8 +4709,8 @@ function App() {
       })
       if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
       notify(result.replayed
-        ? `Purchase-order package ${result.issueReference} reopened. Its delivery approval and attachments remain retained.`
-        : `Purchase-order package ${result.issueReference} retained. Transmission still requires approval and a verified provider receipt.`)
+        ? ot('Purchase-order package {reference} reopened. Its delivery approval and attachments remain retained.', { reference: result.issueReference })
+        : ot('Purchase-order package {reference} retained. Transmission still requires approval and a verified provider receipt.', { reference: result.issueReference }))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -4713,7 +4723,7 @@ function App() {
     openApprovals({
       approvalId: bidPackage.commitment?.issuePackage?.deliveryApprovalId,
       jobId: bidPackage.jobId || null,
-      jobTitle: `${bidPackage.packageNumber} order transmission`,
+      jobTitle: ot('{number} order transmission', { number: bidPackage.packageNumber }),
     })
   }
 
@@ -4752,7 +4762,9 @@ function App() {
         return result.job ? reconcileJobCollections(next, result.job) : next
       })
       if (result.job && selectedJobId === result.job.id) setSelectedJob(result.job)
-      notify(`Verified provider receipt retained for ${result.purchaseOrder?.issuePackage?.issueReference || 'the purchase order'}. The order is now an external commitment; no payment was initiated.`)
+      notify(ot('Verified provider receipt retained for {reference}. The order is now an external commitment; no payment was initiated.', {
+        reference: result.purchaseOrder?.issuePackage?.issueReference || ot('the purchase order'),
+      }))
       await refreshSection('pipeline')
     } catch (requestError) {
       setError(requestError.message)
@@ -11495,6 +11507,7 @@ function App() {
             {section === 'pipeline' && capabilities.pipeline ? (
               <PipelineWorkspace
                 locale={operatorLocale}
+                text={ot}
                 view={pipelineView}
                 onViewChange={setPipelineView}
                 opportunities={data.opportunities || EMPTY_LIST}
@@ -17624,44 +17637,44 @@ function App() {
           <section className="modal bid-package-modal" role="dialog" aria-modal="true" aria-labelledby="bid-package-modal-title" data-testid="bid-package-modal">
             <div className="modal-heading">
               <div>
-                <h2 id="bid-package-modal-title">New bid package</h2>
-                <p>Retain an internal tender comparison. No invitations are sent from this workflow.</p>
+                <h2 id="bid-package-modal-title">{ot('New bid package')}</h2>
+                <p>{ot('Retain an internal tender comparison. No invitations are sent from this workflow.')}</p>
               </div>
-              <button className="icon-button" aria-label="Close bid package" onClick={() => setBidPackageEditor(false)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close bid package')} onClick={() => setBidPackageEditor(false)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidPackage}>
               <div className="form-grid bid-package-form">
                 <label className="form-span">
-                  Opportunity
+                  {ot('Opportunity')}
                   <select required value={bidPackageDraft.opportunityId} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, opportunityId: event.target.value })}>
-                    <option value="">Select an open opportunity</option>
+                    <option value="">{ot('Select an open opportunity')}</option>
                     {(data.opportunities || EMPTY_LIST).filter((opportunity) => !['won', 'lost', 'archived'].includes(opportunity.stage)).map((opportunity) => (
-                      <option key={opportunity.id} value={opportunity.id}>{opportunity.title} / {opportunity.client?.name || 'Client pending'}</option>
+                      <option key={opportunity.id} value={opportunity.id}>{opportunity.title} / {opportunity.client?.name || ot('Client pending')}</option>
                     ))}
                   </select>
                 </label>
                 <label>
-                  Package title
-                  <input required minLength="2" value={bidPackageDraft.title} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, title: event.target.value })} placeholder="Electrical installation package" />
+                  {ot('Package title')}
+                  <input required minLength="2" value={bidPackageDraft.title} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, title: event.target.value })} placeholder={ot('Electrical installation package')} />
                 </label>
                 <label>
-                  Trade
-                  <input required minLength="2" value={bidPackageDraft.trade} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, trade: event.target.value })} placeholder="Electrical" />
+                  {ot('Trade')}
+                  <input required minLength="2" value={bidPackageDraft.trade} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, trade: event.target.value })} placeholder={ot('Electrical')} />
                 </label>
                 <label>
-                  Return due
+                  {ot('Return due')}
                   <input required type="date" min={futureDateInput(1)} value={bidPackageDraft.dueAt} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, dueAt: event.target.value })} />
                 </label>
                 <label>
-                  Owner
+                  {ot('Owner')}
                   <input value={bidPackageDraft.ownerName} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, ownerName: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Scope
-                  <textarea required minLength="5" value={bidPackageDraft.scope} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, scope: event.target.value })} placeholder="Retained scope, interfaces, evidence, assumptions, and return requirements." />
+                  {ot('Scope')}
+                  <textarea required minLength="5" value={bidPackageDraft.scope} onChange={(event) => setBidPackageDraft({ ...bidPackageDraft, scope: event.target.value })} placeholder={ot('Retained scope, interfaces, evidence, assumptions, and return requirements.')} />
                 </label>
                 <fieldset className="form-span bid-partner-picker">
-                  <legend>Internal bidder list</legend>
+                  <legend>{ot('Internal bidder list')}</legend>
                   {(data.tradePartners || EMPTY_LIST).filter((partner) => partner.status === 'active').length ? (
                     <div>
                       {(data.tradePartners || EMPTY_LIST).filter((partner) => partner.status === 'active').map((partner) => (
@@ -17676,19 +17689,19 @@ function App() {
                                 : bidPackageDraft.tradePartnerIds.filter((id) => id !== partner.id),
                             })}
                           />
-                          <span><strong>{partner.name}</strong><small>{formatStatus(partner.partnerType)} / {formatStatus(partner.compliance?.status)}</small></span>
+                          <span><strong>{partner.name}</strong><small>{ot(String(partner.partnerType || 'supplier').replaceAll('_', ' '))} / {ot(String(partner.compliance?.status || 'needs_review').replaceAll('_', ' '))}</small></span>
                         </label>
                       ))}
                     </div>
                   ) : (
-                    <p>No active trade partners are retained. Add and verify partners in Resources first.</p>
+                    <p>{ot('No active trade partners are retained. Add and verify partners in Resources first.')}</p>
                   )}
                 </fieldset>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={() => setBidPackageEditor(false)}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={() => setBidPackageEditor(false)}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !bidPackageDraft.opportunityId || bidPackageDraft.title.trim().length < 2 || bidPackageDraft.trade.trim().length < 2 || bidPackageDraft.scope.trim().length < 5 || !bidPackageDraft.tradePartnerIds.length}>
-                  {submitting ? 'Saving...' : 'Retain bid package'}
+                  {submitting ? ot('Saving...') : ot('Retain bid package')}
                 </button>
               </div>
             </form>
@@ -17701,50 +17714,50 @@ function App() {
           <section className="modal bid-return-modal" role="dialog" aria-modal="true" aria-labelledby="bid-return-modal-title" data-testid="bid-return-modal">
             <div className="modal-heading">
               <div>
-                <h2 id="bid-return-modal-title">Record bid return</h2>
+                <h2 id="bid-return-modal-title">{ot('Record bid return')}</h2>
                 <p>{bidPackageAction.participant.partner?.name} / {bidPackageAction.bidPackage.packageNumber}</p>
               </div>
-              <button className="icon-button" aria-label="Close bid return" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close bid return')} onClick={() => setBidPackageAction(null)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidReturn}>
               <div className="form-grid bid-return-form">
                 <label>
-                  Net amount
+                  {ot('Net amount')}
                   <input required type="number" min="0.01" step="0.01" value={bidReturnDraft.netAmount} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, netAmount: event.target.value })} />
                 </label>
                 <label>
-                  VAT rate
+                  {ot('VAT rate')}
                   <input required type="number" min="0" max="100" step="0.01" value={bidReturnDraft.taxRate} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, taxRate: event.target.value })} />
                 </label>
                 <label>
-                  Received date
+                  {ot('Received date')}
                   <input required type="date" max={futureDateInput(1)} value={bidReturnDraft.receivedAt} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, receivedAt: event.target.value })} />
                 </label>
                 <label>
-                  Valid until
+                  {ot('Valid until')}
                   <input type="date" min={bidReturnDraft.receivedAt || futureDateInput(0)} value={bidReturnDraft.validUntil} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, validUntil: event.target.value })} />
                 </label>
                 <label>
-                  Duration days
+                  {ot('Duration days')}
                   <input type="number" min="0" max="3650" step="1" value={bidReturnDraft.durationDays} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, durationDays: event.target.value })} />
                 </label>
                 <label>
-                  Evidence reference
-                  <input required minLength="3" value={bidReturnDraft.evidenceReference} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, evidenceReference: event.target.value })} placeholder="Email, document or receipt reference" />
+                  {ot('Evidence reference')}
+                  <input required minLength="3" value={bidReturnDraft.evidenceReference} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, evidenceReference: event.target.value })} placeholder={ot('Email, document or receipt reference')} />
                 </label>
                 <label className="form-span">
-                  Exclusions
-                  <textarea value={bidReturnDraft.exclusions} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, exclusions: event.target.value })} placeholder="One exclusion per line" />
+                  {ot('Exclusions')}
+                  <textarea value={bidReturnDraft.exclusions} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, exclusions: event.target.value })} placeholder={ot('One exclusion per line')} />
                 </label>
                 <label className="form-span">
-                  Qualifications
-                  <textarea value={bidReturnDraft.qualifications} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, qualifications: event.target.value })} placeholder="One qualification per line" />
+                  {ot('Qualifications')}
+                  <textarea value={bidReturnDraft.qualifications} onChange={(event) => setBidReturnDraft({ ...bidReturnDraft, qualifications: event.target.value })} placeholder={ot('One qualification per line')} />
                 </label>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || Number(bidReturnDraft.netAmount) <= 0 || bidReturnDraft.evidenceReference.trim().length < 3}>
-                  {submitting ? 'Saving...' : 'Retain return evidence'}
+                  {submitting ? ot('Saving...') : ot('Retain return evidence')}
                 </button>
               </div>
             </form>
@@ -17757,27 +17770,27 @@ function App() {
           <section className="modal bid-selection-modal" role="dialog" aria-modal="true" aria-labelledby="bid-selection-modal-title" data-testid="bid-selection-modal">
             <div className="modal-heading">
               <div>
-                <h2 id="bid-selection-modal-title">Request preferred-bidder approval</h2>
+                <h2 id="bid-selection-modal-title">{ot('Request preferred-bidder approval')}</h2>
                 <p>{bidPackageAction.participant.partner?.name} / {currency.format(bidPackageAction.participant.total || 0)}</p>
               </div>
-              <button className="icon-button" aria-label="Close bid selection" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close bid selection')} onClick={() => setBidPackageAction(null)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidSelection}>
               <div className="bid-selection-review">
-                <div><span>Package</span><strong>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.title}</strong></div>
-                <div><span>Comparison</span><strong>{bidPackageAction.bidPackage.comparison.returned} return(s), {currency.format(bidPackageAction.bidPackage.comparison.spread || 0)} spread</strong></div>
-                <div><span>Safeguard</span><strong>Approval records preference only; it cannot award, order, spend, or send.</strong></div>
+                <div><span>{ot('Package')}</span><strong>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.title}</strong></div>
+                <div><span>{ot('Comparison')}</span><strong>{ot('{count} returns, {amount} spread', { count: bidPackageAction.bidPackage.comparison.returned, amount: currency.format(bidPackageAction.bidPackage.comparison.spread || 0) })}</strong></div>
+                <div><span>{ot('Safeguard')}</span><strong>{ot('Approval records preference only; it cannot award, order, spend, or send.')}</strong></div>
               </div>
               <div className="form-grid bid-selection-form">
                 <label className="form-span">
-                  Selection rationale
-                  <textarea required minLength="8" maxLength="1000" value={bidSelectionRationale} onChange={(event) => setBidSelectionRationale(event.target.value)} placeholder="Compare price, scope, exclusions, programme, quality, risk, and compliance." />
+                  {ot('Selection rationale')}
+                  <textarea required minLength="8" maxLength="1000" value={bidSelectionRationale} onChange={(event) => setBidSelectionRationale(event.target.value)} placeholder={ot('Compare price, scope, exclusions, programme, quality, risk, and compliance.')} />
                 </label>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || bidSelectionRationale.trim().length < 8}>
-                  {submitting ? 'Requesting...' : 'Request selection approval'}
+                  {submitting ? ot('Requesting...') : ot('Request selection approval')}
                 </button>
               </div>
             </form>
@@ -17799,40 +17812,40 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Selected-bid control</p>
-                <h2 id="bid-commitment-modal-title">Prepare purchasing commitment</h2>
+                <p className="eyebrow">{ot('Selected-bid control')}</p>
+                <h2 id="bid-commitment-modal-title">{ot('Prepare purchasing commitment')}</h2>
                 <p>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.selectedParticipant?.partner?.name}</p>
               </div>
-              <button className="icon-button" aria-label="Close purchasing commitment" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close purchasing commitment')} onClick={() => setBidPackageAction(null)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidCommitment}>
               <div className="bid-commitment-review">
-                <div><span>Selected net</span><strong>{currency.format(bidPackageAction.bidPackage.selectedParticipant?.netAmount || 0)}</strong></div>
-                <div><span>VAT / gross</span><strong>{bidPackageAction.bidPackage.selectedParticipant?.taxRate || 0}% / {currency.format(bidPackageAction.bidPackage.selectedParticipant?.total || 0)}</strong></div>
-                <div><span>Scope</span><strong>{bidPackageAction.bidPackage.scope}</strong></div>
-                <div><span>Source</span><strong>{bidPackageAction.bidPackage.selectedParticipant?.evidenceReference}</strong></div>
+                <div><span>{ot('Selected net')}</span><strong>{currency.format(bidPackageAction.bidPackage.selectedParticipant?.netAmount || 0)}</strong></div>
+                <div><span>{ot('VAT / gross')}</span><strong>{bidPackageAction.bidPackage.selectedParticipant?.taxRate || 0}% / {currency.format(bidPackageAction.bidPackage.selectedParticipant?.total || 0)}</strong></div>
+                <div><span>{ot('Scope')}</span><strong>{bidPackageAction.bidPackage.scope}</strong></div>
+                <div><span>{ot('Source')}</span><strong>{bidPackageAction.bidPackage.selectedParticipant?.evidenceReference}</strong></div>
               </div>
               <div className="form-grid bid-commitment-form">
                 <label>
-                  Required by
+                  {ot('Required by')}
                   <input autoFocus required type="date" min={futureDateInput(1)} value={bidCommitmentDraft.requiredBy} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, requiredBy: event.target.value })} />
                 </label>
                 <label>
-                  Cost code
+                  {ot('Cost code')}
                   <input required minLength="2" maxLength="80" value={bidCommitmentDraft.costCode} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, costCode: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Purchasing notes
-                  <textarea maxLength="4000" value={bidCommitmentDraft.notes} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, notes: event.target.value })} placeholder="Record interfaces, required evidence, exclusions, qualifications, and reviewer context." />
+                  {ot('Purchasing notes')}
+                  <textarea maxLength="4000" value={bidCommitmentDraft.notes} onChange={(event) => setBidCommitmentDraft({ ...bidCommitmentDraft, notes: event.target.value })} placeholder={ot('Record interfaces, required evidence, exclusions, qualifications, and reviewer context.')} />
                 </label>
                 <p className="workflow-note form-span">
-                  The selected return, scope, exclusions, qualifications, partner, amount, date, and cost code will be frozen behind SHA-256 verification. This creates an internal approval only; it cannot contact the supplier, issue an award or order, sign a subcontract, or move money.
+                  {ot('The selected return, scope, exclusions, qualifications, partner, amount, date, and cost code will be frozen behind SHA-256 verification. This creates an internal approval only; it cannot contact the supplier, issue an award or order, sign a subcontract, or move money.')}
                 </p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !bidCommitmentDraft.requiredBy || bidCommitmentDraft.costCode.trim().length < 2}>
-                  <ShieldCheck size={15} /> {submitting ? 'Preparing...' : 'Freeze and request approval'}
+                  <ShieldCheck size={15} /> {submitting ? ot('Preparing...') : ot('Freeze and request approval')}
                 </button>
               </div>
             </form>
@@ -17854,22 +17867,22 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Controlled order issue</p>
-                <h2 id="bid-order-package-modal-title">Prepare purchase-order package</h2>
+                <p className="eyebrow">{ot('Controlled order issue')}</p>
+                <h2 id="bid-order-package-modal-title">{ot('Prepare purchase-order package')}</h2>
                 <p>{bidPackageAction.bidPackage.packageNumber} / {bidPackageAction.bidPackage.commitment?.purchaseOrder?.supplier}</p>
               </div>
-              <button className="icon-button" aria-label="Close purchase-order package" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close purchase-order package')} onClick={() => setBidPackageAction(null)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidOrderPackage}>
               <div className="bid-commitment-review">
-                <div><span>Approved net</span><strong>{currency.format(bidPackageAction.bidPackage.commitment?.purchaseOrder?.amount || 0)}</strong></div>
-                <div><span>Required by</span><strong>{formatDate(bidPackageAction.bidPackage.commitment?.purchaseOrder?.requiredBy)}</strong></div>
-                <div><span>Source</span><strong>{bidPackageAction.bidPackage.commitment?.purchaseOrder?.data?.source?.terms?.costCode || 'SUBCONTRACT'}</strong></div>
-                <div><span>Integrity</span><strong>{bidPackageAction.bidPackage.commitment?.integrityValid ? 'Current source verified' : 'Source verification failed'}</strong></div>
+                <div><span>{ot('Approved net')}</span><strong>{currency.format(bidPackageAction.bidPackage.commitment?.purchaseOrder?.amount || 0)}</strong></div>
+                <div><span>{ot('Required by')}</span><strong>{formatDate(bidPackageAction.bidPackage.commitment?.purchaseOrder?.requiredBy)}</strong></div>
+                <div><span>{ot('Source')}</span><strong>{bidPackageAction.bidPackage.commitment?.purchaseOrder?.data?.source?.terms?.costCode || 'SUBCONTRACT'}</strong></div>
+                <div><span>{ot('Integrity')}</span><strong>{bidPackageAction.bidPackage.commitment?.integrityValid ? ot('Current source verified') : ot('Source verification failed')}</strong></div>
               </div>
               <div className="form-grid bid-commitment-form">
                 <label>
-                  Supplier recipient
+                  {ot('Supplier recipient')}
                   <input
                     autoFocus
                     required
@@ -17880,20 +17893,20 @@ function App() {
                   />
                 </label>
                 <label>
-                  Delivery channel
+                  {ot('Delivery channel')}
                   <select value={bidOrderDraft.channel} onChange={(event) => setBidOrderDraft({ ...bidOrderDraft, channel: event.target.value })}>
-                    <option value="email">Email integration</option>
-                    <option value="supplier_portal">Supplier portal integration</option>
+                    <option value="email">{ot('Email integration')}</option>
+                    <option value="supplier_portal">{ot('Supplier portal integration')}</option>
                   </select>
                 </label>
                 <p className="workflow-note form-span">
-                  This freezes a durable PO number plus human-readable HTML and generic OASIS UBL 2.1 Order attachments. It creates a separate transmission approval and does not send, certify Peppol delivery, sign a subcontract, or move money.
+                  {ot('This freezes a durable PO number plus human-readable HTML and generic OASIS UBL 2.1 Order attachments. It creates a separate transmission approval and does not send, certify Peppol delivery, sign a subcontract, or move money.')}
                 </p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !bidOrderDraft.recipient.trim()}>
-                  <PackageCheck size={15} /> {submitting ? 'Preparing...' : 'Freeze package and request approval'}
+                  <PackageCheck size={15} /> {submitting ? ot('Preparing...') : ot('Freeze package and request approval')}
                 </button>
               </div>
             </form>
@@ -17915,16 +17928,16 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Verified delivery evidence</p>
-                <h2 id="bid-order-delivery-modal-title">Record provider receipt</h2>
+                <p className="eyebrow">{ot('Verified delivery evidence')}</p>
+                <h2 id="bid-order-delivery-modal-title">{ot('Record provider receipt')}</h2>
                 <p>{bidPackageAction.bidPackage.commitment?.issuePackage?.issueReference} / {bidPackageAction.bidPackage.commitment?.issuePackage?.communication?.data?.recipient}</p>
               </div>
-              <button className="icon-button" aria-label="Close provider receipt" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close provider receipt')} onClick={() => setBidPackageAction(null)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidOrderDelivery}>
               <div className="form-grid bid-commitment-form">
                 <label>
-                  Configured integration ID
+                  {ot('Configured integration ID')}
                   <input
                     autoFocus
                     required
@@ -17936,7 +17949,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  Provider message ID
+                  {ot('Provider message ID')}
                   <input
                     required
                     minLength="3"
@@ -17947,7 +17960,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  Provider sent at
+                  {ot('Provider sent at')}
                   <input
                     required
                     type="datetime-local"
@@ -17956,13 +17969,13 @@ function App() {
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  Record this only after the configured provider has returned delivery evidence for the approved recipient and package. This action marks the purchase order as externally committed; it does not perform the delivery itself or initiate payment.
+                  {ot('Record this only after the configured provider has returned delivery evidence for the approved recipient and package. This action marks the purchase order as externally committed; it does not perform the delivery itself or initiate payment.')}
                 </p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>Cancel</button>
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => setBidPackageAction(null)}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || bidOrderDeliveryDraft.integration.trim().length < 2 || bidOrderDeliveryDraft.providerMessageId.trim().length < 3 || !bidOrderDeliveryDraft.sentAt}>
-                  <MailCheck size={15} /> {submitting ? 'Recording...' : 'Record verified receipt'}
+                  <MailCheck size={15} /> {submitting ? ot('Recording...') : ot('Record verified receipt')}
                 </button>
               </div>
             </form>
@@ -17975,14 +17988,14 @@ function App() {
           <section className="modal bid-add-participants-modal" role="dialog" aria-modal="true" aria-labelledby="bid-add-participants-title" data-testid="bid-add-participants-modal">
             <div className="modal-heading">
               <div>
-                <h2 id="bid-add-participants-title">Add internal bidders</h2>
-                <p>{bidPackageAction.bidPackage.packageNumber} / no invitation or message will be sent</p>
+                <h2 id="bid-add-participants-title">{ot('Add internal bidders')}</h2>
+                <p>{bidPackageAction.bidPackage.packageNumber} / {ot('no invitation or message will be sent')}</p>
               </div>
-              <button className="icon-button" aria-label="Close add bidders" onClick={() => setBidPackageAction(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label={ot('Close add bidders')} onClick={() => setBidPackageAction(null)}><X size={18} /></button>
             </div>
             <form onSubmit={submitBidParticipants}>
               <fieldset className="bid-partner-picker bid-add-partner-picker">
-                <legend>Available trade partners</legend>
+                <legend>{ot('Available trade partners')}</legend>
                 <div>
                   {(data.tradePartners || EMPTY_LIST)
                     .filter((partner) => partner.status === 'active' && !bidPackageAction.bidPackage.participants.some((participant) => participant.tradePartnerId === partner.id))
@@ -17993,14 +18006,14 @@ function App() {
                           checked={bidAddPartnerIds.includes(partner.id)}
                           onChange={(event) => setBidAddPartnerIds((current) => event.target.checked ? [...current, partner.id] : current.filter((id) => id !== partner.id))}
                         />
-                        <span><strong>{partner.name}</strong><small>{formatStatus(partner.partnerType)} / {formatStatus(partner.compliance?.status)}</small></span>
+                        <span><strong>{partner.name}</strong><small>{ot(String(partner.partnerType || 'supplier').replaceAll('_', ' '))} / {ot(String(partner.compliance?.status || 'needs_review').replaceAll('_', ' '))}</small></span>
                       </label>
                     ))}
                 </div>
               </fieldset>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>Cancel</button>
-                <button className="primary-button" disabled={submitting || !bidAddPartnerIds.length}>{submitting ? 'Adding...' : 'Add bidders internally'}</button>
+                <button type="button" className="secondary-button" onClick={() => setBidPackageAction(null)}>{ot('Cancel')}</button>
+                <button className="primary-button" disabled={submitting || !bidAddPartnerIds.length}>{submitting ? ot('Adding...') : ot('Add bidders internally')}</button>
               </div>
             </form>
           </section>

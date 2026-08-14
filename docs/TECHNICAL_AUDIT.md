@@ -120,6 +120,13 @@ external-provider engines.
     billing milestone sequence data remove presentation parsing, while operator-entered
     budget, time, expense, and supplier evidence remains verbatim. The scrollable
     cost table is keyboard focusable and compact summary contrast now passes axe.
+18. Tender comparison and approved purchasing remained English-only inside the
+    bilingual operator shell. Bid-package search, filters, comparison, preferred
+    selection, purchasing commitments, immutable purchase-order packages, and
+    verified provider receipts now follow the retained operator locale without
+    translating retained names, scope, rationale, or evidence. The end-to-end Dutch
+    flow proves approval and provider-receipt boundaries, reload persistence,
+    English round trip, mobile containment, and axe-clean procurement contrast.
 
 ### Residual technical debt
 
@@ -136,8 +143,9 @@ external-provider engines.
    retained in the ledger. The shell, client portal, Performance Scorecard, and
    Framework Register are bilingual and formatting follows the selected locale.
    Job setup coverage, critical-path work planning, NCR, field risk, field
-   assurance, job-costing, cost-code review, cost-to-complete, and finance-readiness
-   controls are also bilingual, but the remaining specialist operator workspace
+   assurance, tender comparison, purchasing, job-costing, cost-code review,
+   cost-to-complete, and finance-readiness controls are also bilingual, but the
+   remaining specialist operator workspace
    copy is not yet fully translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not

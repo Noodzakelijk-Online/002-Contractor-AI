@@ -105,7 +105,7 @@ test('operator carries a selected bid through approved purchase-order delivery',
   await returnModal.getByLabel('Duration days').fill('42');
   await returnModal.getByLabel('Evidence reference').fill(`BROWSER-BID-RETURN-B-${key}`);
   await returnModal.getByRole('button', { name: 'Retain return evidence' }).click();
-  await expect(detail.getByText('2 retained return(s)')).toBeVisible();
+  await expect(detail.getByText('2 retained returns')).toBeVisible();
 
   await secondRow.getByRole('button', { name: 'Request selection approval' }).click();
   const selectionModal = page.getByTestId('bid-selection-modal');

@@ -1650,11 +1650,11 @@
 .bid-package-row-selected { background: #f3f8f6; box-shadow: inset 3px 0 #287563; }
 .bid-package-main { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 11px; min-width: 0; padding: 0; text-align: left; background: transparent; border: 0; cursor: pointer; }
 .bid-package-main > span:last-child { display: grid; gap: 5px; min-width: 0; }
-.bid-package-main small { overflow: hidden; color: #6c7b75; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.bid-package-main small { overflow: hidden; color: #50645c; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .bid-package-icon { display: grid; width: 32px; height: 32px; place-items: center; color: #2b6959; background: #e5f1ec; border: 1px solid #cfe1d9; border-radius: 6px; }
 .bid-package-values, .bid-participant-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; min-width: 0; margin: 0; }
 .bid-package-values div, .bid-participant-values div { display: grid; gap: 3px; min-width: 0; }
-.bid-package-values dt, .bid-participant-values dt { color: #798681; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.bid-package-values dt, .bid-participant-values dt { color: #50645c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .bid-package-values dd, .bid-participant-values dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #334940; font-size: 10px; font-weight: 700; }
 .bid-package-values .pipeline-overdue { color: #a5482d; }
 .bid-package-heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
@@ -1662,7 +1662,7 @@
 .bid-package-summary, .bid-selection-review { display: grid; grid-template-columns: 1.25fr .85fr 1fr; border-bottom: 1px solid #e3ebe7; }
 .bid-package-summary > div, .bid-selection-review > div { display: grid; align-content: start; gap: 5px; min-width: 0; padding: 13px 16px; border-right: 1px solid #e3ebe7; }
 .bid-package-summary > div:last-child, .bid-selection-review > div:last-child { border-right: 0; }
-.bid-package-summary span, .bid-selection-review span { color: #74827c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.bid-package-summary span, .bid-selection-review span { color: #50645c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .bid-package-summary strong, .bid-selection-review strong { overflow-wrap: anywhere; color: #2d433a; font-size: 11px; line-height: 1.45; }
 .bid-commitment { display: grid; gap: 0; min-width: 0; background: #f6faf8; border-bottom: 1px solid #dfe9e4; box-shadow: inset 3px 0 #2c7561; }
 .bid-commitment-invalid { background: #fff6f3; box-shadow: inset 3px 0 #a5482d; }
@@ -1673,7 +1673,7 @@
 .bid-commitment-values { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-width: 0; margin: 0; border-top: 1px solid #dfe9e4; border-bottom: 1px solid #dfe9e4; }
 .bid-commitment-values > div { display: grid; gap: 3px; min-width: 0; padding: 9px 16px; border-right: 1px solid #dfe9e4; }
 .bid-commitment-values > div:last-child { border-right: 0; }
-.bid-commitment-values dt { color: #74827c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.bid-commitment-values dt { color: #50645c; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .bid-commitment-values dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #2d433a; font-size: 11px; font-weight: 700; }
 .bid-commitment-values code { font-size: 9px; font-weight: 650; }
 .bid-commitment > p { margin: 0; padding: 10px 16px 13px; color: #526b62; font-size: 10px; line-height: 1.5; }
@@ -1687,7 +1687,7 @@
 .bid-participant-row { display: grid; grid-template-columns: minmax(240px, 1.2fr) minmax(300px, .9fr) minmax(220px, auto); align-items: center; gap: 14px; min-width: 0; padding: 13px 18px; border-bottom: 1px solid #e8eeeb; }
 .bid-participant-row:last-child { border-bottom: 0; }
 .bid-participant-copy { display: grid; gap: 4px; min-width: 0; }
-.bid-participant-copy small { color: #6c7b75; font-size: 10px; }
+.bid-participant-copy small { color: #50645c; font-size: 10px; }
 .bid-participant-copy p { margin: 0; overflow-wrap: anywhere; color: #596d65; font-size: 10px; }
 .bid-participant-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
 .bid-participant-actions .secondary-button, .bid-participant-actions .primary-button { min-height: 32px; padding: 0 9px; font-size: 10px; }

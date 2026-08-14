@@ -3,6 +3,22 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-22 Bilingual tender comparison and approved purchasing
+
+- The tender register, bid returns, preferred-bidder review, purchasing commitment,
+  immutable purchase-order package, and provider-receipt lifecycle now share the
+  persisted NL/EN operator locale.
+- Retained partner names, scope, rationale, exclusions, qualifications, and evidence
+  references remain verbatim; external commitment remains blocked until separate
+  approval and an allowlisted provider receipt exist.
+- Browser QA covers Dutch creation through verified receipt, reload persistence,
+  exact API evidence, English round trip, mobile containment, empty error logs, and
+  axe. The scan found and closed low-contrast procurement summary labels.
+- Verification: 2,997 unique specialist translation keys with zero duplicates;
+  10 frontend tests, 535 Node tests, 97 Chromium workflows in 25 isolated batches,
+  release/HAI/lint/build/bundle, production benchmark, hardened container, and
+  Node 22.23.2 Windows standalone gates pass.
+
 ## CP-21 Bilingual job costing and cost-to-complete
 
 - Finance readiness now localizes controlled metrics, statuses, actions, cost-code

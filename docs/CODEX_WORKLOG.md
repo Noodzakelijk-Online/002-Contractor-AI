@@ -1,5 +1,24 @@
 # Codex Worklog
 
+## 2026-08-14 - Tender and purchasing bilingual pass
+
+- Localized the governed procurement chain from bid-package registration and
+  retained return comparison through preferred selection, approved purchasing
+  commitment, immutable PDF/UBL purchase-order package, and verified provider
+  receipt. Retained commercial names, scope, rationale, exclusions, qualifications,
+  and evidence remain verbatim across locale changes.
+- Added a Dutch production-browser journey covering creation, approvals, reloads,
+  exact API evidence, immutable order delivery, axe, mobile containment, English
+  round trip, and empty console/page-error logs. It found and fixed low-contrast
+  procurement summary and participant labels.
+- Current-source gates pass: 2,997 unique specialist translation keys, 10 frontend
+  tests, 535 Node tests (499 passed and 36 PostgreSQL/environment skips) in 125.5
+  seconds, all 97 Chromium workflows in 25 isolated batches in 610.8 seconds,
+  release/HAI/lint/build/bundle at 446,090 total gzip bytes, production benchmark,
+  hardened container, and Node 22.23.2 Windows standalone verification.
+- In-app Browser navigation to the isolated local runtime was blocked by Browser
+  URL policy; the repository production-browser harness passed the same built flow.
+
 ## 2026-08-14 - Job costing and cost-to-complete bilingual pass
 
 - Localized finance readiness across job metrics, status, primary actions, risk
