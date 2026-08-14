@@ -2364,6 +2364,7 @@ function PortfolioScheduleWorkspace({ schedule, jobs, canApprove, onOpenApproval
 }
 
 function FinanceWorkspace({
+  locale,
   finance,
   cashFlow,
   jobs,
@@ -2390,6 +2391,7 @@ function FinanceWorkspace({
       </div>
       <LazyControlBoundary label="cash-flow forecast">
         <CashFlowForecastControl
+          locale={locale}
           cashFlow={cashFlow}
           jobs={jobs}
           request={api}
@@ -11478,6 +11480,7 @@ function App() {
                 />
                 <LazyControlBoundary label="crew capacity board">
                   <CrewCapacityBoard
+                    locale={operatorLocale}
                     board={data.crewCapacity}
                     canApprove={capabilities.approvals === true}
                     submitting={submitting}
@@ -11623,6 +11626,7 @@ function App() {
 
             {section === 'finance' && capabilities.finance ? (
               <FinanceWorkspace
+                locale={operatorLocale}
                 finance={data.finance}
                 cashFlow={data.cashFlow}
                 jobs={jobs}

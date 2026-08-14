@@ -91,6 +91,10 @@ test('explicit capacity and day allocations produce an approval-backed source-cu
   assert.equal(profile.profile.weeklyHours, 40);
   assert.equal(profile.profile.integrityValid, true);
   assert.equal(ledger.setCrewCapacityProfile(worker.id, weekdayProfile(8)).replayed, true);
+  const capacityGap = ledger.listCrewCapacityBoard({ referenceDate: WINDOW_START }).blockers.find(blocker => blocker.type === 'task_capacity_gap');
+  assert.equal(capacityGap.jobTitle, job.title);
+  assert.equal(capacityGap.taskTitle, job.tasks[0].title);
+  assert.equal(capacityGap.remainingHours, 8);
 
   const payload = {
     assignmentId: assignment.id,

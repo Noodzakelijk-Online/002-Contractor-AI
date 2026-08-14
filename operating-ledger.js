@@ -23756,17 +23756,17 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       }
     }
     for (const task of taskCoverage.filter(item => !item.ready)) {
-      blockers.push({ type: 'task_capacity_gap', severity: 'high', jobId: task.jobId, taskId: task.taskId, message: `${task.jobTitle}: ${task.title} still needs ${task.remainingHours} planned crew hour(s).` });
+      blockers.push({ type: 'task_capacity_gap', severity: 'high', jobId: task.jobId, jobTitle: task.jobTitle, taskId: task.taskId, taskTitle: task.title, remainingHours: task.remainingHours, message: `${task.jobTitle}: ${task.title} still needs ${task.remainingHours} planned crew hour(s).` });
     }
     for (const assignment of assignments.filter(item => item.status === 'pending_approval' || item.requiresApproval)) {
       if (assignment.scheduledEnd && String(assignment.scheduledEnd).slice(0, 10) < range.windowStart) continue;
       if (assignment.scheduledStart && String(assignment.scheduledStart).slice(0, 10) > range.windowEnd) continue;
-      blockers.push({ type: 'assignment_pending_approval', severity: 'high', jobId: assignment.jobId, assignmentId: assignment.id, workerId: assignment.workerId, message: `${assignment.workerName || 'Crew assignment'} is still pending approval.` });
+      blockers.push({ type: 'assignment_pending_approval', severity: 'high', jobId: assignment.jobId, assignmentId: assignment.id, workerId: assignment.workerId, workerName: assignment.workerName || 'Crew assignment', message: `${assignment.workerName || 'Crew assignment'} is still pending approval.` });
     }
     for (const job of planningJobs) {
-      if (job.flags?.invalidPlan || job.flags?.unscheduled) blockers.push({ type: 'job_plan_incomplete', severity: 'high', jobId: job.jobId, message: `${job.jobTitle} has no complete source-current schedule for the look-ahead.` });
-      else if (job.flags?.baselinePending) blockers.push({ type: 'job_baseline_pending', severity: 'high', jobId: job.jobId, approvalId: job.baseline?.approvalId || null, message: `${job.jobTitle} has a pending schedule baseline.` });
-      else if (job.flags?.baselineStale) blockers.push({ type: 'job_baseline_stale', severity: 'critical', jobId: job.jobId, message: `${job.jobTitle} changed after its approved schedule baseline.` });
+      if (job.flags?.invalidPlan || job.flags?.unscheduled) blockers.push({ type: 'job_plan_incomplete', severity: 'high', jobId: job.jobId, jobTitle: job.jobTitle, message: `${job.jobTitle} has no complete source-current schedule for the look-ahead.` });
+      else if (job.flags?.baselinePending) blockers.push({ type: 'job_baseline_pending', severity: 'high', jobId: job.jobId, jobTitle: job.jobTitle, approvalId: job.baseline?.approvalId || null, message: `${job.jobTitle} has a pending schedule baseline.` });
+      else if (job.flags?.baselineStale) blockers.push({ type: 'job_baseline_stale', severity: 'critical', jobId: job.jobId, jobTitle: job.jobTitle, message: `${job.jobTitle} changed after its approved schedule baseline.` });
     }
     const sourceBasis = {
       format: CREW_LOOKAHEAD_FORMAT,

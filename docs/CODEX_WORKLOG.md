@@ -290,3 +290,19 @@ Node 22 x64 packaging. Exact counts and external boundaries are retained in
 - Final current-source gates pass: 10 frontend tests, 533 Node tests, all 90
   Chromium workflows, release/build/bundle, dependency audit, hardened container,
   and Node 22.23.2 Windows standalone verification.
+
+## 2026-08-14 - Capacity and liquidity bilingual pass
+
+- Passed the persisted operator locale into the crew-capacity/two-week planning
+  board and the approval-backed 13-week cash-flow forecast.
+- Localized forms, tables, summaries, empty states, approval actions, accessible
+  names, and known system-generated blockers/warnings while keeping retained job,
+  worker, source, and unknown provider text verbatim.
+- Added structured crew blocker context so localized messages interpolate retained
+  names, dates, and hours without parsing presentation strings.
+- Added Dutch cash-flow reload persistence, an axe scan, crew-board locale checks,
+  translation contracts, and structured blocker assertions.
+- Current-source gates pass: 10 frontend tests, 533 Node tests in 333.5 seconds,
+  all 90 Chromium workflows in 554.7 seconds, release/build/bundle at 388,474
+  total gzip bytes, zero dependency vulnerabilities, HAI contract, production
+  benchmark, hardened container, and Node 22.23.2 Windows package verification.

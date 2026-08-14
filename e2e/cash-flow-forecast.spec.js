@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { expectNoAxeViolations } = require('./accessibility-helpers');
 
 function dateInput(days) {
   return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
@@ -15,6 +16,15 @@ test('operator retains, approves, and archives a 13-week cash-flow assumption', 
   const cashFlow = finance.getByTestId('cash-flow-control');
   await expect(cashFlow.getByRole('heading', { name: '13-week cash-flow forecast' })).toBeVisible();
   await expect(cashFlow.getByTestId('cash-flow-week-row')).toHaveCount(13);
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('nl-NL');
+  await expect(cashFlow.getByRole('heading', { name: 'Liquiditeitsprognose voor 13 weken' })).toBeVisible();
+  await expect(cashFlow.getByLabel('Beginsaldo kas')).toBeVisible();
+  await expectNoAxeViolations(page, 'Dutch cash-flow forecast');
+  await page.reload();
+  await page.getByRole('button', { name: 'Financien', exact: true }).click();
+  await expect(cashFlow.getByRole('heading', { name: 'Liquiditeitsprognose voor 13 weken' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Taal' }).selectOption('en-GB');
+  await expect(cashFlow.getByRole('heading', { name: '13-week cash-flow forecast' })).toBeVisible();
 
   await cashFlow.getByLabel('Opening cash').fill('2500');
   await cashFlow.getByRole('button', { name: 'Recalculate' }).click();

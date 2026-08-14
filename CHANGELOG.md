@@ -9,6 +9,7 @@ Versioning for the application contract; database migrations remain append-only.
 - Added retained language selection to approval-gated client portal links, plus a token-scoped client language control.
 - Localized the operator shell and complete client portal, including locale-aware dates, numbers, and EUR values.
 - Localized the ledger-backed Ideal Customer Profile/service-area, bid/no-bid, and preconstruction site-survey workflows, including actions, empty states, decision statuses, and accessible names while preserving retained operator evidence verbatim.
+- Localized the crew-capacity/two-week planning board and 13-week cash-flow forecast, including structured system blockers, warnings, forms, tables, approval states, and accessible names while preserving retained worker, job, and source evidence verbatim.
 - Split specialist operator translations into a lazy shared chunk so the initial shell retains its smaller base locale payload.
 - Added API, migration, restore, frontend, and browser regression coverage for locale isolation and persistence.
 

@@ -92,6 +92,11 @@ test('crew planner retains capacity and allocations before approving a source-cu
   await page.getByRole('button', { name: 'Schedule', exact: true }).click();
   const board = page.getByTestId('crew-capacity-board');
   await expect(board.getByRole('heading', { name: 'Crew capacity and two-week plan' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('nl-NL');
+  await expect(board.getByRole('heading', { name: 'Ploegcapaciteit en tweewekenplan' })).toBeVisible();
+  await expect(board.getByLabel('Schuifbaar bord met ploegcapaciteit voor twee weken')).toBeVisible();
+  await page.getByRole('combobox', { name: 'Taal' }).selectOption('en-GB');
+  await expect(board.getByRole('heading', { name: 'Crew capacity and two-week plan' })).toBeVisible();
   await expect(board.locator('.crew-profile-list').getByRole('button', { name: new RegExp(workerName) })).toBeVisible();
   await expect(board).toContainText('Planning blockers');
 
