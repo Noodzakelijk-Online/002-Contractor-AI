@@ -10,6 +10,7 @@ test('operator retains and updates one commercially ready client identity', asyn
   });
 
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: 'Clients', exact: true }).click();
   await page.getByRole('tab', { name: /Directory/ }).click();
@@ -80,6 +81,35 @@ test('operator retains and updates one commercially ready client identity', asyn
   await directory.getByLabel('Search clients').fill('definitely-no-client-match');
   await expect(directory.getByText('No matching clients')).toBeVisible();
   await directory.getByLabel('Search clients').fill(company);
+
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(page.getByRole('heading', { level: 1, name: 'Klanten', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: /Klantwerk/ })).toBeVisible();
+  await expect(page.getByRole('tab', { name: /Register/ })).toBeVisible();
+  await expect(directory.getByRole('heading', { name: 'Klantenregister' })).toBeVisible();
+  await expect(directory.getByRole('button', { name: 'Nieuwe klant' })).toBeVisible();
+  await expect(directory.getByLabel('Klanten zoeken')).toHaveValue(company);
+  await expect(row.getByText(company, { exact: true })).toBeVisible();
+  await expect(row.getByText(email, { exact: true })).toBeVisible();
+  await expect(row.getByText('+31 20 555 0199', { exact: true })).toBeVisible();
+  await expect(row.getByText('Contact gereed', { exact: true })).toBeVisible();
+  await expect(row.getByText('Facturatie gereed', { exact: true })).toBeVisible();
+  await expect(row.getByText('Peppol gereed', { exact: true })).toBeVisible();
+  await directory.getByLabel('Klanten zoeken').fill('');
+  await directory.getByRole('button', { name: 'Nieuwe klant' }).click();
+  await expect(editor.getByRole('heading', { name: 'Nieuwe klant' })).toBeVisible();
+  await editor.getByLabel('Naam contactpersoon').fill('Onvolledige browserklant');
+  await expect(editor.getByLabel('Voorkeurstaal')).toBeVisible();
+  await editor.getByRole('button', { name: 'Klant vastleggen' }).click();
+  await expect(page.getByText('Klantidentiteit vastgelegd. Er is geen bericht, project, offerte of factuur aangemaakt.')).toBeVisible();
+  const incompleteRow = directory.locator('.client-directory-row').filter({ hasText: 'Onvolledige browserklant' });
+  await expect(incompleteRow.getByText('Contact onvolledig', { exact: true })).toBeVisible();
+  await expect(incompleteRow.getByText('Facturatie onvolledig', { exact: true })).toBeVisible();
+  await expect(incompleteRow.getByText('Peppol onvolledig', { exact: true })).toBeVisible();
+  await expect(incompleteRow.getByText('Ontbreekt: Straatadres koper, Plaats koper, Postcode koper +1', { exact: true })).toBeVisible();
+  await directory.getByLabel('Klanten zoeken').fill(company);
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
+  await expect(directory.getByRole('heading', { name: 'Client directory' })).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
   const geometry = await directory.evaluate(element => ({

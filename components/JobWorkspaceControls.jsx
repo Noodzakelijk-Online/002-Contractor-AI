@@ -2451,7 +2451,8 @@ function CommercialControl({
   )
 }
 
-function ClientDirectoryWorkspace({ directory, canCoordinate, submitting, onCreate, onEdit, onOpen }) {
+function ClientDirectoryWorkspace({ directory, locale, canCoordinate, submitting, onCreate, onEdit, onOpen }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [query, setQuery] = useState('')
   const clients = directory?.clients || EMPTY_LIST
   const summary = directory?.summary || {}
@@ -2473,35 +2474,35 @@ function ClientDirectoryWorkspace({ directory, canCoordinate, submitting, onCrea
     <section className="panel page-panel client-directory" data-testid="client-directory">
       <div className="panel-heading client-directory-heading">
         <div>
-          <h2>Client directory</h2>
-          <p>Maintain one retained identity for project communication, commercial packages, invoicing, and aftercare.</p>
+          <h2>{t('Client directory')}</h2>
+          <p>{t('Maintain one retained identity for project communication, commercial packages, invoicing, and aftercare.')}</p>
         </div>
         {canCoordinate ? (
           <button type="button" className="primary-button" disabled={submitting} onClick={onCreate}>
             <Plus size={16} />
-            New client
+            {t('New client')}
           </button>
         ) : <span className="count-badge">{clients.length}</span>}
       </div>
-      <div className="client-directory-summary" aria-label="Client directory summary">
-        <div><span>Clients</span><strong>{summary.total || 0}</strong></div>
-        <div><span>Contact ready</span><strong>{summary.contactReady || 0}</strong></div>
-        <div><span>Invoice ready</span><strong>{summary.invoiceReady || 0}</strong></div>
-        <div><span>Peppol profile</span><strong>{summary.structuredInvoiceReady || 0}</strong></div>
-        <div><span>Active jobs</span><strong>{summary.activeJobs || 0}</strong></div>
-        <div><span>Receivable</span><strong>{currency.format(summary.outstandingReceivable || 0)}</strong></div>
+      <div className="client-directory-summary" aria-label={t('Client directory summary')}>
+        <div><span>{t('Clients')}</span><strong>{summary.total || 0}</strong></div>
+        <div><span>{t('Contact ready')}</span><strong>{summary.contactReady || 0}</strong></div>
+        <div><span>{t('Invoice ready')}</span><strong>{summary.invoiceReady || 0}</strong></div>
+        <div><span>{t('Peppol profile')}</span><strong>{summary.structuredInvoiceReady || 0}</strong></div>
+        <div><span>{t('Active jobs')}</span><strong>{summary.activeJobs || 0}</strong></div>
+        <div><span>{t('Receivable')}</span><strong>{currency.format(summary.outstandingReceivable || 0)}</strong></div>
       </div>
       <div className="client-directory-filter">
         <Search size={16} aria-hidden="true" />
-        <label htmlFor="client-directory-search">Search clients</label>
+        <label htmlFor="client-directory-search">{t('Search clients')}</label>
         <input
           id="client-directory-search"
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Name, company, email, city, or registration"
+          placeholder={t('Name, company, email, city, or registration')}
         />
-        <span>{rows.length} shown</span>
+        <span>{t('{count} shown', { count: rows.length })}</span>
       </div>
       <div className="client-directory-list">
         {rows.map((client) => {
@@ -2514,40 +2515,40 @@ function ClientDirectoryWorkspace({ directory, canCoordinate, submitting, onCrea
                   <span className="client-directory-icon"><Building2 size={17} /></span>
                   <div>
                     <h3>{client.company || client.name}</h3>
-                    <p>{client.company ? client.name : formatStatus(client.data?.clientType || 'consumer')}</p>
+                    <p>{client.company ? client.name : t(formatStatus(client.data?.clientType || 'consumer'))}</p>
                   </div>
                 </div>
                 <div className="client-directory-contact">
-                  <span>{client.email || client.data?.billingEmail || 'No email retained'}</span>
-                  <span>{client.phone || 'No phone retained'}</span>
-                  <span>{[client.address, client.data?.postalCode, client.city, client.country].filter(Boolean).join(', ') || 'No address retained'}</span>
+                  <span>{client.email || client.data?.billingEmail || t('No email retained')}</span>
+                  <span>{client.phone || t('No phone retained')}</span>
+                  <span>{[client.address, client.data?.postalCode, client.city, client.country].filter(Boolean).join(', ') || t('No address retained')}</span>
                 </div>
                 <div className="client-flags">
-                  <span className={client.readiness?.contactReady ? 'tag tag-green' : 'tag tag-amber'}>Contact {client.readiness?.contactReady ? 'ready' : 'incomplete'}</span>
-                  <span className={client.readiness?.invoiceReady ? 'tag tag-green' : 'tag tag-amber'}>Invoice {client.readiness?.invoiceReady ? 'ready' : 'incomplete'}</span>
-                  <span className={client.readiness?.structuredInvoiceReady ? 'tag tag-green' : 'tag tag-amber'}>Peppol {client.readiness?.structuredInvoiceReady ? 'ready' : 'incomplete'}</span>
+                  <span className={client.readiness?.contactReady ? 'tag tag-green' : 'tag tag-amber'}>{t(client.readiness?.contactReady ? 'Contact ready' : 'Contact incomplete')}</span>
+                  <span className={client.readiness?.invoiceReady ? 'tag tag-green' : 'tag tag-amber'}>{t(client.readiness?.invoiceReady ? 'Invoice ready' : 'Invoice incomplete')}</span>
+                  <span className={client.readiness?.structuredInvoiceReady ? 'tag tag-green' : 'tag tag-amber'}>{t(client.readiness?.structuredInvoiceReady ? 'Peppol ready' : 'Peppol incomplete')}</span>
                 </div>
                 {!client.readiness?.structuredInvoiceReady && missing.length ? (
-                  <small className="client-directory-missing">Missing: {missing.slice(0, 3).map((item) => item.label).join(', ')}{missing.length > 3 ? ` +${missing.length - 3}` : ''}</small>
+                  <small className="client-directory-missing">{t('Missing: {items}{extra}', { items: missing.slice(0, 3).map((item) => t(item.label)).join(', '), extra: missing.length > 3 ? ` +${missing.length - 3}` : '' })}</small>
                 ) : null}
               </div>
-              <div className="client-directory-metrics" aria-label={`Operating context for ${client.company || client.name}`}>
-                <div><span>Active jobs</span><strong>{client.metrics?.activeJobs || 0}</strong></div>
-                <div><span>Pipeline</span><strong>{client.metrics?.openOpportunities || 0}</strong></div>
-                <div><span>Contract value</span><strong>{currency.format(client.metrics?.acceptedContractValue || 0)}</strong></div>
-                <div><span>Receivable</span><strong>{currency.format(client.metrics?.outstandingReceivable || 0)}</strong></div>
+              <div className="client-directory-metrics" aria-label={t('Operating context for {name}', { name: client.company || client.name })}>
+                <div><span>{t('Active jobs')}</span><strong>{client.metrics?.activeJobs || 0}</strong></div>
+                <div><span>{t('Pipeline')}</span><strong>{client.metrics?.openOpportunities || 0}</strong></div>
+                <div><span>{t('Contract value')}</span><strong>{currency.format(client.metrics?.acceptedContractValue || 0)}</strong></div>
+                <div><span>{t('Receivable')}</span><strong>{currency.format(client.metrics?.outstandingReceivable || 0)}</strong></div>
               </div>
               <div className="client-directory-actions">
                 {latestJob ? (
                   <button type="button" className="secondary-button" onClick={() => onOpen(latestJob)}>
                     <ArrowUpRight size={15} />
-                    Open latest job
+                    {t('Open latest job')}
                   </button>
                 ) : null}
                 {canCoordinate ? (
                   <button type="button" className="secondary-button" disabled={submitting} onClick={() => onEdit(client)}>
                     <Pencil size={15} />
-                    Edit client
+                    {t('Edit client')}
                   </button>
                 ) : null}
               </div>
@@ -2556,8 +2557,8 @@ function ClientDirectoryWorkspace({ directory, canCoordinate, submitting, onCrea
         })}
         {!rows.length ? (
           <Empty
-            title={clients.length ? 'No matching clients' : 'No retained clients'}
-            detail={clients.length ? 'Change the directory search to review another retained client.' : 'Create a client identity before preparing commercial or invoicing records.'}
+            title={t(clients.length ? 'No matching clients' : 'No retained clients')}
+            detail={t(clients.length ? 'Change the directory search to review another retained client.' : 'Create a client identity before preparing commercial or invoicing records.')}
           />
         ) : null}
       </div>
@@ -2565,30 +2566,32 @@ function ClientDirectoryWorkspace({ directory, canCoordinate, submitting, onCrea
   )
 }
 
-function ClientsWorkspace({ directory, onCreateClient, onEditClient, ...props }) {
+function ClientsWorkspace({ directory, onCreateClient, onEditClient, locale, ...props }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [view, setView] = useState('work')
   const workCount = props.clients?.jobs?.length || 0
   const directoryCount = directory?.clients?.length || 0
   return (
     <>
-      <div className="client-view-switch" role="tablist" aria-label="Client workspace view">
+      <div className="client-view-switch" role="tablist" aria-label={t('Client workspace view')}>
         <button type="button" role="tab" aria-selected={view === 'work'} className={view === 'work' ? 'active' : ''} onClick={() => setView('work')}>
-          Client work <span>{workCount}</span>
+          {t('Client work')} <span>{workCount}</span>
         </button>
         <button type="button" role="tab" aria-selected={view === 'directory'} className={view === 'directory' ? 'active' : ''} onClick={() => setView('directory')}>
-          Directory <span>{directoryCount}</span>
+          {t('Directory')} <span>{directoryCount}</span>
         </button>
       </div>
       {view === 'directory' ? (
         <ClientDirectoryWorkspace
           directory={directory}
+          locale={locale}
           canCoordinate={props.canCoordinate}
           submitting={props.submitting}
           onCreate={onCreateClient}
           onEdit={onEditClient}
           onOpen={props.onOpen}
         />
-      ) : <ClientSuccessWorkspace {...props} />}
+      ) : <ClientSuccessWorkspace {...props} locale={locale} />}
     </>
   )
 }

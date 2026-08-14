@@ -1313,6 +1313,37 @@ function Metric({ icon, label, value, hint, tone = 'default' }) {
   )
 }
 
+function localizedNextActionMessage(item, jobs, t) {
+  const jobTitle = item.jobTitle
+    || item.title
+    || jobs.find((job) => job.id === item.jobId)?.title
+    || t('This job')
+  if (item.type === 'assign_worker') {
+    return t('{job} needs a worker assignment.', { job: jobTitle })
+  }
+  if (item.type === 'review_daily_cycle') {
+    if (item.actionKind === 'end_of_day_missing') {
+      return t('{job} has an open {status} daily cycle and needs a retained end-of-day plan-versus-actual report.', {
+        job: jobTitle,
+        status: t(formatStatus(item.cycleStatus || 'open')),
+      })
+    }
+    return t("{job} needs today's crew start huddle before the daily operating cycle is complete.", { job: jobTitle })
+  }
+  if (item.type === 'draft_field_report') {
+    return t("{job} needs today's field report for jobsite evidence and office visibility.", { job: jobTitle })
+  }
+  if (item.type === 'create_budget_line') {
+    return t('{job} needs a budget line so costs, commitments, and forecast can be tracked.', { job: jobTitle })
+  }
+  if (item.type === 'prepare_schedule_baseline') {
+    return item.baselineReason === 'approved_baseline_stale'
+      ? t('{job} changed after its approved work-plan baseline and needs a revised internal baseline.', { job: jobTitle })
+      : t('{job} has schedulable tasks but no approved critical-path baseline.', { job: jobTitle })
+  }
+  return item.message || ''
+}
+
 function LazyControlBoundary({ label, mode = 'section', children }) {
   const className = mode === 'job' ? 'loading job-workspace-loading' : 'loading section-loading'
   return (
@@ -10353,8 +10384,8 @@ function App() {
           : job),
       } : current)
       notify(id
-        ? 'Client identity updated in the ledger. Existing commercial snapshots remain immutable.'
-        : 'Client identity retained. No message, project, quote, or invoice was created.')
+        ? ot('Client identity updated in the ledger. Existing commercial snapshots remain immutable.')
+        : ot('Client identity retained. No message, project, quote, or invoice was created.'))
       closeClientEditor()
     } catch (requestError) {
       setError(requestError.message)
@@ -11093,7 +11124,7 @@ function App() {
               <select
                 aria-label={appText(operatorLocale, 'shell.language')}
                 value={operatorLocale}
-                disabled={localeSaving}
+                disabled={localeSaving || initialDataLoading}
                 onChange={(event) => updateOperatorLocale(event.target.value)}
               >
                 {SUPPORTED_LOCALES.map((option) => <option key={option.value} value={option.value}>{option.shortLabel}</option>)}
@@ -11142,8 +11173,7 @@ function App() {
           <div className="safety-stop-banner" role="alert" data-testid="automation-safety-stop-banner">
             <Ban size={18} />
             <span>
-              <strong>Autonomous drafting suspended.</strong> {automationControl.reason} Direct operator work, evidence capture, and
-              approvals remain available.
+              <strong>{ot('Autonomous drafting suspended.')}</strong> {automationControl.reason} {ot('Direct operator work, evidence capture, and approvals remain available.')}
             </span>
             {capabilities.maintenance ? (
               <button
@@ -11151,7 +11181,7 @@ function App() {
                 disabled={submitting}
                 onClick={(event) => openAutomationControlDialog(false, event.currentTarget)}
               >
-                Resume
+                {ot('Resume')}
               </button>
             ) : null}
           </div>
@@ -11160,7 +11190,7 @@ function App() {
         {loading && !data ? (
           <div className="loading">
             <LoaderCircle className="spin" size={26} />
-            Loading the operating ledger
+            {ot('Loading the operating ledger')}
           </div>
         ) : null}
         {data ? (
@@ -11177,45 +11207,42 @@ function App() {
                 {capabilities.maintenance && data.organization && !data.organization.readiness?.ready ? (
                   <section className="panel first-run-panel" data-testid="first-run-setup">
                     <div>
-                      <p className="eyebrow">Owner setup</p>
-                      <h2>Complete the business identity</h2>
-                      <p>
-                        Commercial issue packages stay blocked until {data.organization.readiness.missing.length} required identity
-                        item(s) are retained.
-                      </p>
+                      <p className="eyebrow">{ot('Owner setup')}</p>
+                      <h2>{ot('Complete the business identity')}</h2>
+                      <p>{ot('Commercial issue packages stay blocked until {count} required identity item(s) are retained.', { count: data.organization.readiness.missing.length })}</p>
                     </div>
                     <button className="primary-button" onClick={openOrganizationOnboarding}>
                       <Building2 size={16} />
-                      Finish setup
+                      {ot('Finish setup')}
                     </button>
                   </section>
                 ) : null}
                 <div className="metrics-grid">
                   <Metric
                     icon={BriefcaseBusiness}
-                    label="Jobs today"
+                    label={ot('Jobs today')}
                     value={metrics.openJobs || 0}
-                    hint={`${metrics.completedJobs || 0} completed`}
+                    hint={ot('{count} completed', { count: metrics.completedJobs || 0 })}
                   />
                   <Metric
                     icon={MapPin}
-                    label="Dispatch ready"
+                    label={ot('Dispatch ready')}
                     value={metrics.dispatchReadyJobs || 0}
-                    hint="Mobilize when cleared"
+                    hint={ot('Mobilize when cleared')}
                     tone="blue"
                   />
                   <Metric
                     icon={ClipboardCheck}
-                    label="Approvals"
+                    label={ot('Approvals')}
                     value={metrics.pendingApprovals || 0}
-                    hint="Operator decision required"
+                    hint={ot('Operator decision required')}
                     tone="amber"
                   />
                   <Metric
                     icon={Gauge}
-                    label="Weighted pipeline"
+                    label={ot('Weighted pipeline')}
                     value={currency.format(dashboard.preconstruction?.summary?.weightedValue || 0)}
-                    hint={`${dashboard.preconstruction?.summary?.open || 0} open opportunities`}
+                    hint={ot('{count} open opportunities', { count: dashboard.preconstruction?.summary?.open || 0 })}
                     tone="green"
                   />
                 </div>
@@ -11223,14 +11250,14 @@ function App() {
                   <section className="panel command-panel">
                     <div className="panel-heading">
                       <div>
-                        <h2>{fieldScoped ? 'My field work' : 'Command queue'}</h2>
+                        <h2>{fieldScoped ? ot('My field work') : ot('Command queue')}</h2>
                         <p>
-                          {fieldScoped ? 'Your assigned ledger jobs and retained field updates' : 'Ranked internal work and approval gates'}
+                          {fieldScoped ? ot('Your assigned ledger jobs and retained field updates') : ot('Ranked internal work and approval gates')}
                         </p>
                       </div>
                       {capabilities.approvals ? (
                         <button className="text-button" onClick={() => selectSection('approvals')}>
-                          Open approvals <ChevronRight size={15} />
+                          {ot('Open approvals')} <ChevronRight size={15} />
                         </button>
                       ) : null}
                     </div>
@@ -11242,19 +11269,19 @@ function App() {
                               <TriangleAlert size={15} />
                             </span>
                             <div>
-                              <strong>{item.title || formatStatus(item.type)}</strong>
-                              <p>{item.message}</p>
+                              <strong>{item.title || ot(formatStatus(item.type))}</strong>
+                              <p>{localizedNextActionMessage(item, jobs, ot)}</p>
                             </div>
-                            {item.requiresApproval ? <span className="tag tag-amber">Approval</span> : <span className="tag">Draft</span>}
+                            {item.requiresApproval ? <span className="tag tag-amber">{ot('Approval')}</span> : <span className="tag">{ot('Draft')}</span>}
                             {item.jobId ? (
                               <button
                                 className="icon-button table-action"
-                                aria-label={`Open ${item.jobTitle || item.title || 'linked job'}`}
+                                aria-label={ot('Open {title}', { title: item.jobTitle || item.title || ot('linked job') })}
                                 onClick={() =>
                                   openJobWorkspace(
                                     jobs.find((job) => job.id === item.jobId) || {
                                       id: item.jobId,
-                                      title: item.jobTitle || item.title || 'Ledger job',
+                                      title: item.jobTitle || item.title || ot('Ledger job'),
                                     },
                                   )
                                 }
@@ -11266,46 +11293,46 @@ function App() {
                         ))}
                       </div>
                     ) : (
-                      <Empty title="Queue is clear" detail="No immediate ledger action needs review." />
+                      <Empty title={ot('Queue is clear')} detail={ot('No immediate ledger action needs review.')} />
                     )}
                   </section>
                   <section className="panel schedule-panel">
                     <div className="panel-heading">
                       <div>
-                        <h2>Jobs schedule</h2>
-                        <p>Live work from the ledger</p>
+                        <h2>{ot('Jobs schedule')}</h2>
+                        <p>{ot('Live work from the ledger')}</p>
                       </div>
                       <button className="text-button" onClick={() => selectSection('jobs')}>
-                        All jobs <ChevronRight size={15} />
+                        {ot('All jobs')} <ChevronRight size={15} />
                       </button>
                     </div>
                     <div className="table-wrap">
                       <table>
                         <thead>
                           <tr>
-                            <th>When</th>
-                            <th>Job</th>
-                            <th>Location</th>
-                            <th>Status</th>
-                            <th aria-label="Open job" />
+                            <th>{ot('When')}</th>
+                            <th>{ot('Job')}</th>
+                            <th>{ot('Location')}</th>
+                            <th>{ot('Status')}</th>
+                            <th aria-label={ot('Open job')} />
                           </tr>
                         </thead>
                         <tbody>
                           {activeJobs.slice(0, 6).map((job) => (
                             <tr key={job.id}>
-                              <td>{formatDate(job.scheduledStart || job.targetCompletion)}</td>
+                              <td>{job.scheduledStart || job.targetCompletion ? formatDate(job.scheduledStart || job.targetCompletion) : ot('Not scheduled')}</td>
                               <td>
                                 <strong>{job.title}</strong>
-                                <small>{job.clientName || 'Client pending'}</small>
+                                <small>{job.clientName || ot('Client pending')}</small>
                               </td>
-                              <td>{job.city || job.address || 'Location pending'}</td>
+                              <td>{job.city || job.address || ot('Location pending')}</td>
                               <td>
-                                <span className={`status status-${job.status}`}>{formatStatus(job.status)}</span>
+                                <span className={`status status-${job.status}`}>{ot(formatStatus(job.status))}</span>
                               </td>
                               <td>
                                 <button
                                   className="icon-button table-action"
-                                  aria-label={`Open ${job.title}`}
+                                  aria-label={ot('Open {title}', { title: job.title })}
                                   disabled={loading}
                                   onClick={() => openJobWorkspace(job)}
                                 >
@@ -11323,17 +11350,17 @@ function App() {
                   {capabilities.approvals ? (
                     <section className="panel compact-panel">
                       <div className="panel-heading">
-                        <h2>Approval queue</h2>
+                        <h2>{ot('Approval queue')}</h2>
                         <button className="text-button" onClick={() => selectSection('approvals')}>
-                          Review all <ChevronRight size={15} />
+                          {ot('Review all')} <ChevronRight size={15} />
                         </button>
                       </div>
                       {data.approvals.slice(0, 4).map((item) => (
                         <div className="compact-row" key={item.id}>
                           <ClipboardCheck size={16} />
                           <div>
-                            <strong>{item.title || formatStatus(item.targetType)}</strong>
-                            <small>{item.jobTitle || item.summary || 'Ledger decision'}</small>
+                            <strong>{item.title || ot(formatStatus(item.targetType))}</strong>
+                            <small>{item.jobTitle || item.summary || ot('Ledger decision')}</small>
                           </div>
                           <span>{formatDate(item.createdAt)}</span>
                         </div>
@@ -11343,39 +11370,36 @@ function App() {
                   {capabilities.fieldEvidence ? (
                     <section className="panel compact-panel">
                       <div className="panel-heading">
-                        <h2>Field evidence</h2>
+                        <h2>{ot('Field evidence')}</h2>
                         <button className="text-button" onClick={() => selectSection('field')}>
-                          Open field <ChevronRight size={15} />
+                          {ot('Open field')} <ChevronRight size={15} />
                         </button>
                       </div>
                       <div className="field-summary">
                         <PackageCheck size={26} />
                         <div>
-                          <strong>{metrics.storedDocuments || 0} stored records</strong>
-                          <p>
-                            {metrics.fieldReports || 0} field reports, {metrics.openIncidents || 0} open incidents
-                          </p>
+                          <strong>{ot('{count} stored records', { count: metrics.storedDocuments || 0 })}</strong>
+                          <p>{ot('{reports} field reports, {incidents} open incidents', { reports: metrics.fieldReports || 0, incidents: metrics.openIncidents || 0 })}</p>
                         </div>
                       </div>
                       <button className="secondary-button full-button" onClick={() => selectSection('field')}>
                         <HardHat size={16} />
-                        Review field assurance
+                        {ot('Review field assurance')}
                       </button>
                     </section>
                   ) : null}
                   {capabilities.maintenance ? (
                     <section className="panel compact-panel">
                       <div className="panel-heading">
-                        <h2>Automation</h2>
-                        <span className="tag tag-green">Ledger-only</span>
+                        <h2>{ot('Automation')}</h2>
+                        <span className="tag tag-green">{ot('Ledger-only')}</span>
                       </div>
                       <p className="panel-copy">
-                        The durable cycle creates internal drafts and approval requests. It cannot send messages, commit spend, or confirm
-                        dates.
+                        {ot('The durable cycle creates internal drafts and approval requests. It cannot send messages, commit spend, or confirm dates.')}
                       </p>
                       <button className="secondary-button full-button" disabled={submitting || automationSuspended} onClick={runCycle}>
                         <Activity size={16} />
-                        {automationSuspended ? 'Safety stop active' : 'Run due cycle'}
+                        {automationSuspended ? ot('Safety stop active') : ot('Run due cycle')}
                       </button>
                     </section>
                   ) : null}
@@ -11433,17 +11457,17 @@ function App() {
               <section className="panel page-panel">
                 <div className="panel-heading">
                   <div>
-                    <h2>{fieldScoped ? 'My assigned jobs' : 'All jobs'}</h2>
+                    <h2>{fieldScoped ? ot('My assigned jobs') : ot('All jobs')}</h2>
                     <p>
                       {fieldScoped
-                        ? 'Only jobs available to your field assignment.'
-                        : 'Persisted operational work, ordered by latest update.'}
+                        ? ot('Only jobs available to your field assignment.')
+                        : ot('Persisted operational work, ordered by latest update.')}
                     </p>
                   </div>
                   {capabilities.intake ? (
                     <button className="primary-button" onClick={() => setShowIntake(true)}>
                       <Plus size={16} />
-                      New job
+                      {ot('New job')}
                     </button>
                   ) : null}
                 </div>
@@ -11451,13 +11475,13 @@ function App() {
                   <table>
                     <thead>
                       <tr>
-                        <th>Job</th>
-                        <th>Client</th>
-                        <th>Location</th>
-                        {!fieldScoped ? <th>Value</th> : null}
-                        <th>Progress</th>
-                        <th>Status</th>
-                        <th aria-label="Open job" />
+                        <th>{ot('Job')}</th>
+                        <th>{ot('Client')}</th>
+                        <th>{ot('Location')}</th>
+                        {!fieldScoped ? <th>{ot('Value')}</th> : null}
+                        <th>{ot('Progress')}</th>
+                        <th>{ot('Status')}</th>
+                        <th aria-label={ot('Open job')} />
                       </tr>
                     </thead>
                     <tbody>
@@ -11465,10 +11489,10 @@ function App() {
                         <tr key={job.id}>
                           <td>
                             <strong>{job.title}</strong>
-                            <small>{job.jobType}</small>
+                            <small>{ot(formatStatus(job.jobType))}</small>
                           </td>
-                          <td>{job.clientName || 'Not set'}</td>
-                          <td>{job.city || job.address || 'Not set'}</td>
+                          <td>{job.clientName || ot('Not set')}</td>
+                          <td>{job.city || job.address || ot('Not set')}</td>
                           {!fieldScoped ? <td>{currency.format(job.contractValue || job.estimatedCost || 0)}</td> : null}
                           <td>
                             <div className="progress">
@@ -11477,12 +11501,12 @@ function App() {
                             <small>{Math.round(job.progressPercent || 0)}%</small>
                           </td>
                           <td>
-                            <span className={`status status-${job.status}`}>{formatStatus(job.status)}</span>
+                            <span className={`status status-${job.status}`}>{ot(formatStatus(job.status))}</span>
                           </td>
                           <td>
                             <button
                               className="icon-button table-action"
-                              aria-label={`Open ${job.title}`}
+                              aria-label={ot('Open {title}', { title: job.title })}
                               disabled={loading || sectionLoading}
                               onClick={() => openJobWorkspace(job)}
                             >
@@ -15616,61 +15640,61 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Retained client identity</p>
-                <h2 id="client-editor-title">{clientEditor.mode === 'edit' ? 'Edit client' : 'New client'}</h2>
-                <p>Contact, billing, and electronic invoicing data used by future controlled records.</p>
+                <p className="eyebrow">{ot('Retained client identity')}</p>
+                <h2 id="client-editor-title">{clientEditor.mode === 'edit' ? ot('Edit client') : ot('New client')}</h2>
+                <p>{ot('Contact, billing, and electronic invoicing data used by future controlled records.')}</p>
               </div>
-              <button className="icon-button" type="button" aria-label="Close client editor" onClick={closeClientEditor}>
+              <button className="icon-button" type="button" aria-label={ot('Close client editor')} onClick={closeClientEditor}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitClientEditor}>
               <div className="form-grid client-editor-form">
                 <label>
-                  Contact name
+                  {ot('Contact name')}
                   <input autoFocus required minLength="2" maxLength="160" value={clientDraft.name} onChange={(event) => setClientDraft({ ...clientDraft, name: event.target.value })} />
                 </label>
                 <label>
-                  Client type
+                  {ot('Client type')}
                   <select value={clientDraft.clientType} onChange={(event) => setClientDraft({ ...clientDraft, clientType: event.target.value })}>
-                    <option value="business">Business</option>
-                    <option value="consumer">Consumer</option>
-                    <option value="public">Public body</option>
-                    <option value="property_manager">Property manager</option>
-                    <option value="other">Other</option>
+                    <option value="business">{ot('Business')}</option>
+                    <option value="consumer">{ot('Consumer')}</option>
+                    <option value="public">{ot('Public body')}</option>
+                    <option value="property_manager">{ot('Property manager')}</option>
+                    <option value="other">{ot('Other')}</option>
                   </select>
                 </label>
                 <label className="form-span">
-                  Legal or company name
+                  {ot('Legal or company name')}
                   <input maxLength="200" value={clientDraft.company} onChange={(event) => setClientDraft({ ...clientDraft, company: event.target.value })} />
                 </label>
                 <label>
-                  Contact email
+                  {ot('Contact email')}
                   <input type="email" maxLength="254" value={clientDraft.email} onChange={(event) => setClientDraft({ ...clientDraft, email: event.target.value })} />
                 </label>
                 <label>
-                  Billing email
+                  {ot('Billing email')}
                   <input type="email" maxLength="254" value={clientDraft.billingEmail} onChange={(event) => setClientDraft({ ...clientDraft, billingEmail: event.target.value })} />
                 </label>
                 <label>
-                  Phone
+                  {ot('Phone')}
                   <input type="tel" maxLength="80" value={clientDraft.phone} onChange={(event) => setClientDraft({ ...clientDraft, phone: event.target.value })} />
                 </label>
                 <label>
-                  Preferred language
+                  {ot('Preferred language')}
                   <select value={clientDraft.preferredLanguage} onChange={(event) => setClientDraft({ ...clientDraft, preferredLanguage: event.target.value })}>
-                    <option value="nl">Dutch</option>
-                    <option value="en">English</option>
-                    <option value="de">German</option>
-                    <option value="fr">French</option>
+                    <option value="nl">{ot('Dutch')}</option>
+                    <option value="en">{ot('English')}</option>
+                    <option value="de">{ot('German')}</option>
+                    <option value="fr">{ot('French')}</option>
                   </select>
                 </label>
                 <label className="form-span">
-                  Street address
+                  {ot('Street address')}
                   <input maxLength="300" value={clientDraft.address} onChange={(event) => setClientDraft({ ...clientDraft, address: event.target.value })} />
                 </label>
                 <label>
-                  Postal code
+                  {ot('Postal code')}
                   <input maxLength="30" value={clientDraft.postalCode} onChange={(event) => setClientDraft({ ...clientDraft, postalCode: event.target.value })} />
                 </label>
                 <label>
@@ -15678,35 +15702,35 @@ function App() {
                   <input maxLength="120" value={clientDraft.city} onChange={(event) => setClientDraft({ ...clientDraft, city: event.target.value })} />
                 </label>
                 <label>
-                  Country code
+                  {ot('Country code')}
                   <input required minLength="2" maxLength="2" value={clientDraft.country} onChange={(event) => setClientDraft({ ...clientDraft, country: event.target.value.toUpperCase() })} />
                 </label>
                 <label>
-                  KVK / registration number
+                  {ot('KVK / registration number')}
                   <input maxLength="80" value={clientDraft.registrationNumber} onChange={(event) => setClientDraft({ ...clientDraft, registrationNumber: event.target.value })} />
                 </label>
                 <label>
-                  VAT number
+                  {ot('VAT number')}
                   <input maxLength="80" value={clientDraft.vatNumber} onChange={(event) => setClientDraft({ ...clientDraft, vatNumber: event.target.value })} />
                 </label>
                 <label>
-                  Electronic address scheme
+                  {ot('Electronic address scheme')}
                   <input maxLength="20" placeholder="0106 for KVK or 0190 for OIN" value={clientDraft.electronicAddressScheme} onChange={(event) => setClientDraft({ ...clientDraft, electronicAddressScheme: event.target.value })} />
                 </label>
                 <label>
-                  Electronic address
+                  {ot('Electronic address')}
                   <input maxLength="120" value={clientDraft.electronicAddress} onChange={(event) => setClientDraft({ ...clientDraft, electronicAddress: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Internal notes
+                  {ot('Internal notes')}
                   <textarea maxLength="4000" value={clientDraft.notes} onChange={(event) => setClientDraft({ ...clientDraft, notes: event.target.value })} />
                 </label>
                 <p className="workflow-note form-span">
-                  Saving changes the client master only. Existing quote, invoice, handover, and communication snapshots remain unchanged, and no external action is performed.
+                  {ot('Saving changes the client master only. Existing quote, invoice, handover, and communication snapshots remain unchanged, and no external action is performed.')}
                 </p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeClientEditor}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeClientEditor}>{ot('Cancel')}</button>
                 <button
                   className="primary-button"
                   disabled={
@@ -15717,7 +15741,7 @@ function App() {
                   }
                 >
                   <BadgeCheck size={16} />
-                  {submitting ? 'Retaining...' : clientEditor.mode === 'edit' ? 'Update client' : 'Retain client'}
+                  {submitting ? ot('Retaining...') : clientEditor.mode === 'edit' ? ot('Update client') : ot('Retain client')}
                 </button>
               </div>
             </form>
@@ -15736,11 +15760,11 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Ledger job workspace</p>
-                <h2 id="job-workspace-title">{selectedJob?.title || 'Loading job record'}</h2>
+                <p className="eyebrow">{ot('Ledger job workspace')}</p>
+                <h2 id="job-workspace-title">{selectedJob?.title || ot('Loading job record')}</h2>
                 <p>
-                  {selectedJob?.clientName || 'Client pending'}
-                  {selectedJob?.city ? ` · ${selectedJob.city}` : ''}
+                  {selectedJob?.clientName || ot('Client pending')}
+                  {selectedJob?.city ? ` / ${selectedJob.city}` : ''}
                 </p>
               </div>
               <div className="modal-heading-actions">
@@ -15748,14 +15772,14 @@ function App() {
                   <button
                     className="secondary-button job-resource-button"
                     type="button"
-                    aria-label="Open resource planner"
+                    aria-label={ot('Open resource planner')}
                     onClick={() => setShowResourcePlanner(true)}
                   >
                     <Users size={16} />
-                    Resources
+                    {ot('Resources')}
                   </button>
                 ) : null}
-                <button className="icon-button" aria-label="Close job workspace" onClick={closeJobWorkspace}>
+                <button className="icon-button" aria-label={ot('Close job workspace')} onClick={closeJobWorkspace}>
                   <X size={18} />
                 </button>
               </div>
@@ -15763,31 +15787,31 @@ function App() {
             {selectedJobLoading || !selectedJob ? (
               <div className="loading job-workspace-loading">
                 <LoaderCircle className="spin" size={24} />
-                Loading the retained job record
+                {ot('Loading the retained job record')}
               </div>
             ) : (
               <div className="job-workspace-body">
                 <div className="job-facts">
                   <div>
-                    <span>State</span>
+                    <span>{ot('State')}</span>
                     <strong>
-                      <span className={`status status-${selectedJob.status}`}>{formatStatus(selectedJob.status)}</span>
+                      <span className={`status status-${selectedJob.status}`}>{ot(formatStatus(selectedJob.status))}</span>
                     </strong>
                   </div>
                   <div>
-                    <span>Progress</span>
+                    <span>{ot('Progress')}</span>
                     <strong>{Math.round(selectedJob.progressPercent || 0)}%</strong>
                   </div>
                   <div>
-                    <span>Proposed work</span>
-                    <strong>{formatDate(selectedJob.scheduledStart || selectedJob.targetCompletion)}</strong>
+                    <span>{ot('Proposed work')}</span>
+                    <strong>{selectedJob.scheduledStart || selectedJob.targetCompletion ? formatDate(selectedJob.scheduledStart || selectedJob.targetCompletion) : ot('Not scheduled')}</strong>
                   </div>
                   <div>
-                    <span>Open approvals</span>
+                    <span>{ot('Open approvals')}</span>
                     <strong>{(selectedJob.approvals || []).filter((item) => item.status === 'pending').length}</strong>
                   </div>
                 </div>
-                <LazyControlBoundary label="job controls" mode="job">
+                <LazyControlBoundary label={ot('job controls')} mode="job">
                   {!fieldScoped ? (
                     <TakeoffControl
                       job={selectedJob}
@@ -17375,14 +17399,14 @@ function App() {
                   />
                 </label>
                 <label>
-                  City
+                  {ot('City')}
                   <input
                     value={opportunityDraft.city}
                     onChange={(event) => setOpportunityDraft({ ...opportunityDraft, city: event.target.value })}
                   />
                 </label>
                 <label>
-                  Postal code
+                  {ot('Postal code')}
                   <input
                     value={opportunityDraft.postalCode}
                     onChange={(event) => setOpportunityDraft({ ...opportunityDraft, postalCode: event.target.value })}

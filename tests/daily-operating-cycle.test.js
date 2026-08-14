@@ -159,6 +159,30 @@ test('daily huddle fails closed on missing assignment and safety concern keeps c
   assert.equal(ledger.getDailyOperatingCycle(blocked.cycle.id).status, 'closed');
 });
 
+test('daily dashboard actions expose structured retained job context for locale-safe rendering', t => {
+  const { ledger, worker, job } = fixture(t, 'dashboard-action');
+  ledger.db.prepare("UPDATE jobs SET status = 'scheduled' WHERE id = ?").run(job.id);
+
+  const startAction = ledger.nextActions().find(action => action.type === 'review_daily_cycle' && action.jobId === job.id);
+  assert.equal(startAction.jobTitle, job.title);
+  assert.equal(startAction.actionKind, 'start_huddle_missing');
+  assert.equal(startAction.cycleStatus, null);
+
+  const fieldReportAction = ledger.nextActions().find(action => action.type === 'draft_field_report' && action.jobId === job.id);
+  assert.equal(fieldReportAction.jobTitle, job.title);
+
+  const workDate = new Date().toISOString().slice(0, 10);
+  const started = ledger.createDailyStartHuddle(job.id, huddlePayload(worker.id, {
+    entryKey: `daily-huddle-dashboard-${workDate}`,
+    workDate
+  }), { actor: 'site-lead' });
+  const endAction = ledger.nextActions().find(action => action.type === 'review_daily_cycle' && action.jobId === job.id);
+  assert.equal(endAction.jobTitle, job.title);
+  assert.equal(endAction.actionKind, 'end_of_day_missing');
+  assert.equal(endAction.cycleId, started.cycle.id);
+  assert.equal(endAction.cycleStatus, 'released');
+});
+
 test('daily EOD child writes roll back together and diagnostics detect snapshot tampering', t => {
   const { ledger, worker, job } = fixture(t, 'rollback');
   const started = ledger.createDailyStartHuddle(job.id, huddlePayload(worker.id, { entryKey: 'daily-huddle-entry-rollback' }));

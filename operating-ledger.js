@@ -56125,7 +56125,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       LIMIT 5
     `).all();
     for (const job of jobsWithoutAssignment) {
-      actions.push({ type: 'assign_worker', jobId: job.id, title: job.title, severity: 'high', message: `${job.title} needs a worker assignment.` });
+      actions.push({ type: 'assign_worker', jobId: job.id, jobTitle: job.title, title: job.title, severity: 'high', message: `${job.title} needs a worker assignment.` });
     }
 
     const pendingApprovals = this.db.prepare(`
@@ -56309,7 +56309,9 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         type: 'review_daily_cycle',
         actionKind,
         jobId: job.id,
+        jobTitle: job.title,
         cycleId: job.cycle_id || null,
+        cycleStatus: job.cycle_status || null,
         taskId,
         sourceHash: job.huddle_snapshot_hash || sha256Json({ jobId: job.id, today, actionKind }),
         severity: job.cycle_status === 'blocked' ? 'high' : 'medium',
@@ -56332,7 +56334,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       LIMIT 5
     `).all(today);
     for (const job of jobsWithoutFieldReports) {
-      actions.push({ type: 'draft_field_report', jobId: job.id, severity: 'medium', message: `${job.title} needs today's field report for jobsite evidence and office visibility.` });
+      actions.push({ type: 'draft_field_report', jobId: job.id, jobTitle: job.title, severity: 'medium', message: `${job.title} needs today's field report for jobsite evidence and office visibility.` });
     }
 
     const staleAttendance = this.db.prepare(`
@@ -57315,7 +57317,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     `).all();
     for (const job of jobsWithoutBudgetLines) {
       const amount = normalizeNumber(job.estimated_cost || job.contract_value, 0);
-      actions.push({ type: 'create_budget_line', jobId: job.id, severity: 'medium', suggestedAmount: amount, message: `${job.title} needs a budget line so costs, commitments, and forecast can be tracked.` });
+      actions.push({ type: 'create_budget_line', jobId: job.id, jobTitle: job.title, severity: 'medium', suggestedAmount: amount, message: `${job.title} needs a budget line so costs, commitments, and forecast can be tracked.` });
     }
 
     const forecastCandidates = this.db.prepare(`
@@ -57413,6 +57415,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       actions.push({
         type: 'prepare_schedule_baseline',
         jobId: job.id,
+        jobTitle: job.title,
+        baselineReason: approvedBaseline ? 'approved_baseline_stale' : 'approved_baseline_missing',
         severity: approvedBaseline ? 'high' : 'medium',
         requiresApproval: true,
         plannedStart,

@@ -39,7 +39,7 @@ test('large navigation and job controls are loaded through local suspense bounda
   assert.match(dashboardRootSource, /<LazyControlBoundary label="audit history">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
-  assert.match(dashboardRootSource, /<LazyControlBoundary label="job controls" mode="job">/);
+  assert.match(dashboardRootSource, /<LazyControlBoundary label=\{ot\('job controls'\)\} mode="job">/);
 });
 
 test('5S mutations cannot be overwritten by an older parent board request', () => {
