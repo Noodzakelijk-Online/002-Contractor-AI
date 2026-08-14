@@ -890,6 +890,32 @@ function emptyWorkerAvailabilityDraft(worker = null) {
   }
 }
 
+function workPermitBlockerText(blocker, t) {
+  switch (blocker?.type) {
+    case 'permit_not_active':
+      return t('Permit status is {status}.', { status: formatStatus(blocker.status || 'inactive') })
+    case 'permit_not_started':
+      return t('The permit validity window has not started.')
+    case 'permit_expired':
+      return t('The permit validity window has expired.')
+    case 'permit_definition_integrity':
+      return t('The retained permit definition does not match its approved snapshot.')
+    case 'permit_attendees_missing':
+      return t('No assigned worker is retained for this permit.')
+    case 'permit_acknowledgements_outstanding':
+      return t(
+        blocker.count === 1
+          ? '{count} assigned worker acknowledgement is outstanding.'
+          : '{count} assigned worker acknowledgements are outstanding.',
+        { count: blocker.count || 0 },
+      )
+    case 'permit_acknowledgement_integrity':
+      return t('{count} acknowledgement record(s) failed integrity verification.', { count: blocker.count || 0 })
+    default:
+      return t(blocker?.message || 'Permit readiness blocker')
+  }
+}
+
 
 
 
@@ -6091,7 +6117,7 @@ function App() {
         current.jobId === jobId ? { ...current, permitId: selectedPermit?.id || '' } : current
       ))
     } catch (requestError) {
-      if (loadSequence === workPermitLoadSequenceRef.current) setError(requestError.message)
+      if (loadSequence === workPermitLoadSequenceRef.current) setError(ot(requestError.message))
     } finally {
       if (loadSequence === workPermitLoadSequenceRef.current) setWorkPermitLoading(false)
     }
@@ -6103,9 +6129,9 @@ function App() {
 
   async function createWorkPermit(event) {
     event.preventDefault()
-    const hazards = workPermitDraft.hazards.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
-    const controls = workPermitDraft.controls.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
-    const conditions = workPermitDraft.conditions.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
+    const hazards = workPermitDraft.hazards.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+    const controls = workPermitDraft.controls.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+    const conditions = workPermitDraft.conditions.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
     if (
       !canCoordinate
       || !workPermitDraft.jobId
@@ -6114,11 +6140,11 @@ function App() {
       || !controls.length
       || workPermitDraft.sourceEvidence.trim().length < 3
     ) {
-      setError('Choose a job and retain the permit title, hazards, controls, validity, and source evidence.')
+      setError(ot('Choose a job and retain the permit title, hazards, controls, validity, and source evidence.'))
       return
     }
     if (navigator.onLine === false) {
-      setError('Reconnect before requesting a permit so the current assigned crew and approval snapshot can be frozen from the ledger.')
+      setError(ot('Reconnect before requesting a permit so the current assigned crew and approval snapshot can be frozen from the ledger.'))
       return
     }
     setSubmitting(true)
@@ -6146,15 +6172,15 @@ function App() {
         jobId: workPermitDraft.jobId,
         permitId: result.workPermit.id,
       })
-      notify(result.replayed
+      notify(ot(result.replayed
         ? 'This permit request was already retained; no duplicate approval was created.'
-        : 'Permit definition and assigned crew were frozen for approval.')
+        : 'Permit definition and assigned crew were frozen for approval.'))
       await refresh()
       if (capabilities.approvals && result.approval?.id) {
         openApprovals({ jobId: result.workPermit.jobId, jobTitle: result.workPermit.jobTitle, approvalId: result.approval.id })
       }
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -6163,7 +6189,7 @@ function App() {
   async function acknowledgeWorkPermit(event) {
     event.preventDefault()
     if (!fieldScoped || !selectedWorkPermit || !workPermitDraft.acknowledged || workPermitDraft.acknowledgementEvidence.trim().length < 3) {
-      setError('Select an active assigned permit, confirm the attestation, and retain an evidence reference.')
+      setError(ot('Select an active assigned permit, confirm the attestation, and retain an evidence reference.'))
       return
     }
     const draft = {
@@ -6186,17 +6212,17 @@ function App() {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
         setWorkPermitDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), acknowledgementEvidence: '', acknowledged: false }))
-        notify('Permit acknowledgement was saved locally for an exact worker-scoped retry. Stop work until the live ledger confirms readiness.')
+        notify(ot('Permit acknowledgement was saved locally for an exact worker-scoped retry. Stop work until the live ledger confirms readiness.'))
         return
       }
       const result = await recordFieldOperation(draft)
       retainWorkPermit(result.workPermit)
       setWorkPermitDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), acknowledgementEvidence: '', acknowledged: false }))
-      notify(result.replayed
+      notify(ot(result.replayed
         ? 'This permit acknowledgement was already retained; no duplicate evidence was created.'
         : result.workPermit.readyForWork
           ? 'Your acknowledgement was retained and this permit is ready for the assigned work.'
-          : 'Your acknowledgement was retained. Other permit blockers remain.')
+          : 'Your acknowledgement was retained. Other permit blockers remain.'))
       await refresh()
     } catch (requestError) {
       if (shouldQueueFieldMutation(requestError)) {
@@ -6204,14 +6230,14 @@ function App() {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
           setWorkPermitDraft((current) => ({ ...current, entryKey: createFieldEvidenceDraftId(), acknowledgementEvidence: '', acknowledged: false }))
-          notify('Connection interrupted. The permit acknowledgement was saved locally for an exact retry. Stop work until the live ledger confirms readiness.')
+          notify(ot('Connection interrupted. The permit acknowledgement was saved locally for an exact retry. Stop work until the live ledger confirms readiness.'))
           return
         } catch (outboxError) {
-          setError(outboxError.message)
+          setError(ot(outboxError.message))
           return
         }
       }
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -6220,11 +6246,11 @@ function App() {
   async function suspendWorkPermit(event) {
     event.preventDefault()
     if (!canCoordinate || !selectedWorkPermit || workPermitDraft.suspensionReason.trim().length < 8 || workPermitDraft.suspensionEvidence.trim().length < 3) {
-      setError('Retain a specific suspension reason and evidence reference before stopping this permit.')
+      setError(ot('Retain a specific suspension reason and evidence reference before stopping this permit.'))
       return
     }
     if (navigator.onLine === false) {
-      setError('The permit cannot be synchronized while offline. Stop work on site now and reconnect to retain the suspension.')
+      setError(ot('The permit cannot be synchronized while offline. Stop work on site now and reconnect to retain the suspension.'))
       return
     }
     setSubmitting(true)
@@ -6240,10 +6266,10 @@ function App() {
       })
       retainWorkPermit(result.permit)
       setWorkPermitDraft((current) => ({ ...current, suspensionReason: '', suspensionEvidence: '' }))
-      notify(result.replayed ? 'This stop-work suspension was already retained.' : 'Permit suspended. Work must remain stopped until a new approved permit is issued.')
+      notify(ot(result.replayed ? 'This stop-work suspension was already retained.' : 'Permit suspended. Work must remain stopped until a new approved permit is issued.'))
       await refresh()
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -6252,11 +6278,11 @@ function App() {
   async function closeWorkPermit(event) {
     event.preventDefault()
     if (!canCoordinate || !selectedWorkPermit || workPermitDraft.closureNote.trim().length < 8 || workPermitDraft.closureEvidence.trim().length < 3) {
-      setError('Retain a completion note and closeout evidence reference before closing this permit.')
+      setError(ot('Retain a completion note and closeout evidence reference before closing this permit.'))
       return
     }
     if (navigator.onLine === false) {
-      setError('Reconnect before closing the permit so closeout evidence is retained in the ledger.')
+      setError(ot('Reconnect before closing the permit so closeout evidence is retained in the ledger.'))
       return
     }
     setSubmitting(true)
@@ -6272,10 +6298,10 @@ function App() {
       })
       retainWorkPermit(result.permit)
       setWorkPermitDraft((current) => ({ ...current, closureNote: '', closureEvidence: '' }))
-      notify(result.replayed ? 'This permit closure was already retained.' : 'Permit closed with retained closeout evidence.')
+      notify(ot(result.replayed ? 'This permit closure was already retained.' : 'Permit closed with retained closeout evidence.'))
       await refresh()
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8578,7 +8604,7 @@ function App() {
           actor: 'office_operator',
         }),
       })
-      notify('Internal crew instructions were drafted. Nothing was published or delivered.')
+      notify(ot('Internal crew instructions were drafted. Nothing was published or delivered.'))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -8607,7 +8633,7 @@ function App() {
   async function saveWorker(event) {
     event.preventDefault()
     if (workerDraft.name.trim().length < 2) {
-      setError('Record a crew member name with at least two characters before saving.')
+      setError(ot('Record a crew member name with at least two characters before saving.'))
       return
     }
     setSubmitting(true)
@@ -8633,12 +8659,13 @@ function App() {
       })
       setWorkerEditor(null)
       setWorkerDraft(emptyWorkerDraft())
-      notify(
-        `${result.worker.name} retained as ${formatStatus(result.worker.status)}. No schedule, payroll, or contact action was created.`,
-      )
+      notify(ot('{name} retained as {status}. No schedule, payroll, or contact action was created.', {
+        name: result.worker.name,
+        status: formatStatus(result.worker.status),
+      }))
       await refresh()
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8672,14 +8699,12 @@ function App() {
       })
       setWorkerRetirement(null)
       setWorkerRetirementReason('')
-      notify(
-        result.requiresApproval
-          ? `Retirement approval requested for ${result.worker.name}. New assignments are now blocked.`
-          : `${result.worker.name} is already retired.`,
-      )
+      notify(result.requiresApproval
+        ? ot('Retirement approval requested for {name}. New assignments are now blocked.', { name: result.worker.name })
+        : ot('{name} is already retired.', { name: result.worker.name }))
       await refresh()
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8729,13 +8754,11 @@ function App() {
         qualificationRegister: result.qualificationRegister || current.qualificationRegister,
         dashboard: result.dashboard || current.dashboard,
       } : current)
-      notify(
-        result.replayed
-          ? `The existing ${result.credential.title} review was reopened. No certificate was issued or renewed.`
-          : `${result.credential.title} evidence was retained for approval. It does not satisfy job readiness until verified.`,
-      )
+      notify(result.replayed
+        ? ot('The existing {title} review was reopened. No certificate was issued or renewed.', { title: result.credential.title })
+        : ot('{title} evidence was retained for approval. It does not satisfy job readiness until verified.', { title: result.credential.title }))
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8782,13 +8805,11 @@ function App() {
         qualificationRegister: result.qualificationRegister || current.qualificationRegister,
         dashboard: result.dashboard || current.dashboard,
       } : current)
-      notify(
-        result.replayed
-          ? `${result.requirement.title} is already enforced for this job and role.`
-          : `${result.requirement.title} is now enforced in assignment, dispatch, site-access, and attendance readiness.`,
-      )
+      notify(result.replayed
+        ? ot('{title} is already enforced for this job and role.', { title: result.requirement.title })
+        : ot('{title} is now enforced in assignment, dispatch, site-access, and attendance readiness.', { title: result.requirement.title }))
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8829,9 +8850,9 @@ function App() {
         qualificationRegister: result.qualificationRegister || current.qualificationRegister,
         dashboard: result.dashboard || current.dashboard,
       } : current)
-      notify(`Removal approval requested for ${result.requirement.title}. The requirement remains enforced until approval.`)
+      notify(ot('Removal approval requested for {title}. The requirement remains enforced until approval.', { title: result.requirement.title }))
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8881,13 +8902,13 @@ function App() {
         dashboard: result.dashboard || current.dashboard,
       } : current)
       const conflictCount = result.conflicts?.length || 0
-      notify(
-        result.replayed
-          ? `${result.period.title} already exists with the same retained window.`
-          : `${result.period.title} now blocks overlapping scheduling${conflictCount ? ` and exposes ${conflictCount} assignment conflict${conflictCount === 1 ? '' : 's'}` : ''}.`,
-      )
+      notify(result.replayed
+        ? ot('{title} already exists with the same retained window.', { title: result.period.title })
+        : conflictCount
+          ? ot('{title} now blocks overlapping scheduling and exposes {count} assignment conflict(s).', { title: result.period.title, count: conflictCount })
+          : ot('{title} now blocks overlapping scheduling.', { title: result.period.title }))
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -8928,9 +8949,9 @@ function App() {
         availabilityRegister: result.availabilityRegister || current.availabilityRegister,
         dashboard: result.dashboard || current.dashboard,
       } : current)
-      notify(`Cancellation approval requested for ${result.period.title}. The scheduling block remains active until approval.`)
+      notify(ot('Cancellation approval requested for {title}. The scheduling block remains active until approval.', { title: result.period.title }))
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -9012,7 +9033,7 @@ function App() {
       notify(result.replayed ? 'The matching delivery ticket was already retained; no duplicate was created.' : `Delivery ${result.receipt.receiptReference} retained as ${formatStatus(result.receipt.status)}.`)
       void refreshSection('resources', 'receiving')
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -12109,14 +12130,14 @@ function App() {
                       {fieldScoped && ['scheduled', 'in_progress'].includes(selectedSafetyMeeting.status) ? (
                         <form className="safety-acknowledgement-form" onSubmit={acknowledgeSafetyBriefing}>
                           <label>
-                            Evidence reference
+                            {ot('Evidence reference')}
                             <input
                               required
                               minLength="3"
                               maxLength="240"
                               value={safetyBriefingDraft.evidenceReference}
                               onChange={(event) => updateSafetyBriefingDraft('evidenceReference', event.target.value)}
-                              placeholder="Device, badge, signature, or retained field record"
+                              placeholder={ot('Device, badge, signature, or retained field record')}
                             />
                           </label>
                           <label className="checkbox-label">
@@ -12249,25 +12270,25 @@ function App() {
                 <section className="work-permit-control" data-testid="work-permit-control" aria-busy={workPermitLoading}>
                   <div className="panel-heading">
                     <div>
-                      <h2>Work permits</h2>
-                      <p>Approved hazards, controls, validity, and assigned-worker acceptance</p>
+                      <h2>{ot('Work permits')}</h2>
+                      <p>{ot('Approved hazards, controls, validity, and assigned-worker acceptance')}</p>
                     </div>
-                    <div className="work-permit-summary" aria-label="Work permit summary">
-                      <span className="tag">{workPermits.filter((permit) => permit.status === 'active').length} active</span>
-                      {workPermits.some((permit) => permit.status === 'active' && permit.attendanceSummary?.expected > 0) ? <span className="tag tag-amber">Crew action</span> : null}
-                      {workPermits.some((permit) => permit.status === 'suspended') ? <span className="tag tag-red">Stop work</span> : null}
+                    <div className="work-permit-summary" aria-label={ot('Work permit summary')}>
+                      <span className="tag">{ot('{count} active', { count: workPermits.filter((permit) => permit.status === 'active').length })}</span>
+                      {workPermits.some((permit) => permit.status === 'active' && permit.attendanceSummary?.expected > 0) ? <span className="tag tag-amber">{ot('Crew action')}</span> : null}
+                      {workPermits.some((permit) => permit.status === 'suspended') ? <span className="tag tag-red">{ot('Stop work')}</span> : null}
                     </div>
                   </div>
                   <div className="work-permit-selector">
                     <label>
-                      Job
+                      {ot('Job')}
                       <select required value={workPermitDraft.jobId} onChange={(event) => void selectWorkPermitJob(event.target.value)}>
-                        <option value="">Select an assigned job</option>
+                        <option value="">{ot('Select an assigned job')}</option>
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
                     </label>
                     <label>
-                      Permit
+                      {ot('Permit')}
                       <select
                         value={workPermitDraft.permitId}
                         disabled={workPermitLoading || !workPermitDraft.jobId || !selectedJobWorkPermits.length}
@@ -12285,7 +12306,7 @@ function App() {
                           }))
                         }}
                       >
-                        <option value="">{selectedJobWorkPermits.length ? 'Select a permit' : 'No retained permit'}</option>
+                        <option value="">{selectedJobWorkPermits.length ? ot('Select a permit') : ot('No retained permit')}</option>
                         {selectedJobWorkPermits.map((permit) => (
                           <option key={permit.id} value={permit.id}>{permit.title} / {formatStatus(permit.effectiveStatus || permit.status)}</option>
                         ))}
@@ -12297,51 +12318,51 @@ function App() {
                       <div className="work-permit-context">
                         <div>
                           <strong>{selectedWorkPermit.title}</strong>
-                          <small>{formatStatus(selectedWorkPermit.permitType)} / {selectedWorkPermit.location || 'Jobsite'} / {selectedWorkPermit.holder || 'Project team'}</small>
+                          <small>{formatStatus(selectedWorkPermit.permitType)} / {selectedWorkPermit.location || ot('Jobsite')} / {selectedWorkPermit.holder || ot('Project team')}</small>
                         </div>
                         <div className="work-permit-state">
-                          {selectedWorkPermit.readyForWork ? <span className="tag tag-green"><Check size={13} /> Ready</span> : null}
+                          {selectedWorkPermit.readyForWork ? <span className="tag tag-green"><Check size={13} /> {ot('Ready')}</span> : null}
                           <span className={`status status-${selectedWorkPermit.status}`}>{formatStatus(selectedWorkPermit.effectiveStatus || selectedWorkPermit.status)}</span>
                         </div>
                       </div>
                       <div className="work-permit-validity">
-                        <span><strong>Valid from</strong>{formatDateTime(selectedWorkPermit.validFrom)}</span>
-                        <span><strong>Expires</strong>{formatDateTime(selectedWorkPermit.expiresAt)}</span>
-                        <span><strong>Source</strong>{selectedWorkPermit.evidenceReference || 'Not retained'}</span>
+                        <span><strong>{ot('Valid from')}</strong>{formatDateTime(selectedWorkPermit.validFrom)}</span>
+                        <span><strong>{ot('Expires')}</strong>{formatDateTime(selectedWorkPermit.expiresAt)}</span>
+                        <span><strong>{ot('Source')}</strong>{selectedWorkPermit.evidenceReference || ot('Not retained')}</span>
                       </div>
                       <div className="work-permit-definition">
                         <div>
-                          <strong>Hazards</strong>
+                          <strong>{ot('Hazards')}</strong>
                           <ul>{(selectedWorkPermit.hazards || []).map((hazard) => <li key={hazard}>{hazard}</li>)}</ul>
                         </div>
                         <div>
-                          <strong>Controls</strong>
+                          <strong>{ot('Controls')}</strong>
                           <ul>{(selectedWorkPermit.controls || []).map((control) => <li key={control}>{control}</li>)}</ul>
                         </div>
                         {selectedWorkPermit.conditions?.length ? (
                           <div>
-                            <strong>Conditions</strong>
+                            <strong>{ot('Conditions')}</strong>
                             <ul>{selectedWorkPermit.conditions.map((condition) => <li key={condition}>{condition}</li>)}</ul>
                           </div>
                         ) : null}
                       </div>
-                      <div className="safety-attendee-list" aria-label="Permit crew acknowledgements">
+                      <div className="safety-attendee-list" aria-label={ot('Permit crew acknowledgements')}>
                         {(selectedWorkPermit.attendees || []).map((attendee) => (
                           <div className="safety-attendee-row" key={attendee.id}>
                             <span className={`attendance-presence ${attendee.status === 'acknowledged' ? 'attendance-present' : ''}`} aria-hidden="true" />
                             <div>
                               <strong>{attendee.attendeeName}</strong>
-                              <small>{attendee.company || 'Assigned crew'}{attendee.acknowledgedAt ? ` / ${formatDateTime(attendee.acknowledgedAt)}` : ''}</small>
+                              <small>{attendee.company || ot('Assigned crew')}{attendee.acknowledgedAt ? ` / ${formatDateTime(attendee.acknowledgedAt)}` : ''}</small>
                             </div>
                             <span className={`status status-${attendee.status}`}>{formatStatus(attendee.status)}</span>
                           </div>
                         ))}
-                        {!selectedWorkPermit.attendees?.length ? <div className="attendance-empty"><Users size={20} /><span>No assigned permit worker is retained.</span></div> : null}
+                        {!selectedWorkPermit.attendees?.length ? <div className="attendance-empty"><Users size={20} /><span>{ot('No assigned permit worker is retained.')}</span></div> : null}
                       </div>
                       {selectedWorkPermit.blockers?.length ? (
                         <div className="work-permit-blockers" role="status">
                           <TriangleAlert size={17} />
-                          <ul>{selectedWorkPermit.blockers.map((blocker) => <li key={blocker.type}>{blocker.message}</li>)}</ul>
+                          <ul>{selectedWorkPermit.blockers.map((blocker) => <li key={blocker.type}>{workPermitBlockerText(blocker, ot)}</li>)}</ul>
                         </div>
                       ) : null}
                       {fieldScoped && selectedWorkPermit.status === 'active' ? (
@@ -12354,7 +12375,7 @@ function App() {
                               maxLength="240"
                               value={workPermitDraft.acknowledgementEvidence}
                               onChange={(event) => updateWorkPermitDraft('acknowledgementEvidence', event.target.value)}
-                              placeholder="Device, badge, signature, or retained field record"
+                              placeholder={ot('Device, badge, signature, or retained field record')}
                             />
                           </label>
                           <label className="checkbox-label">
@@ -12363,7 +12384,7 @@ function App() {
                               checked={workPermitDraft.acknowledged}
                               onChange={(event) => updateWorkPermitDraft('acknowledged', event.target.checked)}
                             />
-                            I reviewed this permit, understand the hazards and controls, and will stop work if conditions change.
+                            {ot('I reviewed this permit, understand the hazards and controls, and will stop work if conditions change.')}
                           </label>
                           <button
                             className="primary-button"
@@ -12371,8 +12392,8 @@ function App() {
                           >
                             <ShieldCheck size={16} />
                             {selectedWorkPermit.attendees?.[0]?.status === 'acknowledged'
-                              ? 'Acknowledged'
-                              : navigator.onLine === false ? 'Save acknowledgement offline' : 'Acknowledge permit'}
+                              ? ot('Acknowledged')
+                              : navigator.onLine === false ? ot('Save acknowledgement offline') : ot('Acknowledge permit')}
                           </button>
                         </form>
                       ) : null}
@@ -12381,95 +12402,95 @@ function App() {
                           {selectedWorkPermit.status === 'active' ? (
                             <form onSubmit={suspendWorkPermit}>
                               <div className="work-permit-action-heading">
-                                <strong>Suspend permit</strong>
-                                <span>Stops reliance on this permit immediately.</span>
+                                <strong>{ot('Suspend permit')}</strong>
+                                <span>{ot('Stops reliance on this permit immediately.')}</span>
                               </div>
                               <label>
-                                Stop-work reason
+                                {ot('Stop-work reason')}
                                 <input required disabled={submitting} minLength="8" maxLength="500" value={workPermitDraft.suspensionReason} onChange={(event) => updateWorkPermitDraft('suspensionReason', event.target.value)} />
                               </label>
                               <label>
-                                Evidence reference
+                                {ot('Evidence reference')}
                                 <input required disabled={submitting} minLength="3" maxLength="240" value={workPermitDraft.suspensionEvidence} onChange={(event) => updateWorkPermitDraft('suspensionEvidence', event.target.value)} />
                               </label>
-                              <button className="secondary-button danger-button" disabled={submitting}><Ban size={15} /> Suspend</button>
+                              <button className="secondary-button danger-button" disabled={submitting}><Ban size={15} /> {ot('Suspend')}</button>
                             </form>
                           ) : null}
                           <form onSubmit={closeWorkPermit}>
                             <div className="work-permit-action-heading">
-                              <strong>Close permit</strong>
-                              <span>Retains completion and hand-back evidence.</span>
+                              <strong>{ot('Close permit')}</strong>
+                              <span>{ot('Retains completion and hand-back evidence.')}</span>
                             </div>
                             <label>
-                              Completion note
+                              {ot('Completion note')}
                               <input required disabled={submitting} minLength="8" maxLength="500" value={workPermitDraft.closureNote} onChange={(event) => updateWorkPermitDraft('closureNote', event.target.value)} />
                             </label>
                             <label>
-                              Closeout evidence
+                              {ot('Closeout evidence')}
                               <input required disabled={submitting} minLength="3" maxLength="240" value={workPermitDraft.closureEvidence} onChange={(event) => updateWorkPermitDraft('closureEvidence', event.target.value)} />
                             </label>
-                            <button className="secondary-button" disabled={submitting}><Check size={15} /> Close permit</button>
+                            <button className="secondary-button" disabled={submitting}><Check size={15} /> {ot('Close permit')}</button>
                           </form>
                         </div>
                       ) : null}
                     </div>
                   ) : workPermitDraft.jobId ? (
-                    <div className="attendance-empty"><LockKeyhole size={20} /><span>No governed work permit is retained for this job.</span></div>
+                    <div className="attendance-empty"><LockKeyhole size={20} /><span>{ot('No governed work permit is retained for this job.')}</span></div>
                   ) : null}
                   {canCoordinate ? (
                     <form className="work-permit-create" aria-busy={workPermitLoading || submitting} inert={workPermitLoading || submitting ? true : undefined} onSubmit={createWorkPermit}>
                       <div className="work-permit-create-heading">
-                        <strong>Request permit activation</strong>
-                        <span>Current assigned crew are frozen into the approval snapshot.</span>
+                        <strong>{ot('Request permit activation')}</strong>
+                        <span>{ot('Current assigned crew are frozen into the approval snapshot.')}</span>
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-type">Permit type</label>
+                        <label htmlFor="work-permit-type">{ot('Permit type')}</label>
                         <select id="work-permit-type" disabled={workPermitLoading || submitting} value={workPermitDraft.permitType} onChange={(event) => updateWorkPermitDraft('permitType', event.target.value)}>
-                          <option value="general_work">General work</option>
-                          <option value="hot_work">Hot work</option>
-                          <option value="confined_space">Confined space</option>
-                          <option value="electrical_isolation">Electrical isolation</option>
-                          <option value="excavation">Excavation</option>
-                          <option value="lifting">Lifting</option>
-                          <option value="work_at_height">Work at height</option>
+                          <option value="general_work">{ot('General work')}</option>
+                          <option value="hot_work">{ot('Hot work')}</option>
+                          <option value="confined_space">{ot('Confined space')}</option>
+                          <option value="electrical_isolation">{ot('Electrical isolation')}</option>
+                          <option value="excavation">{ot('Excavation')}</option>
+                          <option value="lifting">{ot('Lifting')}</option>
+                          <option value="work_at_height">{ot('Work at height')}</option>
                         </select>
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-title">Title</label>
+                        <label htmlFor="work-permit-title">{ot('Title')}</label>
                         <input id="work-permit-title" required disabled={workPermitLoading || submitting} minLength="3" maxLength="240" value={workPermitDraft.title} onChange={(event) => updateWorkPermitDraft('title', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-location">Location</label>
+                        <label htmlFor="work-permit-location">{ot('Location')}</label>
                         <input id="work-permit-location" disabled={workPermitLoading || submitting} maxLength="240" value={workPermitDraft.location} onChange={(event) => updateWorkPermitDraft('location', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-valid-from">Valid from</label>
+                        <label htmlFor="work-permit-valid-from">{ot('Valid from')}</label>
                         <input id="work-permit-valid-from" required disabled={workPermitLoading || submitting} type="datetime-local" value={workPermitDraft.validFrom} onChange={(event) => updateWorkPermitDraft('validFrom', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-expires-at">Expires</label>
+                        <label htmlFor="work-permit-expires-at">{ot('Expires')}</label>
                         <input id="work-permit-expires-at" required disabled={workPermitLoading || submitting} type="datetime-local" value={workPermitDraft.expiresAt} onChange={(event) => updateWorkPermitDraft('expiresAt', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-source-evidence">Source evidence</label>
+                        <label htmlFor="work-permit-source-evidence">{ot('Source evidence')}</label>
                         <input id="work-permit-source-evidence" required disabled={workPermitLoading || submitting} minLength="3" maxLength="240" value={workPermitDraft.sourceEvidence} onChange={(event) => updateWorkPermitDraft('sourceEvidence', event.target.value)} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-hazards">Hazards</label>
-                        <textarea id="work-permit-hazards" required disabled={workPermitLoading || submitting} minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => updateWorkPermitDraft('hazards', event.target.value)} placeholder="One retained hazard per line" />
+                        <label htmlFor="work-permit-hazards">{ot('Hazards')}</label>
+                        <textarea id="work-permit-hazards" required disabled={workPermitLoading || submitting} minLength="2" maxLength="4000" value={workPermitDraft.hazards} onChange={(event) => updateWorkPermitDraft('hazards', event.target.value)} placeholder={ot('One retained hazard per line')} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-controls">Controls</label>
-                        <textarea id="work-permit-controls" required disabled={workPermitLoading || submitting} minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => updateWorkPermitDraft('controls', event.target.value)} placeholder="One retained control per line" />
+                        <label htmlFor="work-permit-controls">{ot('Controls')}</label>
+                        <textarea id="work-permit-controls" required disabled={workPermitLoading || submitting} minLength="2" maxLength="4000" value={workPermitDraft.controls} onChange={(event) => updateWorkPermitDraft('controls', event.target.value)} placeholder={ot('One retained control per line')} />
                       </div>
                       <div className="work-permit-field">
-                        <label htmlFor="work-permit-conditions">Conditions</label>
-                        <textarea id="work-permit-conditions" disabled={workPermitLoading || submitting} maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => updateWorkPermitDraft('conditions', event.target.value)} placeholder="One stop or revalidation condition per line" />
+                        <label htmlFor="work-permit-conditions">{ot('Conditions')}</label>
+                        <textarea id="work-permit-conditions" disabled={workPermitLoading || submitting} maxLength="4000" value={workPermitDraft.conditions} onChange={(event) => updateWorkPermitDraft('conditions', event.target.value)} placeholder={ot('One stop or revalidation condition per line')} />
                       </div>
-                      <button className="secondary-button" disabled={workPermitLoading || submitting || !workPermitDraft.jobId}><Plus size={16} /> Request approval</button>
+                      <button className="secondary-button" disabled={workPermitLoading || submitting || !workPermitDraft.jobId}><Plus size={16} /> {ot('Request approval')}</button>
                     </form>
                   ) : null}
-                  <p className="attendance-policy">Permit readiness is derived from approval, validity, retained integrity, and every assigned worker acknowledgement. Changed conditions require stop work and a current permit.</p>
+                  <p className="attendance-policy">{ot('Permit readiness is derived from approval, validity, retained integrity, and every assigned worker acknowledgement. Changed conditions require stop work and a current permit.')}</p>
                 </section>
                 <section className="equipment-handoff-control" data-testid="field-equipment-custody">
                   <div className="panel-heading">
@@ -14241,18 +14262,18 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Retained crew record</p>
-                <h2 id="worker-editor-title">{workerDraft.id ? `Edit ${workerDraft.name || 'crew member'}` : 'Add crew member'}</h2>
-                <p>Identity, availability, skills, and internal cost evidence for resource planning.</p>
+                <p className="eyebrow">{ot('Retained crew record')}</p>
+                <h2 id="worker-editor-title">{workerDraft.id ? ot('Edit {name}', { name: workerDraft.name || ot('crew member') }) : ot('Add crew member')}</h2>
+                <p>{ot('Identity, availability, skills, and internal cost evidence for resource planning.')}</p>
               </div>
-              <button className="icon-button" aria-label="Close crew member editor" onClick={closeWorkerEditor}>
+              <button className="icon-button" aria-label={ot('Close crew member editor')} onClick={closeWorkerEditor}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={saveWorker}>
               <div className="form-grid worker-form">
                 <label className="form-span">
-                  Full name
+                  {ot('Full name')}
                   <input
                     autoFocus
                     required
@@ -14262,27 +14283,27 @@ function App() {
                   />
                 </label>
                 <label>
-                  Role or trade
+                  {ot('Role or trade')}
                   <input
                     value={workerDraft.role}
                     onChange={(event) => setWorkerDraft({ ...workerDraft, role: event.target.value })}
-                    placeholder="Carpenter, site lead, electrician"
+                    placeholder={ot('Carpenter, site lead, electrician')}
                   />
                 </label>
                 <label>
-                  Availability status
+                  {ot('Availability status')}
                   <select value={workerDraft.status} onChange={(event) => setWorkerDraft({ ...workerDraft, status: event.target.value })}>
-                    <option value="available">Available</option>
-                    <option value="busy">Busy</option>
-                    <option value="traveling">Traveling</option>
-                    <option value="offline">Offline</option>
-                    <option value="on_leave">On leave</option>
-                    <option value="on_hold">On hold</option>
-                    <option value="inactive">Inactive</option>
+                    <option value="available">{ot('Available')}</option>
+                    <option value="busy">{ot('Busy')}</option>
+                    <option value="traveling">{ot('Traveling')}</option>
+                    <option value="offline">{ot('Offline')}</option>
+                    <option value="on_leave">{ot('On leave')}</option>
+                    <option value="on_hold">{ot('On hold')}</option>
+                    <option value="inactive">{ot('Inactive')}</option>
                   </select>
                 </label>
                 <label>
-                  Email
+                  {ot('Email')}
                   <input
                     type="email"
                     value={workerDraft.email}
@@ -14290,11 +14311,11 @@ function App() {
                   />
                 </label>
                 <label>
-                  Phone
+                  {ot('Phone')}
                   <input value={workerDraft.phone} onChange={(event) => setWorkerDraft({ ...workerDraft, phone: event.target.value })} />
                 </label>
                 <label>
-                  Home region
+                  {ot('Home region')}
                   <input
                     value={workerDraft.homeRegion}
                     onChange={(event) => setWorkerDraft({ ...workerDraft, homeRegion: event.target.value })}
@@ -14302,7 +14323,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  Hourly cost rate (EUR)
+                  {ot('Hourly cost rate (EUR)')}
                   <input
                     type="number"
                     min="0"
@@ -14312,28 +14333,28 @@ function App() {
                   />
                 </label>
                 <label className="form-span">
-                  Skills
+                  {ot('Skills')}
                   <input
                     value={workerDraft.skills}
                     onChange={(event) => setWorkerDraft({ ...workerDraft, skills: event.target.value })}
-                    placeholder="Carpentry, renovation, electrical installation"
+                    placeholder={ot('Carpentry, renovation, electrical installation')}
                   />
                 </label>
                 <label className="form-span">
-                  Internal notes
+                  {ot('Internal notes')}
                   <textarea
                     value={workerDraft.notes}
                     onChange={(event) => setWorkerDraft({ ...workerDraft, notes: event.target.value })}
-                    placeholder="Record restrictions or resource planning context. Use Qualifications for certificate evidence."
+                    placeholder={ot('Record restrictions or resource planning context. Use Qualifications for certificate evidence.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  Saving this record does not contact the crew member, submit payroll, clear site access, or commit a schedule.
+                  {ot('Saving this record does not contact the crew member, submit payroll, clear site access, or commit a schedule.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeWorkerEditor}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"
@@ -14344,7 +14365,7 @@ function App() {
                   }
                 >
                   <ShieldCheck size={16} />
-                  {submitting ? 'Saving...' : 'Save retained crew member'}
+                  {submitting ? ot('Saving...') : ot('Save retained crew member')}
                 </button>
               </div>
             </form>
@@ -14366,13 +14387,13 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-gated lifecycle</p>
-                <h2 id="worker-retirement-title">Request crew retirement</h2>
+                <p className="eyebrow">{ot('Approval-gated lifecycle')}</p>
+                <h2 id="worker-retirement-title">{ot('Request crew retirement')}</h2>
                 <p>
-                  {workerRetirement.name} / {workerRetirement.role || 'Role not retained'}
+                  {workerRetirement.name} / {workerRetirement.role || ot('Role not retained')}
                 </p>
               </div>
-              <button className="icon-button" aria-label="Close crew retirement request" onClick={closeWorkerRetirement}>
+              <button className="icon-button" aria-label={ot('Close crew retirement request')} onClick={closeWorkerRetirement}>
                 <X size={18} />
               </button>
             </div>
@@ -14381,29 +14402,31 @@ function App() {
                 <div className="job-lifecycle-effect">
                   <Archive size={20} />
                   <div>
-                    <strong>Block this crew member from new assignments</strong>
+                    <strong>{ot('Block this crew member from new assignments')}</strong>
                     <p>
-                      The retained status changes to retired only after approval and after all operational assignments have been released or
-                      reassigned.
+                      {ot('The retained status changes to retired only after approval and after all operational assignments have been released or reassigned.')}
                     </p>
                   </div>
                 </div>
                 <ul className="job-lifecycle-safeguards">
-                  <li>The complete crew, assignment, time, approval, and audit history remains retained.</li>
-                  <li>New assignments are blocked as soon as this request enters the approval queue.</li>
+                  <li>{ot('The complete crew, assignment, time, approval, and audit history remains retained.')}</li>
+                  <li>{ot('New assignments are blocked as soon as this request enters the approval queue.')}</li>
                   <li>
                     {workerRetirement.activeAssignmentCount > 0
-                      ? `Approval cannot complete while ${workerRetirement.activeAssignmentCount} operational assignment${workerRetirement.activeAssignmentCount === 1 ? '' : 's'} remain.`
-                      : 'No operational assignments currently block this retirement.'}
+                      ? ot('Approval cannot complete while {count} operational assignment(s) remain.', { count: workerRetirement.activeAssignmentCount })
+                      : ot('No operational assignments currently block this retirement.')}
                   </li>
                   {workerRetirement.dormantAssignmentCount > 0 ? (
                     <li>
-                      Approval will release {workerRetirement.dormantAssignmentCount} dormant assignment
-                      {workerRetirement.dormantAssignmentCount === 1 ? '' : 's'} retained on inactive jobs, so any later job restore
-                      requires reassignment.
+                      {ot(
+                        workerRetirement.dormantAssignmentCount === 1
+                          ? 'Approval will release {count} dormant assignment retained on inactive jobs, so any later job restore requires reassignment.'
+                          : 'Approval will release {count} dormant assignments retained on inactive jobs, so any later job restore requires reassignment.',
+                        { count: workerRetirement.dormantAssignmentCount },
+                      )}
                     </li>
                   ) : null}
-                  <li>No crew member, client, payroll provider, or site contact is notified.</li>
+                  <li>{ot('No crew member, client, payroll provider, or site contact is notified.')}</li>
                 </ul>
                 <label>
                   Operational reason
@@ -14413,7 +14436,7 @@ function App() {
                     minLength="8"
                     value={workerRetirementReason}
                     onChange={(event) => setWorkerRetirementReason(event.target.value)}
-                    placeholder="Explain why this person should no longer be selected for new work."
+                    placeholder={ot('Explain why this person should no longer be selected for new work.')}
                   />
                 </label>
               </div>
@@ -14445,53 +14468,53 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-backed qualification evidence</p>
-                <h2 id="credential-editor-title">Add credential for {credentialEditor.name}</h2>
-                <p>Retain the source identity and validity dates. Approval verifies this revision before readiness can rely on it.</p>
+                <p className="eyebrow">{ot('Approval-backed qualification evidence')}</p>
+                <h2 id="credential-editor-title">{ot('Add credential for {name}', { name: credentialEditor.name })}</h2>
+                <p>{ot('Retain the source identity and validity dates. Approval verifies this revision before readiness can rely on it.')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close credential editor" onClick={closeCredentialEditor}>
+              <button type="button" className="icon-button" aria-label={ot('Close credential editor')} onClick={closeCredentialEditor}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitWorkerCredential}>
               <div className="form-grid qualification-form">
                 <label>
-                  Credential type
+                  {ot('Credential type')}
                   <select autoFocus value={credentialDraft.credentialType} onChange={(event) => setCredentialDraft({ ...credentialDraft, credentialType: event.target.value })}>
-                    {(data.qualificationRegister?.catalog?.credentials || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                    {(data.qualificationRegister?.catalog?.credentials || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{ot(item.label)}</option>)}
                   </select>
                 </label>
                 <label>
-                  Retained title
-                  <input value={credentialDraft.title} onChange={(event) => setCredentialDraft({ ...credentialDraft, title: event.target.value })} placeholder="Uses the credential type when blank" />
+                  {ot('Retained title')}
+                  <input value={credentialDraft.title} onChange={(event) => setCredentialDraft({ ...credentialDraft, title: event.target.value })} placeholder={ot('Uses the credential type when blank')} />
                 </label>
                 <label>
-                  Issuer
-                  <input value={credentialDraft.issuer} onChange={(event) => setCredentialDraft({ ...credentialDraft, issuer: event.target.value })} placeholder="Training or examination authority" />
+                  {ot('Issuer')}
+                  <input value={credentialDraft.issuer} onChange={(event) => setCredentialDraft({ ...credentialDraft, issuer: event.target.value })} placeholder={ot('Training or examination authority')} />
                 </label>
                 <label>
-                  Credential number
+                  {ot('Credential number')}
                   <input value={credentialDraft.credentialNumber} onChange={(event) => setCredentialDraft({ ...credentialDraft, credentialNumber: event.target.value })} />
                 </label>
                 <label>
-                  Issued on
+                  {ot('Issued on')}
                   <input type="date" max={new Date().toISOString().slice(0, 10)} value={credentialDraft.issuedOn} onChange={(event) => setCredentialDraft({ ...credentialDraft, issuedOn: event.target.value })} />
                 </label>
                 <label>
-                  Expires on
+                  {ot('Expires on')}
                   <input type="date" min={credentialDraft.issuedOn || undefined} value={credentialDraft.expiresOn} onChange={(event) => setCredentialDraft({ ...credentialDraft, expiresOn: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Evidence reference
-                  <textarea required minLength="4" maxLength="500" value={credentialDraft.evidenceReference} onChange={(event) => setCredentialDraft({ ...credentialDraft, evidenceReference: event.target.value })} placeholder="Certificate file, provider register reference, or retained verification source" />
+                  {ot('Evidence reference')}
+                  <textarea required minLength="4" maxLength="500" value={credentialDraft.evidenceReference} onChange={(event) => setCredentialDraft({ ...credentialDraft, evidenceReference: event.target.value })} placeholder={ot('Certificate file, provider register reference, or retained verification source')} />
                 </label>
-                <p className="workflow-note form-span">Submitting creates an immutable pending revision. Contractor.AI does not issue, renew, or contact a certificate authority.</p>
+                <p className="workflow-note form-span">{ot('Submitting creates an immutable pending revision. Contractor.AI does not issue, renew, or contact a certificate authority.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeCredentialEditor}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeCredentialEditor}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || credentialDraft.evidenceReference.trim().length < 4}>
                   <ShieldCheck size={16} />
-                  {submitting ? 'Submitting...' : 'Request evidence verification'}
+                  {submitting ? ot('Submitting...') : ot('Request evidence verification')}
                 </button>
               </div>
             </form>
@@ -14513,48 +14536,48 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Job readiness control</p>
-                <h2 id="qualification-requirement-title">Add qualification requirement</h2>
-                <p>This immediately adds a retained readiness gate for matching assigned roles.</p>
+                <p className="eyebrow">{ot('Job readiness control')}</p>
+                <h2 id="qualification-requirement-title">{ot('Add qualification requirement')}</h2>
+                <p>{ot('This immediately adds a retained readiness gate for matching assigned roles.')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close qualification requirement editor" onClick={closeQualificationRequirementEditor}>
+              <button type="button" className="icon-button" aria-label={ot('Close qualification requirement editor')} onClick={closeQualificationRequirementEditor}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitQualificationRequirement}>
               <div className="form-grid qualification-form">
                 <label className="form-span">
-                  Job
+                  {ot('Job')}
                   <select autoFocus required value={qualificationRequirementDraft.jobId} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, jobId: event.target.value })}>
-                    <option value="">Select a retained job</option>
+                    <option value="">{ot('Select a retained job')}</option>
                     {jobs.filter((job) => !['archived', 'cancelled', 'rejected'].includes(job.status)).map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                   </select>
                 </label>
                 <label>
-                  Requirement type
+                  {ot('Requirement type')}
                   <select value={qualificationRequirementDraft.credentialType} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, credentialType: event.target.value })}>
-                    {(data.qualificationRegister?.catalog?.requirements || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                    {(data.qualificationRegister?.catalog?.requirements || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{ot(item.label)}</option>)}
                   </select>
                 </label>
                 <label>
-                  Applies to role
-                  <input value={qualificationRequirementDraft.role} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, role: event.target.value })} placeholder="Blank means all assigned roles" />
+                  {ot('Applies to role')}
+                  <input value={qualificationRequirementDraft.role} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, role: event.target.value })} placeholder={ot('Blank means all assigned roles')} />
                 </label>
                 <label className="form-span">
-                  Requirement title
-                  <input value={qualificationRequirementDraft.title} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, title: event.target.value })} placeholder="Uses the requirement type when blank" />
+                  {ot('Requirement title')}
+                  <input value={qualificationRequirementDraft.title} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, title: event.target.value })} placeholder={ot('Uses the requirement type when blank')} />
                 </label>
                 <label className="checkbox-control form-span">
                   <input type="checkbox" checked={qualificationRequirementDraft.mandatory} onChange={(event) => setQualificationRequirementDraft({ ...qualificationRequirementDraft, mandatory: event.target.checked })} />
-                  <span>Block dispatch, site access, and attendance when evidence is missing or expired</span>
+                  <span>{ot('Block dispatch, site access, and attendance when evidence is missing or expired')}</span>
                 </label>
-                <p className="workflow-note form-span">Removing a retained requirement later needs an approval and does not delete credential history.</p>
+                <p className="workflow-note form-span">{ot('Removing a retained requirement later needs an approval and does not delete credential history.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeQualificationRequirementEditor}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeQualificationRequirementEditor}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !qualificationRequirementDraft.jobId}>
                   <LockKeyhole size={16} />
-                  {submitting ? 'Saving...' : 'Enforce requirement'}
+                  {submitting ? ot('Saving...') : ot('Enforce requirement')}
                 </button>
               </div>
             </form>
@@ -14576,11 +14599,11 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-gated safety change</p>
-                <h2 id="qualification-retirement-title">Request requirement removal</h2>
+                <p className="eyebrow">{ot('Approval-gated safety change')}</p>
+                <h2 id="qualification-retirement-title">{ot('Request requirement removal')}</h2>
                 <p>{qualificationRequirementRetirement.title} / {qualificationRequirementRetirement.jobTitle}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close qualification removal request" onClick={closeQualificationRequirementRetirement}>
+              <button type="button" className="icon-button" aria-label={ot('Close qualification removal request')} onClick={closeQualificationRequirementRetirement}>
                 <X size={18} />
               </button>
             </div>
@@ -14589,20 +14612,20 @@ function App() {
                 <div className="job-lifecycle-effect">
                   <TriangleAlert size={20} />
                   <div>
-                    <strong>Stop enforcing this readiness gate after approval</strong>
-                    <p>The requirement remains active while the decision is pending. Rejection or cancellation restores its normal active state.</p>
+                    <strong>{ot('Stop enforcing this readiness gate after approval')}</strong>
+                    <p>{ot('The requirement remains active while the decision is pending. Rejection or cancellation restores its normal active state.')}</p>
                   </div>
                 </div>
                 <label>
-                  Operational reason
-                  <textarea autoFocus required minLength="8" value={qualificationRequirementRetirementReason} onChange={(event) => setQualificationRequirementRetirementReason(event.target.value)} placeholder="Reference the accepted scope or safety-plan change." />
+                  {ot('Operational reason')}
+                  <textarea autoFocus required minLength="8" value={qualificationRequirementRetirementReason} onChange={(event) => setQualificationRequirementRetirementReason(event.target.value)} placeholder={ot('Reference the accepted scope or safety-plan change.')} />
                 </label>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeQualificationRequirementRetirement}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeQualificationRequirementRetirement}>{ot('Cancel')}</button>
                 <button className="danger-button" disabled={submitting || qualificationRequirementRetirementReason.trim().length < 8}>
                   <Archive size={16} />
-                  {submitting ? 'Submitting...' : 'Request removal approval'}
+                  {submitting ? ot('Submitting...') : ot('Request removal approval')}
                 </button>
               </div>
             </form>
@@ -14624,54 +14647,54 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Operational capacity ledger</p>
-                <h2 id="availability-editor-title">Add worker unavailability</h2>
-                <p>The retained time window blocks overlapping scheduling immediately without creating a message, payroll record, or HR case.</p>
+                <p className="eyebrow">{ot('Operational capacity ledger')}</p>
+                <h2 id="availability-editor-title">{ot('Add worker unavailability')}</h2>
+                <p>{ot('The retained time window blocks overlapping scheduling immediately without creating a message, payroll record, or HR case.')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close availability editor" onClick={closeAvailabilityEditor}>
+              <button type="button" className="icon-button" aria-label={ot('Close availability editor')} onClick={closeAvailabilityEditor}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitWorkerAvailability}>
               <div className="form-grid availability-form">
                 <label className="form-span">
-                  Worker
+                  {ot('Worker')}
                   <select autoFocus required value={availabilityDraft.workerId} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, workerId: event.target.value })}>
-                    <option value="">Select retained worker</option>
+                    <option value="">{ot('Select retained worker')}</option>
                     {(data.workers || EMPTY_LIST).filter((worker) => worker.status !== 'retired' && !worker.retirementApprovalId).map((worker) => (
-                      <option key={worker.id} value={worker.id}>{worker.name} / {worker.role || 'Role not retained'}</option>
+                      <option key={worker.id} value={worker.id}>{worker.name} / {worker.role || ot('Role not retained')}</option>
                     ))}
                   </select>
                 </label>
                 <label>
-                  Operational type
+                  {ot('Operational type')}
                   <select value={availabilityDraft.periodType} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, periodType: event.target.value })}>
-                    {(data.availabilityRegister?.catalog || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                    {(data.availabilityRegister?.catalog || EMPTY_LIST).map((item) => <option key={item.key} value={item.key}>{ot(item.label)}</option>)}
                   </select>
                 </label>
                 <label>
-                  Display title
-                  <input maxLength="160" value={availabilityDraft.title} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, title: event.target.value })} placeholder="Uses the operational type when blank" />
+                  {ot('Display title')}
+                  <input maxLength="160" value={availabilityDraft.title} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, title: event.target.value })} placeholder={ot('Uses the operational type when blank')} />
                 </label>
                 <label>
-                  Starts
+                  {ot('Starts')}
                   <input required type="datetime-local" value={availabilityDraft.startsAt} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, startsAt: event.target.value })} />
                 </label>
                 <label>
-                  Ends
+                  {ot('Ends')}
                   <input required type="datetime-local" min={availabilityDraft.startsAt || undefined} value={availabilityDraft.endsAt} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, endsAt: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Operational note
-                  <textarea maxLength="1000" value={availabilityDraft.notes} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, notes: event.target.value })} placeholder="Capacity or planning context only" />
+                  {ot('Operational note')}
+                  <textarea maxLength="1000" value={availabilityDraft.notes} onChange={(event) => setAvailabilityDraft({ ...availabilityDraft, notes: event.target.value })} placeholder={ot('Capacity or planning context only')} />
                 </label>
-                <p className="workflow-note form-span">Do not enter diagnosis, illness, medical details, payroll entitlement, HR case information, or location tracking data.</p>
+                <p className="workflow-note form-span">{ot('Do not enter diagnosis, illness, medical details, payroll entitlement, HR case information, or location tracking data.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeAvailabilityEditor}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeAvailabilityEditor}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !availabilityDraft.workerId || !availabilityDraft.startsAt || !availabilityDraft.endsAt}>
                   <CalendarOff size={16} />
-                  {submitting ? 'Saving...' : 'Block availability window'}
+                  {submitting ? ot('Saving...') : ot('Block availability window')}
                 </button>
               </div>
             </form>
@@ -14693,11 +14716,11 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-backed capacity change</p>
-                <h2 id="availability-cancellation-title">Request availability cancellation</h2>
+                <p className="eyebrow">{ot('Approval-backed capacity change')}</p>
+                <h2 id="availability-cancellation-title">{ot('Request availability cancellation')}</h2>
                 <p>{availabilityCancellation.workerName} / {availabilityCancellation.title}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close availability cancellation" onClick={closeAvailabilityCancellation}>
+              <button type="button" className="icon-button" aria-label={ot('Close availability cancellation')} onClick={closeAvailabilityCancellation}>
                 <X size={18} />
               </button>
             </div>
@@ -14706,20 +14729,20 @@ function App() {
                 <div className="job-lifecycle-effect">
                   <TriangleAlert size={20} />
                   <div>
-                    <strong>Remove this scheduling block only after approval</strong>
-                    <p>{formatDateTime(availabilityCancellation.startsAt)} to {formatDateTime(availabilityCancellation.endsAt)} remains unavailable while review is pending.</p>
+                    <strong>{ot('Remove this scheduling block only after approval')}</strong>
+                    <p>{ot('{start} to {end} remains unavailable while review is pending.', { start: formatDateTime(availabilityCancellation.startsAt), end: formatDateTime(availabilityCancellation.endsAt) })}</p>
                   </div>
                 </div>
                 <label>
-                  Operational reason
-                  <textarea autoFocus required minLength="8" maxLength="1000" value={availabilityCancellationReason} onChange={(event) => setAvailabilityCancellationReason(event.target.value)} placeholder="Explain the verified planning change." />
+                  {ot('Operational reason')}
+                  <textarea autoFocus required minLength="8" maxLength="1000" value={availabilityCancellationReason} onChange={(event) => setAvailabilityCancellationReason(event.target.value)} placeholder={ot('Explain the verified planning change.')} />
                 </label>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeAvailabilityCancellation}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeAvailabilityCancellation}>{ot('Cancel')}</button>
                 <button className="danger-button" disabled={submitting || availabilityCancellationReason.trim().length < 8}>
                   <Ban size={16} />
-                  {submitting ? 'Submitting...' : 'Request cancellation approval'}
+                  {submitting ? ot('Submitting...') : ot('Request cancellation approval')}
                 </button>
               </div>
             </form>
@@ -15561,7 +15584,7 @@ function App() {
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeTradePartnerEditor}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button className="primary-button" disabled={submitting || !tradePartnerDraft.name.trim()}>
                   <ShieldCheck size={16} />
@@ -15625,7 +15648,7 @@ function App() {
                 </button>
                 <button className="danger-button" disabled={submitting || tradePartnerRetirementReason.trim().length < 8}>
                   <Archive size={16} />
-                  {submitting ? 'Submitting...' : 'Request retirement approval'}
+                  {submitting ? ot('Submitting...') : ot('Request retirement approval')}
                 </button>
               </div>
             </form>

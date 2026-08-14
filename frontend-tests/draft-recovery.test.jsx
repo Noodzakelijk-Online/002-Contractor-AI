@@ -19,6 +19,12 @@ function DraftHarness({ scope = 'owner:one' }) {
   return <label>Title<input value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })} /></label>
 }
 
+function ClearableDraftHarness({ scope = 'owner:one' }) {
+  const [draft, setDraft] = useState({ id: null })
+  useSessionDraftRecovery({ enabled: true, scope, name: 'worker-editor', value: draft, setValue: setDraft, delayMs: 200 })
+  return <button type="button" onClick={() => setDraft(null)}>Close saved editor</button>
+}
+
 describe('session draft recovery', () => {
   beforeEach(() => {
     vi.useRealTimers()
@@ -32,6 +38,16 @@ describe('session draft recovery', () => {
 
     render(<DraftHarness />)
     expect(await screen.findByDisplayValue('Recovered intake')).toBeTruthy()
+  })
+
+  it('removes a closed editor immediately instead of reopening a stale draft on reload', async () => {
+    const key = draftStorageKey('owner:one', 'worker-editor')
+    writeSessionDraft(window.sessionStorage, 'owner:one', 'worker-editor', { id: null }, Date.now())
+    render(<ClearableDraftHarness />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Close saved editor' }))
+
+    expect(window.sessionStorage.getItem(key)).toBeNull()
   })
 
   it('keeps drafts separated by authenticated operator scope', () => {

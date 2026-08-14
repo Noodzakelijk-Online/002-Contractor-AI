@@ -150,10 +150,12 @@ external-provider engines.
    retained in the ledger. The shell, client portal, Performance Scorecard, and
    Framework Register are bilingual and formatting follows the selected locale.
    Owner onboarding/identity, managed team access, autonomous safety, QA archive
-   maintenance, job setup coverage, critical-path work planning, NCR, field risk,
-   field assurance, tender comparison, purchasing, job-costing, cost-code review,
-   cost-to-complete, and finance-readiness controls are also bilingual, but the
-   remaining specialist operator workspace copy is not yet fully translated.
+   maintenance, workforce directory, qualification evidence, availability,
+   governed work permits, job setup coverage, critical-path work planning, NCR,
+   field risk, field assurance, tender comparison, purchasing, job-costing,
+   cost-code review, cost-to-complete, and finance-readiness controls are also
+   bilingual, but remaining specialist operator workspace copy is not yet fully
+   translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.

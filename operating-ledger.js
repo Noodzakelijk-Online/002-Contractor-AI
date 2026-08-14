@@ -40225,7 +40225,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       && attendanceSummary.expected === 0
       && attendanceSummary.integrityFailures === 0;
     const blockers = [
-      ...(row.status !== 'active' ? [{ type: 'permit_not_active', message: `Permit status is ${row.status}.` }] : []),
+      ...(row.status !== 'active' ? [{ type: 'permit_not_active', status: row.status, message: `Permit status is ${row.status}.` }] : []),
       ...(notStarted ? [{ type: 'permit_not_started', message: 'The permit validity window has not started.' }] : []),
       ...(expired ? [{ type: 'permit_expired', message: 'The permit validity window has expired.' }] : []),
       ...(!definitionIntegrityValid ? [{ type: 'permit_definition_integrity', message: 'The retained permit definition does not match its approved snapshot.' }] : []),

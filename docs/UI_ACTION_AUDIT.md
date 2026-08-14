@@ -49,6 +49,10 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Business identity, material receiving, safety briefing, work permit, LMRA,
   environmental, expense, and daily-cycle forms keep the active job/draft stable
   during background refreshes and disable affected controls while loading.
+- Workforce records, qualification evidence, availability, and work permits now
+  expose complete Dutch and English controls while preserving retained evidence;
+  closing a saved editor clears its recovery record immediately, and permit lists
+  preserve punctuation by treating only line breaks as item boundaries.
 - Field assurance, NCR, and observation/incident controls now share the retained
   operator locale, preserve operator evidence verbatim, expose localized governed
   actions, and remain contained on narrow field-worker screens.

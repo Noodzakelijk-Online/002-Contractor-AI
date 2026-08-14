@@ -5,6 +5,13 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- Localized the complete workforce-readiness chain: retained crew records,
+  qualification requirements and credential evidence, operational availability,
+  assignment safeguards, and governed work permits through approval, worker
+  acknowledgement, suspension, and closeout. Canonical evidence remains verbatim.
+- Fixed stale editor recovery after successful saves, comma corruption in
+  line-delimited permit evidence, singular/plural lifecycle copy, and shared WCAG
+  contrast failures across resource and field workspaces.
 - Localized owner business onboarding and identity, managed team access, autonomous
   safety controls, and QA archive maintenance. Added a Dutch mobile owner journey
   covering retained identity, one-time access-key handling, key rotation,

@@ -1,5 +1,22 @@
 # Codex Worklog
 
+## 2026-08-14 - Workforce readiness and governed permits bilingual pass
+
+- Localized crew creation/editing/retirement, qualification requirements,
+  credential evidence, availability windows, and work permits without translating
+  retained names, roles, notes, source references, hazards, controls, or conditions.
+- Added a Dutch retained-evidence browser journey through assignment approval,
+  qualification verification, availability, permit approval, worker acknowledgement,
+  suspension, closeout, mobile containment, English round trip, axe, and empty logs.
+- Browser debugging found and fixed stale saved-editor recovery, under-contrast
+  resource/field metadata, comma-split permit instructions, and invalid singular
+  copy in permit blockers and dormant-assignment retirement safeguards.
+- Current-source gates pass: 3,540 unique specialist translation keys with zero
+  duplicates; 11 frontend tests; 535 Node tests (499 passed and 36 PostgreSQL or
+  environment skips) in 96.8 seconds; all 100 Chromium workflows in 25 isolated
+  batches in 508.2 seconds; release/HAI/lint/build/bundle at 461,958 total gzip
+  bytes; production benchmark; hardened container; and Node 22.23.2 Windows package.
+
 ## 2026-08-14 - Owner administration bilingual and browser standards pass
 
 - Localized business onboarding and retained identity, managed team access,

@@ -133,6 +133,10 @@ test('work permits require approval and every assigned worker acknowledgement be
   assert.equal(suspended.stopWorkImmediate, true);
   assert.equal(suspended.permit.status, 'suspended');
   assert.equal(suspended.permit.readyForWork, false);
+  assert.deepEqual(
+    suspended.permit.blockers.find(blocker => blocker.type === 'permit_not_active'),
+    { type: 'permit_not_active', status: 'suspended', message: 'Permit status is suspended.' }
+  );
   const suspensionReplay = ledger.suspendWorkPermit(job.id, active.id, {
     entryKey: 'permit-suspension-lifecycle-001',
     reason: 'Ventilation stopped during hot work.',

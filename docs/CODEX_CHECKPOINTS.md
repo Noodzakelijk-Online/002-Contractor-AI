@@ -3,6 +3,20 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-25 Bilingual workforce readiness and governed work permits
+
+- Crew records, qualifications, availability, assignment safeguards, and governed
+  permits now share the persisted NL/EN locale while retained evidence stays exact.
+- Permit approval, assigned-worker acknowledgement, stop-work suspension, closeout,
+  and autonomous blockers remain structured, approval-gated, and ledger-only.
+- Browser QA covers the Dutch lifecycle, exact API readback, English round trip,
+  accessibility, mobile containment, and empty console errors. It also closed stale
+  saved-editor recovery, list punctuation, contrast, and pluralization defects.
+- Verification: 3,540 unique specialist translation keys with zero duplicates;
+  11 frontend tests; 535 Node tests; 100 Chromium workflows in 25 isolated batches;
+  release/HAI/lint/build/bundle; production benchmark; hardened container; and
+  Node 22.23.2 Windows standalone gates pass.
+
 ## CP-24 Bilingual owner administration and safety controls
 
 - Business onboarding and identity, managed local team access, autonomous safety

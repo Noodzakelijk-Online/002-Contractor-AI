@@ -18,14 +18,14 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --omit=dev --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 338 canonical source files; generated release/runtime/artifact directories excluded |
+| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 339 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier produced the checksummed `accountfeed.GenericItem` review-only fixture with `canExecute=false`; a live HAI parser/account-feed sync was not configured for this run |
-| Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 10 locale/component tests, 0 failed |
-| Node tests | Passed | Isolated suite: 535 tests, 499 passed, 36 PostgreSQL/environment skips, 0 failed, 70.1 s |
-| Production build | Passed | `npm run build`: main application JS 544.77 kB and CSS 275.07 kB before gzip; the base locale remains 12.79 kB JS and the expanded 229.26 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 241.70 kB JS |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 544,766 bytes, largest CSS 275,070 bytes, and 455,338 total gzip bytes across 39 assets; all budgets passed |
-| Production-scale ledger | Passed | The retained deterministic production profile passed its correctness/resource/latency thresholds: dashboard p95 422.59 ms, canonical intake p95 47.81 ms, startup 230.67 ms, reopen 4.79 ms, and audit verification p95 242.43 ms. |
-| Browser tests | Passed | All 99 Playwright Chromium workflows passed on current source in 25 bounded isolated batches in 498.2 s |
+| Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 11 locale/component tests, 0 failed |
+| Node tests | Passed | Isolated suite: 535 tests, 499 passed, 36 PostgreSQL/environment skips, 0 failed, 96.8 s |
+| Production build | Passed | `npm run build`: main application JS 547.10 kB and CSS 275.21 kB before gzip; the base locale remains 12.88 kB JS and the expanded 252.29 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 241.70 kB JS |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 547,097 bytes, largest CSS 275,210 bytes, and 461,958 total gzip bytes across 39 assets; all budgets passed |
+| Production-scale ledger | Passed | The retained deterministic production profile passed its correctness/resource/latency thresholds: dashboard p95 544.75 ms, canonical intake p95 44.46 ms, startup 232.91 ms, reopen 4.73 ms, and audit verification p95 255.61 ms. |
+| Browser tests | Passed | All 100 Playwright Chromium workflows passed on current source in 25 bounded isolated batches in 508.2 s |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
@@ -50,9 +50,10 @@ decisions outside this repository.
 | Audit actor integrity | Passed for authenticated role principals, scoped client portal identity, and local `local:owner`; all explicit mutation sites plus 65 former workflow-label fallbacks consume the trusted principal directly. Approval and authoritative operational provenance preserve that principal through retained decisions, downstream releases, chained history, and separation-of-duty checks. NCR closure retains both named and authenticated verifier identities and rejects self-approval. The release contract rejects body-derived actors, fallback routes, and submitted-first approval or operational principals |
 | Work-permit timing integrity | Passed with creation, readiness, and approval expiry bound to the injected ledger clock; deterministic expiry tests retain fail-closed approval behavior without wall-clock sleeps |
 | Draft recovery | Passed for reload restoration, operator isolation, portal-token fingerprinting, expiry/size bounds, secret/file exclusion, logout and intentional-close cleanup, no implicit ledger write, and explicit job-workspace navigation |
+| Workforce and work permits | Passed in Dutch and English through crew creation, assignment approval, qualification evidence approval, availability, permit approval, worker acknowledgement, stop-work suspension, closeout, exact retained API evidence, accessibility, and mobile containment |
 | In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error log; business identity/onboarding, managed team access, autonomous safety, QA maintenance, ICP/service-area, bid/no-bid, WBS/quantity takeoff, labour-burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates and formal variations, job setup coverage, critical-path work planning, crew-capacity/two-week planning, daily start/EOD reporting, production baseline/output/reversal, regiewerk quantity/acknowledgement/conversion, Last Planner, 5S, LMRA, installation/QC inspections, before/during/after photo evidence, NCRs, field observations/incidents, field assurance review, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls render in Dutch. Retained operator evidence remains verbatim across locale changes, while the complete portal, Performance Scorecard, Framework Register, site-survey, and practical-core persistence flows passed in Playwright. |
 | In-app Browser draft QA | Passed against the current built runtime: an unfinished opportunity restored exact values after reload, an intentional close cleared it, and no visible error state remained |
-| Responsive evidence | Desktop and narrow-screen geometry was inspected in prior in-app browser passes; owner administration, job summary, field-assurance, finance, procurement, and equipment workspaces retain exact mobile containment with localized label wrapping, and 99 automated workflows retain repeatable desktop/mobile interaction evidence. In-app local navigation remains blocked by Browser URL policy in this environment; the isolated production-browser harness passed the same built application. |
+| Responsive evidence | Desktop and narrow-screen geometry was inspected in prior in-app browser passes; owner administration, job summary, field-assurance, finance, procurement, equipment, workforce, and permit workspaces retain exact mobile containment with localized label wrapping, and 100 automated workflows retain repeatable desktop/mobile interaction evidence. In-app local navigation remains blocked by Browser URL policy in this environment; the isolated production-browser harness passed the same built application. |
 
 ## Confirmed limitations
 
@@ -76,7 +77,8 @@ decisions outside this repository.
   bid-package comparison, preferred-bidder selection, purchasing commitments,
   immutable purchase-order packages, verified provider receipts, business
   identity/onboarding, managed team access, autonomous safety control, QA archive
-  maintenance, equipment
+  maintenance, workforce directory, qualifications, availability, governed work
+  permits, equipment
   registration, inspection, maintenance, physical custody, quarantine return,
   and approval-gated retirement now have
   persisted NL/EN presentation with locale-aware dates, numbers, and currency.
@@ -96,7 +98,7 @@ decisions outside this repository.
 The performance gate retains a disposable deterministic production-scale fixture,
 historical-search and full-aggregate correctness checks, resource and latency
 thresholds, and a CI report artifact. The current production profile completed the
-representative dashboard at 422.59 ms p95 and a canonical intake at 47.81 ms p95
+representative dashboard at 544.75 ms p95 and a canonical intake at 44.46 ms p95
 while preserving the prior query and assembly optimizations.
 
 The publication record must add the pushed commit SHA and GitHub Actions run URL.

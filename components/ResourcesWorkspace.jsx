@@ -108,7 +108,7 @@ function WorkerDirectory({ t = identityText, workers, summary, canCoordinate, ca
               className={filter === key ? 'resource-tab-active' : ''}
               onClick={() => setFilter(key)}
             >
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
@@ -331,7 +331,7 @@ function QualificationWorkspace({ t = identityText, register, workers, canCoordi
                   <p>{requirement.jobTitle || job?.jobTitle || requirement.jobId}</p>
                 </div>
                 <div className="qualification-requirement-values">
-                  <span>{t('Type')} <strong>{requirement.credentialLabel}</strong></span>
+                  <span>{t('Type')} <strong>{t(requirement.credentialLabel)}</strong></span>
                   <span>{t('Role')} <strong>{requirement.roleKey === '*' ? t('All assigned roles') : formatStatus(requirement.roleKey)}</strong></span>
                   <span>{t('Readiness')} <strong>{job ? t('{ready} ready / {blocked} blocked', { ready: job.readyAssignments, blocked: job.blockedAssignments }) : t('No active job row')}</strong></span>
                 </div>
@@ -450,7 +450,7 @@ function AvailabilityWorkspace({ t = identityText, register, workers, canCoordin
                     <span className={`status status-${displayState}`}>{formatStatus(displayState)}</span>
                     {conflicts.length ? <span className="tag tag-red">{t(conflicts.length === 1 ? '{count} conflict' : '{count} conflicts', { count: conflicts.length })}</span> : null}
                   </div>
-                  <p>{period.workerRole || t('Role not retained')} / {period.periodLabel}</p>
+                  <p>{period.workerRole || t('Role not retained')} / {t(period.periodLabel)}</p>
                 </div>
               </div>
               <div className="availability-window">

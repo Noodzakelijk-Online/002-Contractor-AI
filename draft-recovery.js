@@ -172,6 +172,10 @@ export function useSessionDraftRecovery({ enabled, scope, name, value, setValue,
       skipPersistRef.current = false
       return undefined
     }
+    if (value === null || value === false || value === undefined) {
+      removeSessionDraft(storage, scope, name)
+      return undefined
+    }
     writeTimerRef.current = setTimeout(() => {
       writeSessionDraft(storage, scope, name, value)
       writeTimerRef.current = null
