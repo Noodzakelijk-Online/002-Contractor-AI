@@ -732,6 +732,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
 
   const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   if (!/^USER node$/m.test(dockerfile)) failures.push('Docker runtime must run as the node user.');
+  if (!/^ENV CONTRACTOR_AI_BIND_HOST=0\.0\.0\.0$/m.test(dockerfile)) failures.push('Docker runtime must bind inside its network namespace.');
   if (!/^HEALTHCHECK\b/m.test(dockerfile)) failures.push('Docker runtime must define a readiness healthcheck.');
   if (!dockerfile.includes('hai-connector.js')) failures.push('Docker runtime must include the HAI connector required by server.js.');
 
