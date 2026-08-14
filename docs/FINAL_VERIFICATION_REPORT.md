@@ -21,15 +21,15 @@ decisions outside this repository.
 | Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 340 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier and maintained HAI parser accepted the checksummed `accountfeed.GenericItem` review-only feed with `canExecute=false`; direct local publication read the atomic file back successfully, while live HAI registration/polling was not configured |
 | Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 11 locale/component tests, 0 failed |
-| Node tests | Passed | Isolated suite: 537 tests, 501 passed, 36 PostgreSQL/environment skips, 0 failed, 131.9 s |
-| Production build | Passed | `npm run build`: largest application JS 548,251 bytes and CSS 275,210 bytes before gzip; the specialist operator catalog remains demand-loaded only when Dutch is active |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 548,251 bytes, largest CSS 275,210 bytes, and 462,573 total gzip bytes across 39 assets; all budgets passed |
-| Production-scale ledger | Passed | The retained deterministic 63,500-row profile passed its correctness/resource/latency thresholds: dashboard p95 386.76 ms, canonical intake p95 38.46 ms, startup 269.98 ms, reopen 10.25 ms, seed 1,296.84 ms, and audit verification 213.89 ms. |
+| Node tests | Passed | Isolated suite: 540 tests, 504 passed, 36 PostgreSQL/environment skips, 0 failed, 78.8 s |
+| Production build | Passed | `npm run build`: largest application JS 548,425 bytes and CSS 275,210 bytes before gzip; the specialist operator catalog remains demand-loaded only when Dutch is active |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 548,425 bytes, largest CSS 275,210 bytes, and 462,638 total gzip bytes across 39 assets; all budgets passed |
+| Production-scale ledger | Passed | The retained deterministic 63,500-row profile passed its correctness/resource/latency thresholds in an uncontended run: dashboard p95 433.20 ms, canonical intake p95 47.40 ms, startup 326.81 ms, reopen 5.33 ms, seed 1,155.31 ms, and audit verification 231.89 ms. |
 | Browser tests | Passed | All 101 Playwright Chromium workflows passed on current source in 26 bounded isolated batches |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
-| Windows standalone | Passed | Bundled Node 22.23.2 passed authenticated isolated-profile startup, migration 072/zero pending, redacted owner register, available privacy register, and atomic read-back-verified HAI local-feed publication with `accountfeed.GenericItem` and zero external commitments |
+| Windows standalone | Passed | Bundled Node 22.23.2 passed authenticated isolated-profile startup, migration 072/zero pending, redacted owner register, privacy register, atomic HAI publication, and the packaged ngrok lifecycle with anonymous rejection, authenticated readiness, verified state, and ingress-first shutdown |
 | PostgreSQL parity | CI service gate | Migration 072 operator preferences and the shared ledger contract tests are present; 36 PostgreSQL/environment tests were skipped without local provider services |
 
 ## Manual results
@@ -45,6 +45,7 @@ decisions outside this repository.
 | QA/demo maintenance | Passed for localized preview, complete unbounded selection, deterministic plan hash, stale/empty rejection, verified backup, atomic archive/retirement and approval rejection, retained non-QA records, audit reason/hash, successful focus restoration, and responsive empty state |
 | Managed team access | Passed for localized owner-only account creation, one-time key presentation, rotation, immediate session revocation, deactivation, API redaction, canonical role/status retention, and mobile containment |
 | HAI local-feed lifecycle | Passed for owner-only status, disabled unconfigured UI, atomic publication, read-back contract validation, SHA-256 status, NL/EN round trip, non-owner rejection, Windows package output, accessibility, and zero execution authority/external commitments |
+| ngrok lifecycle | Passed against a controlled edge and real production runtime for local database/storage readiness, anonymous `401`, owner-authenticated readiness, exact public origin, loopback binding, pending-to-verified state, bounded responses, startup cleanup, ingress-first shutdown, and duplicate-stop idempotency |
 | Governed framework lifecycle | Passed across catalog, 23 family playbooks, guarded starters, API, SQLite, restore, export, HAI, desktop and mobile tests |
 | Privacy rights lifecycle | Passed for request registration, minimal identity reference, deadline extension, source-current assessment, independent approval, restriction/objection guards, rectification, partial pseudonymisation, private JSON export, recovery, and desktop/mobile layout |
 | Material, safety, permit and LMRA load races | Passed with job-scoped sequence guards and disabled form controls |
@@ -85,8 +86,10 @@ decisions outside this repository.
   persisted NL/EN presentation with locale-aware dates, numbers, and currency.
   Translation of the remaining specialist operator workspaces, universal
   component-internal draft recovery, and uniform pagination remain partial.
-- The ngrok launcher and fail-closed tests are complete, but no live tunnel was
-  opened because no `NGROK_AUTHTOKEN` was available.
+- The ngrok launcher now verifies the complete authenticated public-edge lifecycle
+  before announcing success, including in the Windows package. No live tunnel was
+  opened because no `NGROK_AUTHTOKEN` and operator-controlled edge were available;
+  the controlled-edge test is not presented as live ngrok-provider acceptance.
 - The HAI connector is read-only, downloadable, and can atomically publish to an
   operator-configured absolute local-feed path. Its output is accepted by the
   maintained HAI generic-feed parser. Actual HAI feed registration, polling, and

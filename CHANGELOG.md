@@ -5,6 +5,10 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- Hardened ngrok startup into a verified lifecycle: the launcher now proves local
+  readiness, rejects unauthenticated public readiness access, validates the
+  authenticated public runtime projection before announcing success, records the
+  verified state in Operations, and closes external ingress before draining the app.
 - Added owner-visible HAI local-feed status and direct publication. Configured
   feeds are atomically replaced, read back, schema-validated, and checksummed;
   relative paths fail production readiness and every response retains the

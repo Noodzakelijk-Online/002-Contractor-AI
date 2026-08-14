@@ -43,6 +43,9 @@ in-product verified backup workflow and retain copies away from the computer.
 - With that path set before launch, Operations also shows the verified local-feed
   state and provides an owner-only **Publish to HAI** action. The Windows smoke
   gate publishes and reads back this feed with zero execution authority.
+- The Windows smoke gate also executes the packaged tunnel lifecycle with a
+  controlled ngrok edge: anonymous readiness is rejected, authenticated readiness
+  reaches the expected loopback runtime, and public ingress closes before shutdown.
 
 ## Build locally
 

@@ -20,8 +20,9 @@ key and ledger remain under `%LOCALAPPDATA%\ContractorAI`; see
 
 Temporary remote access must use `npm run start:tunnel` or
 `ContractorAI-Tunnel.cmd`. The launcher requires both ngrok and Contractor.AI
-authentication, binds the app to loopback, and does not convert local storage
-into hosted storage. See `docs/NGROK.md`.
+authentication, binds the app to loopback, and prints the public URL only after
+local readiness, anonymous rejection, and authenticated public-edge checks pass.
+It does not convert local storage into hosted storage. See `docs/NGROK.md`.
 
 To make internal Contractor.AI review actions visible in HAI, configure an absolute
 `CONTRACTOR_AI_HAI_FEED_PATH` inside HAI's local feed root. An owner can then inspect

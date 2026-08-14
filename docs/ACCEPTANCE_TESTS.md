@@ -5,7 +5,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 
 | ID | Acceptance outcome | Evidence |
 | --- | --- | --- |
-| A01 | Fresh local startup applies all 71 migrations and reports ready | startup/readiness and migration tests |
+| A01 | Fresh local startup applies all 72 migrations and reports ready | startup/readiness and migration tests |
 | A02 | Production startup fails without auth and hosted durability declarations | auth and startup-readiness tests |
 | A03 | Owner can complete persistent guided business setup and the identity appears on governed packages | onboarding, operations and issue-package tests |
 | A04 | Opportunity intake, qualification, survey, conversion, and follow-up persist | opportunity, market-fit, bid, survey tests |
@@ -39,6 +39,7 @@ results for the current revision are recorded in `FINAL_VERIFICATION_REPORT.md`.
 | A32 | Owner suspension and resumption use a focus-trapped reason-and-acknowledgement dialog, restore initiating focus, persist the decision, and prove scheduler/command blocking at desktop and mobile widths | operations-safety Node and browser tests |
 | A33 | Owner QA maintenance previews the complete eligible set, rejects stale and empty plans, verifies recovery before one atomic archive, preserves non-QA and verified-win records, and restores focus across desktop/mobile states | operations-safety Node, source, browser, backup, and audit tests |
 | A34 | Unfinished central operator and client-portal forms recover only inside the same bounded, scoped tab session; secrets/files are excluded, logout clears operator drafts, navigation is not hijacked, and no ledger record exists before submission | Vitest hook tests, release source guard, and draft-recovery Chromium workflow |
+| A35 | ngrok announces a tunnel only after local readiness, anonymous public rejection, authenticated public-edge projection, exact origin, loopback binding, and verified state pass; failure and shutdown close ingress before draining the app | ngrok unit/real-runtime tests, Windows package smoke, release contract, and Operations readiness UI |
 
 ## Manual provider acceptance
 

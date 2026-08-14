@@ -65,7 +65,11 @@ The server binds to `127.0.0.1` and opens the local dashboard. See
 
 `npm run start:tunnel` creates an HTTPS ngrok tunnel to the loopback-only local
 server. It refuses to open a listener unless `NGROK_AUTHTOKEN` and a strong
-Contractor.AI owner key are configured. The tunnel does not move the SQLite
+Contractor.AI owner key are configured. Before printing the public URL, it proves
+local storage/database readiness, confirms that the public readiness route rejects
+anonymous access, and validates the authenticated public projection against the
+exact HTTPS origin and loopback bind. Failed verification closes public ingress
+and the local runtime. The tunnel does not move the SQLite
 ledger or evidence to cloud storage and is not the durable EU-hosted mode. The
 portable package provides `ContractorAI-Tunnel.cmd` using the same local owner
 key. See [ngrok operation](docs/NGROK.md).

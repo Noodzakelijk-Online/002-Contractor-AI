@@ -106,8 +106,8 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 089 | Progressive stabilization gates | Implemented | task graph gates G0-G6 and fail-closed release contract |
 | 090 | No vanity work rule | Implemented | runtime/safety/diagnostic/hosted controls prioritized; no marketing page added |
 | 091 | Feature-level definition of done | Implemented | acceptance requires persistence, role, replay, UI, test and truthful side-effect state |
-| 092 | Fresh-clone dry run | Partial | package/build/container and Node 22 Windows packaging gates emulate clone; external hosted stack not available locally |
-| 093 | Manual verification evidence | Partial | automated real-browser, local runtime and Windows package evidence passed; independent operator/provider/hosted evidence remains external |
+| 092 | Fresh-clone dry run | Partial | package/build/container, Node 22 Windows packaging, and controlled ngrok-edge gates emulate clone; external hosted stack not available locally |
+| 093 | Manual verification evidence | Partial | automated real-browser, local runtime, controlled public-edge, and Windows package evidence passed; independent operator/provider/hosted evidence remains external |
 | 094 | Final no-excuses search | Implemented | release scan covers 67 canonical paths, 12 retired paths, 16 hosted keys and 340 canonical source files; dependency audit reports zero vulnerabilities |
 | 095 | Completion matrix | Implemented | this file contains every phase 000-115 |
 | 096 | Final verification report | Implemented | report records exact local command, browser, runtime, package and container results plus external boundaries |
@@ -129,7 +129,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 112 | Versioning and changelog discipline | Implemented | 1.1.0 release and `CHANGELOG.md`; append-only migration numbering |
 | 113 | Regression baseline | Implemented | release commands, critical path, acceptance matrix and broad test suite |
 | 114 | Maintenance and refactoring review | Partial | debt documented; monolith extraction intentionally deferred behind contract tests |
-| 115 | Final human-operator readiness test | Partial | 101 automated desktop/mobile operator workflows and the Windows HAI local-feed lifecycle passed; independent human, live HAI/ngrok, EU and provider acceptance remain external |
+| 115 | Final human-operator readiness test | Partial | 101 automated desktop/mobile workflows plus Windows HAI and controlled authenticated-ngrok lifecycles passed; independent human, live HAI/ngrok, EU and provider acceptance remain external |
 
 ## Release interpretation
 

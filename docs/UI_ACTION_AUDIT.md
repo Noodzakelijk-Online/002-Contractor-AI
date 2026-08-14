@@ -73,6 +73,10 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
   attention and lets only an owner publish the review-only feed. Download remains
   available independently; an invalid or missing publication path disables the
   direct command without hiding the configuration requirement.
+- Runtime readiness distinguishes a verified authenticated tunnel from verification
+  in progress or an attention state. The label is backed by the launcher's public
+  edge checks and retained only for the current process; it is not inferred from a
+  configured ngrok token or URL.
 - The responsive production UI is exercised by 101 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and

@@ -13913,7 +13913,11 @@ function App() {
                       <span>Access</span>
                       <strong>
                         {data.health.runtime?.exposure?.publicTunnel
-                          ? 'authenticated tunnel'
+                          ? data.health.runtime.exposure.publicTunnelVerified
+                            ? ot('verified authenticated tunnel')
+                            : ot('tunnel attention')
+                          : data.health.runtime?.exposure?.publicTunnelVerificationPending
+                            ? ot('tunnel verification pending')
                           : data.health.runtime?.exposure?.loopbackOnly
                             ? 'this computer only'
                             : data.health.runtime?.mode === 'hosted'

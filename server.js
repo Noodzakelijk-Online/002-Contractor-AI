@@ -349,6 +349,10 @@ function runtimeConfiguration(options = {}) {
   const configuredRoles = roleTokenConfig.principals.map(principal => principal.role);
   if (isStrongOperatorToken(dashboardAuthToken)) configuredRoles.push('owner');
   configuredRoles.push(...managedOperators.map(principal => principal.role));
+  const ngrokState = String(process.env.CONTRACTOR_AI_NGROK_ACTIVE || '').trim().toLowerCase();
+  const ngrokVerifiedAt = String(process.env.CONTRACTOR_AI_NGROK_VERIFIED_AT || '').trim();
+  const ngrokVerifiedTimestamp = Date.parse(ngrokVerifiedAt);
+  const publicTunnelVerified = ngrokState === 'true' && Number.isFinite(ngrokVerifiedTimestamp);
   return {
     mode: runtimeMode,
     storageMode,
@@ -356,8 +360,11 @@ function runtimeConfiguration(options = {}) {
     exposure: {
       bindHost: configuredBindHost || null,
       loopbackOnly: ['127.0.0.1', '::1', 'localhost'].includes(configuredBindHost.toLowerCase()),
-      publicTunnel: runtimeMode === 'local' && process.env.CONTRACTOR_AI_NGROK_ACTIVE === 'true',
-      publicOrigin: hostedPublicUrlDetails.valid ? hostedPublicUrlDetails.origin : null
+      publicTunnel: runtimeMode === 'local' && ngrokState === 'true',
+      publicTunnelVerified: runtimeMode === 'local' && publicTunnelVerified,
+      publicTunnelVerificationPending: runtimeMode === 'local' && ngrokState === 'verifying',
+      publicOrigin: hostedPublicUrlDetails.valid ? hostedPublicUrlDetails.origin : null,
+      tunnelVerifiedAt: publicTunnelVerified ? new Date(ngrokVerifiedTimestamp).toISOString() : null
     },
     auth: {
       required: dashboardAuthRequired,

@@ -41,6 +41,13 @@ test('Windows package contract includes the standalone, tunnel, HAI, and canonic
     'scripts/start-ngrok.js',
     'scripts/export-hai-feed.js'
   ]) assert.ok(runtimeFiles.includes(required), required);
+  const tunnelSource = fs.readFileSync(path.resolve(__dirname, '..', 'scripts', 'start-ngrok.js'), 'utf8');
+  for (const lifecycleControl of [
+    'publicAuthenticationBoundary',
+    "CONTRACTOR_AI_NGROK_ACTIVE = 'true'",
+    'CONTRACTOR_AI_NGROK_VERIFIED_AT',
+    'await closeTunnelIngress(runtime.listener)'
+  ]) assert.ok(tunnelSource.includes(lifecycleControl), lifecycleControl);
 });
 
 test('standalone startup only displays the owner key on first run', () => {

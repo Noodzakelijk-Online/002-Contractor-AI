@@ -39,6 +39,11 @@ requires an absolute configured path, atomically replaces the bounded feed,
 validates the file after writing, and exposes checksummed status without granting
 execution or external-commitment authority.
 
+The ngrok launcher now treats the returned URL as unverified until loopback
+health, anonymous public rejection, owner-authenticated public runtime identity,
+exact origin, and final verified state all pass. Failed startup and normal shutdown
+close the public listener before draining the application.
+
 ## Runtime map
 
 | Layer | Canonical implementation | Boundary |

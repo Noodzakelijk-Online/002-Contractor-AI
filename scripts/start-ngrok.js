@@ -1,23 +1,35 @@
 const { applyStandaloneEnvironment } = require('../standalone-runtime');
 
+const DEFAULT_TUNNEL_READINESS_TIMEOUT_MS = 15_000;
+const DEFAULT_TUNNEL_READINESS_RETRY_MS = 250;
+const MAX_TUNNEL_READINESS_RESPONSE_BYTES = 256 * 1024;
+
 function strongToken(value) {
   const token = String(value || '');
   return token.length >= 32 && token === token.trim() && !/replace-with|example/i.test(token);
 }
 
-function hasStrongOwnerAuthentication(environment = process.env) {
-  if (strongToken(environment.CONTRACTOR_AI_AUTH_TOKEN || environment.DASHBOARD_AUTH_TOKEN)) return true;
+function ownerAuthenticationToken(environment = process.env) {
+  const legacyToken = environment.CONTRACTOR_AI_AUTH_TOKEN || environment.DASHBOARD_AUTH_TOKEN;
+  if (strongToken(legacyToken)) return legacyToken;
   try {
     const parsed = JSON.parse(environment.CONTRACTOR_AI_ROLE_TOKENS || '{}');
     const ownerValues = parsed && !Array.isArray(parsed)
       ? (Array.isArray(parsed.owner) ? parsed.owner : [parsed.owner])
       : [];
-    if (ownerValues.some(value => strongToken(typeof value === 'object' ? value?.token : value))) return true;
+    const roleToken = ownerValues
+      .map(value => typeof value === 'object' ? value?.token : value)
+      .find(strongToken);
+    if (roleToken) return roleToken;
     const principals = Array.isArray(parsed) ? parsed : Array.isArray(parsed.operators) ? parsed.operators : [];
-    return principals.some(principal => principal?.role === 'owner' && strongToken(principal.token));
+    return principals.find(principal => principal?.role === 'owner' && strongToken(principal.token))?.token || null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function hasStrongOwnerAuthentication(environment = process.env) {
+  return Boolean(ownerAuthenticationToken(environment));
 }
 
 function validatedPort(value) {
@@ -52,37 +64,200 @@ function applyTunnelEnvironment(environment, publicUrl, port) {
     CONTRACTOR_AI_BIND_HOST: '127.0.0.1',
     CONTRACTOR_AI_PUBLIC_URL: url.origin,
     CONTRACTOR_AI_TRUST_PROXY: 'loopback',
-    CONTRACTOR_AI_NGROK_ACTIVE: 'true',
+    CONTRACTOR_AI_NGROK_ACTIVE: 'verifying',
     CORS_ORIGINS: url.origin
   });
+  delete environment.CONTRACTOR_AI_NGROK_VERIFIED_AT;
   return url.origin;
+}
+
+function delay(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function readinessError(message, cause) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = 'ngrok_readiness_verification_failed';
+  return error;
+}
+
+async function readBoundedJson(response) {
+  const contentLength = Number(response.headers?.get?.('content-length') || 0);
+  if (contentLength > MAX_TUNNEL_READINESS_RESPONSE_BYTES) {
+    throw readinessError('Tunnel readiness returned an oversized response.');
+  }
+  const text = await response.text();
+  if (Buffer.byteLength(text) > MAX_TUNNEL_READINESS_RESPONSE_BYTES) {
+    throw readinessError('Tunnel readiness returned an oversized response.');
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw readinessError('Tunnel readiness did not return JSON.', error);
+  }
+}
+
+async function waitForTunnelReadiness(origin, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== 'function') throw new Error('A Fetch-compatible implementation is required for tunnel readiness verification.');
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || DEFAULT_TUNNEL_READINESS_TIMEOUT_MS);
+  const retryMs = Math.max(1, Number(options.retryMs) || DEFAULT_TUNNEL_READINESS_RETRY_MS);
+  const endpoint = new URL(options.path || '/api/health/ready', origin).href;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    try {
+      const response = await fetchImpl(endpoint, {
+        method: 'GET',
+        headers: { Accept: 'application/json', ...(options.headers || {}) },
+        redirect: 'error',
+        signal: AbortSignal.timeout(Math.min(3_000, remainingMs))
+      });
+      const body = await readBoundedJson(response);
+      if (options.expectedStatus !== undefined) {
+        if (response.status !== options.expectedStatus) {
+          throw readinessError(`Tunnel readiness returned HTTP ${response.status}; expected ${options.expectedStatus}.`);
+        }
+      } else if (!response.ok) {
+        throw readinessError(`Tunnel readiness returned HTTP ${response.status}.`);
+      }
+      if (typeof options.validate === 'function') options.validate(body);
+      return { endpoint, body };
+    } catch (error) {
+      lastError = error;
+      const waitMs = Math.min(retryMs, Math.max(0, deadline - Date.now()));
+      if (waitMs > 0) await delay(waitMs);
+    }
+  }
+
+  throw readinessError(
+    `Tunnel readiness could not be verified at ${new URL(endpoint).origin}.`,
+    lastError
+  );
+}
+
+function validateLocalReadiness(body) {
+  if (body?.status !== 'ready'
+    || body?.checks?.configuration !== 'ready'
+    || body?.checks?.database !== 'ready'
+    || !['ready', 'verified'].includes(body?.checks?.evidenceStorage)) {
+    throw readinessError('The loopback Contractor.AI runtime is not ready.');
+  }
+}
+
+function validatePublicReadiness(body, publicUrl, state) {
+  const exposure = body?.runtime?.exposure;
+  if (body?.status !== 'ready'
+    || body?.runtime?.auth?.required !== true
+    || exposure?.loopbackOnly !== true
+    || exposure?.publicOrigin !== publicUrl) {
+    throw readinessError('The public tunnel does not reach the expected authenticated loopback runtime.');
+  }
+  if (state === 'verifying' && exposure?.publicTunnelVerificationPending !== true) {
+    throw readinessError('The public tunnel did not report its verification state.');
+  }
+  if (state === 'verified' && (exposure?.publicTunnel !== true || exposure?.publicTunnelVerified !== true)) {
+    throw readinessError('The public tunnel did not enter the verified state.');
+  }
+}
+
+function validatePublicAuthenticationBoundary(body) {
+  if (body?.error?.code !== 'authentication_required') {
+    throw readinessError('The public readiness endpoint did not enforce authentication.');
+  }
+}
+
+async function closeTunnelIngress(listener) {
+  if (!listener?.close) return;
+  await listener.close().catch(() => {});
 }
 
 async function startTunnel(options = {}) {
   const environment = options.environment || process.env;
   if (environment.CONTRACTOR_AI_USE_STANDALONE_CONFIG === 'true') applyStandaloneEnvironment({ environment });
   if (!strongToken(environment.NGROK_AUTHTOKEN)) throw new Error('NGROK_AUTHTOKEN is required and must not be a template value.');
-  if (!hasStrongOwnerAuthentication(environment)) throw new Error('A strong Contractor.AI owner access key is required before public tunnel exposure.');
+  const ownerToken = ownerAuthenticationToken(environment);
+  if (!ownerToken) throw new Error('A strong Contractor.AI owner access key is required before public tunnel exposure.');
   const port = validatedPort(environment.PORT);
   const ngrok = options.ngrok || require('@ngrok/ngrok');
-  const listener = await ngrok.forward(ngrokForwardOptions(environment, port));
+  let listener;
   let server;
+  let app;
   try {
+    listener = await ngrok.forward(ngrokForwardOptions(environment, port));
     const publicUrl = applyTunnelEnvironment(environment, listener.url(), port);
-    const app = options.app || require('../server');
+    app = options.app || require('../server');
     server = await app.locals.runtimeControl.start({ host: '127.0.0.1', port });
+    const readinessOptions = {
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.readinessTimeoutMs,
+      retryMs: options.readinessRetryMs
+    };
+    const localReadiness = await waitForTunnelReadiness(`http://127.0.0.1:${port}`, {
+      ...readinessOptions,
+      path: '/api/health/ready',
+      validate: validateLocalReadiness
+    });
+    const publicAuthenticationBoundary = await waitForTunnelReadiness(publicUrl, {
+      ...readinessOptions,
+      expectedStatus: 401,
+      path: '/api/readiness',
+      validate: validatePublicAuthenticationBoundary
+    });
+    const publicPendingReadiness = await waitForTunnelReadiness(publicUrl, {
+      ...readinessOptions,
+      headers: { Authorization: `Bearer ${ownerToken}` },
+      path: '/api/readiness',
+      validate: body => validatePublicReadiness(body, publicUrl, 'verifying')
+    });
+    environment.CONTRACTOR_AI_NGROK_ACTIVE = 'true';
+    environment.CONTRACTOR_AI_NGROK_VERIFIED_AT = new Date().toISOString();
+    const publicReadiness = await waitForTunnelReadiness(publicUrl, {
+      ...readinessOptions,
+      headers: { Authorization: `Bearer ${ownerToken}` },
+      path: '/api/readiness',
+      validate: body => validatePublicReadiness(body, publicUrl, 'verified')
+    });
     process.stdout.write(`\nContractor.AI secure tunnel: ${publicUrl}\n`);
-    process.stdout.write('The ledger remains on this computer. Authentication is still required.\n\n');
-    return { app, listener, publicUrl, server };
+    process.stdout.write('Public readiness verified. The ledger remains on this computer and authentication is required.\n\n');
+    return {
+      app,
+      environment,
+      listener,
+      publicUrl,
+      readiness: {
+        localEndpoint: localReadiness.endpoint,
+        publicAuthenticationBoundaryEndpoint: publicAuthenticationBoundary.endpoint,
+        publicEndpoint: publicReadiness.endpoint,
+        publicPendingEndpoint: publicPendingReadiness.endpoint,
+        verifiedAt: environment.CONTRACTOR_AI_NGROK_VERIFIED_AT
+      },
+      server
+    };
   } catch (error) {
-    await listener.close().catch(() => {});
+    environment.CONTRACTOR_AI_NGROK_ACTIVE = 'false';
+    delete environment.CONTRACTOR_AI_NGROK_VERIFIED_AT;
+    await closeTunnelIngress(listener);
+    if (server && app?.locals?.runtimeControl?.shutdown) {
+      await app.locals.runtimeControl.shutdown({ server, signal: 'tunnel_start_failed' }).catch(() => {});
+    }
     throw error;
   }
 }
 
 async function stopTunnel(runtime, signal) {
-  await runtime.app.locals.runtimeControl.shutdown({ server: runtime.server, signal });
-  await runtime.listener.close().catch(() => {});
+  if (runtime.stopPromise) return runtime.stopPromise;
+  runtime.stopPromise = (async () => {
+    if (runtime.environment) {
+      runtime.environment.CONTRACTOR_AI_NGROK_ACTIVE = 'false';
+      delete runtime.environment.CONTRACTOR_AI_NGROK_VERIFIED_AT;
+    }
+    await closeTunnelIngress(runtime.listener);
+    await runtime.app.locals.runtimeControl.shutdown({ server: runtime.server, signal });
+  })();
+  return runtime.stopPromise;
 }
 
 if (require.main === module) {
@@ -101,11 +276,18 @@ if (require.main === module) {
 }
 
 module.exports = {
+  DEFAULT_TUNNEL_READINESS_RETRY_MS,
+  DEFAULT_TUNNEL_READINESS_TIMEOUT_MS,
   applyTunnelEnvironment,
   hasStrongOwnerAuthentication,
   ngrokForwardOptions,
+  ownerAuthenticationToken,
   startTunnel,
   stopTunnel,
   strongToken,
-  validatedPort
+  validatedPort,
+  validateLocalReadiness,
+  validatePublicAuthenticationBoundary,
+  validatePublicReadiness,
+  waitForTunnelReadiness
 };

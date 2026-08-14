@@ -201,6 +201,16 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   }
 
   const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const ngrokSource = fs.readFileSync(path.join(root, 'scripts', 'start-ngrok.js'), 'utf8');
+  for (const tunnelBoundary of [
+    "CONTRACTOR_AI_NGROK_ACTIVE: 'verifying'",
+    "expectedStatus: 401",
+    'publicAuthenticationBoundary',
+    'validatePublicReadiness',
+    'await closeTunnelIngress(runtime.listener)'
+  ]) {
+    if (!ngrokSource.includes(tunnelBoundary)) failures.push(`ngrok launcher is missing verified lifecycle boundary: ${tunnelBoundary}`);
+  }
   for (const requiredActorBoundary of [
     'function trustedRequestActor(req)',
     'function bindTrustedRequestActor(req)',

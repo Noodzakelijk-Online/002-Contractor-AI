@@ -56,7 +56,11 @@ owner key under the current user's `%LOCALAPPDATA%`, and does not place the key
 in browser storage or a URL. The ngrok launcher fails before public exposure
 unless both ngrok agent authentication and strong Contractor.AI owner
 authentication are present. It trusts only the local proxy hop and configures
-the exact returned HTTPS origin.
+the exact returned HTTPS origin. Before success is announced, the launcher proves
+local database/storage readiness, requires the public readiness endpoint to reject
+anonymous access, and validates an owner-authenticated response through the public
+edge. A verified timestamp is exposed without credentials in runtime diagnostics.
+Startup failure and normal shutdown close public ingress before draining the app.
 
 The HAI connector is read-only. Its owner endpoints and local exporter expose
 bounded internal action summaries without evidence bodies, arbitrary ledger

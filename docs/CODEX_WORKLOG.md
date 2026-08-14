@@ -1,5 +1,25 @@
 # Codex Worklog
 
+## 2026-08-14 - Verified authenticated ngrok lifecycle
+
+- Replaced URL-returned tunnel readiness with an end-to-end lifecycle: loopback
+  database/storage health, anonymous public rejection, owner-authenticated public
+  runtime identity, exact HTTPS origin, loopback binding, and final verified state
+  must all pass before the launcher prints the public URL.
+- Startup failure and normal shutdown now close external ingress before draining
+  the app. Duplicate stop signals share one promise, and bounded readiness parsing,
+  timeouts, redirect rejection, and response-size limits prevent an edge response
+  from holding the launcher open or consuming unbounded memory.
+- Added mock failure-path coverage, a real production-server edge traversal, runtime
+  diagnostics/UI states, release guards, and a packaged Windows lifecycle smoke.
+  The real-server test caught and fixed the canonical `verified` storage-state and
+  authenticated `/api/readiness` assumptions during development.
+- Current-source gates pass: 3,556 unique specialist translation keys with zero
+  duplicates; 11 frontend tests; 540 Node tests (504 passed and 36 PostgreSQL or
+  environment skips); all 101 Chromium workflows in 26 isolated batches;
+  release/lint/build/bundle at 462,638 total gzip bytes; production benchmark;
+  hardened container; and Node 22.23.2 Windows package.
+
 ## 2026-08-14 - Verified HAI local-feed publication
 
 - Added an owner-only HAI publication lifecycle that inspects the configured

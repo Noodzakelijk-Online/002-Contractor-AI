@@ -3558,6 +3558,9 @@ const OPERATOR_NL = {
   'HAI feed published with {count} read-only action(s).': 'HAI-feed gepubliceerd met {count} alleen-lezenactie(s).',
   'Configure an absolute CONTRACTOR_AI_HAI_FEED_PATH before publishing to HAI.': 'Stel een absoluut CONTRACTOR_AI_HAI_FEED_PATH in voordat u naar HAI publiceert.',
   'HAI feed output path must be absolute.': 'Het uitvoerpad van de HAI-feed moet absoluut zijn.',
+  'verified authenticated tunnel': 'geverifieerde beveiligde tunnel',
+  'tunnel attention': 'tunnel vereist aandacht',
+  'tunnel verification pending': 'tunnelverificatie loopt',
 }
 
 export function operatorText(locale, key, variables = {}) {

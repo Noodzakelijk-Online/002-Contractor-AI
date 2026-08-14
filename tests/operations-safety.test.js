@@ -313,6 +313,9 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.equal(health.body.services.ai, 'ledger_only');
   assert.equal(health.body.services.notifications, 'draft_only');
   assert.equal(health.body.runtime.exposure.publicTunnel, false);
+  assert.equal(health.body.runtime.exposure.publicTunnelVerified, false);
+  assert.equal(health.body.runtime.exposure.publicTunnelVerificationPending, false);
+  assert.equal(health.body.runtime.exposure.tunnelVerifiedAt, null);
 
   const capabilities = await request(baseUrl, '/api/operations/capabilities');
   assert.equal(capabilities.response.status, 200);

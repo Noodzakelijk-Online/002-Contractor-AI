@@ -3,6 +3,23 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-27 Verified authenticated ngrok lifecycle
+
+- A returned ngrok URL remains `verifying` until loopback health, anonymous public
+  rejection, authenticated public-edge runtime identity, exact origin, loopback
+  binding, and a final verified state all pass.
+- Runtime diagnostics expose pending, attention, and verified tunnel states without
+  exposing credentials. Failure and normal shutdown close ingress before app drain.
+- Regression evidence covers bounded/invalid responses, auth/token shapes, failed
+  public verification cleanup, duplicate stop signals, a real production server,
+  release source boundaries, and the packaged Windows launcher.
+- Verification: 3,556 unique specialist translation keys; 11 frontend tests;
+  540 Node tests; 101 Chromium workflows in 26 isolated batches;
+  release/lint/build/bundle; production benchmark; hardened container; and
+  Node 22.23.2 Windows standalone gates pass.
+- External boundary: a live ngrok account/domain/CIDR path still requires an
+  operator token and remains unclaimed until the same checks pass against ngrok.
+
 ## CP-26 Verified HAI local-feed publication
 
 - Operations now exposes owner-only HAI status and direct publication when
