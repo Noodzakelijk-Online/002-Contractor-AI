@@ -15,7 +15,7 @@
   Node binary is reused only when its version exactly matches, while every other
   package artifact is cleaned and rebuilt. The refreshed package passed its full
   Node 22.23.2 runtime verification without stopping the existing preview.
-- Current gates pass: 6 frontend tests, 532 Node tests, 90 Chromium workflows,
+- Gates at that checkpoint passed: 6 frontend tests, 532 Node tests, 90 Chromium workflows,
   zero dependency vulnerabilities, lint, release/build/bundle, maintained HAI
   parser, smoke and production performance, hardened container, and Windows
   standalone verification.
@@ -274,3 +274,19 @@ Node 22 x64 packaging. Exact counts and external boundaries are retained in
   620.83 ms; canonical intake p95 was 86.24 ms and every retained threshold passed.
 - Added smoke contract tests, CI production gate/report upload, release scripts,
   operator guidance, acceptance outcome A27, and phase 051/052 completion evidence.
+
+## 2026-08-14 - Practical-core bilingual workflow pass
+
+- Passed the persisted operator locale through the ledger-backed Pipeline workspace
+  into the ICP/service-area, bid/no-bid, and preconstruction site-survey controls.
+- Localized interface actions, states, empty content, form labels, dialog copy, and
+  accessible names while leaving retained policy, checklist, and evidence text intact.
+- Extracted specialist translations from the eagerly loaded shell locale into a
+  lazy shared catalog; the production base locale returned to 12.79 kB.
+- Added an NL persistence round-trip, Dutch axe scan, site-survey locale interaction,
+  and retained desktop/mobile containment checks to the production-bundle browser flow.
+- Fixed the browser-discovered lowercase English site-survey status regression and
+  reran the complete survey-to-estimating approval flow successfully.
+- Final current-source gates pass: 10 frontend tests, 533 Node tests, all 90
+  Chromium workflows, release/build/bundle, dependency audit, hardened container,
+  and Node 22.23.2 Windows standalone verification.

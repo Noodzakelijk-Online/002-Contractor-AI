@@ -12,7 +12,7 @@ import {
   X,
 } from 'lucide-react'
 import { formatDate, formatNumber, formatStatus } from '../dashboard-format'
-import { operatorText } from '../locale'
+import { operatorText } from '../operator-locale'
 import './PerformanceScorecard.css'
 
 const EMPTY_LIST = Object.freeze([])

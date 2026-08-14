@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { expectNoAxeViolations } = require('./accessibility-helpers');
 
 test('owner governs ICP and service area then retains a responsive opportunity fit assessment', async ({ page, request }) => {
   const marker = Date.now();
@@ -6,6 +7,17 @@ test('owner governs ICP and service area then retains a responsive opportunity f
   await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
 
   const control = page.getByTestId('market-fit-control');
+  const bidControl = page.getByTestId('bid-decision-control');
+  await expect(control.getByRole('heading', { name: 'Ideal customer and service area' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('nl-NL');
+  await expect(page.getByRole('combobox', { name: 'Taal' })).toHaveValue('nl-NL');
+  await expect(control.getByRole('heading', { name: 'Ideale klant en servicegebied' })).toBeVisible();
+  await expect(bidControl.getByRole('heading', { name: 'Inschrijven / niet inschrijven-scorekaart' })).toBeVisible();
+  await expectNoAxeViolations(page, 'Dutch market qualification controls');
+  await page.reload();
+  await page.getByRole('button', { name: 'Pipeline', exact: true }).click();
+  await expect(control.getByRole('heading', { name: 'Ideale klant en servicegebied' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Taal' }).selectOption('en-GB');
   await expect(control.getByRole('heading', { name: 'Ideal customer and service area' })).toBeVisible();
   await control.getByRole('button', { name: 'Configure policy' }).click();
   await control.getByLabel('Profile name', { exact: true }).fill(`Browser Arnhem focus ${marker}`);
@@ -69,7 +81,6 @@ test('owner governs ICP and service area then retains a responsive opportunity f
   expect(fitPayload.evaluation.recommendation).toBe('pursue');
   expect(fitPayload.assessments).toHaveLength(1);
 
-  const bidControl = page.getByTestId('bid-decision-control');
   await expect(bidControl.getByRole('heading', { name: 'Bid / no-bid scorecard' })).toBeVisible();
   await bidControl.getByRole('button', { name: 'Configure scorecard' }).click();
   const policyEditor = page.getByRole('dialog', { name: 'Scorecard policy revision' });

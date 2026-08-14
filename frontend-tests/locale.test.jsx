@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { appText, normalizeLocale, operatorText, portalText } from '../locale'
+import { appText, normalizeLocale, portalText } from '../locale'
+import { operatorText } from '../operator-locale'
 import { currency, formatCurrency, formatDate, formatNumber, formatWeekday, roundDisplay, setDashboardLocale } from '../dashboard-format'
 
 describe('locale contract', () => {
@@ -19,6 +20,9 @@ describe('locale contract', () => {
   it('translates specialist operator controls and interpolates runtime values', () => {
     expect(operatorText('nl-NL', 'Contractor Balanced Scorecard')).toBe('Aannemersscorekaart')
     expect(operatorText('nl-NL', '{count} reviews due', { count: 2 })).toBe('2 beoordelingen vereist')
+    expect(operatorText('nl-NL', 'Ideal customer and service area')).toBe('Ideale klant en servicegebied')
+    expect(operatorText('nl-NL', 'Bid / no-bid scorecard')).toBe('Inschrijven / niet inschrijven-scorekaart')
+    expect(operatorText('nl-NL', '{answered} of {total} checklist items complete', { answered: 7, total: 10 })).toBe('7 van 10 checklistpunten voltooid')
     expect(operatorText('en-GB', 'Framework')).toBe('Framework')
     expect(operatorText('nl-NL', 'Unmapped retained text')).toBe('Unmapped retained text')
   })

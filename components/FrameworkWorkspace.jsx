@@ -15,7 +15,7 @@ import {
   X,
 } from 'lucide-react'
 import { formatDateTime, formatStatus } from '../dashboard-format'
-import { operatorText } from '../locale'
+import { operatorText } from '../operator-locale'
 import './FrameworkWorkspace.css'
 
 const EMPTY_LIST = Object.freeze([])

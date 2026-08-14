@@ -1599,6 +1599,7 @@ function BidPackageWorkspace({
 }
 
 function PipelineWorkspace({
+  locale,
   view,
   onViewChange,
   opportunities,
@@ -1692,6 +1693,7 @@ function PipelineWorkspace({
 
       <LazyControlBoundary label="market-fit controls">
         <MarketFitControl
+          locale={locale}
           marketFit={marketFit}
           canManagePolicy={canManagePolicy}
           canCoordinate={canCoordinate}
@@ -1703,6 +1705,7 @@ function PipelineWorkspace({
 
       <LazyControlBoundary label="bid/no-bid controls">
         <BidDecisionControl
+          locale={locale}
           bidDecisions={bidDecisions}
           canManagePolicy={canManagePolicy}
           canCoordinate={canCoordinate}
@@ -1871,6 +1874,7 @@ function PipelineWorkspace({
           ) : null}
           <LazyControlBoundary label="site survey controls">
             <SiteSurveyControl
+              locale={locale}
               opportunity={selectedOpportunity}
               canCoordinate={canCoordinate}
               canApprove={canApprove}
@@ -11350,6 +11354,7 @@ function App() {
 
             {section === 'pipeline' && capabilities.pipeline ? (
               <PipelineWorkspace
+                locale={operatorLocale}
                 view={pipelineView}
                 onViewChange={setPipelineView}
                 opportunities={data.opportunities || EMPTY_LIST}

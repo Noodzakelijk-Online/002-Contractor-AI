@@ -8,6 +8,8 @@ Versioning for the application contract; database migrations remain append-only.
 - Added migration 072 with self-scoped, audited NL/EN operator preferences that survive local restart and local-to-hosted migration.
 - Added retained language selection to approval-gated client portal links, plus a token-scoped client language control.
 - Localized the operator shell and complete client portal, including locale-aware dates, numbers, and EUR values.
+- Localized the ledger-backed Ideal Customer Profile/service-area, bid/no-bid, and preconstruction site-survey workflows, including actions, empty states, decision statuses, and accessible names while preserving retained operator evidence verbatim.
+- Split specialist operator translations into a lazy shared chunk so the initial shell retains its smaller base locale payload.
 - Added API, migration, restore, frontend, and browser regression coverage for locale isolation and persistence.
 
 ### Added

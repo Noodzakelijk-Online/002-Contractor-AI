@@ -25,6 +25,11 @@ test('operator completes an approval-gated site survey and advances the opportun
 
   const control = page.getByTestId('site-survey-control');
   await expect(control.getByRole('heading', { name: 'Preconstruction site survey' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('nl-NL');
+  await expect(control.getByRole('heading', { name: 'Locatieopname voor uitvoering' })).toBeVisible();
+  await expect(control.getByRole('button', { name: 'Plan vastleggen' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Taal' }).selectOption('en-GB');
+  await expect(control.getByRole('heading', { name: 'Preconstruction site survey' })).toBeVisible();
   await expect(page.locator('.pipeline-detail')).not.toContainText('null%');
   await control.getByLabel('Surveyor').fill('Browser Surveyor');
   await control.getByLabel('Planning notes').fill('Internal browser QA plan; no appointment confirmation is sent.');
