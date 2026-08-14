@@ -8,6 +8,7 @@ async function postJson(request, route, data) {
 
 async function openJob(page, title) {
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
   await expect(workspace).toBeVisible();
@@ -136,6 +137,15 @@ test('daywork moves from offline quantity capture through acknowledgement and so
   expect(changeOrder.amount).toBe(440);
   expect(changeOrder.data.source.id).toBe(ticket.id);
   expect(changeOrder.data.source.sourceHash).toBe(ticket.sourceHash);
+
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(control.getByRole('heading', { name: 'Regiewerk en extra werk' })).toBeVisible();
+  ticketCard = control.locator('.daywork-ticket').filter({ hasText: 'Additional containment support' });
+  await expect(ticketCard).toContainText('Installed additional containment support around an existing service conflict.');
+  await expect(ticketCard).toContainText('Existing services were not shown on the retained coordination basis.');
+  await expect(ticketCard.locator('.status')).toHaveText('omgezet');
+  await expect(control.getByText('Geen regiebonnen')).toHaveCount(0);
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
 
   await page.setViewportSize({ width: 390, height: 844 });
   control = await openJob(page, title);

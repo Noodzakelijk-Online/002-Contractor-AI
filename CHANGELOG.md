@@ -11,6 +11,7 @@ Versioning for the application contract; database migrations remain append-only.
 - Localized the ledger-backed Ideal Customer Profile/service-area, bid/no-bid, and preconstruction site-survey workflows, including actions, empty states, decision statuses, and accessible names while preserving retained operator evidence verbatim.
 - Localized the crew-capacity/two-week planning board and 13-week cash-flow forecast, including structured system blockers, warnings, forms, tables, approval states, and accessible names while preserving retained worker, job, and source evidence verbatim.
 - Localized the complete governed commercial workflow: written scope, assumptions, exclusions, allowances, project risk register and premortem, fixed-price-versus-regie decision, estimates, quote packages, client acceptance evidence, provider delivery receipts, and formal variations. Retained contract evidence remains verbatim across locale changes.
+- Localized the governed daily execution chain: start huddles and end-of-day reports, approved production baselines, offline installed-output capture and reversals, and regiewerk quantity, acknowledgement, and variation conversion. Retained worker notes, measurements, cost codes, and evidence references remain verbatim across locale changes.
 - Split specialist operator translations into a lazy shared chunk so the initial shell retains its smaller base locale payload.
 - Added API, migration, restore, frontend, and browser regression coverage for locale isolation and persistence.
 

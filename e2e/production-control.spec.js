@@ -16,6 +16,7 @@ test('operator approves a production baseline, records output offline, and reque
   const job = (await intakeResponse.json()).job;
 
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   let workspace = page.getByTestId('job-workspace');
   let production = workspace.getByTestId('production-control');
@@ -97,6 +98,22 @@ test('operator approves a production baseline, records output offline, and reque
   expect(detail.productionEntries.filter(entry => entry.status === 'reversed')).toHaveLength(1);
   expect(detail.productionControl.summary.crewHours).toBe(8);
   expect(detail.audit.some(event => event.action === 'reverse_production_entry')).toBeTruthy();
+
+  await page.reload();
+  await page.getByRole('button', { name: `Open ${title}` }).first().click();
+  production = page.getByTestId('job-workspace').getByTestId('production-control');
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(production.getByRole('heading', { name: 'Productiebeheersing' })).toBeVisible();
+  await expect(production.getByText('Installed wall finish area').first()).toBeVisible();
+  await expect(production.getByText('Second wall zone measured while connectivity was unavailable.')).toBeVisible();
+  await expect(production.getByText('vastgelegd', { exact: true })).toBeVisible();
+  await production.getByRole('button', { name: 'Uitgangswaarde herzien' }).click();
+  const dutchBaseline = production.getByTestId('production-baseline-form');
+  await expect(dutchBaseline.getByText('Herziene productie-uitgangswaarde')).toBeVisible();
+  await expect(dutchBaseline.getByLabel('Regelsleutel')).toHaveValue('wall-finish-area');
+  await expect(dutchBaseline.getByLabel('Omschrijving')).toHaveValue('Installed wall finish area');
+  await dutchBaseline.getByRole('button', { name: 'Productie-uitgangswaarde annuleren' }).click();
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();

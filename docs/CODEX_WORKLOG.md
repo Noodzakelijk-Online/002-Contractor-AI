@@ -1,5 +1,13 @@
 # Codex Worklog
 
+- Localized the complete governed daily execution chain in Dutch and English:
+  daily start huddles and end-of-day reports, approved production baselines,
+  offline installed-output capture and reversals, and regiewerk quantity,
+  receipt-only acknowledgement, and source-bound variation conversion.
+- Expanded the lazy specialist operator catalog from 1,208 to 1,416 unique keys
+  with no duplicates or missing literal keys for the targeted controls. Existing
+  browser journeys now prove Dutch rendering and exact retained English field
+  notes, quantities, cost codes, rationale, and evidence across locale changes.
 - Localized the complete source-bound commercial workflow in Dutch and English:
   written scope and allowances, project risk and premortem, fixed-price-versus-regie
   selection, estimate and quote registers, acceptance evidence, verified delivery,

@@ -6209,15 +6209,15 @@ function App() {
       || dailyHuddle.productionTarget.trim().length < 3 || dailyHuddle.safetyFocus.trim().length < 5
       || dailyHuddle.evidenceReference.trim().length < 3
     ) {
-      setError('Choose a job and date, then retain the work plan, production target, safety focus, and huddle evidence reference.')
+      setError(ot('Choose a job and date, then retain the work plan, production target, safety focus, and huddle evidence reference.'))
       return
     }
     if (!fieldScoped && (dailyHuddle.facilitator.trim().length < 2 || !dailyHuddle.workerIds.length || !dailyHuddle.leadWorkerId)) {
-      setError('Record the facilitator, crew, and daily lead before retaining the start huddle.')
+      setError(ot('Record the facilitator, crew, and daily lead before retaining the start huddle.'))
       return
     }
     if (dailyHuddle.stopWorkRequired && !dailyHuddle.blockingIssues.trim()) {
-      setError('Record at least one blocking issue before setting the stop-work state.')
+      setError(ot('Record at least one blocking issue before setting the stop-work state.'))
       return
     }
     const payload = {
@@ -6251,7 +6251,7 @@ function App() {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
         setDailyHuddle(emptyDailyHuddle())
-        notify('Start huddle was saved locally with its frozen crew, plan, safety focus, and stop-work state. It will sync after reconnection.')
+        notify(ot('Start huddle was saved locally with its frozen crew, plan, safety focus, and stop-work state. It will sync after reconnection.'))
         return
       }
       const result = await recordFieldOperation(draft)
@@ -6267,10 +6267,12 @@ function App() {
       })
       notify(
         result.replayed
-          ? 'This start huddle was already retained; the existing daily cycle was returned.'
+          ? ot('This start huddle was already retained; the existing daily cycle was returned.')
           : cycle.status === 'blocked'
-            ? `Start huddle retained with ${cycle.blockingIssues.length} blocking issue${cycle.blockingIssues.length === 1 ? '' : 's'}. Work is not released by this record.`
-            : 'Start huddle retained with frozen crew, plan, safety focus, and hold points. This record does not replace a permit or safety clearance.',
+            ? cycle.blockingIssues.length === 1
+              ? ot('Start huddle retained with {count} blocking issue. Work is not released by this record.', { count: cycle.blockingIssues.length })
+              : ot('Start huddle retained with {count} blocking issues. Work is not released by this record.', { count: cycle.blockingIssues.length })
+            : ot('Start huddle retained with frozen crew, plan, safety focus, and hold points. This record does not replace a permit or safety clearance.'),
       )
       await refresh()
     } catch (requestError) {
@@ -6279,7 +6281,7 @@ function App() {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
           setDailyHuddle(emptyDailyHuddle())
-          notify('Connection interrupted. The complete start huddle was saved locally for an exact retry.')
+          notify(ot('Connection interrupted. The complete start huddle was saved locally for an exact retry.'))
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -6304,23 +6306,23 @@ function App() {
       !(manpower > 0 && manpower <= 500) ||
       !fieldDailyLog.workCompleted.trim()
     ) {
-      setError('Choose an open daily cycle, record positive hours and manpower, and describe the completed work.')
+      setError(ot('Choose an open daily cycle, record positive hours and manpower, and describe the completed work.'))
       return
     }
     if (!fieldScoped && !fieldDailyLog.workerId) {
-      setError('Select the crew member whose time is being recorded.')
+      setError(ot('Select the crew member whose time is being recorded.'))
       return
     }
     if (fieldDailyLog.safetyConcern && fieldDailyLog.safetyNotes.trim().length < 5) {
-      setError('Describe the safety concern before submitting the daily site log.')
+      setError(ot('Describe the safety concern before submitting the daily site log.'))
       return
     }
     if (!fieldDailyLog.planAchieved && !fieldDailyLog.varianceReasons.trim()) {
-      setError('Record at least one reason when the daily production target was not achieved.')
+      setError(ot('Record at least one reason when the daily production target was not achieved.'))
       return
     }
     if (fieldDailyLog.tomorrowPlan.trim().length < 3 || fieldDailyLog.evidenceReferences.trim().length < 3) {
-      setError('Record tomorrow\'s plan and at least one retained EOD evidence reference.')
+      setError(ot('Record tomorrow\'s plan and at least one retained EOD evidence reference.'))
       return
     }
     const payload = {
@@ -6355,7 +6357,7 @@ function App() {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
         setFieldDailyLog(emptyFieldDailyLog())
-        notify('End-of-day report was saved locally with its time, safety, variance, and handoff evidence. It will sync after reconnection.')
+        notify(ot('End-of-day report was saved locally with its time, safety, variance, and handoff evidence. It will sync after reconnection.'))
         return
       }
       const result = await recordFieldOperation(draft)
@@ -6366,8 +6368,10 @@ function App() {
       setFieldDailyLog({ ...emptyFieldDailyLog(), jobId: fieldDailyLog.jobId })
       notify(
         result.replayed || result.dailyLog?.replayed
-          ? 'This end-of-day report was already retained; the existing daily cycle was returned without duplication.'
-          : `End-of-day report retained with plan variance, time card, safety state, and tomorrow handoff. ${approvalCount} review${approvalCount === 1 ? '' : 's'} added to the ledger.`,
+          ? ot('This end-of-day report was already retained; the existing daily cycle was returned without duplication.')
+          : approvalCount === 1
+            ? ot('End-of-day report retained with plan variance, time card, safety state, and tomorrow handoff. {count} review added to the ledger.', { count: approvalCount })
+            : ot('End-of-day report retained with plan variance, time card, safety state, and tomorrow handoff. {count} reviews added to the ledger.', { count: approvalCount }),
       )
       await refresh()
     } catch (requestError) {
@@ -6376,7 +6380,7 @@ function App() {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
           setFieldDailyLog(emptyFieldDailyLog())
-          notify('Connection interrupted. The complete end-of-day report was saved locally for an exact retry.')
+          notify(ot('Connection interrupted. The complete end-of-day report was saved locally for an exact retry.'))
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -6391,7 +6395,7 @@ function App() {
 
   async function requestProductionBaseline(payload) {
     if (!selectedJobId || !Array.isArray(payload?.lines) || !payload.lines.length) {
-      setError('Add at least one measured production line before requesting baseline approval.')
+      setError(ot('Add at least one measured production line before requesting baseline approval.'))
       return false
     }
     setSubmitting(true)
@@ -6404,8 +6408,8 @@ function App() {
       if (result.job) setSelectedJob(result.job)
       notify(
         result.replayed
-          ? `Production baseline v${result.baseline?.versionNumber || ''} is already retained.`
-          : `Production baseline v${result.baseline?.versionNumber || ''} retained for approval. No field output, schedule, budget, or external commitment was created.`,
+          ? ot('Production baseline v{version} is already retained.', { version: result.baseline?.versionNumber || '' })
+          : ot('Production baseline v{version} retained for approval. No field output, schedule, budget, or external commitment was created.', { version: result.baseline?.versionNumber || '' }),
       )
       await refreshSection(sectionRef.current)
       return true
@@ -6440,15 +6444,15 @@ function App() {
       if (navigator.onLine === false) {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
-        notify('Production output was saved locally and will be recorded for this operator after reconnection.')
+        notify(ot('Production output was saved locally and will be recorded for this operator after reconnection.'))
         return true
       }
       const result = await recordFieldOperation(draft)
       if (result.job) setSelectedJob(result.job)
       notify(
         result.replayed || result.entry?.replayed
-          ? 'This production output was already retained; no duplicate was created.'
-          : 'Installed quantity and crew hours were recorded against the approved production baseline.',
+          ? ot('This production output was already retained; no duplicate was created.')
+          : ot('Installed quantity and crew hours were recorded against the approved production baseline.'),
       )
       await refreshSection(sectionRef.current)
       return true
@@ -6457,7 +6461,7 @@ function App() {
         try {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
-          notify('Connection interrupted. Production output was saved locally for an exact retry.')
+          notify(ot('Connection interrupted. Production output was saved locally for an exact retry.'))
           return true
         } catch (outboxError) {
           setError(outboxError.message)
@@ -6486,15 +6490,15 @@ function App() {
       if (navigator.onLine === false) {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
-        notify('Daywork quantities were saved locally and will be submitted for review after reconnection.')
+        notify(ot('Daywork quantities were saved locally and will be submitted for review after reconnection.'))
         return true
       }
       const result = await recordFieldOperation(draft)
       if (result.job) setSelectedJob(result.job)
       notify(
         result.replayed
-          ? 'This daywork ticket was already retained; no duplicate was created.'
-          : `${result.dayworkTicket?.ticketNumber || 'Daywork ticket'} retained for quantity and evidence review. No price or external commitment was created.`,
+          ? ot('This daywork ticket was already retained; no duplicate was created.')
+          : ot('{ticket} retained for quantity and evidence review. No price or external commitment was created.', { ticket: result.dayworkTicket?.ticketNumber || ot('Daywork ticket') }),
       )
       await refreshSection(sectionRef.current)
       return true
@@ -6503,7 +6507,7 @@ function App() {
         try {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
-          notify('Connection interrupted. Daywork quantities were saved locally for an exact retry.')
+          notify(ot('Connection interrupted. Daywork quantities were saved locally for an exact retry.'))
           return true
         } catch (outboxError) {
           setError(outboxError.message)
@@ -6529,8 +6533,8 @@ function App() {
       if (result.job) setSelectedJob(result.job)
       notify(
         result.replayed
-          ? 'This acknowledgement review is already pending.'
-          : 'Acknowledgement evidence was retained for review. It confirms receipt only and does not accept price or scope.',
+          ? ot('This acknowledgement review is already pending.')
+          : ot('Acknowledgement evidence was retained for review. It confirms receipt only and does not accept price or scope.'),
       )
       await refreshSection(sectionRef.current)
       return true
@@ -6554,8 +6558,8 @@ function App() {
       if (result.job) setSelectedJob(result.job)
       notify(
         result.replayed
-          ? 'This daywork ticket is already linked to its retained change order.'
-          : 'A source-bound change order was prepared for approval. Contract value and external commitments remain unchanged.',
+          ? ot('This daywork ticket is already linked to its retained change order.')
+          : ot('A source-bound change order was prepared for approval. Contract value and external commitments remain unchanged.'),
       )
       await refreshSection(sectionRef.current)
       return true
@@ -6579,8 +6583,8 @@ function App() {
       if (result.job) setSelectedJob(result.job)
       notify(
         result.replayed
-          ? 'The production reversal is already retained.'
-          : 'Production reversal retained for approval. The entry remains included until the decision is approved.',
+          ? ot('The production reversal is already retained.')
+          : ot('Production reversal retained for approval. The entry remains included until the decision is approved.'),
       )
       await refreshSection(sectionRef.current)
       return true
@@ -12868,65 +12872,65 @@ function App() {
                 <form className="evidence-form daily-cycle-form" data-testid="daily-start-huddle-form" aria-busy={dailyCycleLoading} onSubmit={recordDailyStartHuddle}>
                   <div className="panel-heading">
                     <div>
-                      <h2>Daily start huddle</h2>
-                      <p>Freeze today&apos;s crew, production target, safety focus, hold points, constraints, and stop-work state before the shift.</p>
+                      <h2>{ot('Daily start huddle')}</h2>
+                      <p>{ot("Freeze today's crew, production target, safety focus, hold points, constraints, and stop-work state before the shift.")}</p>
                     </div>
-                    <span className="tag">Internal control</span>
+                    <span className="tag">{ot('Internal control')}</span>
                   </div>
                   <div className="form-grid daily-cycle-job-grid">
                     <label>
-                      Job
+                      {ot('Job')}
                       <select required value={dailyHuddle.jobId} onChange={(event) => void selectDailyCycleJob(event.target.value)}>
-                        <option value="">Select an active job</option>
+                        <option value="">{ot('Select an active job')}</option>
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
                     </label>
                   </div>
                   <fieldset className="form-grid daily-cycle-fieldset" disabled={dailyCycleLoading}>
                     <label>
-                      Work date
+                      {ot('Work date')}
                       <input required type="date" value={dailyHuddle.workDate} onChange={(event) => updateDailyHuddle('workDate', event.target.value)} />
                     </label>
                     <label>
-                      Shift
+                      {ot('Shift')}
                       <select value={dailyHuddle.shiftLabel} onChange={(event) => updateDailyHuddle('shiftLabel', event.target.value)}>
-                        <option value="day">Day</option>
-                        <option value="early">Early</option>
-                        <option value="late">Late</option>
-                        <option value="night">Night</option>
+                        <option value="day">{ot('Day')}</option>
+                        <option value="early">{ot('Early')}</option>
+                        <option value="late">{ot('Late')}</option>
+                        <option value="night">{ot('Night')}</option>
                       </select>
                     </label>
                     <label>
-                      Weather
+                      {ot('Weather')}
                       <select value={dailyHuddle.weather} onChange={(event) => updateDailyHuddle('weather', event.target.value)}>
-                        <option value="clear">Clear</option>
-                        <option value="cloudy">Cloudy</option>
-                        <option value="rain">Rain</option>
-                        <option value="wind">High wind</option>
-                        <option value="heat">Heat</option>
-                        <option value="cold">Cold</option>
+                        <option value="clear">{ot('Clear')}</option>
+                        <option value="cloudy">{ot('Cloudy')}</option>
+                        <option value="rain">{ot('Rain')}</option>
+                        <option value="wind">{ot('High wind')}</option>
+                        <option value="heat">{ot('Heat')}</option>
+                        <option value="cold">{ot('Cold')}</option>
                       </select>
                     </label>
                     {!fieldScoped ? (
                       <>
                         <label>
-                          Facilitator
-                          <input required minLength="2" maxLength="160" value={dailyHuddle.facilitator} onChange={(event) => updateDailyHuddle('facilitator', event.target.value)} placeholder="Crew lead or supervisor" />
+                          {ot('Facilitator')}
+                          <input required minLength="2" maxLength="160" value={dailyHuddle.facilitator} onChange={(event) => updateDailyHuddle('facilitator', event.target.value)} placeholder={ot('Crew lead or supervisor')} />
                         </label>
                         <label>
-                          Daily lead
+                          {ot('Daily lead')}
                           <select required value={dailyHuddle.leadWorkerId} onChange={(event) => updateDailyHuddle('leadWorkerId', event.target.value)}>
-                            <option value="">Select retained crew first</option>
+                            <option value="">{ot('Select retained crew first')}</option>
                             {workers.filter(worker => dailyHuddle.workerIds.includes(worker.id)).map(worker => <option key={worker.id} value={worker.id}>{worker.name}</option>)}
                           </select>
                         </label>
                         <fieldset className="daily-crew-picker form-span">
-                          <legend>Huddle crew</legend>
+                          <legend>{ot('Huddle crew')}</legend>
                           <div>
                             {workers.filter(worker => !['retired', 'inactive'].includes(worker.status)).map(worker => (
                               <label className="checkbox-label" key={worker.id}>
                                 <input type="checkbox" checked={dailyHuddle.workerIds.includes(worker.id)} onChange={(event) => toggleDailyHuddleWorker(worker.id, event.target.checked)} />
-                                <span>{worker.name}<small>{worker.role || 'Crew'}</small></span>
+                                <span>{worker.name}<small>{worker.role || ot('Crew')}</small></span>
                               </label>
                             ))}
                           </div>
@@ -12935,71 +12939,71 @@ function App() {
                     ) : (
                       <div className="daily-field-identity form-span">
                         <Users size={18} />
-                        <span><strong>{operator.worker?.name || 'Field worker'}</strong><small>Your authenticated field identity is the retained huddle lead and attendee.</small></span>
+                        <span><strong>{operator.worker?.name || ot('Field worker')}</strong><small>{ot('Your authenticated field identity is the retained huddle lead and attendee.')}</small></span>
                       </div>
                     )}
                     <label className="form-span">
-                      Planned work
-                      <textarea required minLength="8" maxLength="4000" value={dailyHuddle.plannedWork} onChange={(event) => updateDailyHuddle('plannedWork', event.target.value)} placeholder="Specific work areas, sequence, and handoffs for this shift." />
+                      {ot('Planned work')}
+                      <textarea required minLength="8" maxLength="4000" value={dailyHuddle.plannedWork} onChange={(event) => updateDailyHuddle('plannedWork', event.target.value)} placeholder={ot('Specific work areas, sequence, and handoffs for this shift.')} />
                     </label>
                     <label className="form-span">
-                      Production target
-                      <textarea required minLength="3" maxLength="1000" value={dailyHuddle.productionTarget} onChange={(event) => updateDailyHuddle('productionTarget', event.target.value)} placeholder="A measurable quantity, milestone, or completion state." />
+                      {ot('Production target')}
+                      <textarea required minLength="3" maxLength="1000" value={dailyHuddle.productionTarget} onChange={(event) => updateDailyHuddle('productionTarget', event.target.value)} placeholder={ot('A measurable quantity, milestone, or completion state.')} />
                     </label>
                     <label className="form-span">
-                      Site conditions
-                      <textarea maxLength="2000" value={dailyHuddle.siteConditions} onChange={(event) => updateDailyHuddle('siteConditions', event.target.value)} placeholder="Access, occupants, logistics, weather exposure, or changed conditions." />
+                      {ot('Site conditions')}
+                      <textarea maxLength="2000" value={dailyHuddle.siteConditions} onChange={(event) => updateDailyHuddle('siteConditions', event.target.value)} placeholder={ot('Access, occupants, logistics, weather exposure, or changed conditions.')} />
                     </label>
                     <label className="form-span">
-                      Safety focus
-                      <textarea required minLength="5" maxLength="2000" value={dailyHuddle.safetyFocus} onChange={(event) => updateDailyHuddle('safetyFocus', event.target.value)} placeholder="Today&apos;s hazards, controls, LMRA trigger, and stop-work condition." />
+                      {ot('Safety focus')}
+                      <textarea required minLength="5" maxLength="2000" value={dailyHuddle.safetyFocus} onChange={(event) => updateDailyHuddle('safetyFocus', event.target.value)} placeholder={ot("Today's hazards, controls, LMRA trigger, and stop-work condition.")} />
                     </label>
                     <label className="form-span">
-                      Quality hold points
-                      <textarea value={dailyHuddle.qualityHoldPoints} onChange={(event) => updateDailyHuddle('qualityHoldPoints', event.target.value)} placeholder="One inspection, witness, or approval hold point per line." />
+                      {ot('Quality hold points')}
+                      <textarea value={dailyHuddle.qualityHoldPoints} onChange={(event) => updateDailyHuddle('qualityHoldPoints', event.target.value)} placeholder={ot('One inspection, witness, or approval hold point per line.')} />
                     </label>
                     <label className="form-span">
-                      Constraints
-                      <textarea value={dailyHuddle.constraints} onChange={(event) => updateDailyHuddle('constraints', event.target.value)} placeholder="Materials, information, access, equipment, or third-party dependencies." />
+                      {ot('Constraints')}
+                      <textarea value={dailyHuddle.constraints} onChange={(event) => updateDailyHuddle('constraints', event.target.value)} placeholder={ot('Materials, information, access, equipment, or third-party dependencies.')} />
                     </label>
                     <label className="form-span">
-                      Blocking issues
-                      <textarea value={dailyHuddle.blockingIssues} onChange={(event) => updateDailyHuddle('blockingIssues', event.target.value)} placeholder="Only conditions that prevent planned work; one per line." />
+                      {ot('Blocking issues')}
+                      <textarea value={dailyHuddle.blockingIssues} onChange={(event) => updateDailyHuddle('blockingIssues', event.target.value)} placeholder={ot('Only conditions that prevent planned work; one per line.')} />
                     </label>
                     <label className="checkbox-label form-span daily-stop-work">
                       <input type="checkbox" checked={dailyHuddle.stopWorkRequired} onChange={(event) => updateDailyHuddle('stopWorkRequired', event.target.checked)} />
-                      Stop work until the retained blocking issues are resolved
+                      {ot('Stop work until the retained blocking issues are resolved')}
                     </label>
                     <label className="form-span">
-                      Huddle evidence reference
-                      <input required minLength="3" maxLength="500" value={dailyHuddle.evidenceReference} onChange={(event) => updateDailyHuddle('evidenceReference', event.target.value)} placeholder="Signed sheet, attendance photo, or retained document reference" />
+                      {ot('Huddle evidence reference')}
+                      <input required minLength="3" maxLength="500" value={dailyHuddle.evidenceReference} onChange={(event) => updateDailyHuddle('evidenceReference', event.target.value)} placeholder={ot('Signed sheet, attendance photo, or retained document reference')} />
                     </label>
                   </fieldset>
                   <div className="modal-actions">
                     <button className="primary-button" disabled={submitting || dailyCycleLoading}>
                       <ClipboardCheck size={16} />
-                      {submitting ? 'Retaining...' : dailyCycleLoading ? 'Loading daily cycles...' : navigator.onLine === false ? 'Save huddle offline' : 'Retain start huddle'}
+                      {submitting ? ot('Retaining...') : dailyCycleLoading ? ot('Loading daily cycles...') : navigator.onLine === false ? ot('Save huddle offline') : ot('Retain start huddle')}
                     </button>
                   </div>
-                  <p className="attendance-policy">A released huddle is an internal coordination record. It does not create a permit, certify compliance, notify the crew, or authorize hazardous work.</p>
+                  <p className="attendance-policy">{ot('A released huddle is an internal coordination record. It does not create a permit, certify compliance, notify the crew, or authorize hazardous work.')}</p>
                 </form>
                 <form className="evidence-form daily-site-log" data-testid="daily-site-log-form" onSubmit={recordFieldDailyLog}>
                   <div className="panel-heading">
                     <div>
-                      <h2>End-of-day report</h2>
-                      <p>Close an open huddle with plan-versus-actual evidence, time, safety state, unresolved actions, and tomorrow&apos;s handoff.</p>
+                      <h2>{ot('End-of-day report')}</h2>
+                      <p>{ot("Close an open huddle with plan-versus-actual evidence, time, safety state, unresolved actions, and tomorrow's handoff.")}</p>
                     </div>
                     {fieldScoped && operator.worker?.name ? <span className="tag tag-green">{operator.worker.name}</span> : null}
                   </div>
                   <div className="form-grid">
                     <label>
-                      Job
+                      {ot('Job')}
                       <select
                         required
                         value={fieldDailyLog.jobId}
                         onChange={(event) => void selectDailyCycleJob(event.target.value)}
                       >
-                        <option value="">Select an active job</option>
+                        <option value="">{ot('Select an active job')}</option>
                         {activeJobs.map((job) => (
                           <option key={job.id} value={job.id}>
                             {job.title}
@@ -13008,7 +13012,7 @@ function App() {
                       </select>
                     </label>
                     <label>
-                      Open daily cycle
+                      {ot('Open daily cycle')}
                       <select
                         required
                         value={fieldDailyLog.cycleId}
@@ -13022,28 +13026,28 @@ function App() {
                           })
                         }}
                       >
-                        <option value="">Select a released or blocked huddle</option>
+                        <option value="">{ot('Select a released or blocked huddle')}</option>
                         {fieldDailyCycles.filter(cycle => ['released', 'blocked'].includes(cycle.status)).map(cycle => (
-                          <option key={cycle.id} value={cycle.id}>{formatDate(cycle.workDate)} / {formatStatus(cycle.shiftLabel)} / {formatStatus(cycle.status)}</option>
+                          <option key={cycle.id} value={cycle.id}>{formatDate(cycle.workDate)} / {ot(formatStatus(cycle.shiftLabel))} / {ot(formatStatus(cycle.status))}</option>
                         ))}
                       </select>
                     </label>
                     {selectedDailyCycle ? (
                       <div className={`daily-cycle-source form-span daily-cycle-source-${selectedDailyCycle.status}`}>
-                        <div><span>Production target</span><strong>{selectedDailyCycle.productionTarget}</strong></div>
-                        <div><span>Safety focus</span><strong>{selectedDailyCycle.safetyFocus}</strong></div>
-                        <div><span>Start state</span><strong>{formatStatus(selectedDailyCycle.status)}</strong></div>
+                        <div><span>{ot('Production target')}</span><strong>{selectedDailyCycle.productionTarget}</strong></div>
+                        <div><span>{ot('Safety focus')}</span><strong>{selectedDailyCycle.safetyFocus}</strong></div>
+                        <div><span>{ot('Start state')}</span><strong>{ot(formatStatus(selectedDailyCycle.status))}</strong></div>
                       </div>
                     ) : null}
                     {!fieldScoped ? (
                       <label>
-                        Crew member
+                        {ot('Crew member')}
                         <select
                           required
                           value={fieldDailyLog.workerId}
                           onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, workerId: event.target.value })}
                         >
-                          <option value="">Select a crew member</option>
+                          <option value="">{ot('Select a crew member')}</option>
                           {workers
                             .filter((worker) => !['retired', 'inactive'].includes(worker.status))
                             .map((worker) => (
@@ -13055,7 +13059,7 @@ function App() {
                       </label>
                     ) : null}
                     <label>
-                      Work date
+                      {ot('Work date')}
                       <input
                         required
                         type="date"
@@ -13064,7 +13068,7 @@ function App() {
                       />
                     </label>
                     <label>
-                      Hours worked
+                      {ot('Hours worked')}
                       <input
                         required
                         type="number"
@@ -13077,7 +13081,7 @@ function App() {
                       />
                     </label>
                     <label>
-                      People on site
+                      {ot('People on site')}
                       <input
                         required
                         type="number"
@@ -13090,35 +13094,35 @@ function App() {
                       />
                     </label>
                     <label>
-                      Weather
+                      {ot('Weather')}
                       <select
                         value={fieldDailyLog.weather}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, weather: event.target.value })}
                       >
-                        <option value="clear">Clear</option>
-                        <option value="cloudy">Cloudy</option>
-                        <option value="rain">Rain</option>
-                        <option value="wind">High wind</option>
-                        <option value="heat">Heat</option>
-                        <option value="cold">Cold</option>
+                        <option value="clear">{ot('Clear')}</option>
+                        <option value="cloudy">{ot('Cloudy')}</option>
+                        <option value="rain">{ot('Rain')}</option>
+                        <option value="wind">{ot('High wind')}</option>
+                        <option value="heat">{ot('Heat')}</option>
+                        <option value="cold">{ot('Cold')}</option>
                       </select>
                     </label>
                     <label className="form-span">
-                      Work completed
+                      {ot('Work completed')}
                       <textarea
                         required
                         minLength="3"
                         value={fieldDailyLog.workCompleted}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, workCompleted: event.target.value })}
-                        placeholder="Record the work completed during this shift."
+                        placeholder={ot('Record the work completed during this shift.')}
                       />
                     </label>
                     <label className="form-span">
-                      Blockers or follow-up
+                      {ot('Blockers or follow-up')}
                       <textarea
                         value={fieldDailyLog.blockers}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, blockers: event.target.value })}
-                        placeholder="One blocker or follow-up per line."
+                        placeholder={ot('One blocker or follow-up per line.')}
                       />
                     </label>
                     <label className="form-span checkbox-label daily-target-check">
@@ -13127,46 +13131,46 @@ function App() {
                         checked={fieldDailyLog.planAchieved}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, planAchieved: event.target.checked })}
                       />
-                      The retained production target was achieved
+                      {ot('The retained production target was achieved')}
                     </label>
                     {!fieldDailyLog.planAchieved ? (
                       <label className="form-span">
-                        Reasons for variance
+                        {ot('Reasons for variance')}
                         <textarea
                           required
                           value={fieldDailyLog.varianceReasons}
                           onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, varianceReasons: event.target.value })}
-                          placeholder="One source-grounded reason per line; do not infer causes."
+                          placeholder={ot('One source-grounded reason per line; do not infer causes.')}
                         />
                       </label>
                     ) : null}
                     <label className="form-span">
-                      Unresolved actions
+                      {ot('Unresolved actions')}
                       <textarea
                         value={fieldDailyLog.unresolvedActions}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, unresolvedActions: event.target.value })}
-                        placeholder="Owner, decision, material, access, quality, or safety action still open."
+                        placeholder={ot('Owner, decision, material, access, quality, or safety action still open.')}
                       />
                     </label>
                     <label className="form-span">
-                      Tomorrow&apos;s plan
+                      {ot("Tomorrow's plan")}
                       <textarea
                         required
                         minLength="3"
                         maxLength="4000"
                         value={fieldDailyLog.tomorrowPlan}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, tomorrowPlan: event.target.value })}
-                        placeholder="Next work sequence, first handoff, and constraint-removal priority."
+                        placeholder={ot('Next work sequence, first handoff, and constraint-removal priority.')}
                       />
                     </label>
                     <label className="form-span">
-                      EOD evidence references
+                      {ot('EOD evidence references')}
                       <textarea
                         required
                         minLength="3"
                         value={fieldDailyLog.evidenceReferences}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, evidenceReferences: event.target.value })}
-                        placeholder="Photo set, delivery ticket, inspection, measurement, or retained document reference; one per line."
+                        placeholder={ot('Photo set, delivery ticket, inspection, measurement, or retained document reference; one per line.')}
                       />
                     </label>
                     <label className="form-span checkbox-label">
@@ -13175,29 +13179,29 @@ function App() {
                         checked={fieldDailyLog.safetyConcern}
                         onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, safetyConcern: event.target.checked })}
                       />
-                      A safety concern requires office review
+                      {ot('A safety concern requires office review')}
                     </label>
                     {fieldDailyLog.safetyConcern ? (
                       <>
                         <label>
-                          Risk level
+                          {ot('Risk level')}
                           <select
                             value={fieldDailyLog.safetyRiskLevel}
                             onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, safetyRiskLevel: event.target.value })}
                           >
-                            <option value="medium">Medium</option>
-                            <option value="high">High</option>
-                            <option value="critical">Critical</option>
+                            <option value="medium">{ot('Medium')}</option>
+                            <option value="high">{ot('High')}</option>
+                            <option value="critical">{ot('Critical')}</option>
                           </select>
                         </label>
                         <label className="form-span">
-                          Safety concern
+                          {ot('Safety concern')}
                           <textarea
                             required
                             minLength="5"
                             value={fieldDailyLog.safetyNotes}
                             onChange={(event) => setFieldDailyLog({ ...fieldDailyLog, safetyNotes: event.target.value })}
-                            placeholder="Describe the hazard, immediate control, and required follow-up."
+                            placeholder={ot('Describe the hazard, immediate control, and required follow-up.')}
                           />
                         </label>
                       </>
@@ -13206,10 +13210,10 @@ function App() {
                   <div className="modal-actions">
                     <button className="primary-button" disabled={submitting}>
                       <ClipboardList size={16} />
-                      {submitting ? 'Submitting...' : navigator.onLine === false ? 'Save EOD report offline' : 'Submit EOD report'}
+                      {submitting ? ot('Submitting...') : navigator.onLine === false ? ot('Save EOD report offline') : ot('Submit EOD report')}
                     </button>
                   </div>
-                  <p className="attendance-policy">Approval recognizes the retained daily evidence. It does not send a client update, change the schedule, order materials, or certify safety compliance.</p>
+                  <p className="attendance-policy">{ot('Approval recognizes the retained daily evidence. It does not send a client update, change the schedule, order materials, or certify safety compliance.')}</p>
                 </form>
                 <form ref={fieldCaptureRef} className="evidence-form" data-testid="field-evidence-form" onSubmit={uploadEvidence}>
                   <div className="panel-heading">
@@ -13223,7 +13227,7 @@ function App() {
                     <label>
                       Job
                       <select required value={evidence.jobId} onChange={(event) => void selectFieldEvidenceJob(event.target.value)}>
-                        <option value="">Select an active job</option>
+                        <option value="">{ot('Select an active job')}</option>
                         {activeJobs.map((job) => (
                           <option key={job.id} value={job.id}>
                             {job.title}
@@ -15793,6 +15797,7 @@ function App() {
                   ) : null}
                   <ProductionControl
                     job={selectedJob}
+                    locale={operatorLocale}
                     canCoordinate={canCoordinate}
                     canReport={canCoordinate || capabilities.fieldEvidence === true}
                     canApprove={capabilities.approvals === true}
@@ -15807,6 +15812,7 @@ function App() {
                   />
                   <DayworkControl
                     job={selectedJob}
+                    locale={operatorLocale}
                     canReport={canCoordinate || capabilities.fieldEvidence === true}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}

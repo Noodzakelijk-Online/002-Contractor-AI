@@ -1060,6 +1060,7 @@ function TakeoffControl({
 
 function ProductionControl({
   job,
+  locale,
   canCoordinate,
   canReport,
   canApprove,
@@ -1072,6 +1073,7 @@ function ProductionControl({
   onOpenApprovals,
   onSyncOutbox,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const production = job.productionControl || {}
   const activeBaseline = production.activeBaseline || null
   const activeBaselineId = activeBaseline?.id || ''
@@ -1152,7 +1154,7 @@ function ProductionControl({
 
   const summary = production.summary || {}
   const performanceStatus = summary.performanceFactor === null || summary.performanceFactor === undefined
-    ? 'Not rated'
+    ? t('Not rated')
     : roundDisplay(summary.performanceFactor)
 
   return (
@@ -1160,31 +1162,31 @@ function ProductionControl({
       <div className="section-heading production-heading">
         <Activity size={18} />
         <div>
-          <h3>Production control</h3>
-          <p>Compare measured installed output and crew hours with one approved production baseline.</p>
+          <h3>{t('Production control')}</h3>
+          <p>{t('Compare measured installed output and crew hours with one approved production baseline.')}</p>
         </div>
         {canCoordinate && !pendingBaseline && !editingBaseline ? (
           <button type="button" className="secondary-button" disabled={submitting} onClick={beginBaselineRevision}>
             <Ruler size={15} />
-            {activeBaseline ? 'Revise baseline' : 'Create baseline'}
+            {activeBaseline ? t('Revise baseline') : t('Create baseline')}
           </button>
         ) : null}
       </div>
 
-      <div className="production-summary" aria-label="Production performance summary">
-        <div><span>Quantity progress</span><strong>{roundDisplay(summary.quantityProgressPercent || 0)}%</strong></div>
-        <div><span>Earned / crew hours</span><strong>{roundDisplay(summary.earnedHours || 0)} / {roundDisplay(summary.crewHours || 0)}</strong></div>
-        <div><span>Performance factor</span><strong>{performanceStatus}</strong></div>
-        <div><span>At-risk lines</span><strong>{summary.atRiskLines || 0}</strong></div>
+      <div className="production-summary" aria-label={t('Production performance summary')}>
+        <div><span>{t('Quantity progress')}</span><strong>{roundDisplay(summary.quantityProgressPercent || 0)}%</strong></div>
+        <div><span>{t('Earned / crew hours')}</span><strong>{roundDisplay(summary.earnedHours || 0)} / {roundDisplay(summary.crewHours || 0)}</strong></div>
+        <div><span>{t('Performance factor')}</span><strong>{performanceStatus}</strong></div>
+        <div><span>{t('At-risk lines')}</span><strong>{summary.atRiskLines || 0}</strong></div>
       </div>
 
       {pendingBaseline ? (
         <div className="production-pending" role="status">
           <ShieldCheck size={16} />
-          <span>Baseline v{pendingBaseline.versionNumber} is awaiting approval. Output remains bound to the current approved baseline.</span>
+          <span>{t('Baseline v{version} is awaiting approval. Output remains bound to the current approved baseline.', { version: pendingBaseline.versionNumber })}</span>
           {canApprove ? (
             <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pendingBaseline.approvalId, jobId: job.id, jobTitle: job.title })}>
-              Review approval
+              {t('Review approval')}
             </button>
           ) : null}
         </div>
@@ -1194,84 +1196,84 @@ function ProductionControl({
         <form className="production-baseline-editor" data-testid="production-baseline-form" onSubmit={submitBaseline}>
           <div className="production-editor-heading">
             <div>
-              <strong>{activeBaseline ? 'Revised production baseline' : 'Initial production baseline'}</strong>
-              <small>Keep existing line keys and units when revising lines with retained output.</small>
+              <strong>{activeBaseline ? t('Revised production baseline') : t('Initial production baseline')}</strong>
+              <small>{t('Keep existing line keys and units when revising lines with retained output.')}</small>
             </div>
-            <button type="button" className="icon-button" aria-label="Cancel production baseline" onClick={() => setEditingBaseline(false)}><X size={16} /></button>
+            <button type="button" className="icon-button" aria-label={t('Cancel production baseline')} onClick={() => setEditingBaseline(false)}><X size={16} /></button>
           </div>
           <div className="production-baseline-lines">
             {baselineLines.map((line, index) => (
               <div className="production-baseline-line" key={index}>
-                <label>Line key<input required minLength="2" maxLength="100" value={line.lineKey} onChange={(event) => updateBaselineLine(index, { lineKey: event.target.value })} /></label>
-                <label>Cost code<input required minLength="2" maxLength="80" value={line.costCode} onChange={(event) => updateBaselineLine(index, { costCode: event.target.value })} /></label>
-                <label className="production-description">Description<input required minLength="2" maxLength="300" value={line.description} onChange={(event) => updateBaselineLine(index, { description: event.target.value })} /></label>
-                <label>Unit<input required maxLength="30" value={line.unit} onChange={(event) => updateBaselineLine(index, { unit: event.target.value })} /></label>
-                <label>Planned quantity<input required type="number" min="0.0001" step="0.0001" value={line.plannedQuantity} onChange={(event) => updateBaselineLine(index, { plannedQuantity: event.target.value })} /></label>
-                <label>Labor hours<input required type="number" min="0.01" step="0.01" value={line.plannedLaborHours} onChange={(event) => updateBaselineLine(index, { plannedLaborHours: event.target.value })} /></label>
+                <label>{t('Line key')}<input required minLength="2" maxLength="100" value={line.lineKey} onChange={(event) => updateBaselineLine(index, { lineKey: event.target.value })} /></label>
+                <label>{t('Cost code')}<input required minLength="2" maxLength="80" value={line.costCode} onChange={(event) => updateBaselineLine(index, { costCode: event.target.value })} /></label>
+                <label className="production-description">{t('Description')}<input required minLength="2" maxLength="300" value={line.description} onChange={(event) => updateBaselineLine(index, { description: event.target.value })} /></label>
+                <label>{t('Unit')}<input required maxLength="30" value={line.unit} onChange={(event) => updateBaselineLine(index, { unit: event.target.value })} /></label>
+                <label>{t('Planned quantity')}<input required type="number" min="0.0001" step="0.0001" value={line.plannedQuantity} onChange={(event) => updateBaselineLine(index, { plannedQuantity: event.target.value })} /></label>
+                <label>{t('Labor hours')}<input required type="number" min="0.01" step="0.01" value={line.plannedLaborHours} onChange={(event) => updateBaselineLine(index, { plannedLaborHours: event.target.value })} /></label>
                 {baselineLines.length > 1 ? (
-                  <button type="button" className="icon-button production-remove-line" aria-label={`Remove production line ${index + 1}`} onClick={() => setBaselineLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X size={15} /></button>
+                  <button type="button" className="icon-button production-remove-line" aria-label={t('Remove production line {number}', { number: index + 1 })} onClick={() => setBaselineLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X size={15} /></button>
                 ) : null}
               </div>
             ))}
           </div>
-          <label className="production-notes">Reviewer context<textarea maxLength="4000" value={baselineNotes} onChange={(event) => setBaselineNotes(event.target.value)} placeholder="Record measurement basis, crew assumptions, and retained references." /></label>
+          <label className="production-notes">{t('Reviewer context')}<textarea maxLength="4000" value={baselineNotes} onChange={(event) => setBaselineNotes(event.target.value)} placeholder={t('Record measurement basis, crew assumptions, and retained references.')} /></label>
           <div className="modal-actions">
-            <button type="button" className="secondary-button" disabled={submitting || baselineLines.length >= 200} onClick={() => setBaselineLines((current) => [...current, emptyProductionBaselineLine(current.length)])}><Plus size={15} />Line</button>
-            <button className="primary-button" disabled={submitting}><ShieldCheck size={15} />{submitting ? 'Retaining...' : 'Request baseline approval'}</button>
+            <button type="button" className="secondary-button" disabled={submitting || baselineLines.length >= 200} onClick={() => setBaselineLines((current) => [...current, emptyProductionBaselineLine(current.length)])}><Plus size={15} />{t('Line')}</button>
+            <button className="primary-button" disabled={submitting}><ShieldCheck size={15} />{submitting ? t('Retaining...') : t('Request baseline approval')}</button>
           </div>
         </form>
       ) : null}
 
       {activeBaseline ? (
-        <div className="production-line-register" role="table" aria-label="Production baseline lines">
+        <div className="production-line-register" role="table" aria-label={t('Production baseline lines')}>
           {lines.map((line) => (
             <div className={`production-line-row ${line.atRisk ? 'production-line-risk' : ''}`} role="row" key={line.lineKey}>
               <div className="production-line-copy" role="cell"><strong>{line.description}</strong><small>{line.costCode} / {line.lineKey}</small></div>
-              <div role="cell"><span>Installed</span><strong>{roundDisplay(line.installedQuantity)} / {roundDisplay(line.plannedQuantity)} {line.unit}</strong></div>
-              <div role="cell"><span>Earned / crew</span><strong>{roundDisplay(line.earnedHours)} / {roundDisplay(line.crewHours)} h</strong></div>
-              <div role="cell"><span>Factor</span><strong>{line.performanceFactor === null ? 'Not rated' : roundDisplay(line.performanceFactor)}</strong></div>
+              <div role="cell"><span>{t('Installed')}</span><strong>{roundDisplay(line.installedQuantity)} / {roundDisplay(line.plannedQuantity)} {line.unit}</strong></div>
+              <div role="cell"><span>{t('Earned / crew')}</span><strong>{roundDisplay(line.earnedHours)} / {roundDisplay(line.crewHours)} h</strong></div>
+              <div role="cell"><span>{t('Factor')}</span><strong>{line.performanceFactor === null ? t('Not rated') : roundDisplay(line.performanceFactor)}</strong></div>
             </div>
           ))}
         </div>
       ) : !editingBaseline ? (
-        <Empty title="No approved production baseline" detail="An office operator must retain measured plan quantities and labor hours before field output can be recorded." />
+        <Empty title={t('No approved production baseline')} detail={t('An office operator must retain measured plan quantities and labor hours before field output can be recorded.')} />
       ) : null}
 
       {activeBaseline && canReport ? (
         <form className="production-entry-form" data-testid="production-entry-form" onSubmit={submitEntry}>
           <div className="production-entry-heading">
-            <div className="production-entry-copy"><strong>Record installed output</strong><small>Operational crew hours support productivity review and do not replace payroll time cards.</small></div>
+            <div className="production-entry-copy"><strong>{t('Record installed output')}</strong><small>{t('Operational crew hours support productivity review and do not replace payroll time cards.')}</small></div>
             <div className="production-outbox-status" aria-live="polite">
               {outboxPending ? (
                 <button type="button" className="secondary-button" disabled={outboxSyncing || navigator.onLine === false} onClick={onSyncOutbox}>
                   <RefreshCw size={14} className={outboxSyncing ? 'spin' : ''} />
-                  {outboxSyncing ? 'Syncing...' : `${outboxPending} queued`}
+                  {outboxSyncing ? t('Syncing...') : t('{count} queued', { count: outboxPending })}
                 </button>
               ) : (
-                <span className="tag tag-green">Outbox clear</span>
+                <span className="tag tag-green">{t('Outbox clear')}</span>
               )}
             </div>
           </div>
           <div className="form-grid">
-            <label>Production line<select required value={entryDraft.lineKey} onChange={(event) => setEntryDraft({ ...entryDraft, lineKey: event.target.value })}>{lines.map((line) => <option key={line.lineKey} value={line.lineKey}>{line.description} ({line.unit})</option>)}</select></label>
-            <label>Work date<input required type="date" value={entryDraft.workDate} onChange={(event) => setEntryDraft({ ...entryDraft, workDate: event.target.value })} /></label>
-            <label>Installed quantity<input required type="number" min="0.0001" step="0.0001" value={entryDraft.quantity} onChange={(event) => setEntryDraft({ ...entryDraft, quantity: event.target.value })} /></label>
-            <label>Crew hours<input required type="number" min="0" max="12000" step="0.01" value={entryDraft.crewHours} onChange={(event) => setEntryDraft({ ...entryDraft, crewHours: event.target.value })} /></label>
-            <label className="form-span">Field note<textarea required minLength="3" maxLength="4000" value={entryDraft.note} onChange={(event) => setEntryDraft({ ...entryDraft, note: event.target.value })} placeholder="Record measured area, work location, crew conditions, and evidence reference." /></label>
+            <label>{t('Production line')}<select required value={entryDraft.lineKey} onChange={(event) => setEntryDraft({ ...entryDraft, lineKey: event.target.value })}>{lines.map((line) => <option key={line.lineKey} value={line.lineKey}>{line.description} ({line.unit})</option>)}</select></label>
+            <label>{t('Work date')}<input required type="date" value={entryDraft.workDate} onChange={(event) => setEntryDraft({ ...entryDraft, workDate: event.target.value })} /></label>
+            <label>{t('Installed quantity')}<input required type="number" min="0.0001" step="0.0001" value={entryDraft.quantity} onChange={(event) => setEntryDraft({ ...entryDraft, quantity: event.target.value })} /></label>
+            <label>{t('Crew hours')}<input required type="number" min="0" max="12000" step="0.01" value={entryDraft.crewHours} onChange={(event) => setEntryDraft({ ...entryDraft, crewHours: event.target.value })} /></label>
+            <label className="form-span">{t('Field note')}<textarea required minLength="3" maxLength="4000" value={entryDraft.note} onChange={(event) => setEntryDraft({ ...entryDraft, note: event.target.value })} placeholder={t('Record measured area, work location, crew conditions, and evidence reference.')} /></label>
           </div>
-          <div className="modal-actions"><button className="primary-button" disabled={submitting}><Activity size={15} />{submitting ? 'Recording...' : navigator.onLine === false ? 'Save output offline' : 'Record output'}</button></div>
+          <div className="modal-actions"><button className="primary-button" disabled={submitting}><Activity size={15} />{submitting ? t('Recording...') : navigator.onLine === false ? t('Save output offline') : t('Record output')}</button></div>
         </form>
       ) : null}
 
       {entries.length ? (
-        <div className="production-entry-register" aria-label="Recent production entries">
+        <div className="production-entry-register" aria-label={t('Recent production entries')}>
           {entries.slice(0, 10).map((entry) => {
             const line = (activeBaseline?.snapshot?.lines || EMPTY_LIST).find((item) => item.lineKey === entry.lineKey)
             return (
               <div className="production-entry-row" key={entry.id}>
-                <div><strong>{line?.description || entry.lineKey}</strong><small>{formatDate(entry.workDate)} / {entry.note || 'No note'}</small></div>
-                <div><span>{roundDisplay(entry.quantity)} {line?.unit || 'unit'}</span><span>{roundDisplay(entry.crewHours)} h</span><span className={`status status-${entry.status}`}>{formatStatus(entry.status)}</span></div>
-                {canCoordinate && entry.status === 'recorded' ? <button type="button" className="icon-button" aria-label={`Request reversal for ${line?.description || entry.lineKey}`} onClick={() => { setReversalEntryId(entry.id); setReversalReason('') }}><RefreshCw size={15} /></button> : null}
+                <div><strong>{line?.description || entry.lineKey}</strong><small>{formatDate(entry.workDate)} / {entry.note || t('No note')}</small></div>
+                <div><span>{roundDisplay(entry.quantity)} {line?.unit || t('unit')}</span><span>{roundDisplay(entry.crewHours)} h</span><span className={`status status-${entry.status}`}>{t(formatStatus(entry.status))}</span></div>
+                {canCoordinate && entry.status === 'recorded' ? <button type="button" className="icon-button" aria-label={t('Request reversal for {line}', { line: line?.description || entry.lineKey })} onClick={() => { setReversalEntryId(entry.id); setReversalReason('') }}><RefreshCw size={15} /></button> : null}
               </div>
             )
           })}
@@ -1280,18 +1282,19 @@ function ProductionControl({
 
       {reversalEntryId ? (
         <form className="production-reversal-form" data-testid="production-reversal-form" onSubmit={submitReversal}>
-          <label>Reversal reason<textarea autoFocus required minLength="5" maxLength="2000" value={reversalReason} onChange={(event) => setReversalReason(event.target.value)} /></label>
-          <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setReversalEntryId(null)}>Cancel</button><button className="primary-button" disabled={submitting || reversalReason.trim().length < 5}><ShieldCheck size={15} />Request reversal approval</button></div>
+          <label>{t('Reversal reason')}<textarea autoFocus required minLength="5" maxLength="2000" value={reversalReason} onChange={(event) => setReversalReason(event.target.value)} /></label>
+          <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setReversalEntryId(null)}>{t('Cancel')}</button><button className="primary-button" disabled={submitting || reversalReason.trim().length < 5}><ShieldCheck size={15} />{t('Request reversal approval')}</button></div>
         </form>
       ) : null}
 
-      <p className="workflow-note">Baseline approval, field capture, and reversals stay internal. Contractor.AI does not alter payroll, budget, schedule, scope, or external commitments from these records.</p>
+      <p className="workflow-note">{t('Baseline approval, field capture, and reversals stay internal. Contractor.AI does not alter payroll, budget, schedule, scope, or external commitments from these records.')}</p>
     </section>
   )
 }
 
 function DayworkControl({
   job,
+  locale,
   canReport,
   canCoordinate,
   canApprove,
@@ -1304,6 +1307,7 @@ function DayworkControl({
   onOpenApprovals,
   onSyncOutbox,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const tickets = job.dayworkTickets || EMPTY_LIST
   const pendingApprovals = job.approvals?.filter((approval) => approval.status === 'pending') || EMPTY_LIST
   const assignments = (job.assignments || EMPTY_LIST).filter((assignment) => !['released', 'cancelled', 'completed', 'closed', 'rejected'].includes(assignment.status))
@@ -1444,64 +1448,64 @@ function DayworkControl({
       <div className="section-heading daywork-heading">
         <ClipboardPenLine size={18} />
         <div>
-          <h3>Daywork and extra work</h3>
-          <p>Retain observed site quantities first, then route acknowledgement and pricing through separate approval gates.</p>
+          <h3>{t('Daywork and extra work')}</h3>
+          <p>{t('Retain observed site quantities first, then route acknowledgement and pricing through separate approval gates.')}</p>
         </div>
         <div className="daywork-outbox-status" aria-live="polite">
           {outboxPending ? (
             <button type="button" className="secondary-button" disabled={outboxSyncing || !online} onClick={onSyncOutbox}>
               <RefreshCw size={14} className={outboxSyncing ? 'spin' : ''} />
-              {outboxSyncing ? 'Syncing...' : `${outboxPending} queued`}
+              {outboxSyncing ? t('Syncing...') : t('{count} queued', { count: outboxPending })}
             </button>
-          ) : <span className="tag tag-green">Outbox clear</span>}
+          ) : <span className="tag tag-green">{t('Outbox clear')}</span>}
         </div>
       </div>
 
-      <div className="daywork-summary" aria-label="Daywork ticket summary">
-        <div><span>Tickets</span><strong>{tickets.length}</strong></div>
-        <div><span>Open control</span><strong>{pendingCount}</strong></div>
-        <div><span>Acknowledged</span><strong>{acknowledgedCount}</strong></div>
-        <div><span>Converted</span><strong>{convertedCount}</strong></div>
+      <div className="daywork-summary" aria-label={t('Daywork ticket summary')}>
+        <div><span>{t('Tickets')}</span><strong>{tickets.length}</strong></div>
+        <div><span>{t('Open control')}</span><strong>{pendingCount}</strong></div>
+        <div><span>{t('Acknowledged')}</span><strong>{acknowledgedCount}</strong></div>
+        <div><span>{t('Converted')}</span><strong>{convertedCount}</strong></div>
       </div>
 
       {canReport ? (
         <form className="daywork-entry-form" data-testid="daywork-entry-form" onSubmit={submitTicket}>
           <div className="daywork-form-heading">
-            <div><strong>Record observed extra work</strong><small>Quantities and evidence are retained without price, scope acceptance, or external commitment.</small></div>
+            <div><strong>{t('Record observed extra work')}</strong><small>{t('Quantities and evidence are retained without price, scope acceptance, or external commitment.')}</small></div>
           </div>
           <div className="form-grid">
-            <label>Work date<input required type="date" value={draft.workDate} onChange={(event) => setDraft({ ...draft, workDate: event.target.value })} /></label>
+            <label>{t('Work date')}<input required type="date" value={draft.workDate} onChange={(event) => setDraft({ ...draft, workDate: event.target.value })} /></label>
             {canCoordinate ? (
-              <label>Responsible worker<select value={draft.workerId} onChange={(event) => setDraft({ ...draft, workerId: event.target.value })}><option value="">Office record / unassigned</option>{assignments.map((assignment) => <option key={assignment.id} value={assignment.workerId}>{assignment.workerName || assignment.workerId}</option>)}</select></label>
+              <label>{t('Responsible worker')}<select value={draft.workerId} onChange={(event) => setDraft({ ...draft, workerId: event.target.value })}><option value="">{t('Office record / unassigned')}</option>{assignments.map((assignment) => <option key={assignment.id} value={assignment.workerId}>{assignment.workerName || assignment.workerId}</option>)}</select></label>
             ) : null}
-            <label className="form-span">Title<input required minLength="2" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Additional work observed" /></label>
-            <label className="form-span">Work completed<textarea required minLength="3" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Record location, completed work, and site conditions." /></label>
-            <label className="form-span">Reason<textarea required minLength="3" maxLength="2000" value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} placeholder="Record why this work was outside or changed from the retained basis." /></label>
-            <label>Evidence reference<input required minLength="3" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder="Photo set, drawing, instruction" /></label>
-            <label>Internal note<input maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+            <label className="form-span">{t('Title')}<input required minLength="2" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Additional work observed')} /></label>
+            <label className="form-span">{t('Work completed')}<textarea required minLength="3" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder={t('Record location, completed work, and site conditions.')} /></label>
+            <label className="form-span">{t('Reason')}<textarea required minLength="3" maxLength="2000" value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} placeholder={t('Record why this work was outside or changed from the retained basis.')} /></label>
+            <label>{t('Evidence reference')}<input required minLength="3" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder={t('Photo set, drawing, instruction')} /></label>
+            <label>{t('Internal note')}<input maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
           </div>
-          <div className="daywork-lines" aria-label="Observed daywork quantities">
+          <div className="daywork-lines" aria-label={t('Observed daywork quantities')}>
             {draft.lines.map((line, index) => (
               <div className="daywork-line-editor" key={line.lineKey}>
-                <label>Type<select value={line.lineType} onChange={(event) => changeLineType(index, event.target.value)}><option value="labor">Labor</option><option value="material">Material</option><option value="equipment">Equipment</option><option value="subcontract">Subcontract</option><option value="other">Other</option></select></label>
-                <label className="daywork-line-description">Description<input required minLength="2" maxLength="240" value={line.description} onChange={(event) => updateLine(index, { description: event.target.value })} /></label>
-                <label>Quantity<input required type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(event) => updateLine(index, { quantity: event.target.value })} /></label>
-                <label>Unit<input required maxLength="24" value={line.unit} onChange={(event) => updateLine(index, { unit: event.target.value })} /></label>
-                <label>Cost code<input required minLength="2" maxLength="80" value={line.costCode} onChange={(event) => updateLine(index, { costCode: event.target.value })} /></label>
-                <label>Line evidence<input maxLength="240" value={line.sourceReference} onChange={(event) => updateLine(index, { sourceReference: event.target.value })} /></label>
-                {draft.lines.length > 1 ? <button type="button" className="icon-button" aria-label={`Remove daywork line ${index + 1}`} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}><X size={15} /></button> : <span className="daywork-line-spacer" />}
+                <label>{t('Type')}<select value={line.lineType} onChange={(event) => changeLineType(index, event.target.value)}><option value="labor">{t('Labor')}</option><option value="material">{t('Material')}</option><option value="equipment">{t('Equipment')}</option><option value="subcontract">{t('Subcontract')}</option><option value="other">{t('Other')}</option></select></label>
+                <label className="daywork-line-description">{t('Description')}<input required minLength="2" maxLength="240" value={line.description} onChange={(event) => updateLine(index, { description: event.target.value })} /></label>
+                <label>{t('Quantity')}<input required type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(event) => updateLine(index, { quantity: event.target.value })} /></label>
+                <label>{t('Unit')}<input required maxLength="24" value={line.unit} onChange={(event) => updateLine(index, { unit: event.target.value })} /></label>
+                <label>{t('Cost code')}<input required minLength="2" maxLength="80" value={line.costCode} onChange={(event) => updateLine(index, { costCode: event.target.value })} /></label>
+                <label>{t('Line evidence')}<input maxLength="240" value={line.sourceReference} onChange={(event) => updateLine(index, { sourceReference: event.target.value })} /></label>
+                {draft.lines.length > 1 ? <button type="button" className="icon-button" aria-label={t('Remove daywork line {number}', { number: index + 1 })} onClick={() => setDraft((current) => ({ ...current, lines: current.lines.filter((_, lineIndex) => lineIndex !== index) }))}><X size={15} /></button> : <span className="daywork-line-spacer" />}
               </div>
             ))}
           </div>
           <div className="modal-actions">
-            <button type="button" className="secondary-button" disabled={submitting || draft.lines.length >= 50} onClick={() => setDraft((current) => ({ ...current, lines: [...current.lines, emptyDayworkLine('material')] }))}><Plus size={15} />Quantity line</button>
-            <button className="primary-button" disabled={submitting}><ClipboardPenLine size={15} />{submitting ? 'Retaining...' : !online ? 'Save daywork offline' : 'Submit for review'}</button>
+            <button type="button" className="secondary-button" disabled={submitting || draft.lines.length >= 50} onClick={() => setDraft((current) => ({ ...current, lines: [...current.lines, emptyDayworkLine('material')] }))}><Plus size={15} />{t('Quantity line')}</button>
+            <button className="primary-button" disabled={submitting}><ClipboardPenLine size={15} />{submitting ? t('Retaining...') : !online ? t('Save daywork offline') : t('Submit for review')}</button>
           </div>
         </form>
       ) : null}
 
       {tickets.length ? (
-        <div className="daywork-register" aria-label="Retained daywork tickets">
+        <div className="daywork-register" aria-label={t('Retained daywork tickets')}>
           {tickets.map((ticket) => {
             const pendingTicketApproval = pendingApprovals.find((approval) => approval.targetType === 'daywork_ticket' && approval.targetId === ticket.id)
             const pendingAcknowledgementApproval = pendingApprovals.find((approval) => approval.targetType === 'daywork_acknowledgement' && approval.targetId === ticket.id)
@@ -1510,41 +1514,41 @@ function DayworkControl({
             return (
               <article className="daywork-ticket" key={ticket.id} data-testid={`daywork-ticket-${ticket.id}`}>
                 <div className="daywork-ticket-heading">
-                  <div><strong>{ticket.ticketNumber || ticket.title}</strong><span className={`status status-${ticket.status}`}>{formatStatus(ticket.status)}</span></div>
-                  <small>{formatDate(ticket.workDate)} / {ticket.workerName || 'Office record'} / {ticket.lineCount || ticket.lines?.length || 0} line(s)</small>
+                  <div><strong>{ticket.ticketNumber || ticket.title}</strong><span className={`status status-${ticket.status}`}>{t(formatStatus(ticket.status))}</span></div>
+                  <small>{formatDate(ticket.workDate)} / {ticket.workerName || t('Office record')} / {t('{count} line(s)', { count: ticket.lineCount || ticket.lines?.length || 0 })}</small>
                 </div>
-                <div className="daywork-ticket-copy"><strong>{ticket.title}</strong><p>{ticket.description}</p><small>Reason: {ticket.reason}</small><small>Evidence: {ticket.evidenceReference}</small></div>
+                <div className="daywork-ticket-copy"><strong>{ticket.title}</strong><p>{ticket.description}</p><small>{t('Reason: {reason}', { reason: ticket.reason })}</small><small>{t('Evidence: {reference}', { reference: ticket.evidenceReference })}</small></div>
                 <div className="daywork-ticket-lines">
-                  {(ticket.lines || EMPTY_LIST).map((line) => <div key={line.lineKey}><span>{formatStatus(line.lineType)}</span><strong>{roundDisplay(line.quantity)} {line.unit}</strong><small>{line.description} / {line.costCode}</small></div>)}
+                  {(ticket.lines || EMPTY_LIST).map((line) => <div key={line.lineKey}><span>{t(formatStatus(line.lineType))}</span><strong>{roundDisplay(line.quantity)} {line.unit}</strong><small>{line.description} / {line.costCode}</small></div>)}
                 </div>
                 <div className="daywork-ticket-actions">
-                  {pendingTicketApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingTicketApproval.id, jobId: job.id, jobTitle: job.title })}><ShieldCheck size={15} />Review quantities</button> : null}
-                  {pendingAcknowledgementApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingAcknowledgementApproval.id, jobId: job.id, jobTitle: job.title })}><ShieldCheck size={15} />Review acknowledgement</button> : null}
-                  {canCoordinate && ticket.status === 'approved' && !pendingAcknowledgementApproval ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginAcknowledgement(ticket)}><BadgeCheck size={15} />Record acknowledgement</button> : null}
-                  {canCoordinate && ['approved', 'acknowledged'].includes(ticket.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginPricing(ticket)}><ReceiptEuro size={15} />Price change</button> : null}
+                  {pendingTicketApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingTicketApproval.id, jobId: job.id, jobTitle: job.title })}><ShieldCheck size={15} />{t('Review quantities')}</button> : null}
+                  {pendingAcknowledgementApproval && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingAcknowledgementApproval.id, jobId: job.id, jobTitle: job.title })}><ShieldCheck size={15} />{t('Review acknowledgement')}</button> : null}
+                  {canCoordinate && ticket.status === 'approved' && !pendingAcknowledgementApproval ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginAcknowledgement(ticket)}><BadgeCheck size={15} />{t('Record acknowledgement')}</button> : null}
+                  {canCoordinate && ['approved', 'acknowledged'].includes(ticket.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginPricing(ticket)}><ReceiptEuro size={15} />{t('Price change')}</button> : null}
                 </div>
                 {acknowledgementTicketId === ticket.id ? (
                   <form className="daywork-inline-form" data-testid="daywork-acknowledgement-form" onSubmit={submitAcknowledgement}>
-                    <div className="form-grid"><label>Evidence reference<input required minLength="3" maxLength="500" value={acknowledgement.evidenceReference} onChange={(event) => setAcknowledgement({ ...acknowledgement, evidenceReference: event.target.value })} /></label><label>Acknowledged by<input required minLength="2" maxLength="160" value={acknowledgement.acknowledgedBy} onChange={(event) => setAcknowledgement({ ...acknowledgement, acknowledgedBy: event.target.value })} /></label><label>Date and time<input required type="datetime-local" value={acknowledgement.acknowledgedAt} onChange={(event) => setAcknowledgement({ ...acknowledgement, acknowledgedAt: event.target.value })} /></label><label>Internal note<input maxLength="2000" value={acknowledgement.notes} onChange={(event) => setAcknowledgement({ ...acknowledgement, notes: event.target.value })} /></label></div>
-                    <p className="workflow-note">This records receipt of the site record only. It does not accept price or scope.</p>
-                    <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setAcknowledgementTicketId('')}>Cancel</button><button className="primary-button" disabled={submitting}><ShieldCheck size={15} />Request evidence review</button></div>
+                    <div className="form-grid"><label>{t('Evidence reference')}<input required minLength="3" maxLength="500" value={acknowledgement.evidenceReference} onChange={(event) => setAcknowledgement({ ...acknowledgement, evidenceReference: event.target.value })} /></label><label>{t('Acknowledged by')}<input required minLength="2" maxLength="160" value={acknowledgement.acknowledgedBy} onChange={(event) => setAcknowledgement({ ...acknowledgement, acknowledgedBy: event.target.value })} /></label><label>{t('Date and time')}<input required type="datetime-local" value={acknowledgement.acknowledgedAt} onChange={(event) => setAcknowledgement({ ...acknowledgement, acknowledgedAt: event.target.value })} /></label><label>{t('Internal note')}<input maxLength="2000" value={acknowledgement.notes} onChange={(event) => setAcknowledgement({ ...acknowledgement, notes: event.target.value })} /></label></div>
+                    <p className="workflow-note">{t('This records receipt of the site record only. It does not accept price or scope.')}</p>
+                    <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setAcknowledgementTicketId('')}>{t('Cancel')}</button><button className="primary-button" disabled={submitting}><ShieldCheck size={15} />{t('Request evidence review')}</button></div>
                   </form>
                 ) : null}
                 {isPricing ? (
                   <form className="daywork-inline-form" data-testid="daywork-pricing-form" onSubmit={submitPricing}>
-                    <div className="daywork-price-lines">{(ticket.lines || EMPTY_LIST).map((line) => <label key={line.lineKey}><span>{line.description}<small>{roundDisplay(line.quantity)} {line.unit}</small></span><input required type="number" min="0" max="1000000000" step="0.01" value={prices[line.lineKey] || ''} onChange={(event) => setPrices((current) => ({ ...current, [line.lineKey]: event.target.value }))} placeholder="Unit price" /></label>)}</div>
-                    <div className="daywork-price-summary"><label>Schedule impact (days)<input type="number" min="-3650" max="3650" step="0.5" value={scheduleDeltaDays} onChange={(event) => setScheduleDeltaDays(event.target.value)} /></label><div><span>Net change preview</span><strong>{currency.format(pricingTotal)}</strong></div></div>
-                    <p className="workflow-note">Conversion creates a separate approval-gated change order. It does not contact the client or change contract value.</p>
-                    <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setPricingTicketId('')}>Cancel</button><button className="primary-button" disabled={submitting || !(pricingTotal > 0)}><ArrowUpRight size={15} />Prepare change order</button></div>
+                    <div className="daywork-price-lines">{(ticket.lines || EMPTY_LIST).map((line) => <label key={line.lineKey}><span>{line.description}<small>{roundDisplay(line.quantity)} {line.unit}</small></span><input required type="number" min="0" max="1000000000" step="0.01" value={prices[line.lineKey] || ''} onChange={(event) => setPrices((current) => ({ ...current, [line.lineKey]: event.target.value }))} placeholder={t('Unit price')} /></label>)}</div>
+                    <div className="daywork-price-summary"><label>{t('Schedule impact (days)')}<input type="number" min="-3650" max="3650" step="0.5" value={scheduleDeltaDays} onChange={(event) => setScheduleDeltaDays(event.target.value)} /></label><div><span>{t('Net change preview')}</span><strong>{currency.format(pricingTotal)}</strong></div></div>
+                    <p className="workflow-note">{t('Conversion creates a separate approval-gated change order. It does not contact the client or change contract value.')}</p>
+                    <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setPricingTicketId('')}>{t('Cancel')}</button><button className="primary-button" disabled={submitting || !(pricingTotal > 0)}><ArrowUpRight size={15} />{t('Prepare change order')}</button></div>
                   </form>
                 ) : null}
               </article>
             )
           })}
         </div>
-      ) : <Empty title="No daywork tickets" detail="Observed extra work will appear here after field or office capture." />}
+      ) : <Empty title={t('No daywork tickets')} detail={t('Observed extra work will appear here after field or office capture.')} />}
 
-      <p className="workflow-note">Autonomy may surface missing reviews, but it cannot invent quantities, acknowledgement, pricing, client acceptance, supplier spend, schedule commitments, invoices, payments, or funds movement.</p>
+      <p className="workflow-note">{t('Autonomy may surface missing reviews, but it cannot invent quantities, acknowledgement, pricing, client acceptance, supplier spend, schedule commitments, invoices, payments, or funds movement.')}</p>
     </section>
   )
 }

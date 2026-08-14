@@ -49,6 +49,7 @@ async function retainStartHuddle(page, job, worker) {
 test('operator retains one governed start huddle and EOD report on desktop and mobile', async ({ page, request }) => {
   const { worker, job } = await dailyCycleFixture(request, 'desktop');
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await page.getByRole('button', { name: 'Field updates', exact: true }).click();
   const huddleForm = await retainStartHuddle(page, job, worker);
 
@@ -66,6 +67,14 @@ test('operator retains one governed start huddle and EOD report on desktop and m
   await eodForm.getByLabel('Unresolved actions').fill('Confirm the final opening before 08:00.');
   await eodForm.getByLabel("Tomorrow's plan").fill('Complete the final bay, retain the hold-point check, and start boarding.');
   await eodForm.getByLabel('EOD evidence references').fill('browser-progress-photo-set-001');
+
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(huddleForm.getByRole('heading', { name: 'Dagstart' })).toBeVisible();
+  await expect(eodForm.getByRole('heading', { name: 'Dagafsluitingsrapport' })).toBeVisible();
+  await expect(eodForm.getByLabel('Uitgevoerd werk')).toHaveValue('Framed and checked 15 linear metres of first-floor partition wall.');
+  await expect(eodForm.getByLabel('Redenen voor afwijking')).toHaveValue('Electrical opening detail arrived after the planned handoff.');
+  await expect(eodForm.getByLabel('Plan voor morgen')).toHaveValue('Complete the final bay, retain the hold-point check, and start boarding.');
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
   await eodForm.getByRole('button', { name: 'Submit EOD report' }).click();
 
   await expect(page.getByText('End-of-day report retained with plan variance, time card, safety state, and tomorrow handoff. 1 review added to the ledger.')).toBeVisible();
@@ -128,6 +137,7 @@ test('operator retains one governed start huddle and EOD report on desktop and m
 test('offline EOD report and progress sync once through the scoped field outbox', async ({ page, request, context }) => {
   const { worker, job, suffix } = await dailyCycleFixture(request, 'offline');
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await page.getByRole('button', { name: 'Field updates', exact: true }).click();
   await retainStartHuddle(page, job, worker);
 
