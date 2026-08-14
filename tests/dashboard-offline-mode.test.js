@@ -20,6 +20,7 @@ const dashboardSource = [
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
 const localeSource = fs.readFileSync(path.join(__dirname, '..', 'locale.js'), 'utf8');
+const operatorLocaleSource = fs.readFileSync(path.join(__dirname, '..', 'operator-locale.js'), 'utf8');
 const ledgerSource = fs.readFileSync(path.join(__dirname, '..', 'operating-ledger.js'), 'utf8');
 
 test('React dashboard uses ledger endpoints instead of cached or simulated contractor records', () => {
@@ -335,6 +336,13 @@ test('equipment custody connects reservations, field handoff, exact offline retr
   assert.match(dashboardSource, /equipment-custody\/check-out/);
   assert.match(dashboardSource, /equipment-custody\/\$\{encodeURIComponent\(custodySessionId\)\}\/return/);
   assert.match(dashboardSource, /Damaged, unsafe, and lost returns are quarantined automatically/);
+  assert.match(dashboardRootSource, /\{ot\('Equipment handoff'\)\}/);
+  assert.match(dashboardRootSource, /\{ot\('Record equipment inspection'\)\}/);
+  assert.match(dashboardRootSource, /\{ot\('Record equipment maintenance'\)\}/);
+  assert.match(dashboardRootSource, /\{ot\('Request equipment retirement'\)\}/);
+  assert.match(dashboardSource, /t\(tool\.status\.replaceAll\('_', ' '\)\)/);
+  assert.match(operatorLocaleSource, /'Equipment handoff': 'Materieeloverdracht'/);
+  assert.match(operatorLocaleSource, /'Approval-gated lifecycle': 'Levenscyclus met goedkeuringspoort'/);
 });
 
 test('governed 5S connects approved standards, canonical equipment state, corrective action, and exact offline replay', () => {

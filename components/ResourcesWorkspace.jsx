@@ -579,14 +579,16 @@ function EquipmentDirectory({
               <div>
                 <div className="equipment-title">
                   <h4>{session.toolName}</h4>
-                  <span className={`status status-${session.overdue ? 'attention' : session.status}`}>{session.overdue ? formatStatus('overdue') : formatStatus(session.status)}</span>
+                  <span className={`status status-${session.overdue ? 'attention' : session.status}`}>
+                    {t((session.overdue ? 'overdue' : session.status).replaceAll('_', ' '))}
+                  </span>
                 </div>
                 <p>{session.jobTitle} / {session.workerName || session.checkedOutBy}</p>
               </div>
               <div className="equipment-custody-values">
                 <span>{t('Out')} <strong>{formatDateTime(session.checkedOutAt)}</strong></span>
                 <span>{t('Due')} <strong>{session.dueBackAt ? formatDateTime(session.dueBackAt) : t('Open')}</strong></span>
-                <span>{t('Condition')} <strong>{formatStatus(session.returnCondition || session.checkoutCondition)}</strong></span>
+                <span>{t('Condition')} <strong>{t((session.returnCondition || session.checkoutCondition).replaceAll('_', ' '))}</strong></span>
                 <span>{t('Location')} <strong>{session.returnLocation || session.checkoutLocation || t('Not retained')}</strong></span>
               </div>
               {canCoordinate && session.status === 'checked_out' ? (
@@ -618,7 +620,7 @@ function EquipmentDirectory({
               className={filter === key ? 'resource-tab-active' : ''}
               onClick={() => setFilter(key)}
             >
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
@@ -639,15 +641,15 @@ function EquipmentDirectory({
               <div>
                 <div className="trade-partner-title equipment-title">
                   <h3>{tool.name}</h3>
-                  <span className={`status status-${tool.status}`}>{formatStatus(tool.status)}</span>
+                  <span className={`status status-${tool.status}`}>{t(tool.status.replaceAll('_', ' '))}</span>
                   {tool.inspection?.required ? (
                     <span className={`tag ${tool.inspection.requiresAttention ? 'tag-amber' : 'tag-green'}`}>
-                      {t('Inspection')} {formatStatus(tool.inspection.status)}
+                      {t('Inspection')} {t(tool.inspection.status.replaceAll('_', ' '))}
                     </span>
                   ) : null}
                   {tool.retirementApprovalId ? <span className="tag tag-amber">{t('Retirement pending')}</span> : null}
                 </div>
-                <p>{formatStatus(tool.category || 'general equipment')}</p>
+                <p>{t(tool.category || 'general equipment')}</p>
                 <small>{tool.data?.serialNumber || tool.currentLocation || tool.homeLocation || t('Reference not retained')}</small>
               </div>
             </div>
@@ -662,7 +664,7 @@ function EquipmentDirectory({
                 {t('Last inspection')}{' '}
                 <strong>
                   {tool.inspection?.lastInspectedAt
-                    ? `${formatDate(tool.inspection.lastInspectedAt)} / ${formatStatus(tool.inspection.lastResult)}`
+                    ? `${formatDate(tool.inspection.lastInspectedAt)} / ${t(tool.inspection.lastResult.replaceAll('_', ' '))}`
                     : t('Not retained')}
                 </strong>
               </span>
@@ -670,7 +672,7 @@ function EquipmentDirectory({
                 {t('Last maintenance')}{' '}
                 <strong>
                   {tool.maintenance?.lastMaintainedAt
-                    ? `${formatDate(tool.maintenance.lastMaintainedAt)} / ${formatStatus(tool.maintenance.latestMaintenance?.outcome)}`
+                    ? `${formatDate(tool.maintenance.lastMaintainedAt)} / ${tool.maintenance.latestMaintenance?.outcome ? t(tool.maintenance.latestMaintenance.outcome.replaceAll('_', ' ')) : t('Not retained')}`
                     : t('Not retained')}
                 </strong>
               </span>

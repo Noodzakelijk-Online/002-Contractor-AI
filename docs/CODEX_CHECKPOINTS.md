@@ -3,6 +3,22 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-23 Bilingual equipment lifecycle and physical custody
+
+- Equipment registration, controlled statuses, office/field handoff, return and
+  quarantine, inspection, maintenance, readiness, and approval-gated retirement
+  now share the persisted NL/EN operator locale.
+- Retained names, categories, locations, notes, findings, evidence references,
+  meter values, principals, and ledger enums remain unchanged across locale
+  switches; failed inspection and exceptional return safeguards remain fail closed.
+- Browser QA covers the full Dutch lifecycle, reload persistence, exact API
+  evidence, English round trip, mobile containment, empty error logs, and axe. The
+  scan found and closed shared resource and custody contrast defects.
+- Verification: 3,161 unique specialist translation keys with zero duplicates;
+  10 frontend tests, 535 Node tests, 98 Chromium workflows in 25 isolated batches,
+  release/HAI/lint/build/bundle, production benchmark, hardened container, and
+  Node 22.23.2 Windows standalone gates pass.
+
 ## CP-22 Bilingual tender comparison and approved purchasing
 
 - The tender register, bid returns, preferred-bidder review, purchasing commitment,

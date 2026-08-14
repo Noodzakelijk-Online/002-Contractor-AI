@@ -18,14 +18,14 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --omit=dev --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 336 canonical source files; generated release/runtime/artifact directories excluded |
+| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 337 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier produced the checksummed `accountfeed.GenericItem` review-only fixture with `canExecute=false`; a live HAI parser/account-feed sync was not configured for this run |
 | Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 10 locale/component tests, 0 failed |
-| Node tests | Passed | Node 22.23.2 isolated suite: 535 tests, 499 passed, 36 PostgreSQL/environment skips, 0 failed, 125.5 s |
-| Production build | Passed | `npm run build`: main application JS 543.39 kB and CSS 275.07 kB before gzip; the base locale remains 12.79 kB JS and the expanded 201.22 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 241.70 kB JS |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 543,394 bytes, largest CSS 275,070 bytes, and 446,090 total gzip bytes across 39 assets; all budgets passed |
-| Production-scale ledger | Passed | The retained deterministic production profile passed its correctness/resource/latency thresholds: dashboard p95 870.50 ms, canonical intake p95 91.82 ms, startup 354.52 ms, reopen 16.43 ms, and audit verification p95 490.28 ms. |
-| Browser tests | Passed | All 97 Playwright Chromium workflows passed on current source in 25 bounded isolated batches in 610.8 s |
+| Node tests | Passed | Isolated suite: 535 tests, 499 passed, 36 PostgreSQL/environment skips, 0 failed, 114.0 s |
+| Production build | Passed | `npm run build`: main application JS 544.54 kB and CSS 275.07 kB before gzip; the base locale remains 12.79 kB JS and the expanded 215.50 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 241.70 kB JS |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 544,541 bytes, largest CSS 275,070 bytes, and 450,343 total gzip bytes across 39 assets; all budgets passed |
+| Production-scale ledger | Passed | The retained deterministic production profile passed its correctness/resource/latency thresholds: dashboard p95 440.54 ms, canonical intake p95 46.69 ms, startup 256.33 ms, reopen 4.51 ms, and audit verification p95 234.02 ms. |
+| Browser tests | Passed | All 98 Playwright Chromium workflows passed on current source in 25 bounded isolated batches in 525.8 s |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
@@ -51,7 +51,7 @@ decisions outside this repository.
 | Draft recovery | Passed for reload restoration, operator isolation, portal-token fingerprinting, expiry/size bounds, secret/file exclusion, logout and intentional-close cleanup, no implicit ledger write, and explicit job-workspace navigation |
 | In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error log; ICP/service-area, bid/no-bid, WBS/quantity takeoff, labour-burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates and formal variations, job setup coverage, critical-path work planning, crew-capacity/two-week planning, daily start/EOD reporting, production baseline/output/reversal, regiewerk quantity/acknowledgement/conversion, Last Planner, 5S, LMRA, installation/QC inspections, before/during/after photo evidence, NCRs, field observations/incidents, field assurance review, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls render in Dutch. Retained operator evidence remains verbatim across locale changes, while the complete portal, Performance Scorecard, Framework Register, site-survey, and practical-core persistence flows passed in Playwright. |
 | In-app Browser draft QA | Passed against the current built runtime: an unfinished opportunity restored exact values after reload, an intentional close cleared it, and no visible error state remained |
-| Responsive evidence | Desktop and narrow-screen geometry was inspected in prior in-app browser passes; the job summary, field-assurance, finance, and procurement workspaces retain exact mobile containment with localized label wrapping, and 97 automated workflows retain repeatable desktop/mobile interaction evidence. This pass's attempted in-app local navigation was blocked by Browser URL policy; no product failure was observed. |
+| Responsive evidence | Desktop and narrow-screen geometry was inspected in prior in-app browser passes; the job summary, field-assurance, finance, procurement, and equipment workspaces retain exact mobile containment with localized label wrapping, and 98 automated workflows retain repeatable desktop/mobile interaction evidence. In-app local navigation remains blocked by Browser URL policy in this environment; the isolated production-browser harness passed the same built application. |
 
 ## Confirmed limitations
 
@@ -73,7 +73,9 @@ decisions outside this repository.
   client-success handover, job costing, cost-code review, cost-to-complete,
   source-linked forecast warnings, finance readiness, 13-week cash-flow controls,
   bid-package comparison, preferred-bidder selection, purchasing commitments,
-  immutable purchase-order packages, and verified provider receipts now have
+  immutable purchase-order packages, verified provider receipts, equipment
+  registration, inspection, maintenance, physical custody, quarantine return,
+  and approval-gated retirement now have
   persisted NL/EN presentation with locale-aware dates, numbers, and currency.
   Translation of the remaining specialist and parent operator workspaces, universal
   component-internal draft recovery, and uniform pagination remain partial.

@@ -1,5 +1,23 @@
 # Codex Worklog
 
+## 2026-08-14 - Equipment lifecycle and custody bilingual pass
+
+- Localized the complete equipment register, office and field custody handoff,
+  return/quarantine, inspection, maintenance, readiness, and approval-gated
+  retirement chain while preserving retained names, notes, references, findings,
+  meter values, and API enums verbatim.
+- Added a Dutch production-browser journey covering creation, failed inspection,
+  corrective maintenance, passing reinspection, reload persistence, reservation,
+  checkout, damaged return, retirement request, exact API evidence, English round
+  trip, axe, mobile containment, and empty console errors.
+- The axe pass found and fixed shared low-contrast resource metadata and custody
+  labels instead of excluding the rule.
+- Current-source gates pass: 3,161 unique specialist translation keys, 10 frontend
+  tests, 535 Node tests (499 passed and 36 PostgreSQL/environment skips) in 114.0
+  seconds, all 98 Chromium workflows in 25 isolated batches in 525.8 seconds,
+  release/HAI/lint/build/bundle at 450,343 total gzip bytes, production benchmark,
+  hardened container, and Node 22.23.2 Windows standalone verification.
+
 ## 2026-08-14 - Tender and purchasing bilingual pass
 
 - Localized the governed procurement chain from bid-package registration and

@@ -5630,7 +5630,7 @@ function App() {
     if (!fieldEquipmentCheckout.jobId || !fieldEquipmentCheckout.reservationId || fieldEquipmentCheckout.evidenceReference.trim().length < 3
       || (!fieldScoped && fieldEquipmentCheckout.checkedOutBy.trim().length < 2)
       || (meter !== null && (!Number.isFinite(meter) || meter < 0))) {
-      setError('Choose a checkout-ready reservation and retain the physical custodian, handoff evidence, and a valid meter value.')
+      setError(ot('Choose a checkout-ready reservation and retain the physical custodian, handoff evidence, and a valid meter value.'))
       return
     }
     const jobId = fieldEquipmentCheckout.jobId
@@ -5661,13 +5661,16 @@ function App() {
         setFieldEquipmentCheckout(emptyEquipmentCheckoutDraft())
         setFieldEquipmentPlans([])
         setFieldEquipmentCustody([])
-        notify('Equipment handoff was saved locally with its custody evidence and will sync after reconnection.')
+        notify(ot('Equipment handoff was saved locally with its custody evidence and will sync after reconnection.'))
         return
       }
       const result = await recordFieldOperation(draft)
       notify(result.replayed
-        ? 'This equipment handoff was already retained; no duplicate custody session was created.'
-        : `${result.custody.toolName} custody was retained for ${result.custody.checkedOutBy}.`)
+        ? ot('This equipment handoff was already retained; no duplicate custody session was created.')
+        : ot('{name} custody was retained for {custodian}.', {
+            name: result.custody.toolName,
+            custodian: result.custody.checkedOutBy,
+          }))
       await selectFieldEquipmentJob(jobId)
       await refresh()
     } catch (requestError) {
@@ -5678,7 +5681,7 @@ function App() {
           setFieldEquipmentCheckout(emptyEquipmentCheckoutDraft())
           setFieldEquipmentPlans([])
           setFieldEquipmentCustody([])
-          notify('Connection interrupted. The equipment handoff was saved locally for an exact retry.')
+          notify(ot('Connection interrupted. The equipment handoff was saved locally for an exact retry.'))
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -5699,7 +5702,7 @@ function App() {
       || (!fieldScoped && fieldEquipmentReturn.returnedBy.trim().length < 2)
       || (meter !== null && (!Number.isFinite(meter) || meter < 0))
       || (exceptional && fieldEquipmentReturn.notes.trim().length < 8)) {
-      setError('Retain the return condition and evidence, a valid meter, and findings for damaged, unsafe, or lost equipment.')
+      setError(ot('Retain the return condition and evidence, a valid meter, and findings for damaged, unsafe, or lost equipment.'))
       return
     }
     const jobId = fieldEquipmentReturn.jobId
@@ -5728,15 +5731,15 @@ function App() {
         await refreshOutboxState()
         setFieldEquipmentReturn(emptyEquipmentReturnDraft())
         setFieldEquipmentCustody([])
-        notify('Equipment return was saved locally with its condition evidence and will sync after reconnection.')
+        notify(ot('Equipment return was saved locally with its condition evidence and will sync after reconnection.'))
         return
       }
       const result = await recordFieldOperation(draft)
       notify(result.replayed
-        ? 'This equipment return was already retained; no duplicate evidence was created.'
+        ? ot('This equipment return was already retained; no duplicate evidence was created.')
         : exceptional
-          ? `${result.custody.toolName} was quarantined for internal review.`
-          : `${result.custody.toolName} was returned and released for availability.`)
+          ? ot('{name} was quarantined for internal review.', { name: result.custody.toolName })
+          : ot('{name} was returned and released for availability.', { name: result.custody.toolName }))
       await selectFieldEquipmentJob(jobId)
       await refresh()
     } catch (requestError) {
@@ -5746,7 +5749,7 @@ function App() {
           await refreshOutboxState()
           setFieldEquipmentReturn(emptyEquipmentReturnDraft())
           setFieldEquipmentCustody([])
-          notify('Connection interrupted. The complete equipment return was saved locally for an exact retry.')
+          notify(ot('Connection interrupted. The complete equipment return was saved locally for an exact retry.'))
           return
         } catch (outboxError) {
           setError(outboxError.message)
@@ -9061,11 +9064,11 @@ function App() {
   async function saveEquipment(event) {
     event.preventDefault()
     if (equipmentDraft.name.trim().length < 2) {
-      setError('Record an equipment name with at least two characters before saving.')
+      setError(ot('Record an equipment name with at least two characters before saving.'))
       return
     }
     if (equipmentDraft.inspectionRequired && !equipmentDraft.inspectionDueAt) {
-      setError('Record the next inspection due date before marking inspection as required.')
+      setError(ot('Record the next inspection due date before marking inspection as required.'))
       return
     }
     setSubmitting(true)
@@ -9090,7 +9093,10 @@ function App() {
       })
       setEquipmentEditor(null)
       setEquipmentDraft(emptyEquipmentDraft())
-      notify(`${result.tool.name} retained as ${formatStatus(result.tool.status)}. No dispatch, purchase, or assignment was created.`)
+      notify(ot('{name} retained as {status}. No dispatch, purchase, or assignment was created.', {
+        name: result.tool.name,
+        status: ot(result.tool.status.replaceAll('_', ' ')),
+      }))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -9138,9 +9144,11 @@ function App() {
       })
       setEquipmentInspection(null)
       setEquipmentInspectionDraft(emptyEquipmentInspectionDraft())
-      notify(
-        `${result.tool.name} inspection retained as ${formatStatus(result.inspection.result)}. ${result.reservationReady ? 'Inspection readiness is clear.' : 'New reservations remain blocked.'}`,
-      )
+      notify(ot('{name} inspection retained as {result}. {readiness}', {
+        name: result.tool.name,
+        result: ot(result.inspection.result.replaceAll('_', ' ')),
+        readiness: ot(result.reservationReady ? 'Inspection readiness is clear.' : 'New reservations remain blocked.'),
+      }))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -9190,11 +9198,15 @@ function App() {
       })
       setEquipmentMaintenance(null)
       setEquipmentMaintenanceDraft(emptyEquipmentMaintenanceDraft())
-      notify(
-        result.reinspectionRequired
-          ? `${result.tool.name} maintenance retained as completed. A passing reinspection is required before a new reservation.`
-          : `${result.tool.name} maintenance retained as ${formatStatus(result.maintenance.outcome)}. ${result.reservationReady ? 'Equipment readiness is clear.' : 'New reservations remain blocked.'}`,
-      )
+      notify(result.reinspectionRequired
+        ? ot('{name} maintenance retained as completed. A passing reinspection is required before a new reservation.', {
+            name: result.tool.name,
+          })
+        : ot('{name} maintenance retained as {outcome}. {readiness}', {
+            name: result.tool.name,
+            outcome: ot(result.maintenance.outcome.replaceAll('_', ' ')),
+            readiness: ot(result.reservationReady ? 'Equipment readiness is clear.' : 'New reservations remain blocked.'),
+          }))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -9231,11 +9243,9 @@ function App() {
       })
       setEquipmentRetirement(null)
       setEquipmentRetirementReason('')
-      notify(
-        result.requiresApproval
-          ? `Retirement approval requested for ${result.tool.name}. New reservations are now blocked.`
-          : `${result.tool.name} is already retired.`,
-      )
+      notify(result.requiresApproval
+        ? ot('Retirement approval requested for {name}. New reservations are now blocked.', { name: result.tool.name })
+        : ot('{name} is already retired.', { name: result.tool.name }))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -9825,7 +9835,7 @@ function App() {
     const meter = equipmentCheckoutDraft.meter === '' ? null : Number(equipmentCheckoutDraft.meter)
     if (!equipmentCheckoutDraft.jobId || !equipmentCheckoutDraft.reservationId || equipmentCheckoutDraft.checkedOutBy.trim().length < 2
       || equipmentCheckoutDraft.evidenceReference.trim().length < 3 || (meter !== null && (!Number.isFinite(meter) || meter < 0))) {
-      setError('Choose a checkout-ready reservation and retain the custodian, handoff evidence, and a valid meter value.')
+      setError(ot('Choose a checkout-ready reservation and retain the custodian, handoff evidence, and a valid meter value.'))
       return
     }
     setSubmitting(true)
@@ -9856,8 +9866,11 @@ function App() {
         dashboard: result.dashboard || current.dashboard,
       } : current)
       notify(result.replayed
-        ? 'This equipment handoff was already retained; no duplicate custody session was created.'
-        : `${result.custody.toolName} checked out to ${result.custody.checkedOutBy}.`)
+        ? ot('This equipment handoff was already retained; no duplicate custody session was created.')
+        : ot('{name} checked out to {custodian}.', {
+            name: result.custody.toolName,
+            custodian: result.custody.checkedOutBy,
+          }))
       await refreshSection('resources', 'equipment')
     } catch (requestError) {
       setError(requestError.message)
@@ -9890,7 +9903,7 @@ function App() {
     if (!equipmentReturnEditor || equipmentReturnDraft.returnedBy.trim().length < 2
       || equipmentReturnDraft.evidenceReference.trim().length < 3 || (meter !== null && (!Number.isFinite(meter) || meter < 0))
       || (exceptional && equipmentReturnDraft.notes.trim().length < 8)) {
-      setError('Retain the returning person, condition evidence, a valid meter, and findings for damaged, unsafe, or lost equipment.')
+      setError(ot('Retain the returning person, condition evidence, a valid meter, and findings for damaged, unsafe, or lost equipment.'))
       return
     }
     setSubmitting(true)
@@ -9918,10 +9931,13 @@ function App() {
         dashboard: result.dashboard || current.dashboard,
       } : current)
       notify(result.replayed
-        ? 'This equipment return was already retained; no duplicate evidence was created.'
+        ? ot('This equipment return was already retained; no duplicate evidence was created.')
         : exceptional
-          ? `${result.custody.toolName} returned as ${formatStatus(result.custody.returnCondition)} and moved to quarantine review.`
-          : `${result.custody.toolName} returned and released for availability.`)
+          ? ot('{name} returned as {condition} and moved to quarantine review.', {
+              name: result.custody.toolName,
+              condition: ot(result.custody.returnCondition.replaceAll('_', ' ')),
+            })
+          : ot('{name} returned and released for availability.', { name: result.custody.toolName }))
       await refreshSection('resources', 'equipment')
     } catch (requestError) {
       setError(requestError.message)
@@ -12458,37 +12474,37 @@ function App() {
                 <section className="equipment-handoff-control" data-testid="field-equipment-custody">
                   <div className="panel-heading">
                     <div>
-                      <h2>Equipment handoff</h2>
-                      <p>Physical custody and return condition</p>
+                      <h2>{ot('Equipment handoff')}</h2>
+                      <p>{ot('Physical custody and return condition')}</p>
                     </div>
                     <div className="equipment-handoff-summary" aria-live="polite">
-                      {fieldEquipmentCustody.length ? <span className="tag tag-amber">{fieldEquipmentCustody.length} checked out</span> : null}
+                      {fieldEquipmentCustody.length ? <span className="tag tag-amber">{ot('{count} checked out', { count: fieldEquipmentCustody.length })}</span> : null}
                       <Wrench size={20} />
                     </div>
                   </div>
                   <div className="equipment-field-selector">
                     <label>
-                      Job
+                      {ot('Job')}
                       <select required value={fieldEquipmentCheckout.jobId || fieldEquipmentReturn.jobId} onChange={(event) => void selectFieldEquipmentJob(event.target.value)}>
-                        <option value="">Select an active job</option>
+                        <option value="">{ot('Select an active job')}</option>
                         {activeJobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
                       </select>
                     </label>
                     {navigator.onLine === false && !fieldEquipmentPlans.length && !fieldEquipmentCustody.length ? (
-                      <p className="workflow-note">Reconnect to load the retained reservations and active custody for this job.</p>
+                      <p className="workflow-note">{ot('Reconnect to load the retained reservations and active custody for this job.')}</p>
                     ) : null}
                   </div>
                   {fieldEquipmentCustody.length ? (
-                    <div className="equipment-field-custody-list" aria-label="Active equipment custody">
+                    <div className="equipment-field-custody-list" aria-label={ot('Active equipment custody')}>
                       {fieldEquipmentCustody.map((session) => (
                         <div className="equipment-field-custody-row" key={session.id}>
                           <span className={`equipment-custody-marker ${session.overdue ? 'equipment-custody-marker-alert' : ''}`} aria-hidden="true" />
                           <div>
                             <strong>{session.toolName}</strong>
-                            <small>{session.workerName || session.checkedOutBy} / due {session.dueBackAt ? formatDateTime(session.dueBackAt) : 'open'}</small>
+                            <small>{session.workerName || session.checkedOutBy} / {ot('due {date}', { date: session.dueBackAt ? formatDateTime(session.dueBackAt) : ot('open') })}</small>
                           </div>
                           <button type="button" className="secondary-button" disabled={submitting} onClick={() => setFieldEquipmentReturn(emptyEquipmentReturnDraft(session))}>
-                            <PackageCheck size={15} /> Return
+                            <PackageCheck size={15} /> {ot('Return')}
                           </button>
                         </div>
                       ))}
@@ -12497,120 +12513,120 @@ function App() {
                   {fieldEquipmentReturn.custodySessionId ? (
                     <form className="equipment-field-form equipment-return-form" data-testid="field-equipment-return-form" onSubmit={recordFieldEquipmentReturn}>
                       <div className="equipment-field-form-heading">
-                        <strong>Return {fieldEquipmentCustody.find(session => session.id === fieldEquipmentReturn.custodySessionId)?.toolName || 'equipment'}</strong>
-                        <button type="button" className="icon-button" aria-label="Cancel equipment return" onClick={() => setFieldEquipmentReturn(emptyEquipmentReturnDraft())}><X size={16} /></button>
+                        <strong>{ot('Return {name}', { name: fieldEquipmentCustody.find(session => session.id === fieldEquipmentReturn.custodySessionId)?.toolName || ot('equipment') })}</strong>
+                        <button type="button" className="icon-button" aria-label={ot('Cancel equipment return')} onClick={() => setFieldEquipmentReturn(emptyEquipmentReturnDraft())}><X size={16} /></button>
                       </div>
                       <div className="form-grid">
                         <label>
-                          Returned at
+                          {ot('Returned at')}
                           <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldEquipmentReturn.returnedAt} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, returnedAt: event.target.value })} />
                         </label>
                         {!fieldScoped ? (
                           <label>
-                            Returned by
+                            {ot('Returned by')}
                             <input required minLength="2" maxLength="160" value={fieldEquipmentReturn.returnedBy} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, returnedBy: event.target.value })} />
                           </label>
                         ) : null}
                         <label>
-                          Return condition
+                          {ot('Return condition')}
                           <select value={fieldEquipmentReturn.condition} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, condition: event.target.value })}>
-                            <option value="serviceable">Serviceable</option>
-                            <option value="good">Good</option>
-                            <option value="damaged">Damaged</option>
-                            <option value="unsafe">Unsafe</option>
-                            <option value="lost">Lost</option>
+                            <option value="serviceable">{ot('Serviceable')}</option>
+                            <option value="good">{ot('Good')}</option>
+                            <option value="damaged">{ot('Damaged')}</option>
+                            <option value="unsafe">{ot('Unsafe')}</option>
+                            <option value="lost">{ot('Lost')}</option>
                           </select>
                         </label>
                         <label>
-                          Return location
-                          <input maxLength="240" value={fieldEquipmentReturn.location} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, location: event.target.value })} placeholder="Depot, yard, or quarantine bay" />
+                          {ot('Return location')}
+                          <input maxLength="240" value={fieldEquipmentReturn.location} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, location: event.target.value })} placeholder={ot('Depot, yard, or quarantine bay')} />
                         </label>
                         <label>
-                          Meter
+                          {ot('Meter')}
                           <input type="number" min="0" step="any" inputMode="decimal" value={fieldEquipmentReturn.meter} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, meter: event.target.value })} />
                         </label>
                         <label className="form-span">
-                          Return evidence reference
-                          <input required minLength="3" maxLength="240" value={fieldEquipmentReturn.evidenceReference} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                          {ot('Return evidence reference')}
+                          <input required minLength="3" maxLength="240" value={fieldEquipmentReturn.evidenceReference} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, evidenceReference: event.target.value })} placeholder={ot('Photo, checklist, or signed handoff')} />
                         </label>
                         <label className="form-span">
-                          Return findings
-                          <textarea required={['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition)} minLength={['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition) ? 8 : undefined} maxLength="2000" value={fieldEquipmentReturn.notes} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, notes: event.target.value })} placeholder="Condition, missing parts, or isolation detail" />
+                          {ot('Return findings')}
+                          <textarea required={['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition)} minLength={['damaged', 'unsafe', 'lost'].includes(fieldEquipmentReturn.condition) ? 8 : undefined} maxLength="2000" value={fieldEquipmentReturn.notes} onChange={(event) => setFieldEquipmentReturn({ ...fieldEquipmentReturn, notes: event.target.value })} placeholder={ot('Condition, missing parts, or isolation detail')} />
                         </label>
                       </div>
                       <div className="modal-actions">
                         <button className="primary-button" disabled={submitting}>
                           <PackageCheck size={16} />
-                          {submitting ? 'Recording...' : navigator.onLine === false ? 'Save return offline' : 'Retain return'}
+                          {submitting ? ot('Recording...') : navigator.onLine === false ? ot('Save return offline') : ot('Retain return')}
                         </button>
                       </div>
                     </form>
                   ) : null}
                   {fieldEquipmentPlans.length ? (
                     <form className="equipment-field-form equipment-checkout-form" data-testid="field-equipment-checkout-form" onSubmit={recordFieldEquipmentCheckout}>
-                      <div className="equipment-field-form-heading"><strong>Check out reserved equipment</strong></div>
+                      <div className="equipment-field-form-heading"><strong>{ot('Check out reserved equipment')}</strong></div>
                       <div className="form-grid">
                         <label className="form-span">
-                          Reservation
+                          {ot('Reservation')}
                           <select required value={fieldEquipmentCheckout.reservationId} onChange={(event) => selectFieldEquipmentPlan(event.target.value)}>
-                            <option value="">Select a checkout-ready reservation</option>
+                            <option value="">{ot('Select a checkout-ready reservation')}</option>
                             {fieldEquipmentPlans.map((plan) => (
                               <option key={plan.reservation.id} value={plan.reservation.id} disabled={!plan.checkoutReady}>
-                                {plan.tool.name} / {plan.checkoutReady ? 'ready' : plan.activeCustody ? 'already checked out' : `${formatStatus(plan.tool.status)} - blocked`}
+                                {plan.tool.name} / {plan.checkoutReady ? ot('ready') : plan.activeCustody ? ot('already checked out') : ot('{status} - blocked', { status: ot(plan.tool.status.replaceAll('_', ' ')) })}
                               </option>
                             ))}
                           </select>
                         </label>
                         <label>
-                          Checked out at
+                          {ot('Checked out at')}
                           <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={fieldEquipmentCheckout.checkedOutAt} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, checkedOutAt: event.target.value })} />
                         </label>
                         <label>
-                          Due back
+                          {ot('Due back')}
                           <input type="datetime-local" min={fieldEquipmentCheckout.checkedOutAt} value={fieldEquipmentCheckout.dueBackAt} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, dueBackAt: event.target.value })} />
                         </label>
                         {!fieldScoped ? (
                           <label>
-                            Physical custodian
+                            {ot('Physical custodian')}
                             <input required minLength="2" maxLength="160" value={fieldEquipmentCheckout.checkedOutBy} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, checkedOutBy: event.target.value })} />
                           </label>
                         ) : null}
                         <label>
-                          Checkout condition
+                          {ot('Checkout condition')}
                           <select value={fieldEquipmentCheckout.condition} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, condition: event.target.value })}>
-                            <option value="good">Good</option>
-                            <option value="serviceable">Serviceable</option>
+                            <option value="good">{ot('Good')}</option>
+                            <option value="serviceable">{ot('Serviceable')}</option>
                           </select>
                         </label>
                         <label>
-                          Handoff location
-                          <input maxLength="240" value={fieldEquipmentCheckout.location} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, location: event.target.value })} placeholder="Depot, yard, or project gate" />
+                          {ot('Handoff location')}
+                          <input maxLength="240" value={fieldEquipmentCheckout.location} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, location: event.target.value })} placeholder={ot('Depot, yard, or project gate')} />
                         </label>
                         <label>
-                          Meter
+                          {ot('Meter')}
                           <input type="number" min="0" step="any" inputMode="decimal" value={fieldEquipmentCheckout.meter} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, meter: event.target.value })} />
                         </label>
                         <label className="form-span">
-                          Handoff evidence reference
-                          <input required minLength="3" maxLength="240" value={fieldEquipmentCheckout.evidenceReference} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                          {ot('Handoff evidence reference')}
+                          <input required minLength="3" maxLength="240" value={fieldEquipmentCheckout.evidenceReference} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, evidenceReference: event.target.value })} placeholder={ot('Photo, checklist, or signed handoff')} />
                         </label>
                         <label className="form-span">
-                          Handoff note
-                          <textarea maxLength="2000" value={fieldEquipmentCheckout.notes} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, notes: event.target.value })} placeholder="Keys, accessories, restrictions, or visible condition" />
+                          {ot('Handoff note')}
+                          <textarea maxLength="2000" value={fieldEquipmentCheckout.notes} onChange={(event) => setFieldEquipmentCheckout({ ...fieldEquipmentCheckout, notes: event.target.value })} placeholder={ot('Keys, accessories, restrictions, or visible condition')} />
                         </label>
                       </div>
                       <div className="modal-actions">
                         <button className="primary-button" disabled={submitting || !selectedFieldEquipmentPlan?.checkoutReady}>
                           <ArrowUpRight size={16} />
-                          {submitting ? 'Recording...' : navigator.onLine === false ? 'Save handoff offline' : 'Retain checkout'}
+                          {submitting ? ot('Recording...') : navigator.onLine === false ? ot('Save handoff offline') : ot('Retain checkout')}
                         </button>
                       </div>
                     </form>
                   ) : null}
                   {fieldEquipmentCheckout.jobId && navigator.onLine !== false && !fieldEquipmentPlans.length && !fieldEquipmentCustody.length ? (
-                    <Empty title="No equipment handoff available" detail="This job has no checkout-ready retained equipment reservation." />
+                    <Empty title={ot('No equipment handoff available')} detail={ot('This job has no checkout-ready retained equipment reservation.')} />
                   ) : null}
-                  <p className="attendance-policy">Custody records are internal operational evidence. External hire, spend, and statutory inspection remain separately governed.</p>
+                  <p className="attendance-policy">{ot('Custody records are internal operational evidence. External hire, spend, and statutory inspection remain separately governed.')}</p>
                 </section>
                 <section className="evidence-form field-five-s-panel">
                   <LazyControlBoundary label="5S field controls">
@@ -14724,70 +14740,70 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Retained equipment record</p>
-                <h2 id="equipment-editor-title">{equipmentDraft.id ? `Edit ${equipmentDraft.name || 'equipment'}` : 'Add equipment'}</h2>
-                <p>Identity, condition, location, inspection, and internal reference evidence for resource planning.</p>
+                <p className="eyebrow">{ot('Retained equipment record')}</p>
+                <h2 id="equipment-editor-title">{equipmentDraft.id ? ot('Edit {name}', { name: equipmentDraft.name || ot('equipment') }) : ot('Add equipment')}</h2>
+                <p>{ot('Identity, condition, location, inspection, and internal reference evidence for resource planning.')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close equipment editor" onClick={closeEquipmentEditor}>
+              <button type="button" className="icon-button" aria-label={ot('Close equipment editor')} onClick={closeEquipmentEditor}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={saveEquipment}>
               <div className="form-grid equipment-form">
                 <label className="form-span">
-                  Equipment name
+                  {ot('Equipment name')}
                   <input
                     autoFocus
                     required
                     minLength="2"
                     value={equipmentDraft.name}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, name: event.target.value })}
-                    placeholder="Site laser, tower scaffold, service van"
+                    placeholder={ot('Site laser, tower scaffold, service van')}
                   />
                 </label>
                 <label>
-                  Category
+                  {ot('Category')}
                   <input
                     required
                     value={equipmentDraft.category}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, category: event.target.value })}
-                    placeholder="Measurement, access, vehicle"
+                    placeholder={ot('Measurement, access, vehicle')}
                   />
                 </label>
                 <label>
-                  Operational status
+                  {ot('Operational status')}
                   <select
                     value={equipmentDraft.status}
                     disabled={Boolean(equipmentEditor?.activeCustody)}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, status: event.target.value })}
                   >
-                    <option value="available">Available</option>
-                    <option value="in_use" disabled={!equipmentEditor?.activeCustody}>In use (custody controlled)</option>
-                    <option value="maintenance">Maintenance</option>
-                    <option value="inspection_due">Inspection due</option>
-                    <option value="inactive">Inactive</option>
-                    <option value="lost">Lost</option>
+                    <option value="available">{ot('Available')}</option>
+                    <option value="in_use" disabled={!equipmentEditor?.activeCustody}>{ot('In use (custody controlled)')}</option>
+                    <option value="maintenance">{ot('Maintenance')}</option>
+                    <option value="inspection_due">{ot('Inspection due')}</option>
+                    <option value="inactive">{ot('Inactive')}</option>
+                    <option value="lost">{ot('Lost')}</option>
                   </select>
                 </label>
                 <label>
-                  Home location
+                  {ot('Home location')}
                   <input
                     value={equipmentDraft.homeLocation}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, homeLocation: event.target.value })}
-                    placeholder="Utrecht depot"
+                    placeholder={ot('Utrecht depot')}
                   />
                 </label>
                 <label>
-                  Current location
+                  {ot('Current location')}
                   <input
                     disabled={Boolean(equipmentEditor?.activeCustody)}
                     value={equipmentDraft.currentLocation}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, currentLocation: event.target.value })}
-                    placeholder="Depot, site, or vehicle"
+                    placeholder={ot('Depot, site, or vehicle')}
                   />
                 </label>
                 <label>
-                  Serial or asset reference
+                  {ot('Serial or asset reference')}
                   <input
                     value={equipmentDraft.serialNumber}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, serialNumber: event.target.value })}
@@ -14805,10 +14821,10 @@ function App() {
                       })
                     }
                   />
-                  Inspection required before reservation
+                  {ot('Inspection required before reservation')}
                 </label>
                 <label>
-                  Inspection due
+                  {ot('Inspection due')}
                   <input
                     type="date"
                     required={equipmentDraft.inspectionRequired}
@@ -14818,20 +14834,20 @@ function App() {
                   />
                 </label>
                 <label className="form-span">
-                  Internal notes
+                  {ot('Internal notes')}
                   <textarea
                     value={equipmentDraft.notes}
                     onChange={(event) => setEquipmentDraft({ ...equipmentDraft, notes: event.target.value })}
-                    placeholder="Record condition, restrictions, certificates, or planning context."
+                    placeholder={ot('Record condition, restrictions, certificates, or planning context.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  Saving this record does not reserve, dispatch, inspect, purchase, or assign equipment.
+                  {ot('Saving this record does not reserve, dispatch, inspect, purchase, or assign equipment.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeEquipmentEditor}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"
@@ -14843,7 +14859,7 @@ function App() {
                   }
                 >
                   <ShieldCheck size={16} />
-                  {submitting ? 'Saving...' : 'Save retained equipment'}
+                  {submitting ? ot('Saving...') : ot('Save retained equipment')}
                 </button>
               </div>
             </form>
@@ -14865,87 +14881,87 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Physical custody</p>
-                <h2 id="equipment-checkout-title">Check out reserved equipment</h2>
-                <p>Reservation-linked handoff evidence</p>
+                <p className="eyebrow">{ot('Physical custody')}</p>
+                <h2 id="equipment-checkout-title">{ot('Check out reserved equipment')}</h2>
+                <p>{ot('Reservation-linked handoff evidence')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close equipment checkout" onClick={closeEquipmentCheckout}>
+              <button type="button" className="icon-button" aria-label={ot('Close equipment checkout')} onClick={closeEquipmentCheckout}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={saveEquipmentCheckout}>
               <div className="form-grid equipment-custody-form">
                 <label>
-                  Job
+                  {ot('Job')}
                   <select autoFocus required disabled={submitting} value={equipmentCheckoutDraft.jobId} onChange={(event) => void selectEquipmentCheckoutJob(event.target.value)}>
-                    <option value="">Select an active job</option>
+                    <option value="">{ot('Select an active job')}</option>
                     {jobs.filter((job) => !['archived', 'completed', 'cancelled', 'rejected'].includes(job.status)).map((job) => (
                       <option key={job.id} value={job.id}>{job.title}</option>
                     ))}
                   </select>
                 </label>
                 <label>
-                  Reservation
+                  {ot('Reservation')}
                   <select required disabled={!equipmentCheckoutDraft.jobId || submitting} value={equipmentCheckoutDraft.reservationId} onChange={(event) => selectEquipmentCheckoutPlan(event.target.value)}>
-                    <option value="">Select checkout-ready equipment</option>
+                    <option value="">{ot('Select checkout-ready equipment')}</option>
                     {equipmentCheckoutPlans.map((plan) => (
                       <option key={plan.reservation.id} value={plan.reservation.id} disabled={!plan.checkoutReady}>
-                        {plan.tool.name} / {plan.checkoutReady ? 'ready' : plan.activeCustody ? 'already checked out' : `${formatStatus(plan.tool.status)} - blocked`}
+                        {plan.tool.name} / {plan.checkoutReady ? ot('ready') : plan.activeCustody ? ot('already checked out') : ot('{status} - blocked', { status: ot(plan.tool.status.replaceAll('_', ' ')) })}
                       </option>
                     ))}
                   </select>
                 </label>
                 {selectedEquipmentCheckoutPlan ? (
                   <dl className="equipment-custody-preview form-span">
-                    <div><dt>Equipment</dt><dd>{selectedEquipmentCheckoutPlan.tool.name}</dd></div>
-                    <div><dt>Current location</dt><dd>{selectedEquipmentCheckoutPlan.tool.currentLocation || 'Not retained'}</dd></div>
-                    <div><dt>Reservation until</dt><dd>{selectedEquipmentCheckoutPlan.reservation.neededUntil ? formatDateTime(selectedEquipmentCheckoutPlan.reservation.neededUntil) : 'Open'}</dd></div>
+                    <div><dt>{ot('Equipment')}</dt><dd>{selectedEquipmentCheckoutPlan.tool.name}</dd></div>
+                    <div><dt>{ot('Current location')}</dt><dd>{selectedEquipmentCheckoutPlan.tool.currentLocation || ot('Not retained')}</dd></div>
+                    <div><dt>{ot('Reservation until')}</dt><dd>{selectedEquipmentCheckoutPlan.reservation.neededUntil ? formatDateTime(selectedEquipmentCheckoutPlan.reservation.neededUntil) : ot('Open')}</dd></div>
                   </dl>
                 ) : equipmentCheckoutDraft.jobId && !submitting ? (
-                  <p className="workflow-note form-span">No checkout-ready retained equipment reservation is available for this job.</p>
+                  <p className="workflow-note form-span">{ot('No checkout-ready retained equipment reservation is available for this job.')}</p>
                 ) : null}
                 <label>
-                  Physical custodian
+                  {ot('Physical custodian')}
                   <input required minLength="2" maxLength="160" value={equipmentCheckoutDraft.checkedOutBy} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, checkedOutBy: event.target.value })} />
                 </label>
                 <label>
-                  Checkout condition
+                  {ot('Checkout condition')}
                   <select value={equipmentCheckoutDraft.condition} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, condition: event.target.value })}>
-                    <option value="good">Good</option>
-                    <option value="serviceable">Serviceable</option>
+                    <option value="good">{ot('Good')}</option>
+                    <option value="serviceable">{ot('Serviceable')}</option>
                   </select>
                 </label>
                 <label>
-                  Checked out at
+                  {ot('Checked out at')}
                   <input required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={equipmentCheckoutDraft.checkedOutAt} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, checkedOutAt: event.target.value })} />
                 </label>
                 <label>
-                  Due back
+                  {ot('Due back')}
                   <input type="datetime-local" min={equipmentCheckoutDraft.checkedOutAt} value={equipmentCheckoutDraft.dueBackAt} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, dueBackAt: event.target.value })} />
                 </label>
                 <label>
-                  Handoff location
-                  <input maxLength="240" value={equipmentCheckoutDraft.location} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, location: event.target.value })} placeholder="Depot, yard, or project gate" />
+                  {ot('Handoff location')}
+                  <input maxLength="240" value={equipmentCheckoutDraft.location} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, location: event.target.value })} placeholder={ot('Depot, yard, or project gate')} />
                 </label>
                 <label>
-                  Meter
+                  {ot('Meter')}
                   <input type="number" min="0" step="any" inputMode="decimal" value={equipmentCheckoutDraft.meter} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, meter: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Handoff evidence reference
-                  <input required minLength="3" maxLength="240" value={equipmentCheckoutDraft.evidenceReference} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                  {ot('Handoff evidence reference')}
+                  <input required minLength="3" maxLength="240" value={equipmentCheckoutDraft.evidenceReference} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, evidenceReference: event.target.value })} placeholder={ot('Photo, checklist, or signed handoff')} />
                 </label>
                 <label className="form-span">
-                  Handoff note
-                  <textarea maxLength="2000" value={equipmentCheckoutDraft.notes} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, notes: event.target.value })} placeholder="Keys, accessories, restrictions, or visible condition" />
+                  {ot('Handoff note')}
+                  <textarea maxLength="2000" value={equipmentCheckoutDraft.notes} onChange={(event) => setEquipmentCheckoutDraft({ ...equipmentCheckoutDraft, notes: event.target.value })} placeholder={ot('Keys, accessories, restrictions, or visible condition')} />
                 </label>
-                <p className="workflow-note form-span">Checkout changes equipment availability and reservation state atomically. It creates no purchase, hire, or external communication.</p>
+                <p className="workflow-note form-span">{ot('Checkout changes equipment availability and reservation state atomically. It creates no purchase, hire, or external communication.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeEquipmentCheckout}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeEquipmentCheckout}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !selectedEquipmentCheckoutPlan?.checkoutReady || equipmentCheckoutDraft.checkedOutBy.trim().length < 2 || equipmentCheckoutDraft.evidenceReference.trim().length < 3}>
                   <ArrowUpRight size={16} />
-                  {submitting ? 'Recording...' : 'Retain checkout'}
+                  {submitting ? ot('Recording...') : ot('Retain checkout')}
                 </button>
               </div>
             </form>
@@ -14967,62 +14983,62 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Physical custody</p>
-                <h2 id="equipment-return-title">Return {equipmentReturnEditor.toolName}</h2>
+                <p className="eyebrow">{ot('Physical custody')}</p>
+                <h2 id="equipment-return-title">{ot('Return {name}', { name: equipmentReturnEditor.toolName })}</h2>
                 <p>{equipmentReturnEditor.jobTitle} / {equipmentReturnEditor.workerName || equipmentReturnEditor.checkedOutBy}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close equipment return" onClick={closeEquipmentReturn}>
+              <button type="button" className="icon-button" aria-label={ot('Close equipment return')} onClick={closeEquipmentReturn}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={saveEquipmentReturn}>
               <div className="form-grid equipment-custody-form">
                 <dl className="equipment-custody-preview form-span">
-                  <div><dt>Checked out</dt><dd>{formatDateTime(equipmentReturnEditor.checkedOutAt)}</dd></div>
-                  <div><dt>Due back</dt><dd>{equipmentReturnEditor.dueBackAt ? formatDateTime(equipmentReturnEditor.dueBackAt) : 'Open'}</dd></div>
-                  <div><dt>Checkout condition</dt><dd>{formatStatus(equipmentReturnEditor.checkoutCondition)}</dd></div>
+                  <div><dt>{ot('Checked out')}</dt><dd>{formatDateTime(equipmentReturnEditor.checkedOutAt)}</dd></div>
+                  <div><dt>{ot('Due back')}</dt><dd>{equipmentReturnEditor.dueBackAt ? formatDateTime(equipmentReturnEditor.dueBackAt) : ot('Open')}</dd></div>
+                  <div><dt>{ot('Checkout condition')}</dt><dd>{ot(equipmentReturnEditor.checkoutCondition.replaceAll('_', ' '))}</dd></div>
                 </dl>
                 <label>
-                  Returned at
+                  {ot('Returned at')}
                   <input autoFocus required type="datetime-local" max={toLocalDateTimeInput(new Date())} value={equipmentReturnDraft.returnedAt} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, returnedAt: event.target.value })} />
                 </label>
                 <label>
-                  Returned by
+                  {ot('Returned by')}
                   <input required minLength="2" maxLength="160" value={equipmentReturnDraft.returnedBy} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, returnedBy: event.target.value })} />
                 </label>
                 <label>
-                  Return condition
+                  {ot('Return condition')}
                   <select value={equipmentReturnDraft.condition} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, condition: event.target.value })}>
-                    <option value="serviceable">Serviceable</option>
-                    <option value="good">Good</option>
-                    <option value="damaged">Damaged</option>
-                    <option value="unsafe">Unsafe</option>
-                    <option value="lost">Lost</option>
+                    <option value="serviceable">{ot('Serviceable')}</option>
+                    <option value="good">{ot('Good')}</option>
+                    <option value="damaged">{ot('Damaged')}</option>
+                    <option value="unsafe">{ot('Unsafe')}</option>
+                    <option value="lost">{ot('Lost')}</option>
                   </select>
                 </label>
                 <label>
-                  Return location
-                  <input maxLength="240" value={equipmentReturnDraft.location} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, location: event.target.value })} placeholder="Depot, yard, or quarantine bay" />
+                  {ot('Return location')}
+                  <input maxLength="240" value={equipmentReturnDraft.location} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, location: event.target.value })} placeholder={ot('Depot, yard, or quarantine bay')} />
                 </label>
                 <label>
-                  Meter
+                  {ot('Meter')}
                   <input type="number" min={equipmentReturnEditor.checkoutMeter ?? 0} step="any" inputMode="decimal" value={equipmentReturnDraft.meter} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, meter: event.target.value })} />
                 </label>
                 <label className="form-span">
-                  Return evidence reference
-                  <input required minLength="3" maxLength="240" value={equipmentReturnDraft.evidenceReference} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, evidenceReference: event.target.value })} placeholder="Photo, checklist, or signed handoff" />
+                  {ot('Return evidence reference')}
+                  <input required minLength="3" maxLength="240" value={equipmentReturnDraft.evidenceReference} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, evidenceReference: event.target.value })} placeholder={ot('Photo, checklist, or signed handoff')} />
                 </label>
                 <label className="form-span">
-                  Return findings
-                  <textarea required={['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition)} minLength={['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition) ? 8 : undefined} maxLength="2000" value={equipmentReturnDraft.notes} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, notes: event.target.value })} placeholder="Condition, missing parts, or isolation detail" />
+                  {ot('Return findings')}
+                  <textarea required={['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition)} minLength={['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition) ? 8 : undefined} maxLength="2000" value={equipmentReturnDraft.notes} onChange={(event) => setEquipmentReturnDraft({ ...equipmentReturnDraft, notes: event.target.value })} placeholder={ot('Condition, missing parts, or isolation detail')} />
                 </label>
-                <p className="workflow-note form-span">Damaged, unsafe, and lost returns are quarantined automatically and create an internal review action. No supplier or finance action is executed.</p>
+                <p className="workflow-note form-span">{ot('Damaged, unsafe, and lost returns are quarantined automatically and create an internal review action. No supplier or finance action is executed.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeEquipmentReturn}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeEquipmentReturn}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || equipmentReturnDraft.returnedBy.trim().length < 2 || equipmentReturnDraft.evidenceReference.trim().length < 3 || (['damaged', 'unsafe', 'lost'].includes(equipmentReturnDraft.condition) && equipmentReturnDraft.notes.trim().length < 8)}>
                   <PackageCheck size={16} />
-                  {submitting ? 'Recording...' : 'Retain return'}
+                  {submitting ? ot('Recording...') : ot('Retain return')}
                 </button>
               </div>
             </form>
@@ -15044,32 +15060,32 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Internal inspection evidence</p>
-                <h2 id="equipment-inspection-title">Record equipment inspection</h2>
+                <p className="eyebrow">{ot('Internal inspection evidence')}</p>
+                <h2 id="equipment-inspection-title">{ot('Record equipment inspection')}</h2>
                 <p>
-                  {equipmentInspection.name} / {formatStatus(equipmentInspection.category || 'general')}
+                  {equipmentInspection.name} / {ot(equipmentInspection.category || 'general')}
                 </p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close equipment inspection" onClick={closeEquipmentInspection}>
+              <button type="button" className="icon-button" aria-label={ot('Close equipment inspection')} onClick={closeEquipmentInspection}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={recordEquipmentInspection}>
               <div className="form-grid equipment-inspection-form">
                 <label>
-                  Inspection result
+                  {ot('Inspection result')}
                   <select
                     autoFocus
                     value={equipmentInspectionDraft.result}
                     onChange={(event) => setEquipmentInspectionDraft({ ...equipmentInspectionDraft, result: event.target.value })}
                   >
-                    <option value="passed">Passed</option>
-                    <option value="limited">Limited</option>
-                    <option value="failed">Failed</option>
+                    <option value="passed">{ot('Passed')}</option>
+                    <option value="limited">{ot('Limited')}</option>
+                    <option value="failed">{ot('Failed')}</option>
                   </select>
                 </label>
                 <label>
-                  Inspection date
+                  {ot('Inspection date')}
                   <input
                     type="date"
                     required
@@ -15079,17 +15095,17 @@ function App() {
                   />
                 </label>
                 <label>
-                  Inspector or internal reference
+                  {ot('Inspector or internal reference')}
                   <input
                     required
                     minLength="2"
                     value={equipmentInspectionDraft.inspector}
                     onChange={(event) => setEquipmentInspectionDraft({ ...equipmentInspectionDraft, inspector: event.target.value })}
-                    placeholder="Name or retained staff reference"
+                    placeholder={ot('Name or retained staff reference')}
                   />
                 </label>
                 <label>
-                  Next inspection due
+                  {ot('Next inspection due')}
                   <input
                     type="date"
                     required={equipmentInspection.inspection?.required && equipmentInspectionDraft.result === 'passed'}
@@ -15100,36 +15116,35 @@ function App() {
                   />
                 </label>
                 <label className="form-span">
-                  Evidence reference
+                  {ot('Evidence reference')}
                   <input
                     value={equipmentInspectionDraft.reference}
                     onChange={(event) => setEquipmentInspectionDraft({ ...equipmentInspectionDraft, reference: event.target.value })}
-                    placeholder="Checklist, document, or service reference"
+                    placeholder={ot('Checklist, document, or service reference')}
                   />
                 </label>
                 <label className="form-span">
-                  Findings
+                  {ot('Findings')}
                   <textarea
                     required={equipmentInspectionDraft.result !== 'passed'}
                     minLength={equipmentInspectionDraft.result !== 'passed' ? 8 : undefined}
                     value={equipmentInspectionDraft.notes}
                     onChange={(event) => setEquipmentInspectionDraft({ ...equipmentInspectionDraft, notes: event.target.value })}
-                    placeholder="Retain findings, restrictions, or follow-up work."
+                    placeholder={ot('Retain findings, restrictions, or follow-up work.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  This creates internal operational evidence only. It does not claim statutory inspection, certification, supplier service,
-                  or external approval. Failed and limited results block new reservations.
+                  {ot('This creates internal operational evidence only. It does not claim statutory inspection, certification, supplier service, or external approval. Failed and limited results block new reservations.')}
                   {['failed', 'limited'].includes(equipmentInspection.inspection?.status)
-                    ? ' Retain completed maintenance before recording a passing reinspection.'
+                    ? ` ${ot('Retain completed maintenance before recording a passing reinspection.')}`
                     : equipmentInspection.inspection?.status === 'reinspection_required'
-                      ? ' Completed maintenance is retained; record a passing reinspection before reservation readiness can return.'
+                      ? ` ${ot('Completed maintenance is retained; record a passing reinspection before reservation readiness can return.')}`
                       : ''}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeEquipmentInspection}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"
@@ -15144,7 +15159,7 @@ function App() {
                   }
                 >
                   <ClipboardCheck size={16} />
-                  {submitting ? 'Recording...' : 'Record inspection'}
+                  {submitting ? ot('Recording...') : ot('Record inspection')}
                 </button>
               </div>
             </form>
@@ -15166,45 +15181,45 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Internal maintenance evidence</p>
-                <h2 id="equipment-maintenance-title">Record equipment maintenance</h2>
+                <p className="eyebrow">{ot('Internal maintenance evidence')}</p>
+                <h2 id="equipment-maintenance-title">{ot('Record equipment maintenance')}</h2>
                 <p>
-                  {equipmentMaintenance.name} / {formatStatus(equipmentMaintenance.category || 'general')}
+                  {equipmentMaintenance.name} / {ot(equipmentMaintenance.category || 'general')}
                 </p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close equipment maintenance" onClick={closeEquipmentMaintenance}>
+              <button type="button" className="icon-button" aria-label={ot('Close equipment maintenance')} onClick={closeEquipmentMaintenance}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={recordEquipmentMaintenance}>
               <div className="form-grid equipment-maintenance-form">
                 <label>
-                  Maintenance outcome
+                  {ot('Maintenance outcome')}
                   <select
                     autoFocus
                     value={equipmentMaintenanceDraft.outcome}
                     onChange={(event) => setEquipmentMaintenanceDraft({ ...equipmentMaintenanceDraft, outcome: event.target.value })}
                   >
-                    <option value="completed">Completed</option>
-                    <option value="follow_up_required">Follow up required</option>
+                    <option value="completed">{ot('Completed')}</option>
+                    <option value="follow_up_required">{ot('Follow up required')}</option>
                   </select>
                 </label>
                 <label>
-                  Maintenance type
+                  {ot('Maintenance type')}
                   <select
                     value={equipmentMaintenanceDraft.maintenanceType}
                     onChange={(event) =>
                       setEquipmentMaintenanceDraft({ ...equipmentMaintenanceDraft, maintenanceType: event.target.value })
                     }
                   >
-                    <option value="corrective">Corrective</option>
-                    <option value="preventive">Preventive</option>
-                    <option value="repair">Repair</option>
-                    <option value="service">Service</option>
+                    <option value="corrective">{ot('Corrective')}</option>
+                    <option value="preventive">{ot('Preventive')}</option>
+                    <option value="repair">{ot('Repair')}</option>
+                    <option value="service">{ot('Service')}</option>
                   </select>
                 </label>
                 <label>
-                  Maintenance date
+                  {ot('Maintenance date')}
                   <input
                     type="date"
                     required
@@ -15214,41 +15229,40 @@ function App() {
                   />
                 </label>
                 <label>
-                  Person or internal reference
+                  {ot('Person or internal reference')}
                   <input
                     required
                     minLength="2"
                     value={equipmentMaintenanceDraft.performedBy}
                     onChange={(event) => setEquipmentMaintenanceDraft({ ...equipmentMaintenanceDraft, performedBy: event.target.value })}
-                    placeholder="Name or retained staff reference"
+                    placeholder={ot('Name or retained staff reference')}
                   />
                 </label>
                 <label className="form-span">
-                  Evidence reference
+                  {ot('Evidence reference')}
                   <input
                     value={equipmentMaintenanceDraft.reference}
                     onChange={(event) => setEquipmentMaintenanceDraft({ ...equipmentMaintenanceDraft, reference: event.target.value })}
-                    placeholder="Work order, checklist, or internal reference"
+                    placeholder={ot('Work order, checklist, or internal reference')}
                   />
                 </label>
                 <label className="form-span">
-                  Work performed
+                  {ot('Work performed')}
                   <textarea
                     required
                     minLength="8"
                     value={equipmentMaintenanceDraft.notes}
                     onChange={(event) => setEquipmentMaintenanceDraft({ ...equipmentMaintenanceDraft, notes: event.target.value })}
-                    placeholder="Retain the work completed, remaining defect, or follow-up requirement."
+                    placeholder={ot('Retain the work completed, remaining defect, or follow-up requirement.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  This retains internal maintenance evidence only. It does not place a supplier order, commit spend, claim external service,
-                  or clear a failed inspection. A passing reinspection is required after failed or limited inspection evidence.
+                  {ot('This retains internal maintenance evidence only. It does not place a supplier order, commit spend, claim external service, or clear a failed inspection. A passing reinspection is required after failed or limited inspection evidence.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeEquipmentMaintenance}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"
@@ -15260,7 +15274,7 @@ function App() {
                   }
                 >
                   <Wrench size={16} />
-                  {submitting ? 'Recording...' : 'Record maintenance'}
+                  {submitting ? ot('Recording...') : ot('Record maintenance')}
                 </button>
               </div>
             </form>
@@ -15282,16 +15296,16 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-gated lifecycle</p>
-                <h2 id="equipment-retirement-title">Request equipment retirement</h2>
+                <p className="eyebrow">{ot('Approval-gated lifecycle')}</p>
+                <h2 id="equipment-retirement-title">{ot('Request equipment retirement')}</h2>
                 <p>
-                  {equipmentRetirement.name} / {formatStatus(equipmentRetirement.category || 'general')}
+                  {equipmentRetirement.name} / {ot(equipmentRetirement.category || 'general')}
                 </p>
               </div>
               <button
                 type="button"
                 className="icon-button"
-                aria-label="Close equipment retirement request"
+                aria-label={ot('Close equipment retirement request')}
                 onClick={closeEquipmentRetirement}
               >
                 <X size={18} />
@@ -15302,48 +15316,48 @@ function App() {
                 <div className="job-lifecycle-effect">
                   <Archive size={20} />
                   <div>
-                    <strong>Block this equipment from new reservations</strong>
+                    <strong>{ot('Block this equipment from new reservations')}</strong>
                     <p>
-                      The retained status changes to retired only after approval and after every operational reservation has been released.
+                      {ot('The retained status changes to retired only after approval and after every operational reservation has been released.')}
                     </p>
                   </div>
                 </div>
                 <ul className="job-lifecycle-safeguards">
-                  <li>The complete equipment, reservation, approval, and audit history remains retained.</li>
-                  <li>New reservations are blocked as soon as this request enters the approval queue.</li>
+                  <li>{ot('The complete equipment, reservation, approval, and audit history remains retained.')}</li>
+                  <li>{ot('New reservations are blocked as soon as this request enters the approval queue.')}</li>
                   <li>
                     {equipmentRetirement.activeReservationCount > 0
-                      ? `Approval cannot complete while ${equipmentRetirement.activeReservationCount} operational reservation${equipmentRetirement.activeReservationCount === 1 ? '' : 's'} remain.`
-                      : 'No operational reservations currently block this retirement.'}
+                      ? ot('Approval cannot complete while {count} operational reservations remain.', { count: equipmentRetirement.activeReservationCount })
+                      : ot('No operational reservations currently block this retirement.')}
                   </li>
                   {equipmentRetirement.dormantReservationCount > 0 ? (
                     <li>
-                      Approval will release {equipmentRetirement.dormantReservationCount} dormant reservation
-                      {equipmentRetirement.dormantReservationCount === 1 ? '' : 's'} retained on inactive jobs, so any later job restore
-                      requires a new reservation.
+                      {ot('Approval will release {count} dormant reservations retained on inactive jobs, so any later job restore requires a new reservation.', {
+                        count: equipmentRetirement.dormantReservationCount,
+                      })}
                     </li>
                   ) : null}
-                  <li>No crew member, client, supplier, finance provider, or site contact is notified.</li>
+                  <li>{ot('No crew member, client, supplier, finance provider, or site contact is notified.')}</li>
                 </ul>
                 <label>
-                  Operational reason
+                  {ot('Operational reason')}
                   <textarea
                     autoFocus
                     required
                     minLength="8"
                     value={equipmentRetirementReason}
                     onChange={(event) => setEquipmentRetirementReason(event.target.value)}
-                    placeholder="Explain why this equipment should no longer be selected for work."
+                    placeholder={ot('Explain why this equipment should no longer be selected for work.')}
                   />
                 </label>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeEquipmentRetirement}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button className="danger-button" disabled={submitting || equipmentRetirementReason.trim().length < 8}>
                   <Archive size={16} />
-                  {submitting ? 'Submitting...' : 'Request retirement approval'}
+                  {submitting ? ot('Submitting...') : ot('Request retirement approval')}
                 </button>
               </div>
             </form>

@@ -61,7 +61,11 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
   provider receipts in Dutch or English without rewriting commercial evidence.
   No supplier contact, award, order, payment, or signature is claimed before its
   independent approval and provider evidence boundary.
-- The responsive production UI is exercised by 97 isolated Chromium tests across
+- Equipment now presents registration, controlled status, office/field custody,
+  return quarantine, inspection, maintenance, and approval-gated retirement in
+  Dutch or English without rewriting retained evidence. Its resource metadata and
+  custody labels pass the same axe contrast gate.
+- The responsive production UI is exercised by 98 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised
