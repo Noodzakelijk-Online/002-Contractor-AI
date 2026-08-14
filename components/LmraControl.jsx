@@ -6,6 +6,7 @@ import {
   shouldQueueFieldMutation,
 } from '../field-outbox'
 import { formatDateTime, formatStatus } from '../dashboard-format'
+import { operatorText } from '../operator-locale'
 
 const CHECKS = [
   ['task_understood', 'I understand the work, sequence, and stop-work triggers.'],
@@ -39,6 +40,7 @@ function splitLines(value) {
 }
 
 export default function LmraControl({
+  locale = 'en-GB',
   jobs,
   fieldScoped,
   apiRequest,
@@ -48,6 +50,7 @@ export default function LmraControl({
   outboxScope,
   refreshOutboxState,
 }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [jobId, setJobId] = useState('')
   const [jobDetail, setJobDetail] = useState(null)
   const [assessments, setAssessments] = useState([])
@@ -149,19 +152,19 @@ export default function LmraControl({
   async function submitAssessment(event) {
     event.preventDefault()
     if (!fieldScoped || !jobId || !selectedPlan) {
-      setError('An authenticated field worker and retained pre-task plan are required.')
+      setError(t('An authenticated field worker and retained pre-task plan are required.'))
       return
     }
     if (draft.activity.trim().length < 3 || draft.workArea.trim().length < 2 || draft.evidenceReference.trim().length < 3) {
-      setError('Retain the activity, work area, and evidence reference.')
+      setError(t('Retain the activity, work area, and evidence reference.'))
       return
     }
     if (!readyRequested && draft.stopWorkReason.trim().length < 8) {
-      setError('A failed or uncertain check requires a stop-work reason of at least eight characters.')
+      setError(t('A failed or uncertain check requires a stop-work reason of at least eight characters.'))
       return
     }
     if (needsReassessmentEvidence && draft.resolutionNote.trim().length < 8) {
-      setError('Retain how the prior stop-work condition was resolved before reassessing.')
+      setError(t('Retain how the prior stop-work condition was resolved before reassessing.'))
       return
     }
     const operation = {
@@ -191,17 +194,17 @@ export default function LmraControl({
     try {
       const outcome = await sendOrQueue(operation)
       if (outcome.queued) {
-        setQueuedNotice('Saved on this device. Work is not authorized until the live ledger validates current sources; complete a new LMRA if this retry is older than 15 minutes.')
-        notify('LMRA saved for exact retry. Work must remain stopped until live validation succeeds.')
+        setQueuedNotice(t('Saved on this device. Work is not authorized until the live ledger validates current sources; complete a new LMRA if this retry is older than 15 minutes.'))
+        notify(t('LMRA saved for exact retry. Work must remain stopped until live validation succeeds.'))
         resetDraft(selectedPlan.id)
         return
       }
       const assessment = outcome.result.lmraAssessment
       notify(outcome.result.replayed
-        ? 'This exact LMRA was already retained.'
+        ? t('This exact LMRA was already retained.')
         : assessment.readyForHazardousWork
-          ? `LMRA ready until ${formatDateTime(assessment.validUntil)}. Reassess when conditions change.`
-          : 'Stop-work LMRA retained. Resolve the condition and complete a linked reassessment.')
+          ? t('LMRA ready until {time}. Reassess when conditions change.', { time: formatDateTime(assessment.validUntil) })
+          : t('Stop-work LMRA retained. Resolve the condition and complete a linked reassessment.'))
       resetDraft(selectedPlan.id)
       await Promise.all([loadLmraData(jobId, selectedPlan.id), refresh()])
     } catch (requestError) {
@@ -215,13 +218,13 @@ export default function LmraControl({
     <section className="lmra-control" data-testid="lmra-control" aria-busy={loading || submitting || undefined}>
       <div className="panel-heading">
         <div>
-          <h2>Last-minute risk assessment</h2>
-          <p>Worker-owned checks against the exact current plan immediately before hazardous work.</p>
+          <h2>{t('Last-minute risk assessment')}</h2>
+          <p>{t('Worker-owned checks against the exact current plan immediately before hazardous work.')}</p>
         </div>
-        <div className="lmra-summary" aria-label="LMRA summary">
-          <span className="tag">{assessments.filter(item => item.readyForHazardousWork).length} current</span>
-          {assessments.some(item => item.outcome === 'stop_work' && item.isLatestForWorkerPlan) ? <span className="tag tag-red">Stop work</span> : null}
-          <button type="button" className="icon-button" aria-label="Refresh LMRA records" title="Refresh" disabled={loading} onClick={() => loadLmraData(jobId, draft.preTaskPlanId)}>
+        <div className="lmra-summary" aria-label={t('LMRA summary')}>
+          <span className="tag">{t('{count} current', { count: assessments.filter(item => item.readyForHazardousWork).length })}</span>
+          {assessments.some(item => item.outcome === 'stop_work' && item.isLatestForWorkerPlan) ? <span className="tag tag-red">{t('Stop work')}</span> : null}
+          <button type="button" className="icon-button" aria-label={t('Refresh LMRA records')} title={t('Refresh')} disabled={loading} onClick={() => loadLmraData(jobId, draft.preTaskPlanId)}>
             <RefreshCw size={16} />
           </button>
         </div>
@@ -229,18 +232,18 @@ export default function LmraControl({
 
       <div className="lmra-selector">
         <label>
-          Job
+          {t('Job')}
           <select required value={jobId} onChange={event => selectJob(event.target.value)}>
-            <option value="">Select an assigned job</option>
+            <option value="">{t('Select an assigned job')}</option>
             {activeJobs.map(job => <option key={job.id} value={job.id}>{job.title}</option>)}
           </select>
         </label>
         <label>
-          Pre-task plan
+          {t('Pre-task plan')}
           <select value={draft.preTaskPlanId} disabled={!jobId || !plans.length} onChange={event => updateDraft('preTaskPlanId', event.target.value)}>
-            <option value="">{plans.length ? 'Select the exact plan' : 'No retained plan'}</option>
+            <option value="">{plans.length ? t('Select the exact plan') : t('No retained plan')}</option>
             {plans.map(plan => (
-              <option key={plan.id} value={plan.id}>{plan.planNumber} / {formatStatus(plan.effectiveStatus || plan.status)}</option>
+              <option key={plan.id} value={plan.id}>{plan.planNumber} / {t(formatStatus(plan.effectiveStatus || plan.status))}</option>
             ))}
           </select>
         </label>
@@ -253,44 +256,44 @@ export default function LmraControl({
         <div className={`lmra-source-state ${selectedPlan.readyForWork ? 'lmra-source-ready' : 'lmra-source-blocked'}`} aria-live="polite">
           {selectedPlan.readyForWork ? <ShieldCheck size={19} /> : <TriangleAlert size={19} />}
           <div>
-            <strong>{selectedPlan.planNumber} / revision {selectedPlan.revisionNumber}</strong>
-            <span>{selectedPlan.readyForWork ? 'Plan and worker acknowledgement are current.' : 'Source blockers remain; any submitted assessment will retain a stop-work outcome.'}</span>
+            <strong>{t('{plan} / revision {revision}', { plan: selectedPlan.planNumber, revision: selectedPlan.revisionNumber })}</strong>
+            <span>{selectedPlan.readyForWork ? t('Plan and worker acknowledgement are current.') : t('Source blockers remain; any submitted assessment will retain a stop-work outcome.')}</span>
           </div>
         </div>
       ) : jobId ? (
-        <div className="lmra-message lmra-message-warning" role="status"><TriangleAlert size={17} /><span>No pre-task plan is available for this job.</span></div>
+        <div className="lmra-message lmra-message-warning" role="status"><TriangleAlert size={17} /><span>{t('No pre-task plan is available for this job.')}</span></div>
       ) : null}
 
       {fieldScoped && selectedPlan ? (
         <form className="lmra-form" aria-busy={loading || submitting} inert={loading || submitting ? true : undefined} onSubmit={submitAssessment}>
           <div className="lmra-form-grid">
             <label>
-              Activity
-              <input required disabled={loading || submitting} minLength="3" maxLength="500" value={draft.activity} onChange={event => updateDraft('activity', event.target.value)} placeholder="Hazardous task about to start" />
+              {t('Activity')}
+              <input required disabled={loading || submitting} minLength="3" maxLength="500" value={draft.activity} onChange={event => updateDraft('activity', event.target.value)} placeholder={t('Hazardous task about to start')} />
             </label>
             <label>
-              Work area
+              {t('Work area')}
               <input required disabled={loading || submitting} minLength="2" maxLength="240" value={draft.workArea} onChange={event => updateDraft('workArea', event.target.value)} />
             </label>
             <label>
-              Linked task
+              {t('Linked task')}
               <select disabled={loading || submitting} value={draft.taskId} onChange={event => updateDraft('taskId', event.target.value)}>
-                <option value="">No task selected</option>
+                <option value="">{t('No task selected')}</option>
                 {tasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}
               </select>
             </label>
             <label>
-              Validity
+              {t('Validity')}
               <select disabled={loading || submitting} value={draft.validForMinutes} onChange={event => updateDraft('validForMinutes', event.target.value)}>
-                <option value="60">1 hour</option>
-                <option value="120">2 hours</option>
-                <option value="240">4 hours maximum</option>
+                <option value="60">{t('1 hour')}</option>
+                <option value="120">{t('2 hours')}</option>
+                <option value="240">{t('4 hours maximum')}</option>
               </select>
             </label>
           </div>
 
           <fieldset className="lmra-checks">
-            <legend>Check immediately before starting</legend>
+            <legend>{t('Check immediately before starting')}</legend>
             {CHECKS.map(([key, label]) => (
               <label className="lmra-check" key={key}>
                 <input
@@ -302,51 +305,51 @@ export default function LmraControl({
                     setDraft(current => ({ ...current, checks: { ...current.checks, [key]: checked } }))
                   }}
                 />
-                <span>{label}</span>
+                <span>{t(label)}</span>
               </label>
             ))}
           </fieldset>
 
           <div className="lmra-form-grid">
             <label>
-              Evidence reference
-              <input required disabled={loading || submitting} minLength="3" maxLength="240" value={draft.evidenceReference} onChange={event => updateDraft('evidenceReference', event.target.value)} placeholder="Photo, field note, or device record" />
+              {t('Evidence reference')}
+              <input required disabled={loading || submitting} minLength="3" maxLength="240" value={draft.evidenceReference} onChange={event => updateDraft('evidenceReference', event.target.value)} placeholder={t('Photo, field note, or device record')} />
             </label>
             <label>
-              Observed hazards
-              <textarea disabled={loading || submitting} maxLength="4000" value={draft.observedHazards} onChange={event => updateDraft('observedHazards', event.target.value)} placeholder="One observation per line" />
+              {t('Observed hazards')}
+              <textarea disabled={loading || submitting} maxLength="4000" value={draft.observedHazards} onChange={event => updateDraft('observedHazards', event.target.value)} placeholder={t('One observation per line')} />
             </label>
             {!readyRequested ? (
               <label className="lmra-form-span">
-                Stop-work reason
-                <textarea required disabled={loading || submitting} minLength="8" maxLength="1000" value={draft.stopWorkReason} onChange={event => updateDraft('stopWorkReason', event.target.value)} placeholder="Describe the failed, unknown, or changed condition" />
+                {t('Stop-work reason')}
+                <textarea required disabled={loading || submitting} minLength="8" maxLength="1000" value={draft.stopWorkReason} onChange={event => updateDraft('stopWorkReason', event.target.value)} placeholder={t('Describe the failed, unknown, or changed condition')} />
               </label>
             ) : null}
             {needsReassessmentEvidence ? (
               <label className="lmra-form-span">
-                Prior condition resolution
-                <textarea required disabled={loading || submitting} minLength="8" maxLength="1000" value={draft.resolutionNote} onChange={event => updateDraft('resolutionNote', event.target.value)} placeholder="What changed and what evidence confirms the control is now effective?" />
+                {t('Prior condition resolution')}
+                <textarea required disabled={loading || submitting} minLength="8" maxLength="1000" value={draft.resolutionNote} onChange={event => updateDraft('resolutionNote', event.target.value)} placeholder={t('What changed and what evidence confirms the control is now effective?')} />
               </label>
             ) : null}
           </div>
 
           <label className="checkbox-label lmra-attestation">
             <input type="checkbox" disabled={loading || submitting} checked={draft.safeToStart} onChange={event => updateDraft('safeToStart', event.target.checked)} />
-            Based on these checks, I confirm the work is safe to start now. I will stop and reassess if anything changes.
+            {t('Based on these checks, I confirm the work is safe to start now. I will stop and reassess if anything changes.')}
           </label>
           <button className={readyRequested ? 'primary-button' : 'danger-button'} disabled={loading || submitting}>
             {readyRequested ? <Check size={16} /> : <TriangleAlert size={16} />}
-            {submitting ? 'Validating...' : navigator.onLine === false ? 'Save evidence offline / keep work stopped' : readyRequested ? 'Validate and retain LMRA' : 'Retain stop-work LMRA'}
+            {submitting ? t('Validating...') : navigator.onLine === false ? t('Save evidence offline / keep work stopped') : readyRequested ? t('Validate and retain LMRA') : t('Retain stop-work LMRA')}
           </button>
         </form>
       ) : !fieldScoped ? (
-        <p className="attendance-policy">LMRA answers are worker-owned actual evidence. Office roles can review records but cannot complete or clear an assessment for a worker.</p>
+        <p className="attendance-policy">{t('LMRA answers are worker-owned actual evidence. Office roles can review records but cannot complete or clear an assessment for a worker.')}</p>
       ) : null}
 
       <div className="lmra-register" aria-live="polite">
         <div className="lmra-register-heading">
-          <strong>Recent assessments</strong>
-          <span>{assessments.length} retained</span>
+          <strong>{t('Recent assessments')}</strong>
+          <span>{t('{count} retained', { count: assessments.length })}</span>
         </div>
         {assessments.slice(0, 12).map(assessment => (
           <div className="lmra-row" key={assessment.id}>
@@ -360,16 +363,16 @@ export default function LmraControl({
             </div>
             <div className="lmra-row-status">
               <span className={`status status-${assessment.readyForHazardousWork ? 'active' : 'attention'}`}>
-                {assessment.readyForHazardousWork ? 'ready' : formatStatus(assessment.outcome)}
+                {assessment.readyForHazardousWork ? t('ready') : t(formatStatus(assessment.outcome))}
               </span>
-              <small>{assessment.readyForHazardousWork ? `until ${formatDateTime(assessment.validUntil)}` : assessment.expired ? 'expired' : 'review required'}</small>
+              <small>{assessment.readyForHazardousWork ? t('until {time}', { time: formatDateTime(assessment.validUntil) }) : assessment.expired ? t('expired') : t('review required')}</small>
             </div>
           </div>
         ))}
-        {!assessments.length ? <div className="attendance-empty"><ShieldAlert size={20} /><span>No LMRA evidence is retained for this job.</span></div> : null}
+        {!assessments.length ? <div className="attendance-empty"><ShieldAlert size={20} /><span>{t('No LMRA evidence is retained for this job.')}</span></div> : null}
       </div>
 
-      <p className="attendance-policy">A current LMRA is a time-bounded operational check, not a certification of legal compliance or competence. Changed conditions always require stop-work and reassessment.</p>
+      <p className="attendance-policy">{t('A current LMRA is a time-bounded operational check, not a certification of legal compliance or competence. Changed conditions always require stop-work and reassessment.')}</p>
     </section>
   )
 }

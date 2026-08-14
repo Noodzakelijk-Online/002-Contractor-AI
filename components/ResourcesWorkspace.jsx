@@ -37,6 +37,7 @@ import {
 } from '../dashboard-format'
 import Empty from './EmptyState'
 import FiveSWorkspace from './FiveSWorkspace'
+import { operatorText } from '../operator-locale'
 
 function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitting, onCreate, onEdit, onRetire, onOpenApprovals }) {
   const [query, setQuery] = useState('')
@@ -1094,6 +1095,7 @@ function MaterialReceivingWorkspace({ register, canCoordinate, canApprove, submi
 }
 
 function ResourcesWorkspace({
+  locale = 'en-GB',
   workforce,
   inventory,
   workers,
@@ -1147,6 +1149,7 @@ function ResourcesWorkspace({
   onOpen,
   request,
 }) {
+  const t = (key) => operatorText(locale, key)
   const [workforceMode, setWorkforceMode] = useState('readiness')
   const isWorkforce = view === 'workforce'
   const isInventory = view === 'inventory'
@@ -1166,7 +1169,7 @@ function ResourcesWorkspace({
     <section className="panel page-panel resources-workspace" data-testid="resources-workspace">
       <div className="panel-heading resources-heading">
         <div>
-          <h2>{isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : isFiveS ? '5S organization control' : 'Resource readiness'}</h2>
+          <h2>{isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : isFiveS ? t('5S organization control') : 'Resource readiness'}</h2>
           <p>
             {isTimesheets
               ? 'Review submitted worker time by week, resolve exceptions, approve immutable revisions, and prepare a controlled payroll handoff.'
@@ -1175,7 +1178,7 @@ function ResourcesWorkspace({
               : isPartners
               ? 'Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.'
               : isFiveS
-                ? 'Control vehicle, trailer, depot, store, and job-storage standards with approved checks, field audits, and evidence-backed corrective actions.'
+                ? t('Control vehicle, trailer, depot, store, and job-storage standards with approved checks, field audits, and evidence-backed corrective actions.')
               : isEquipment
                 ? 'Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.'
                 : isQualifications
@@ -1297,6 +1300,7 @@ function ResourcesWorkspace({
       ) : null}
       {isFiveS ? (
         <FiveSWorkspace
+          locale={locale}
           board={fiveS}
           request={request}
           jobs={jobs}

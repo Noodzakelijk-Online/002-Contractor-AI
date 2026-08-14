@@ -11495,6 +11495,7 @@ function App() {
                 </LazyControlBoundary>
                 <LazyControlBoundary label="Last Planner weekly control">
                   <LastPlannerBoard
+                    locale={operatorLocale}
                     board={data.lastPlanner}
                     jobs={data.operatorScopeJobs || jobs}
                     canApprove={capabilities.approvals === true}
@@ -11568,6 +11569,7 @@ function App() {
             {section === 'resources' && capabilities.resources ? (
               <LazyControlBoundary label="resource controls">
                 <ResourcesWorkspace
+                  locale={operatorLocale}
                   workforce={data.workforce}
                   inventory={data.inventory}
                   workers={workers}
@@ -12064,6 +12066,7 @@ function App() {
                 </LazyControlBoundary>
                 <LazyControlBoundary label="last-minute risk assessment controls">
                   <LmraControl
+                    locale={operatorLocale}
                     jobs={activeJobs}
                     fieldScoped={fieldScoped}
                     apiRequest={api}
@@ -12459,6 +12462,7 @@ function App() {
                 <section className="evidence-form field-five-s-panel">
                   <LazyControlBoundary label="5S field controls">
                     <FiveSWorkspace
+                      locale={operatorLocale}
                       request={api}
                       jobs={activeJobs}
                       fieldMode

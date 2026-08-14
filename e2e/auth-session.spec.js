@@ -227,6 +227,14 @@ test('field worker completes a live LMRA, then records changed-condition stop-wo
   await page.getByRole('button', { name: 'Field updates', exact: true }).click();
   const panel = page.getByTestId('lmra-control');
   await expect(panel.getByRole('heading', { name: 'Last-minute risk assessment' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('nl-NL');
+  await expect(panel.getByRole('heading', { name: 'Laatste-minuut-risicoanalyse' })).toBeVisible();
+  await expect(panel.getByLabel('LMRA-registraties vernieuwen')).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: 'Buitendienst', exact: true }).click();
+  await expect(panel.getByRole('heading', { name: 'Laatste-minuut-risicoanalyse' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Taal' }).selectOption('en-GB');
+  await expect(panel.getByRole('heading', { name: 'Last-minute risk assessment' })).toBeVisible();
   const selectors = panel.locator('.lmra-selector select');
   await selectors.nth(0).selectOption(job.id);
   await expect(selectors.nth(1).locator(`option[value="${planResult.preTaskPlan.id}"]`)).toHaveCount(1);

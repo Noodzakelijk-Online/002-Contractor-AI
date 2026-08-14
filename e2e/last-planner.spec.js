@@ -77,7 +77,16 @@ test('Last Planner workspace governs make-ready, weekly promises, daily evidence
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Schedule', exact: true }).click();
-  const board = page.getByTestId('last-planner-board');
+  let board = page.getByTestId('last-planner-board');
+  await expect(board.getByRole('heading', { name: 'Last Planner weekly control' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('nl-NL');
+  await expect(board.getByRole('heading', { name: 'Wekelijkse Last Planner-sturing' })).toBeVisible();
+  await expect(board.getByLabel('Samenvatting Last Planner')).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: 'Planning', exact: true }).click();
+  board = page.getByTestId('last-planner-board');
+  await expect(board.getByRole('heading', { name: 'Wekelijkse Last Planner-sturing' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Taal' }).selectOption('en-GB');
   await expect(board.getByRole('heading', { name: 'Last Planner weekly control' })).toBeVisible();
   await board.getByLabel('Week starts').fill(weekStart);
   await board.getByRole('button', { name: 'Load week' }).click();

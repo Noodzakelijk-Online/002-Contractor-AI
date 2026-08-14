@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import Empty from './EmptyState'
 import { formatDate, formatStatus } from '../dashboard-format'
+import { operatorText } from '../operator-locale'
 
 const EMPTY_LIST = Object.freeze([])
 const CONSTRAINT_CATEGORIES = [
@@ -70,6 +71,7 @@ function candidateKey(candidate) {
 }
 
 export default function LastPlannerBoard({
+  locale = 'en-GB',
   board,
   jobs,
   canApprove,
@@ -82,6 +84,7 @@ export default function LastPlannerBoard({
   onRecordOutcome,
   onOpenJob,
 }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [weekStart, setWeekStart] = useState(board?.week?.weekStart || '')
   const [selectedJobId, setSelectedJobId] = useState('')
   const [showConstraintForm, setShowConstraintForm] = useState(false)
@@ -144,7 +147,7 @@ export default function LastPlannerBoard({
     setPromiseDrafts((current) => current[key] ? current : {
       ...current,
       [key]: {
-        promise: candidate.taskTitle || 'Complete retained task scope',
+        promise: candidate.taskTitle || t('Complete retained task scope'),
         promisedBy: candidate.workerNames.join(', '),
         plannedHours: candidate.allocatedHours,
       },
@@ -220,47 +223,47 @@ export default function LastPlannerBoard({
     <section className="panel page-panel last-planner" data-testid="last-planner-board">
       <div className="panel-heading last-planner-heading">
         <div>
-          <h2>Last Planner weekly control</h2>
-          <p>Make-ready, weekly promises, daily actuals, PPC, and variance learning.</p>
+          <h2>{t('Last Planner weekly control')}</h2>
+          <p>{t('Make-ready, weekly promises, daily actuals, PPC, and variance learning.')}</p>
         </div>
         <span className={`last-planner-state ${board?.ready ? 'state-ready' : 'state-blocked'}`}>
-          {board?.ready ? 'Look-ahead current' : 'Look-ahead required'}
+          {board?.ready ? t('Look-ahead current') : t('Look-ahead required')}
         </span>
       </div>
 
-      <div className="last-planner-summary" aria-label="Last Planner summary">
-        <div><span>Make-ready</span><strong>{board?.summary?.makeReadyCandidates || 0}/{board?.summary?.candidatePromises || 0}</strong></div>
-        <div><span>Open constraints</span><strong>{board?.summary?.openConstraints || 0}</strong></div>
-        <div><span>Weekly promises</span><strong>{board?.summary?.weeklyPromises || 0}</strong></div>
-        <div><span>Complete</span><strong>{board?.summary?.completedPromises || 0}</strong></div>
-        <div><span>Missed</span><strong>{board?.summary?.missedPromises || 0}</strong></div>
-        <div><span>PPC</span><strong>{board?.summary?.ppcPercent == null ? 'Pending' : `${board.summary.ppcPercent}%`}</strong></div>
+      <div className="last-planner-summary" aria-label={t('Last Planner summary')}>
+        <div><span>{t('Make-ready')}</span><strong>{board?.summary?.makeReadyCandidates || 0}/{board?.summary?.candidatePromises || 0}</strong></div>
+        <div><span>{t('Open constraints')}</span><strong>{board?.summary?.openConstraints || 0}</strong></div>
+        <div><span>{t('Weekly promises')}</span><strong>{board?.summary?.weeklyPromises || 0}</strong></div>
+        <div><span>{t('Complete')}</span><strong>{board?.summary?.completedPromises || 0}</strong></div>
+        <div><span>{t('Missed')}</span><strong>{board?.summary?.missedPromises || 0}</strong></div>
+        <div><span>PPC</span><strong>{board?.summary?.ppcPercent == null ? t('Pending') : `${board.summary.ppcPercent}%`}</strong></div>
       </div>
 
       <div className="last-planner-toolbar">
-        <button type="button" className="icon-button" aria-label="Previous week" title="Previous week" disabled={submitting} onClick={() => onLoadWeek(offsetDate(board?.week?.weekStart || weekStart, -7))}>
+        <button type="button" className="icon-button" aria-label={t('Previous week')} title={t('Previous week')} disabled={submitting} onClick={() => onLoadWeek(offsetDate(board?.week?.weekStart || weekStart, -7))}>
           <ArrowLeft size={17} />
         </button>
         <label>
-          <span>Week starts</span>
+          <span>{t('Week starts')}</span>
           <input type="date" value={weekStart} onChange={(event) => setWeekStart(event.target.value)} />
         </label>
         <button type="button" className="secondary-button" disabled={submitting || !weekStart} onClick={() => onLoadWeek(weekStart)}>
           <RefreshCw size={16} />
-          Load week
+          {t('Load week')}
         </button>
-        <button type="button" className="icon-button" aria-label="Next week" title="Next week" disabled={submitting} onClick={() => onLoadWeek(offsetDate(board?.week?.weekStart || weekStart, 7))}>
+        <button type="button" className="icon-button" aria-label={t('Next week')} title={t('Next week')} disabled={submitting} onClick={() => onLoadWeek(offsetDate(board?.week?.weekStart || weekStart, 7))}>
           <ArrowRight size={17} />
         </button>
         <label className="last-planner-job-select">
-          <span>Job</span>
+          <span>{t('Job')}</span>
           <select value={selectedJobId} onChange={(event) => setSelectedJobId(event.target.value)}>
-            <option value="">Select job</option>
+            <option value="">{t('Select job')}</option>
             {jobOptions.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
           </select>
         </label>
         {selectedJob ? (
-          <button type="button" className="icon-button" aria-label={`Open ${selectedJob.title}`} title="Open job" onClick={() => onOpenJob(selectedJob.id)}>
+          <button type="button" className="icon-button" aria-label={t('Open {job}', { job: selectedJob.title })} title={t('Open job')} onClick={() => onOpenJob(selectedJob.id)}>
             <Link2 size={16} />
           </button>
         ) : null}
@@ -269,54 +272,54 @@ export default function LastPlannerBoard({
       <div className="last-planner-workspace">
         <section className="last-planner-register" aria-labelledby="make-ready-heading">
           <div className="last-planner-register-heading">
-            <div><h3 id="make-ready-heading">Make-ready register</h3><p>{formatDate(board?.week?.weekStart)} to {formatDate(board?.week?.weekEnd)}</p></div>
+            <div><h3 id="make-ready-heading">{t('Make-ready register')}</h3><p>{t('{start} to {end}', { start: formatDate(board?.week?.weekStart), end: formatDate(board?.week?.weekEnd) })}</p></div>
             <button type="button" className="secondary-button" disabled={!selectedJobId || submitting} onClick={() => setShowConstraintForm((current) => !current)}>
               {showConstraintForm ? <X size={16} /> : <Plus size={16} />}
-              {showConstraintForm ? 'Close' : 'Add constraint'}
+              {showConstraintForm ? t('Close') : t('Add constraint')}
             </button>
           </div>
           {showConstraintForm ? (
             <form className="last-planner-constraint-form" onSubmit={submitConstraint}>
-              <label><span>Task</span><select value={constraintDraft.taskId} onChange={(event) => setConstraintDraft((current) => ({ ...current, taskId: event.target.value }))}><option value="">Job-wide</option>{availableTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label>
-              <label><span>Category</span><select value={constraintDraft.category} onChange={(event) => setConstraintDraft((current) => ({ ...current, category: event.target.value }))}>{CONSTRAINT_CATEGORIES.map((category) => <option key={category} value={category}>{formatStatus(category)}</option>)}</select></label>
-              <label><span>Owner</span><input required minLength="2" maxLength="160" value={constraintDraft.owner} onChange={(event) => setConstraintDraft((current) => ({ ...current, owner: event.target.value }))} /></label>
-              <label><span>Due date</span><input required type="date" value={constraintDraft.dueDate} onChange={(event) => setConstraintDraft((current) => ({ ...current, dueDate: event.target.value }))} /></label>
-              <label className="last-planner-wide"><span>Constraint</span><input required minLength="3" maxLength="160" value={constraintDraft.title} onChange={(event) => setConstraintDraft((current) => ({ ...current, title: event.target.value }))} /></label>
-              <label className="last-planner-wide"><span>Required condition</span><textarea required minLength="5" maxLength="2000" rows="2" value={constraintDraft.description} onChange={(event) => setConstraintDraft((current) => ({ ...current, description: event.target.value }))} /></label>
-              <label className="last-planner-wide"><span>Source evidence</span><input required minLength="3" maxLength="500" value={constraintDraft.evidenceReference} onChange={(event) => setConstraintDraft((current) => ({ ...current, evidenceReference: event.target.value }))} /></label>
-              <button type="submit" className="primary-button" disabled={submitting}><Plus size={16} />Retain constraint</button>
+              <label><span>{t('Task')}</span><select value={constraintDraft.taskId} onChange={(event) => setConstraintDraft((current) => ({ ...current, taskId: event.target.value }))}><option value="">{t('Job-wide')}</option>{availableTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label>
+              <label><span>{t('Category')}</span><select value={constraintDraft.category} onChange={(event) => setConstraintDraft((current) => ({ ...current, category: event.target.value }))}>{CONSTRAINT_CATEGORIES.map((category) => <option key={category} value={category}>{t(formatStatus(category))}</option>)}</select></label>
+              <label><span>{t('Owner')}</span><input required minLength="2" maxLength="160" value={constraintDraft.owner} onChange={(event) => setConstraintDraft((current) => ({ ...current, owner: event.target.value }))} /></label>
+              <label><span>{t('Due date')}</span><input required type="date" value={constraintDraft.dueDate} onChange={(event) => setConstraintDraft((current) => ({ ...current, dueDate: event.target.value }))} /></label>
+              <label className="last-planner-wide"><span>{t('Constraint')}</span><input required minLength="3" maxLength="160" value={constraintDraft.title} onChange={(event) => setConstraintDraft((current) => ({ ...current, title: event.target.value }))} /></label>
+              <label className="last-planner-wide"><span>{t('Required condition')}</span><textarea required minLength="5" maxLength="2000" rows="2" value={constraintDraft.description} onChange={(event) => setConstraintDraft((current) => ({ ...current, description: event.target.value }))} /></label>
+              <label className="last-planner-wide"><span>{t('Source evidence')}</span><input required minLength="3" maxLength="500" value={constraintDraft.evidenceReference} onChange={(event) => setConstraintDraft((current) => ({ ...current, evidenceReference: event.target.value }))} /></label>
+              <button type="submit" className="primary-button" disabled={submitting}><Plus size={16} />{t('Retain constraint')}</button>
             </form>
           ) : null}
           <div className="last-planner-list">
             {jobConstraints.map((constraint) => (
               <div className={`last-planner-row constraint-${constraint.status}`} key={constraint.id}>
                 <span className="last-planner-row-icon">{constraint.status === 'released' ? <Check size={16} /> : <TriangleAlert size={16} />}</span>
-                <span><strong>{constraint.title}</strong><small>{formatStatus(constraint.category)} / {constraint.taskTitle || 'Job-wide'} / {constraint.owner}</small></span>
-                <span><strong>{formatDate(constraint.dueDate)}</strong><small>{formatStatus(constraint.status)}</small></span>
+                <span><strong>{constraint.title}</strong><small>{t(formatStatus(constraint.category))} / {constraint.taskTitle || t('Job-wide')} / {constraint.owner}</small></span>
+                <span><strong>{formatDate(constraint.dueDate)}</strong><small>{t(formatStatus(constraint.status))}</small></span>
                 {constraint.status === 'open' ? (
                   releaseDraft?.constraintId === constraint.id ? (
                     <form className="last-planner-release-form" onSubmit={submitRelease}>
-                      <label><span>Release evidence</span><input autoFocus required minLength="3" maxLength="500" value={releaseDraft.evidenceReference} onChange={(event) => setReleaseDraft({ ...releaseDraft, evidenceReference: event.target.value })} /></label>
-                      <button type="submit" className="secondary-button" disabled={submitting}><Check size={15} />Release</button>
-                      <button type="button" className="icon-button" aria-label="Cancel release" onClick={() => setReleaseDraft(null)}><X size={15} /></button>
+                      <label><span>{t('Release evidence')}</span><input autoFocus required minLength="3" maxLength="500" value={releaseDraft.evidenceReference} onChange={(event) => setReleaseDraft({ ...releaseDraft, evidenceReference: event.target.value })} /></label>
+                      <button type="submit" className="secondary-button" disabled={submitting}><Check size={15} />{t('Release')}</button>
+                      <button type="button" className="icon-button" aria-label={t('Cancel release')} onClick={() => setReleaseDraft(null)}><X size={15} /></button>
                     </form>
                   ) : (
-                    <button type="button" className="secondary-button" disabled={submitting} onClick={() => setReleaseDraft({ constraintId: constraint.id, evidenceReference: '' })}><Check size={15} />Release</button>
+                    <button type="button" className="secondary-button" disabled={submitting} onClick={() => setReleaseDraft({ constraintId: constraint.id, evidenceReference: '' })}><Check size={15} />{t('Release')}</button>
                   )
-                ) : <span className="status status-approved">Released</span>}
+                ) : <span className="status status-approved">{t('Released')}</span>}
               </div>
             ))}
-            {!jobConstraints.length ? <Empty title="No make-ready constraints" detail="Retained constraints for the selected job and week appear here." /> : null}
+            {!jobConstraints.length ? <Empty title={t('No make-ready constraints')} detail={t('Retained constraints for the selected job and week appear here.')} /> : null}
           </div>
         </section>
 
         <section className="last-planner-register" aria-labelledby="weekly-promise-heading">
           <div className="last-planner-register-heading">
-            <div><h3 id="weekly-promise-heading">Weekly promises</h3><p>{activePlan ? `Version ${activePlan.versionNumber} / ${formatStatus(activePlan.status)}` : 'No retained plan'}</p></div>
+            <div><h3 id="weekly-promise-heading">{t('Weekly promises')}</h3><p>{activePlan ? t('Version {version} / {status}', { version: activePlan.versionNumber, status: t(formatStatus(activePlan.status)) }) : t('No retained plan')}</p></div>
             {activePlan?.status === 'pending_approval' ? (
-              <button type="button" className="primary-button" disabled={!canApprove} onClick={() => onReviewApproval(activePlan)}><ShieldCheck size={16} />Review decision</button>
+              <button type="button" className="primary-button" disabled={!canApprove} onClick={() => onReviewApproval(activePlan)}><ShieldCheck size={16} />{t('Review decision')}</button>
             ) : (
-              <button type="button" className="primary-button" disabled={submitting || !selectedRows.length || Boolean(activePlan)} onClick={submitPlan}><CalendarCheck size={16} />Request approval</button>
+              <button type="button" className="primary-button" disabled={submitting || !selectedRows.length || Boolean(activePlan)} onClick={submitPlan}><CalendarCheck size={16} />{t('Request approval')}</button>
             )}
           </div>
           {!activePlan ? (
@@ -330,19 +333,19 @@ export default function LastPlannerBoard({
                     <label className="last-planner-candidate-toggle">
                       <input type="checkbox" checked={selected} disabled={!candidate.ready || candidate.alreadyPlanned} onChange={() => toggleCandidate(candidate)} />
                       <span><strong>{candidate.taskTitle}</strong><small>{formatDate(candidate.workDate)} / {hours(candidate.allocatedHours)}h / {candidate.workerNames.join(', ')}</small></span>
-                      <span className={`status ${candidate.ready ? 'status-approved' : 'status-blocked'}`}>{candidate.ready ? 'Ready' : `${candidate.openConstraintIds.length} blocked`}</span>
+                      <span className={`status ${candidate.ready ? 'status-approved' : 'status-blocked'}`}>{candidate.ready ? t('Ready') : t('{count} blocked', { count: candidate.openConstraintIds.length })}</span>
                     </label>
                     {selected ? (
                       <div className="last-planner-promise-editor">
-                        <label><span>Promise</span><input required minLength="5" maxLength="1000" value={draft.promise || ''} onChange={(event) => setPromiseDrafts((current) => ({ ...current, [key]: { ...current[key], promise: event.target.value } }))} /></label>
-                        <label><span>Promised by</span><input required minLength="2" maxLength="160" value={draft.promisedBy || ''} onChange={(event) => setPromiseDrafts((current) => ({ ...current, [key]: { ...current[key], promisedBy: event.target.value } }))} /></label>
-                        <label><span>Hours</span><input required type="number" min="0.25" max={candidate.allocatedHours} step="0.25" value={draft.plannedHours || ''} onChange={(event) => setPromiseDrafts((current) => ({ ...current, [key]: { ...current[key], plannedHours: event.target.value } }))} /></label>
+                        <label><span>{t('Promise')}</span><input required minLength="5" maxLength="1000" value={draft.promise || ''} onChange={(event) => setPromiseDrafts((current) => ({ ...current, [key]: { ...current[key], promise: event.target.value } }))} /></label>
+                        <label><span>{t('Promised by')}</span><input required minLength="2" maxLength="160" value={draft.promisedBy || ''} onChange={(event) => setPromiseDrafts((current) => ({ ...current, [key]: { ...current[key], promisedBy: event.target.value } }))} /></label>
+                        <label><span>{t('Hours')}</span><input required type="number" min="0.25" max={candidate.allocatedHours} step="0.25" value={draft.plannedHours || ''} onChange={(event) => setPromiseDrafts((current) => ({ ...current, [key]: { ...current[key], plannedHours: event.target.value } }))} /></label>
                       </div>
                     ) : null}
                   </div>
                 )
               })}
-              {!jobCandidates.length ? <Empty title="No crew-backed promise candidates" detail="Approved task-level allocations in the selected week appear here." /> : null}
+              {!jobCandidates.length ? <Empty title={t('No crew-backed promise candidates')} detail={t('Approved task-level allocations in the selected week appear here.')} /> : null}
             </div>
           ) : (
             <div className="last-planner-list">
@@ -355,11 +358,11 @@ export default function LastPlannerBoard({
                       <span className="last-planner-row-icon"><Target size={16} /></span>
                       <span>
                         <strong>{commitment.promise}</strong>
-                        <small>{commitment.taskTitle} / {commitment.promisedBy} / {hours(commitment.plannedHours)}h{commitment.atRisk ? ' / Constraint reopened' : ''}</small>
+                        <small>{commitment.taskTitle} / {commitment.promisedBy} / {hours(commitment.plannedHours)}h{commitment.atRisk ? ` / ${t('Constraint reopened')}` : ''}</small>
                       </span>
                       <span><strong>{formatDate(commitment.workDate)}</strong><small>{commitment.workerNames.join(', ')}</small></span>
                       {commitment.outcome ? (
-                        <span className={`status ${commitment.outcome.result === 'completed' ? 'status-approved' : 'status-blocked'}`}>{formatStatus(commitment.outcome.result)}</span>
+                        <span className={`status ${commitment.outcome.result === 'completed' ? 'status-approved' : 'status-blocked'}`}>{t(formatStatus(commitment.outcome.result))}</span>
                       ) : activePlan.status === 'approved' ? (
                         <button type="button" className="secondary-button" disabled={submitting || !cycles.length} onClick={() => setOutcomeDraft({
                           planId: commitment.planId,
@@ -369,26 +372,26 @@ export default function LastPlannerBoard({
                           dailyCycleId: cycles[0]?.id || '',
                           varianceCategory: 'prerequisite',
                           varianceReason: '',
-                        })}><ClipboardCheck size={15} />Record outcome</button>
-                      ) : <span className="status status-pending">Pending approval</span>}
+                        })}><ClipboardCheck size={15} />{t('Record outcome')}</button>
+                      ) : <span className="status status-pending">{t('Pending approval')}</span>}
                     </div>
                     {editing ? (
                       <form className="last-planner-outcome-form" onSubmit={submitOutcome}>
-                        <label><span>Result</span><select value={outcomeDraft.result} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, result: event.target.value })}><option value="completed">Completed</option><option value="not_completed">Not completed</option></select></label>
-                        <label><span>Daily cycle</span><select required value={outcomeDraft.dailyCycleId} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, dailyCycleId: event.target.value })}><option value="">Select closed cycle</option>{cycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{formatDate(cycle.workDate)} / {formatStatus(cycle.shiftLabel)}</option>)}</select></label>
-                        <label className="last-planner-wide"><span>Outcome evidence</span><input required minLength="3" maxLength="500" value={outcomeDraft.evidenceReference} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, evidenceReference: event.target.value })} /></label>
+                        <label><span>{t('Result')}</span><select value={outcomeDraft.result} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, result: event.target.value })}><option value="completed">{t('Completed')}</option><option value="not_completed">{t('Not completed')}</option></select></label>
+                        <label><span>{t('Daily cycle')}</span><select required value={outcomeDraft.dailyCycleId} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, dailyCycleId: event.target.value })}><option value="">{t('Select closed cycle')}</option>{cycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{formatDate(cycle.workDate)} / {t(formatStatus(cycle.shiftLabel))}</option>)}</select></label>
+                        <label className="last-planner-wide"><span>{t('Outcome evidence')}</span><input required minLength="3" maxLength="500" value={outcomeDraft.evidenceReference} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, evidenceReference: event.target.value })} /></label>
                         {outcomeDraft.result === 'not_completed' ? <>
-                          <label><span>Reason category</span><select value={outcomeDraft.varianceCategory} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, varianceCategory: event.target.value })}>{VARIANCE_CATEGORIES.map((category) => <option key={category} value={category}>{formatStatus(category)}</option>)}</select></label>
-                          <label className="last-planner-wide"><span>Learning reason</span><textarea required minLength="5" maxLength="2000" rows="2" value={outcomeDraft.varianceReason} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, varianceReason: event.target.value })} /></label>
+                          <label><span>{t('Reason category')}</span><select value={outcomeDraft.varianceCategory} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, varianceCategory: event.target.value })}>{VARIANCE_CATEGORIES.map((category) => <option key={category} value={category}>{t(formatStatus(category))}</option>)}</select></label>
+                          <label className="last-planner-wide"><span>{t('Learning reason')}</span><textarea required minLength="5" maxLength="2000" rows="2" value={outcomeDraft.varianceReason} onChange={(event) => setOutcomeDraft({ ...outcomeDraft, varianceReason: event.target.value })} /></label>
                         </> : null}
-                        <button type="submit" className="primary-button" disabled={submitting}><Check size={15} />Retain outcome</button>
-                        <button type="button" className="icon-button" aria-label="Cancel outcome" onClick={() => setOutcomeDraft(null)}><X size={15} /></button>
+                        <button type="submit" className="primary-button" disabled={submitting}><Check size={15} />{t('Retain outcome')}</button>
+                        <button type="button" className="icon-button" aria-label={t('Cancel outcome')} onClick={() => setOutcomeDraft(null)}><X size={15} /></button>
                       </form>
                     ) : null}
                   </div>
                 )
               })}
-              {!jobCommitments.length ? <Empty title="No weekly promises retained" detail="Approved or pending promises for the selected job appear here." /> : null}
+              {!jobCommitments.length ? <Empty title={t('No weekly promises retained')} detail={t('Approved or pending promises for the selected job appear here.')} /> : null}
             </div>
           )}
         </section>
@@ -396,19 +399,19 @@ export default function LastPlannerBoard({
 
       <section className="last-planner-learning" aria-labelledby="last-planner-learning-heading">
         <div className="last-planner-register-heading">
-          <div><h3 id="last-planner-learning-heading">PPC and variance learning</h3><p>Decided promises only</p></div>
+          <div><h3 id="last-planner-learning-heading">{t('PPC and variance learning')}</h3><p>{t('Decided promises only')}</p></div>
           <BarChart3 size={18} />
         </div>
         <div className="last-planner-learning-body">
           <div className="last-planner-ppc">
-            <strong>{board?.summary?.ppcPercent == null ? 'Pending' : `${board.summary.ppcPercent}%`}</strong>
-            <span>Percent Plan Complete</span>
+            <strong>{board?.summary?.ppcPercent == null ? t('Pending') : `${board.summary.ppcPercent}%`}</strong>
+            <span>{t('Percent Plan Complete')}</span>
           </div>
           <div className="last-planner-variance-list">
             {Object.entries(board?.varianceReasons || {}).map(([category, count]) => (
-              <div key={category}><span>{formatStatus(category)}</span><strong>{count}</strong></div>
+              <div key={category}><span>{t(formatStatus(category))}</span><strong>{count}</strong></div>
             ))}
-            {!Object.keys(board?.varianceReasons || {}).length ? <Empty title="No variance reasons" detail="Reasons appear after a weekly promise is retained as not completed." /> : null}
+            {!Object.keys(board?.varianceReasons || {}).length ? <Empty title={t('No variance reasons')} detail={t('Reasons appear after a weekly promise is retained as not completed.')} /> : null}
           </div>
         </div>
       </section>

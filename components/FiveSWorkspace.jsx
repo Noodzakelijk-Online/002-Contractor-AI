@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { createFieldEvidenceDraftId } from '../field-outbox'
 import { formatDate, formatStatus } from '../dashboard-format'
+import { operatorText } from '../operator-locale'
 import Empty from './EmptyState'
 
 const STAGES = [
@@ -132,26 +133,28 @@ function cacheBoard(jobId, board) {
   }
 }
 
-function statusCopy(row) {
-  if (!row?.currentStandard) return 'Standard required'
-  if (row.auditDue) return row.latestAudit ? 'Audit overdue' : 'First audit due'
-  if (row.openActions?.length) return `${row.openActions.length} action${row.openActions.length === 1 ? '' : 's'} open`
-  return row.ready ? 'Ready' : 'Review required'
+function statusCopy(row, t) {
+  if (!row?.currentStandard) return t('Standard required')
+  if (row.auditDue) return row.latestAudit ? t('Audit overdue') : t('First audit due')
+  if (row.openActions?.length) return t(row.openActions.length === 1 ? '{count} action open' : '{count} actions open', { count: row.openActions.length })
+  return row.ready ? t('Ready') : t('Review required')
 }
 
-function FiveSSummary({ summary = {} }) {
+function FiveSSummary({ summary = {}, locale = 'en-GB' }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   return (
-    <div className="five-s-summary" aria-label="5S readiness summary">
-      <div><span>Locations</span><strong>{summary.locations || 0}</strong></div>
-      <div><span>Ready</span><strong>{summary.ready || 0}</strong></div>
-      <div><span>Audits due</span><strong>{summary.auditsDue || 0}</strong></div>
-      <div><span>Open actions</span><strong>{summary.openActions || 0}</strong></div>
-      <div><span>Average score</span><strong>{summary.averageScorePercent == null ? '-' : `${summary.averageScorePercent}%`}</strong></div>
+    <div className="five-s-summary" aria-label={t('5S readiness summary')}>
+      <div><span>{t('Locations')}</span><strong>{summary.locations || 0}</strong></div>
+      <div><span>{t('Ready')}</span><strong>{summary.ready || 0}</strong></div>
+      <div><span>{t('Audits due')}</span><strong>{summary.auditsDue || 0}</strong></div>
+      <div><span>{t('Open actions')}</span><strong>{summary.openActions || 0}</strong></div>
+      <div><span>{t('Average score')}</span><strong>{summary.averageScorePercent == null ? '-' : `${summary.averageScorePercent}%`}</strong></div>
     </div>
   )
 }
 
-function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmit }) {
+function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmit, locale = 'en-GB' }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [draft, setDraft] = useState(() => initialAuditDraft(row, operatorName))
   const items = row.currentStandard?.items || []
 
@@ -193,31 +196,31 @@ function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmi
     <form className="five-s-audit-form" data-testid={fieldMode ? 'field-five-s-audit-form' : 'five-s-audit-form'} onSubmit={submit}>
       <div className="five-s-form-heading">
         <div>
-          <strong>Audit {row.location.name}</strong>
-          <span>Standard v{row.currentStandard.versionNumber} / every check is retained</span>
+          <strong>{t('Audit {location}', { location: row.location.name })}</strong>
+          <span>{t('Standard v{version} / every check is retained', { version: row.currentStandard.versionNumber })}</span>
         </div>
-        <button type="button" className="icon-button" aria-label="Close 5S audit" onClick={onCancel}><X size={16} /></button>
+        <button type="button" className="icon-button" aria-label={t('Close 5S audit')} onClick={onCancel}><X size={16} /></button>
       </div>
       <div className="form-grid">
         <label>
-          Audit date
+          {t('Audit date')}
           <input required type="date" max={todayInput()} value={draft.auditDate} onChange={(event) => setDraft({ ...draft, auditDate: event.target.value })} />
         </label>
         {!fieldMode || !operatorName ? (
           <label>
-            Audited by
+            {t('Audited by')}
             <input required minLength="2" maxLength="160" value={draft.auditedBy} onChange={(event) => setDraft({ ...draft, auditedBy: event.target.value })} />
           </label>
         ) : null}
         <label className="form-span">
-          Evidence references
+          {t('Evidence references')}
           <textarea
             required
             minLength="3"
             maxLength="2000"
             value={draft.evidenceReferences}
             onChange={(event) => setDraft({ ...draft, evidenceReferences: event.target.value })}
-            placeholder="Photo, checklist, or storage inspection reference; one per line"
+            placeholder={t('Photo, checklist, or storage inspection reference; one per line')}
           />
         </label>
       </div>
@@ -227,12 +230,12 @@ function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmi
           return (
             <fieldset className={`five-s-check ${result.result === 'fail' ? 'five-s-check-failed' : ''}`} key={item.id}>
               <legend>
-                <span>{formatStatus(item.stage)}</span>
+                <span>{t(formatStatus(item.stage))}</span>
                 <strong>{item.title}</strong>
               </legend>
               <p>{item.requirement}</p>
-              {item.tool ? <small><Wrench size={13} /> {item.tool.name} / expected at {item.expectedLocation || row.location.name}</small> : null}
-              <div className="five-s-result-control" role="radiogroup" aria-label={`${item.title} result`}>
+              {item.tool ? <small><Wrench size={13} /> {item.tool.name} / {t('expected at {location}', { location: item.expectedLocation || row.location.name })}</small> : null}
+              <div className="five-s-result-control" role="radiogroup" aria-label={t('{title} result', { title: item.title })}>
                 {[
                   ['pass', 'Pass'],
                   ['fail', 'Fail'],
@@ -246,35 +249,35 @@ function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmi
                       checked={result.result === value}
                       onChange={() => updateResult(item.id, { result: value })}
                     />
-                    {label}
+                    {t(label)}
                   </label>
                 ))}
               </div>
               <label>
-                Check note
+                {t('Check note')}
                 <input maxLength="500" value={result.note || ''} onChange={(event) => updateResult(item.id, { note: event.target.value })} />
               </label>
               {result.result === 'fail' ? (
                 <div className="five-s-finding-fields">
                   <label className="form-span">
-                    Finding
+                    {t('Finding')}
                     <textarea required minLength="5" maxLength="2000" value={result.finding || ''} onChange={(event) => updateResult(item.id, { finding: event.target.value })} />
                   </label>
                   <label>
-                    Action owner
+                    {t('Action owner')}
                     <input required minLength="2" maxLength="160" value={result.actionOwner || ''} onChange={(event) => updateResult(item.id, { actionOwner: event.target.value })} />
                   </label>
                   <label>
-                    Due date
+                    {t('Due date')}
                     <input required type="date" min={draft.auditDate} value={result.actionDueDate || ''} onChange={(event) => updateResult(item.id, { actionDueDate: event.target.value })} />
                   </label>
                   <label>
-                    Severity
+                    {t('Severity')}
                     <select value={result.severity || 'medium'} onChange={(event) => updateResult(item.id, { severity: event.target.value })}>
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
-                      <option value="critical">Critical</option>
+                      <option value="low">{t('Low')}</option>
+                      <option value="medium">{t('Medium')}</option>
+                      <option value="high">{t('High')}</option>
+                      <option value="critical">{t('Critical')}</option>
                     </select>
                   </label>
                 </div>
@@ -284,10 +287,10 @@ function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmi
         })}
       </div>
       <div className="five-s-form-actions">
-        <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
+        <button type="button" className="secondary-button" onClick={onCancel}>{t('Cancel')}</button>
         <button className="primary-button" disabled={submitting || !items.length}>
           <ClipboardCheck size={16} />
-          {submitting ? 'Retaining...' : fieldMode && navigator.onLine === false ? 'Save audit offline' : 'Retain audit'}
+          {submitting ? t('Retaining...') : fieldMode && navigator.onLine === false ? t('Save audit offline') : t('Retain audit')}
         </button>
       </div>
     </form>
@@ -295,6 +298,7 @@ function AuditForm({ row, fieldMode, operatorName, submitting, onCancel, onSubmi
 }
 
 function FiveSWorkspace({
+  locale = 'en-GB',
   board: suppliedBoard = null,
   request,
   jobs = [],
@@ -306,6 +310,7 @@ function FiveSWorkspace({
   onOpenApprovals,
   onSubmitFieldAudit,
 }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [board, setBoard] = useState(suppliedBoard)
   const [selectedJobId, setSelectedJobId] = useState(() => fieldMode ? jobs[0]?.id || '' : '')
   const [selectedLocationId, setSelectedLocationId] = useState('')
@@ -339,7 +344,7 @@ function FiveSWorkspace({
       if (retained) {
         setBoard(retained)
         setCached(true)
-        setNotice('Showing the last locally cached 5S board. New audits will use the exact retained standard revision.')
+        setNotice(operatorText(locale, 'Showing the last locally cached 5S board. New audits will use the exact retained standard revision.'))
       } else {
         setError(requestError.message)
         setBoard(null)
@@ -347,7 +352,7 @@ function FiveSWorkspace({
     } finally {
       setLoading(false)
     }
-  }, [fieldMode, request])
+  }, [fieldMode, locale, request])
 
   useEffect(() => {
     if (!fieldMode && suppliedBoard) {
@@ -401,7 +406,7 @@ function FiveSWorkspace({
       setSelectedLocationId(result.location.id)
       setLocationDraft(initialLocationDraft())
       setShowLocationForm(false)
-      setNotice(`${result.location.name} was retained as a governed 5S location.`)
+      setNotice(t('{name} was retained as a governed 5S location.', { name: result.location.name }))
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -438,7 +443,7 @@ function FiveSWorkspace({
       })
       retainMutationBoard(result.board)
       setShowStandardForm(false)
-      setNotice('The 5S standard is retained and waiting for an independent approval decision.')
+      setNotice(t('The 5S standard is retained and waiting for an independent approval decision.'))
       if (canApprove && onOpenApprovals) onOpenApprovals({ approvalId: result.approval.id })
     } catch (requestError) {
       setError(requestError.message)
@@ -473,10 +478,10 @@ function FiveSWorkspace({
       }
       setAuditLocationId('')
       setNotice(result?.queued
-        ? 'The complete 5S audit was saved locally and will sync as an exact retry after reconnection.'
+        ? t('The complete 5S audit was saved locally and will sync as an exact retry after reconnection.')
         : result?.replayed
-          ? 'This 5S audit was already retained; no duplicate was created.'
-          : 'The 5S audit and any corrective actions were retained.')
+          ? t('This 5S audit was already retained; no duplicate was created.')
+          : t('The 5S audit and any corrective actions were retained.'))
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -499,7 +504,7 @@ function FiveSWorkspace({
       })
       retainMutationBoard(result.board)
       setResolution({ actionId: '', evidenceReference: '', resolutionNote: '' })
-      setNotice(result.replayed ? 'This resolution was already retained.' : 'Corrective-action resolution evidence was retained.')
+      setNotice(result.replayed ? t('This resolution was already retained.') : t('Corrective-action resolution evidence was retained.'))
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -512,8 +517,8 @@ function FiveSWorkspace({
       {fieldMode ? (
         <div className="five-s-field-heading">
           <div>
-            <h2>5S vehicle and tool control</h2>
-            <p>Check the approved location standard and retain actual field condition.</p>
+            <h2>{t('5S vehicle and tool control')}</h2>
+            <p>{t('Check the approved location standard and retain actual field condition.')}</p>
           </div>
           <Truck size={21} />
         </div>
@@ -521,33 +526,33 @@ function FiveSWorkspace({
       {fieldMode ? (
         <div className="five-s-field-selector">
           <label>
-            Job
+            {t('Job')}
             <select value={selectedJobId} onChange={(event) => setSelectedJobId(event.target.value)}>
-              <option value="">Select an active job</option>
+              <option value="">{t('Select an active job')}</option>
               {jobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
             </select>
           </label>
-          <button type="button" className="icon-button" aria-label="Refresh 5S board" disabled={!selectedJobId || loading || navigator.onLine === false} onClick={() => void loadBoard(selectedJobId)}>
+          <button type="button" className="icon-button" aria-label={t('Refresh 5S board')} disabled={!selectedJobId || loading || navigator.onLine === false} onClick={() => void loadBoard(selectedJobId)}>
             <RefreshCw size={16} />
           </button>
         </div>
       ) : null}
       {error ? <div className="five-s-message five-s-error" role="alert"><AlertTriangle size={16} /> {error}</div> : null}
       {notice ? <div className="five-s-message" role="status"><Check size={16} /> {notice}</div> : null}
-      {cached ? <div className="five-s-cache-state"><Boxes size={16} /> Offline cached board</div> : null}
-      {loading ? <div className="five-s-loading"><RefreshCw size={18} /> Loading retained 5S controls...</div> : null}
-      {!loading && board ? <FiveSSummary summary={board.summary} /> : null}
+      {cached ? <div className="five-s-cache-state"><Boxes size={16} /> {t('Offline cached board')}</div> : null}
+      {loading ? <div className="five-s-loading"><RefreshCw size={18} /> {t('Loading retained 5S controls...')}</div> : null}
+      {!loading && board ? <FiveSSummary summary={board.summary} locale={locale} /> : null}
       {!fieldMode && canCoordinate ? (
         <div className="five-s-toolbar">
           <button type="button" className="primary-button" onClick={() => setShowLocationForm((value) => !value)}>
-            <Plus size={16} /> Add location
+            <Plus size={16} /> {t('Add location')}
           </button>
           <button type="button" className="secondary-button" disabled={!selectedRow || Boolean(selectedRow.pendingStandard)} onClick={() => setShowStandardForm((value) => !value)}>
-            <ShieldCheck size={16} /> {selectedRow?.currentStandard ? 'Revise standard' : 'Create standard'}
+            <ShieldCheck size={16} /> {selectedRow?.currentStandard ? t('Revise standard') : t('Create standard')}
           </button>
           {selectedRow?.pendingStandard && onOpenApprovals ? (
             <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: selectedRow.pendingStandard.approvalId })}>
-              <ShieldCheck size={16} /> Review pending standard
+              <ShieldCheck size={16} /> {t('Review pending standard')}
             </button>
           ) : null}
         </div>
@@ -555,68 +560,68 @@ function FiveSWorkspace({
       {showLocationForm ? (
         <form className="five-s-inline-form" data-testid="five-s-location-form" onSubmit={createLocation}>
           <div className="five-s-form-heading">
-            <div><strong>Retain a 5S location</strong><span>Vehicle, trailer, depot, store, or job storage</span></div>
-            <button type="button" className="icon-button" aria-label="Close location form" onClick={() => setShowLocationForm(false)}><X size={16} /></button>
+            <div><strong>{t('Retain a 5S location')}</strong><span>{t('Vehicle, trailer, depot, store, or job storage')}</span></div>
+            <button type="button" className="icon-button" aria-label={t('Close location form')} onClick={() => setShowLocationForm(false)}><X size={16} /></button>
           </div>
           <div className="form-grid">
             <label>
-              Job scope
+              {t('Job scope')}
               <select value={locationDraft.jobId} onChange={(event) => setLocationDraft({ ...locationDraft, jobId: event.target.value })}>
-                <option value="">Organization-wide</option>
+                <option value="">{t('Organization-wide')}</option>
                 {jobs.map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}
               </select>
             </label>
             <label>
-              Location type
+              {t('Location type')}
               <select value={locationDraft.locationType} onChange={(event) => setLocationDraft({ ...locationDraft, locationType: event.target.value })}>
-                {LOCATION_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                {LOCATION_TYPES.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
               </select>
             </label>
             <label>
-              Name
+              {t('Name')}
               <input required minLength="3" maxLength="160" value={locationDraft.name} onChange={(event) => setLocationDraft({ ...locationDraft, name: event.target.value })} placeholder="Service van 04" />
             </label>
             <label>
-              Identifier
-              <input maxLength="120" value={locationDraft.identifier} onChange={(event) => setLocationDraft({ ...locationDraft, identifier: event.target.value })} placeholder="Registration or retained reference" />
+              {t('Identifier')}
+              <input maxLength="120" value={locationDraft.identifier} onChange={(event) => setLocationDraft({ ...locationDraft, identifier: event.target.value })} placeholder={t('Registration or retained reference')} />
             </label>
             <label>
-              Owner
+              {t('Owner')}
               <input required minLength="2" maxLength="160" value={locationDraft.owner} onChange={(event) => setLocationDraft({ ...locationDraft, owner: event.target.value })} />
             </label>
             <label>
-              Audit frequency
-              <div className="five-s-number-control"><input required type="number" min="1" max="365" value={locationDraft.auditFrequencyDays} onChange={(event) => setLocationDraft({ ...locationDraft, auditFrequencyDays: event.target.value })} /><span>days</span></div>
+              {t('Audit frequency')}
+              <div className="five-s-number-control"><input required type="number" min="1" max="365" value={locationDraft.auditFrequencyDays} onChange={(event) => setLocationDraft({ ...locationDraft, auditFrequencyDays: event.target.value })} /><span>{t('days')}</span></div>
             </label>
           </div>
-          <div className="five-s-form-actions"><button className="primary-button" disabled={submitting}><Plus size={16} /> Retain location</button></div>
+          <div className="five-s-form-actions"><button className="primary-button" disabled={submitting}><Plus size={16} /> {t('Retain location')}</button></div>
         </form>
       ) : null}
       {showStandardForm && selectedRow ? (
         <form className="five-s-inline-form" data-testid="five-s-standard-form" onSubmit={requestStandard}>
           <div className="five-s-form-heading">
-            <div><strong>Standard for {selectedRow.location.name}</strong><span>All five stages are required before approval</span></div>
-            <button type="button" className="icon-button" aria-label="Close standard form" onClick={() => setShowStandardForm(false)}><X size={16} /></button>
+            <div><strong>{t('Standard for {location}', { location: selectedRow.location.name })}</strong><span>{t('All five stages are required before approval')}</span></div>
+            <button type="button" className="icon-button" aria-label={t('Close standard form')} onClick={() => setShowStandardForm(false)}><X size={16} /></button>
           </div>
           <div className="five-s-standard-editor">
             {standardItems.map((item, index) => (
               <fieldset key={item.stage}>
-                <legend>{STAGES.find(([stage]) => stage === item.stage)?.[1]}</legend>
+                <legend>{t(STAGES.find(([stage]) => stage === item.stage)?.[1])}</legend>
                 <label>
-                  Check title
+                  {t('Check title')}
                   <input required minLength="3" maxLength="160" value={item.title} onChange={(event) => updateStandardItem(index, { title: event.target.value })} />
                 </label>
                 <label>
-                  Requirement
+                  {t('Requirement')}
                   <textarea required minLength="5" maxLength="1000" value={item.requirement} onChange={(event) => updateStandardItem(index, { requirement: event.target.value })} />
                 </label>
                 {item.stage === 'set_in_order' ? (
                   <label>
-                    Canonical equipment link
+                    {t('Canonical equipment link')}
                     <select value={linkedToolId} onChange={(event) => setLinkedToolId(event.target.value)}>
-                      <option value="">Condition check only</option>
+                      <option value="">{t('Condition check only')}</option>
                       {tools.filter((tool) => tool.status !== 'retired').map((tool) => (
-                        <option key={tool.id} value={tool.id}>{tool.name} / {formatStatus(tool.status)} / {tool.currentLocation || 'location not retained'}</option>
+                        <option key={tool.id} value={tool.id}>{tool.name} / {t(formatStatus(tool.status))} / {tool.currentLocation || t('location not retained')}</option>
                       ))}
                     </select>
                   </label>
@@ -625,22 +630,22 @@ function FiveSWorkspace({
             ))}
           </div>
           <div className="five-s-form-actions">
-            <button className="primary-button" disabled={submitting}><ShieldCheck size={16} /> Request approval</button>
+            <button className="primary-button" disabled={submitting}><ShieldCheck size={16} /> {t('Request approval')}</button>
           </div>
         </form>
       ) : null}
-      {!loading && !board && fieldMode && !selectedJobId ? <Empty title="Select a job" detail="Choose an assigned job to load its approved 5S locations." /> : null}
+      {!loading && !board && fieldMode && !selectedJobId ? <Empty title={t('Select a job')} detail={t('Choose an assigned job to load its approved 5S locations.')} /> : null}
       {!loading && board && !rows.length ? (
         <Empty
-          title={fieldMode ? 'No job-scoped 5S location' : 'No 5S locations retained'}
+          title={fieldMode ? t('No job-scoped 5S location') : t('No 5S locations retained')}
           detail={fieldMode
-            ? 'The office must retain and approve a job-scoped location standard before field auditing.'
-            : 'Add a vehicle, trailer, depot, store, or job storage location to begin controlled 5S work.'}
+            ? t('The office must retain and approve a job-scoped location standard before field auditing.')
+            : t('Add a vehicle, trailer, depot, store, or job storage location to begin controlled 5S work.')}
         />
       ) : null}
       {rows.length ? (
         <div className="five-s-layout">
-          <div className="five-s-location-list" role="list" aria-label="5S locations">
+          <div className="five-s-location-list" role="list" aria-label={t('5S locations')}>
             {rows.map((row) => (
               <button
                 type="button"
@@ -656,9 +661,9 @@ function FiveSWorkspace({
                 <span className={`five-s-status-marker five-s-status-${row.status}`} aria-hidden="true" />
                 <span>
                   <strong>{row.location.name}</strong>
-                  <small>{formatStatus(row.location.locationType)} / {row.location.jobTitle || 'Organization-wide'}</small>
+                  <small>{t(formatStatus(row.location.locationType))} / {row.location.jobTitle || t('Organization-wide')}</small>
                 </span>
-                <span className="five-s-location-state">{statusCopy(row)}</span>
+                <span className="five-s-location-state">{statusCopy(row, t)}</span>
                 <ChevronRight size={16} />
               </button>
             ))}
@@ -667,24 +672,24 @@ function FiveSWorkspace({
             <div className="five-s-location-detail">
               <div className="five-s-detail-heading">
                 <div>
-                  <span>{formatStatus(selectedRow.location.locationType)}</span>
+                  <span>{t(formatStatus(selectedRow.location.locationType))}</span>
                   <h3>{selectedRow.location.name}</h3>
-                  <p>{selectedRow.location.owner} / audit every {selectedRow.location.auditFrequencyDays} days</p>
+                  <p>{selectedRow.location.owner} / {t('audit every {count} days', { count: selectedRow.location.auditFrequencyDays })}</p>
                 </div>
-                <span className={`status status-${selectedRow.ready ? 'ready' : 'attention'}`}>{statusCopy(selectedRow)}</span>
+                <span className={`status status-${selectedRow.ready ? 'ready' : 'attention'}`}>{statusCopy(selectedRow, t)}</span>
               </div>
               <div className="five-s-detail-facts">
-                <div><span>Current standard</span><strong>{selectedRow.currentStandard ? `v${selectedRow.currentStandard.versionNumber}` : 'Not approved'}</strong></div>
-                <div><span>Latest audit</span><strong>{selectedRow.latestAudit ? formatDate(selectedRow.latestAudit.auditDate) : 'Not retained'}</strong></div>
-                <div><span>Score</span><strong>{selectedRow.latestAudit ? `${selectedRow.latestAudit.scorePercent}%` : '-'}</strong></div>
-                <div><span>Next audit</span><strong>{selectedRow.nextAuditDate ? formatDate(selectedRow.nextAuditDate) : 'Due now'}</strong></div>
+                <div><span>{t('Current standard')}</span><strong>{selectedRow.currentStandard ? `v${selectedRow.currentStandard.versionNumber}` : t('Not approved')}</strong></div>
+                <div><span>{t('Latest audit')}</span><strong>{selectedRow.latestAudit ? formatDate(selectedRow.latestAudit.auditDate) : t('Not retained')}</strong></div>
+                <div><span>{t('Score')}</span><strong>{selectedRow.latestAudit ? `${selectedRow.latestAudit.scorePercent}%` : '-'}</strong></div>
+                <div><span>{t('Next audit')}</span><strong>{selectedRow.nextAuditDate ? formatDate(selectedRow.nextAuditDate) : t('Due now')}</strong></div>
               </div>
               {selectedRow.linkedTools?.length ? (
                 <div className="five-s-tool-state">
                   {selectedRow.linkedTools.map((tool) => (
                     <div key={tool.id}>
                       <Wrench size={16} />
-                      <span><strong>{tool.name}</strong><small>{formatStatus(tool.status)} / {tool.currentLocation || 'location not retained'} / inspection {formatStatus(tool.inspectionStatus)}</small></span>
+                      <span><strong>{tool.name}</strong><small>{t(formatStatus(tool.status))} / {tool.currentLocation || t('location not retained')} / {t('inspection {status}', { status: t(formatStatus(tool.inspectionStatus)) })}</small></span>
                       {tool.reservationReady ? <Check size={16} /> : <AlertTriangle size={16} />}
                     </div>
                   ))}
@@ -694,29 +699,29 @@ function FiveSWorkspace({
                 <div className="five-s-standard-view">
                   {selectedRow.currentStandard.items.map((item) => (
                     <div key={item.id}>
-                      <span>{formatStatus(item.stage)}</span>
+                      <span>{t(formatStatus(item.stage))}</span>
                       <strong>{item.title}</strong>
                       <p>{item.requirement}</p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="five-s-readiness-warning"><AlertTriangle size={17} /> Field audits stay blocked until the five-stage standard is approved.</div>
+                <div className="five-s-readiness-warning"><AlertTriangle size={17} /> {t('Field audits stay blocked until the five-stage standard is approved.')}</div>
               )}
               {selectedRow.openActions?.length ? (
                 <div className="five-s-actions">
-                  <div className="five-s-section-heading"><strong>Corrective actions</strong><span>{selectedRow.openActions.length} open</span></div>
+                  <div className="five-s-section-heading"><strong>{t('Corrective actions')}</strong><span>{t('{count} open', { count: selectedRow.openActions.length })}</span></div>
                   {selectedRow.openActions.map((action) => (
                     <div className="five-s-action-row" key={action.id}>
                       <span className={`five-s-action-severity five-s-action-${action.severity}`} aria-hidden="true" />
                       <div>
                         <strong>{action.title}</strong>
                         <p>{action.finding}</p>
-                        <small>{action.owner} / due {formatDate(action.dueDate)} / {formatStatus(action.severity)}</small>
+                        <small>{action.owner} / {t('due {date}', { date: formatDate(action.dueDate) })} / {t(formatStatus(action.severity))}</small>
                       </div>
                       {!fieldMode && canCoordinate ? (
                         <button type="button" className="secondary-button" onClick={() => setResolution({ actionId: action.id, evidenceReference: '', resolutionNote: '' })}>
-                          <Check size={15} /> Resolve
+                          <Check size={15} /> {t('Resolve')}
                         </button>
                       ) : null}
                     </div>
@@ -726,23 +731,23 @@ function FiveSWorkspace({
               {resolution.actionId ? (
                 <form className="five-s-resolution-form" onSubmit={resolveAction}>
                   <div className="five-s-form-heading">
-                    <div><strong>Retain resolution evidence</strong><span>The finding remains historical evidence.</span></div>
-                    <button type="button" className="icon-button" aria-label="Cancel action resolution" onClick={() => setResolution({ actionId: '', evidenceReference: '', resolutionNote: '' })}><X size={16} /></button>
+                    <div><strong>{t('Retain resolution evidence')}</strong><span>{t('The finding remains historical evidence.')}</span></div>
+                    <button type="button" className="icon-button" aria-label={t('Cancel action resolution')} onClick={() => setResolution({ actionId: '', evidenceReference: '', resolutionNote: '' })}><X size={16} /></button>
                   </div>
                   <label>
-                    Evidence reference
+                    {t('Evidence reference')}
                     <input required minLength="3" maxLength="500" value={resolution.evidenceReference} onChange={(event) => setResolution({ ...resolution, evidenceReference: event.target.value })} />
                   </label>
                   <label>
-                    Resolution note
+                    {t('Resolution note')}
                     <textarea required minLength="5" maxLength="2000" value={resolution.resolutionNote} onChange={(event) => setResolution({ ...resolution, resolutionNote: event.target.value })} />
                   </label>
-                  <button className="primary-button" disabled={submitting}><Check size={16} /> Retain resolution</button>
+                  <button className="primary-button" disabled={submitting}><Check size={16} /> {t('Retain resolution')}</button>
                 </form>
               ) : null}
               {selectedRow.currentStandard && auditLocationId !== selectedRow.location.id ? (
                 <button type="button" className="primary-button five-s-audit-command" onClick={() => setAuditLocationId(selectedRow.location.id)}>
-                  <Camera size={16} /> Start 5S audit
+                  <Camera size={16} /> {t('Start 5S audit')}
                 </button>
               ) : null}
               {auditLocationId === selectedRow.location.id && selectedRow.currentStandard ? (
@@ -754,13 +759,14 @@ function FiveSWorkspace({
                   submitting={submitting}
                   onCancel={() => setAuditLocationId('')}
                   onSubmit={submitAudit}
+                  locale={locale}
                 />
               ) : null}
             </div>
           ) : null}
         </div>
       ) : null}
-      <p className="five-s-policy">5S records are internal operating evidence. They do not change tool custody or status, dispatch a vehicle, authorize spend, or certify safety or compliance.</p>
+      <p className="five-s-policy">{t('5S records are internal operating evidence. They do not change tool custody or status, dispatch a vehicle, authorize spend, or certify safety or compliance.')}</p>
     </div>
   )
 }

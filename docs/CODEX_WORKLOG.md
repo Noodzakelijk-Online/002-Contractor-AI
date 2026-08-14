@@ -306,3 +306,20 @@ Node 22 x64 packaging. Exact counts and external boundaries are retained in
   all 90 Chromium workflows in 554.7 seconds, release/build/bundle at 388,474
   total gzip bytes, zero dependency vulnerabilities, HAI contract, production
   benchmark, hardened container, and Node 22.23.2 Windows package verification.
+
+## 2026-08-14 - Field planning and safety bilingual pass
+
+- Passed the persisted operator locale into Last Planner weekly control, office and
+  field 5S, and the worker-owned LMRA workflow, including the nested Resources path.
+- Localized static controls, known statuses, validation messages, offline notices,
+  accessible names, and system outcomes while preserving user-entered promises,
+  findings, hazards, evidence references, and retained standards verbatim.
+- Added exact interpolation contracts plus Dutch-to-English browser round trips with
+  reload persistence before completing the existing approval, corrective-action,
+  live-LMRA, stop-work, and responsive mobile workflows.
+- The operator catalog now has 754 unique case-sensitive entries with no duplicate
+  keys and remains a lazy shared production chunk.
+- Current-source gates pass: 10 frontend tests, 533 Node tests in 74.5 seconds, all
+  90 Chromium workflows in 490.5 seconds, release/build/bundle at 394,091 total
+  gzip bytes, HAI fail-closed contract, production benchmark, hardened container,
+  and Node 22.23.2 Windows package verification.
