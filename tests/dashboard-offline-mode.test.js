@@ -439,7 +439,9 @@ test('operations view lists, verifies, and exports portable checksummed local ba
   assert.match(dashboardSource, /data-testid="runtime-exposure-readiness"/);
   assert.match(dashboardSource, /data-testid="hai-connector-readiness"/);
   assert.match(dashboardSource, /href="\/api\/integrations\/hai\/feed\?limit=100"/);
-  assert.match(dashboardSource, /Export HAI feed/);
+  assert.match(dashboardSource, /Download HAI feed/);
+  assert.match(dashboardSource, /api\('\/api\/integrations\/hai\/publish'/);
+  assert.match(dashboardSource, /Publish to HAI/);
   assert.match(dashboardSource, /operations\/backups\/\$\{encodeURIComponent\(backup\.backupId\)\}\/download/);
   assert.match(dashboardSource, /command-plan\?limit=100&jobLimit=12/);
   assert.match(dashboardSource, /if \(next === 'operations'\) void refreshOperationsCommandPlan\(sequence\)/);

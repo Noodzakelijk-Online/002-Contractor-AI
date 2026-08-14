@@ -63,6 +63,7 @@ module.exports = defineConfig({
         CONTRACTOR_AI_REQUIRE_AUTH: 'false',
         CONTRACTOR_AI_AUTH_TOKEN: '',
         CONTRACTOR_AI_ROLE_TOKENS: '',
+        CONTRACTOR_AI_HAI_FEED_PATH: path.join(localRuntimeDirectory, 'connected-sources', 'contractor-ai.json'),
         CONTRACTOR_AI_RATE_LIMIT: process.env.CONTRACTOR_AI_RATE_LIMIT || '10000',
         CONTRACTOR_AI_VERIFIED_INTEGRATIONS: 'playwright_test_provider'
       }
@@ -81,6 +82,7 @@ module.exports = defineConfig({
         CONTRACTOR_AI_REQUIRE_AUTH: 'true',
         CONTRACTOR_AI_AUTH_TOKEN: '',
         CONTRACTOR_AI_ROLE_TOKENS: browserRoleTokens,
+        CONTRACTOR_AI_HAI_FEED_PATH: path.join(authRuntimeDirectory, 'connected-sources', 'contractor-ai.json'),
         CONTRACTOR_AI_RATE_LIMIT: process.env.CONTRACTOR_AI_RATE_LIMIT || '10000'
       }
     }

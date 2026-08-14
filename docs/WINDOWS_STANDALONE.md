@@ -40,6 +40,9 @@ in-product verified backup workflow and retain copies away from the computer.
 - `ContractorAI-Export-HAI.cmd`: exports the read-only HAI feed while the local
   application is running. Set `CONTRACTOR_AI_HAI_FEED_PATH` to an absolute file
   under HAI's configured feed root first.
+- With that path set before launch, Operations also shows the verified local-feed
+  state and provides an owner-only **Publish to HAI** action. The Windows smoke
+  gate publishes and reads back this feed with zero execution authority.
 
 ## Build locally
 

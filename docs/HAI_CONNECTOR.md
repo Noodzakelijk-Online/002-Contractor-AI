@@ -22,9 +22,18 @@ The API is owner-only:
 
 - `GET /api/integrations/hai/manifest`
 - `GET /api/integrations/hai/feed?limit=100`
+- `GET /api/integrations/hai/status`
+- `POST /api/integrations/hai/publish`
 
 The API does not expose evidence bodies, client contact details, financial line
 items, credentials, or arbitrary ledger payloads.
+
+When `CONTRACTOR_AI_HAI_FEED_PATH` is an absolute path, the owner can publish
+from Operations without using a terminal. Contractor.AI writes a same-directory
+temporary file, replaces the configured feed atomically, reads it back, validates
+every GenericItem, and reports the item count, SHA-256, and publication time.
+Relative paths fail production readiness. Missing, invalid, oversized, or
+unavailable files remain explicit states and never become a successful sync.
 
 ## Local feed export
 
@@ -62,7 +71,7 @@ In HAI's Connected Sources screen, register an owner-scoped account feed with:
 }
 ```
 
-Sync the feed from HAI after each export. HAI preserves raw source JSON and
+Sync the feed from HAI after each CLI or Operations publication. HAI preserves raw source JSON and
 deduplicates by external id plus content revision. This connector deliberately
 does not provide a write-back or command endpoint; consequential actions remain
 inside Contractor.AI's authenticated approval workflow.

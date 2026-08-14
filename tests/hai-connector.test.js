@@ -12,6 +12,8 @@ const {
   HAI_ITEM_TYPE,
   buildHaiFeed,
   connectorManifest,
+  inspectHaiFeedPublication,
+  publishHaiFeed,
   validateHaiFeed,
   writeHaiFeedAtomically
 } = require('../hai-connector');
@@ -102,6 +104,26 @@ test('HAI feed writes an operator-selected absolute local file with stable integ
   assert.throws(() => writeHaiFeedAtomically('relative-feed.json', feed), /absolute/);
 });
 
+test('HAI local-feed publication reports configuration, verifies output, and replaces stale content', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-hai-publication-'));
+  const outputFile = path.join(directory, 'contractor-ai.json');
+  assert.equal(inspectHaiFeedPublication('').status, 'not_configured');
+  assert.equal(inspectHaiFeedPublication('relative-feed.json').status, 'invalid_configuration');
+  assert.equal(inspectHaiFeedPublication(outputFile).status, 'not_published');
+  const first = publishHaiFeed([{ type: 'review', id: 'one', message: 'Review one.' }], { outputFile, limit: 100 });
+  assert.equal(first.status, 'published');
+  assert.equal(first.itemCount, 1);
+  assert.match(first.sha256, /^[a-f0-9]{64}$/);
+  const second = publishHaiFeed([
+    { type: 'review', id: 'one', message: 'Review one.' },
+    { type: 'review', id: 'two', message: 'Review two.' }
+  ], { outputFile, limit: 100 });
+  assert.equal(second.itemCount, 2);
+  assert.notEqual(second.sha256, first.sha256);
+  fs.writeFileSync(outputFile, '{invalid', 'utf8');
+  assert.equal(inspectHaiFeedPublication(outputFile).status, 'invalid_feed');
+});
+
 test('HAI exporter authenticates to a loopback API and never puts its owner key in the URL', async () => {
   const token = 'hai-export-owner-token-at-least-32-characters';
   const feed = buildHaiFeed([{ type: 'review', id: 'export-one', message: 'Review export.' }]);
@@ -140,7 +162,8 @@ test('HAI API is owner-only and returns the generic JSON root array', async () =
     CONTRACTOR_AI_ROLE_TOKENS: JSON.stringify(tokens),
     CONTRACTOR_AI_DATA_DIR: directory,
     LEDGER_DB_FILE: path.join(directory, 'ledger.sqlite'),
-    UPLOAD_DIR: path.join(directory, 'uploads')
+    UPLOAD_DIR: path.join(directory, 'uploads'),
+    CONTRACTOR_AI_HAI_FEED_PATH: path.join(directory, 'connected-sources', 'contractor-ai.json')
   });
   delete process.env.CONTRACTOR_AI_AUTH_TOKEN;
   delete require.cache[require.resolve('../server')];
@@ -165,6 +188,27 @@ test('HAI API is owner-only and returns the generic JSON root array', async () =
     const denied = await request('/api/integrations/hai/feed', tokens.office_operator);
     assert.equal(denied.status, 403);
     assert.equal((await denied.json()).error.code, 'insufficient_role');
+    const initialStatus = await request('/api/integrations/hai/status', tokens.owner);
+    assert.equal(initialStatus.status, 200);
+    assert.equal((await initialStatus.json()).publication.status, 'not_published');
+    const deniedPublish = await fetch(`${baseUrl}/api/integrations/hai/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.office_operator}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 5 })
+    });
+    assert.equal(deniedPublish.status, 403);
+    const published = await fetch(`${baseUrl}/api/integrations/hai/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.owner}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 5 })
+    });
+    assert.equal(published.status, 200);
+    const publishedBody = await published.json();
+    assert.equal(publishedBody.publication.status, 'published');
+    assert.equal(publishedBody.canExecute, false);
+    assert.equal(publishedBody.externalCommitments, 0);
+    assert.ok(fs.existsSync(process.env.CONTRACTOR_AI_HAI_FEED_PATH));
+    validateHaiFeed(JSON.parse(fs.readFileSync(process.env.CONTRACTOR_AI_HAI_FEED_PATH, 'utf8')));
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

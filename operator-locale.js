@@ -3545,6 +3545,19 @@ const OPERATOR_NL = {
   '{title} now blocks overlapping scheduling.': '{title} blokkeert nu overlappende planning.',
   'Your acknowledgement was retained and this permit is ready for the assigned work.': 'Uw bevestiging is vastgelegd en deze werkvergunning is gereed voor het toegewezen werk.',
   'Your acknowledgement was retained. Other permit blockers remain.': 'Uw bevestiging is vastgelegd. Andere blokkades voor de werkvergunning blijven bestaan.',
+  'HAI feed': 'HAI-feed',
+  'attention': 'aandacht',
+  'checking': 'controleren',
+  '{count} action(s) published': '{count} actie(s) gepubliceerd',
+  'ready to publish': 'gereed om te publiceren',
+  'download only': 'alleen downloaden',
+  'Download HAI feed': 'HAI-feed downloaden',
+  'Publish to HAI': 'Naar HAI publiceren',
+  'Publish the current read-only actions to the configured HAI local feed': 'Publiceer de huidige alleen-lezenacties naar de ingestelde lokale HAI-feed',
+  'Configure an absolute HAI local-feed path to enable direct publication': 'Stel een absoluut pad voor de lokale HAI-feed in om direct publiceren mogelijk te maken',
+  'HAI feed published with {count} read-only action(s).': 'HAI-feed gepubliceerd met {count} alleen-lezenactie(s).',
+  'Configure an absolute CONTRACTOR_AI_HAI_FEED_PATH before publishing to HAI.': 'Stel een absoluut CONTRACTOR_AI_HAI_FEED_PATH in voordat u naar HAI publiceert.',
+  'HAI feed output path must be absolute.': 'Het uitvoerpad van de HAI-feed moet absoluut zijn.',
 }
 
 export function operatorText(locale, key, variables = {}) {

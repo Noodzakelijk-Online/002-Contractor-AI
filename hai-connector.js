@@ -10,6 +10,7 @@ const HAI_FEED_OPERATION = 'review_document';
 const HAI_SOURCE_URI_PREFIX = 'contractor-ai://review-actions/';
 const DEFAULT_HAI_FEED_LIMIT = 100;
 const MAX_HAI_FEED_LIMIT = 250;
+const MAX_HAI_FEED_FILE_BYTES = 5 * 1024 * 1024;
 
 function boundedFeedLimit(value, fallback = DEFAULT_HAI_FEED_LIMIT) {
   const parsed = Number(value);
@@ -200,6 +201,115 @@ function writeHaiFeedAtomically(outputFile, feed) {
   };
 }
 
+function inspectHaiFeedPublication(outputFile) {
+  const configuredValue = String(outputFile || '').trim();
+  if (!configuredValue) {
+    return {
+      configured: false,
+      status: 'not_configured',
+      outputFile: null,
+      itemCount: 0,
+      sha256: null,
+      publishedAt: null
+    };
+  }
+  if (!path.isAbsolute(configuredValue)) {
+    return {
+      configured: true,
+      status: 'invalid_configuration',
+      outputFile: configuredValue,
+      itemCount: 0,
+      sha256: null,
+      publishedAt: null,
+      issue: 'HAI feed output path must be absolute.'
+    };
+  }
+  const resolved = path.resolve(configuredValue);
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return {
+        configured: true,
+        status: 'not_published',
+        outputFile: resolved,
+        itemCount: 0,
+        sha256: null,
+        publishedAt: null
+      };
+    }
+    return {
+      configured: true,
+      status: 'unavailable',
+      outputFile: resolved,
+      itemCount: 0,
+      sha256: null,
+      publishedAt: null,
+      issue: error.code || 'feed_unavailable'
+    };
+  }
+  if (!stat.isFile() || stat.size > MAX_HAI_FEED_FILE_BYTES) {
+    return {
+      configured: true,
+      status: 'invalid_feed',
+      outputFile: resolved,
+      itemCount: 0,
+      sha256: null,
+      publishedAt: stat.mtime.toISOString(),
+      issue: stat.isFile() ? 'HAI feed file exceeds the safe inspection limit.' : 'HAI feed output path is not a file.'
+    };
+  }
+  try {
+    const content = fs.readFileSync(resolved);
+    const feed = validateHaiFeed(JSON.parse(content.toString('utf8')));
+    return {
+      configured: true,
+      status: 'published',
+      outputFile: resolved,
+      itemCount: feed.length,
+      sha256: sha256(content),
+      publishedAt: stat.mtime.toISOString()
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      status: 'invalid_feed',
+      outputFile: resolved,
+      itemCount: 0,
+      sha256: null,
+      publishedAt: stat.mtime.toISOString(),
+      issue: cleanText(error.message, 240) || 'HAI feed validation failed.'
+    };
+  }
+}
+
+function publishHaiFeed(actions, options = {}) {
+  const publication = inspectHaiFeedPublication(options.outputFile);
+  if (!publication.configured) {
+    const error = new Error('Configure an absolute CONTRACTOR_AI_HAI_FEED_PATH before publishing to HAI.');
+    error.code = 'hai_feed_path_not_configured';
+    error.statusCode = 409;
+    throw error;
+  }
+  if (publication.status === 'invalid_configuration') {
+    const error = new Error(publication.issue);
+    error.code = 'hai_feed_path_invalid';
+    error.statusCode = 422;
+    throw error;
+  }
+  const feed = buildHaiFeed(actions, { limit: options.limit });
+  writeHaiFeedAtomically(publication.outputFile, feed);
+  const result = inspectHaiFeedPublication(publication.outputFile);
+  if (result.status !== 'published') {
+    const error = new Error('The HAI feed could not be verified after publication.');
+    error.code = 'hai_feed_publish_verification_failed';
+    error.statusCode = 500;
+    throw error;
+  }
+  return result;
+}
+
 module.exports = {
   DEFAULT_HAI_FEED_LIMIT,
   HAI_CONNECTOR_ID,
@@ -207,11 +317,14 @@ module.exports = {
   HAI_FEED_OPERATION,
   HAI_ITEM_PROVIDER,
   HAI_ITEM_TYPE,
+  MAX_HAI_FEED_FILE_BYTES,
   MAX_HAI_FEED_LIMIT,
   boundedFeedLimit,
   buildHaiFeed,
   connectorManifest,
+  inspectHaiFeedPublication,
   mapActionToHaiItem,
+  publishHaiFeed,
   validateHaiFeed,
   writeHaiFeedAtomically
 };

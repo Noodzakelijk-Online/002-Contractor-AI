@@ -3534,6 +3534,15 @@ function App() {
   const automationControl = operationCapabilities?.automation?.control || data?.scheduler?.control || null
   const automationSuspended = automationControl?.suspended === true
   const evidenceStorageCapability = operationCapabilities?.evidenceStorage || null
+  const haiPublication = operationCapabilities?.haiConnector?.publication || null
+  const haiPublicationReady = haiPublication?.configured === true && haiPublication?.status !== 'invalid_configuration'
+  const haiPublicationLabel = haiPublication?.status === 'published'
+    ? ot('{count} action(s) published', { count: haiPublication.itemCount || 0 })
+    : haiPublication?.status === 'not_published'
+      ? ot('ready to publish')
+      : haiPublication?.status === 'invalid_configuration' || haiPublication?.status === 'invalid_feed' || haiPublication?.status === 'unavailable'
+        ? ot('attention')
+        : ot('download only')
   const exportValidationAvailable = operationCapabilities?.export?.integrity === 'sha256'
   const localBackupAvailable = operationCapabilities?.backup?.available === true
   const localRestoreAvailable = operationCapabilities?.restore?.available === true
@@ -4963,6 +4972,34 @@ function App() {
     } catch (requestError) {
       setError(ot(requestError.message))
       return null
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function publishHaiLocalFeed() {
+    setSubmitting(true)
+    try {
+      const result = await api('/api/integrations/hai/publish', {
+        method: 'POST',
+        body: JSON.stringify({ limit: 100 }),
+      })
+      setData((current) => current?.operationsCapabilities ? {
+        ...current,
+        operationsCapabilities: {
+          ...current.operationsCapabilities,
+          capabilities: {
+            ...current.operationsCapabilities.capabilities,
+            haiConnector: {
+              ...current.operationsCapabilities.capabilities?.haiConnector,
+              publication: result.publication,
+            },
+          },
+        },
+      } : current)
+      notify(ot('HAI feed published with {count} read-only action(s).', { count: result.publication.itemCount || 0 }))
+    } catch (requestError) {
+      setError(ot(requestError.message))
     } finally {
       setSubmitting(false)
     }
@@ -13948,8 +13985,8 @@ function App() {
                       </strong>
                     </div>
                     <div data-testid="hai-connector-readiness">
-                      <span>HAI feed</span>
-                      <strong>{operationCapabilities?.haiConnector?.available ? 'read-only ready' : 'checking'}</strong>
+                      <span>{ot('HAI feed')}</span>
+                      <strong>{operationCapabilities?.haiConnector?.available ? haiPublicationLabel : ot('checking')}</strong>
                     </div>
                     <div>
                       <span>Recovery</span>
@@ -14001,8 +14038,21 @@ function App() {
                     </a>
                     <a className="secondary-button" href="/api/integrations/hai/feed?limit=100" download="contractor-ai.json">
                       <GitBranch size={16} />
-                      Export HAI feed
+                      {ot('Download HAI feed')}
                     </a>
+                    <button
+                      className="secondary-button"
+                      disabled={submitting || !haiPublicationReady}
+                      title={
+                        haiPublicationReady
+                          ? ot('Publish the current read-only actions to the configured HAI local feed')
+                          : ot('Configure an absolute HAI local-feed path to enable direct publication')
+                      }
+                      onClick={publishHaiLocalFeed}
+                    >
+                      <RefreshCw size={16} />
+                      {ot('Publish to HAI')}
+                    </button>
                     <button
                       className="secondary-button"
                       disabled={submitting || !localBackupAvailable}

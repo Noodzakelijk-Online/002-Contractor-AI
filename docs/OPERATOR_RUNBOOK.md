@@ -23,10 +23,11 @@ Temporary remote access must use `npm run start:tunnel` or
 authentication, binds the app to loopback, and does not convert local storage
 into hosted storage. See `docs/NGROK.md`.
 
-To make internal Contractor.AI review actions visible in HAI, run the
-owner-authenticated `npm run export:hai` command to an absolute path inside
-HAI's local feed root, then sync HAI's `generic_json_feed`. See
-`docs/HAI_CONNECTOR.md`.
+To make internal Contractor.AI review actions visible in HAI, configure an absolute
+`CONTRACTOR_AI_HAI_FEED_PATH` inside HAI's local feed root. An owner can then inspect
+and publish the read-only feed from Operations; the server atomically replaces and
+verifies the file. `npm run export:hai` remains available for manual download/export.
+Register or sync HAI's `generic_json_feed` separately; see `docs/HAI_CONNECTOR.md`.
 
 For development, run `npm run dev:api` and `npm run dev` in separate terminals.
 The Vite client proxies API calls to the Node service.

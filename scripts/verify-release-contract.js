@@ -288,7 +288,9 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/operations/control/resume'",
     "app.get('/api/operations/support-bundle'",
     "app.get('/api/integrations/hai/manifest'",
-    "app.get('/api/integrations/hai/feed'"
+    "app.get('/api/integrations/hai/feed'",
+    "app.get('/api/integrations/hai/status'",
+    "app.post('/api/integrations/hai/publish'"
   ]) {
     if (!serverSource.includes(canonicalRoute)) failures.push(`Canonical ledger route is missing: ${canonicalRoute}`);
   }
@@ -367,11 +369,14 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     '/api/operations/operators',
     '/api/operations/privacy/requests',
     '/api/integrations/hai/manifest',
+    '/api/integrations/hai/status',
+    '/api/integrations/hai/publish',
     'accountfeed.GenericItem',
     'generic_json_feed',
     'review_document',
     'operatorRegisterRedacted',
     'privacyRegisterAvailable',
+    'haiLocalFeedPublished',
     'removeFixture(fixtureRoot)'
   ]) {
     if (!windowsPackageVerificationSource.includes(verificationRequirement)) {

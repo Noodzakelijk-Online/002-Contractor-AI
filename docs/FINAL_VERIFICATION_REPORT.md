@@ -18,18 +18,18 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --omit=dev --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 339 canonical source files; generated release/runtime/artifact directories excluded |
-| HAI input contract | Passed | Native verifier produced the checksummed `accountfeed.GenericItem` review-only fixture with `canExecute=false`; a live HAI parser/account-feed sync was not configured for this run |
+| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 340 canonical source files; generated release/runtime/artifact directories excluded |
+| HAI input contract | Passed | Native verifier and maintained HAI parser accepted the checksummed `accountfeed.GenericItem` review-only feed with `canExecute=false`; direct local publication read the atomic file back successfully, while live HAI registration/polling was not configured |
 | Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 11 locale/component tests, 0 failed |
-| Node tests | Passed | Isolated suite: 535 tests, 499 passed, 36 PostgreSQL/environment skips, 0 failed, 96.8 s |
-| Production build | Passed | `npm run build`: main application JS 547.10 kB and CSS 275.21 kB before gzip; the base locale remains 12.88 kB JS and the expanded 252.29 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 241.70 kB JS |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 547,097 bytes, largest CSS 275,210 bytes, and 461,958 total gzip bytes across 39 assets; all budgets passed |
-| Production-scale ledger | Passed | The retained deterministic production profile passed its correctness/resource/latency thresholds: dashboard p95 544.75 ms, canonical intake p95 44.46 ms, startup 232.91 ms, reopen 4.73 ms, and audit verification p95 255.61 ms. |
-| Browser tests | Passed | All 100 Playwright Chromium workflows passed on current source in 25 bounded isolated batches in 508.2 s |
+| Node tests | Passed | Isolated suite: 537 tests, 501 passed, 36 PostgreSQL/environment skips, 0 failed, 131.9 s |
+| Production build | Passed | `npm run build`: largest application JS 548,251 bytes and CSS 275,210 bytes before gzip; the specialist operator catalog remains demand-loaded only when Dutch is active |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 548,251 bytes, largest CSS 275,210 bytes, and 462,573 total gzip bytes across 39 assets; all budgets passed |
+| Production-scale ledger | Passed | The retained deterministic 63,500-row profile passed its correctness/resource/latency thresholds: dashboard p95 386.76 ms, canonical intake p95 38.46 ms, startup 269.98 ms, reopen 10.25 ms, seed 1,296.84 ms, and audit verification 213.89 ms. |
+| Browser tests | Passed | All 101 Playwright Chromium workflows passed on current source in 26 bounded isolated batches |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
-| Windows standalone | Passed | A running preview kept its bundled Node executable locked; the builder preserved Node 22.23.2, refreshed the remaining package, then `npm run test:windows-package` passed authenticated isolated-profile startup, migration 072/zero pending, redacted owner register, available privacy register, and read-only `accountfeed.GenericItem` HAI contract |
+| Windows standalone | Passed | Bundled Node 22.23.2 passed authenticated isolated-profile startup, migration 072/zero pending, redacted owner register, available privacy register, and atomic read-back-verified HAI local-feed publication with `accountfeed.GenericItem` and zero external commitments |
 | PostgreSQL parity | CI service gate | Migration 072 operator preferences and the shared ledger contract tests are present; 36 PostgreSQL/environment tests were skipped without local provider services |
 
 ## Manual results
@@ -44,6 +44,7 @@ decisions outside this repository.
 | Local backup/restore UX | Passed in browser and backend contract tests |
 | QA/demo maintenance | Passed for localized preview, complete unbounded selection, deterministic plan hash, stale/empty rejection, verified backup, atomic archive/retirement and approval rejection, retained non-QA records, audit reason/hash, successful focus restoration, and responsive empty state |
 | Managed team access | Passed for localized owner-only account creation, one-time key presentation, rotation, immediate session revocation, deactivation, API redaction, canonical role/status retention, and mobile containment |
+| HAI local-feed lifecycle | Passed for owner-only status, disabled unconfigured UI, atomic publication, read-back contract validation, SHA-256 status, NL/EN round trip, non-owner rejection, Windows package output, accessibility, and zero execution authority/external commitments |
 | Governed framework lifecycle | Passed across catalog, 23 family playbooks, guarded starters, API, SQLite, restore, export, HAI, desktop and mobile tests |
 | Privacy rights lifecycle | Passed for request registration, minimal identity reference, deadline extension, source-current assessment, independent approval, restriction/objection guards, rectification, partial pseudonymisation, private JSON export, recovery, and desktop/mobile layout |
 | Material, safety, permit and LMRA load races | Passed with job-scoped sequence guards and disabled form controls |
@@ -53,7 +54,7 @@ decisions outside this repository.
 | Workforce and work permits | Passed in Dutch and English through crew creation, assignment approval, qualification evidence approval, availability, permit approval, worker acknowledgement, stop-work suspension, closeout, exact retained API evidence, accessibility, and mobile containment |
 | In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error log; business identity/onboarding, managed team access, autonomous safety, QA maintenance, ICP/service-area, bid/no-bid, WBS/quantity takeoff, labour-burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates and formal variations, job setup coverage, critical-path work planning, crew-capacity/two-week planning, daily start/EOD reporting, production baseline/output/reversal, regiewerk quantity/acknowledgement/conversion, Last Planner, 5S, LMRA, installation/QC inspections, before/during/after photo evidence, NCRs, field observations/incidents, field assurance review, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls render in Dutch. Retained operator evidence remains verbatim across locale changes, while the complete portal, Performance Scorecard, Framework Register, site-survey, and practical-core persistence flows passed in Playwright. |
 | In-app Browser draft QA | Passed against the current built runtime: an unfinished opportunity restored exact values after reload, an intentional close cleared it, and no visible error state remained |
-| Responsive evidence | Desktop and narrow-screen geometry was inspected in prior in-app browser passes; owner administration, job summary, field-assurance, finance, procurement, equipment, workforce, and permit workspaces retain exact mobile containment with localized label wrapping, and 100 automated workflows retain repeatable desktop/mobile interaction evidence. In-app local navigation remains blocked by Browser URL policy in this environment; the isolated production-browser harness passed the same built application. |
+| Responsive evidence | Desktop and narrow-screen geometry was inspected in prior in-app browser passes; owner administration, job summary, field-assurance, finance, procurement, equipment, workforce, permit, and HAI controls retain mobile containment with localized label wrapping, and 101 automated workflows retain repeatable desktop/mobile interaction evidence. In-app local navigation remains blocked by Browser URL policy in this environment; the isolated production-browser harness passed the same built application. |
 
 ## Confirmed limitations
 
@@ -86,10 +87,11 @@ decisions outside this repository.
   component-internal draft recovery, and uniform pagination remain partial.
 - The ngrok launcher and fail-closed tests are complete, but no live tunnel was
   opened because no `NGROK_AUTHTOKEN` was available.
-- The HAI connector is read-only, exportable, and accepted by the maintained HAI
-  generic-feed parser. A configured HAI account-feed sync and owner mapping were
-  not available for live deployment acceptance; the connector has no authority
-  to mutate Contractor.AI records.
+- The HAI connector is read-only, downloadable, and can atomically publish to an
+  operator-configured absolute local-feed path. Its output is accepted by the
+  maintained HAI generic-feed parser. Actual HAI feed registration, polling, and
+  owner mapping were not available for live acceptance; neither side receives
+  authority to mutate Contractor.AI records or create external commitments.
 - The product supports compliance evidence and review gates but makes no legal or
   certification claim.
 - Automated accessibility checks do not replace representative keyboard,

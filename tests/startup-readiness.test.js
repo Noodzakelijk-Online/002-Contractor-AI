@@ -80,6 +80,32 @@ test('direct production startup refuses copied environment template placeholders
   assert.match(result.stderr, /template_placeholder_configured/);
 });
 
+test('direct production startup rejects a relative configured HAI feed path', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-startup-hai-path-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const result = childProcess.spawnSync(process.execPath, ['server.js'], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      CONTRACTOR_AI_RUNTIME_MODE: 'local',
+      CONTRACTOR_AI_STORAGE_MODE: 'local',
+      CONTRACTOR_AI_AUTH_TOKEN: 'hai-path-owner-token-at-least-32-characters',
+      CONTRACTOR_AI_ROLE_TOKENS: '',
+      CONTRACTOR_AI_TRUST_PROXY: '',
+      CONTRACTOR_AI_HAI_FEED_PATH: 'relative-feed.json',
+      STATE_FILE: path.join(directory, 'state.json'),
+      LEDGER_DB_FILE: path.join(directory, 'ledger.sqlite'),
+      UPLOAD_DIR: path.join(directory, 'uploads')
+    }
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /production_runtime_not_ready/);
+  assert.match(result.stderr, /hai_feed_path_invalid/);
+});
+
 test('direct production startup rejects duplicate principal identity and token ownership', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-startup-principals-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

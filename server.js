@@ -22,7 +22,13 @@ const {
 const { OpenMeteoWeatherService } = require('./weather-service');
 const { EvidenceStorageError, createEvidenceStorage } = require('./evidence-storage');
 const { verifySqliteBackupDatabase } = require('./scripts/restore-local-backup');
-const { boundedFeedLimit, buildHaiFeed, connectorManifest } = require('./hai-connector');
+const {
+  boundedFeedLimit,
+  buildHaiFeed,
+  connectorManifest,
+  inspectHaiFeedPublication,
+  publishHaiFeed
+} = require('./hai-connector');
 const packageMetadata = require('./package.json');
 
 const app = express();
@@ -40,6 +46,7 @@ const dataDir = process.env.CONTRACTOR_AI_DATA_DIR
 const distDir = path.join(__dirname, 'dist');
 const runtimeMode = String(process.env.CONTRACTOR_AI_RUNTIME_MODE || 'local').trim().toLowerCase();
 const storageMode = String(process.env.CONTRACTOR_AI_STORAGE_MODE || 'local').trim().toLowerCase();
+const haiFeedOutputPath = String(process.env.CONTRACTOR_AI_HAI_FEED_PATH || '').trim();
 const trustedProxyRaw = String(process.env.CONTRACTOR_AI_TRUST_PROXY || '').trim();
 const trustedProxyEntries = trustedProxyRaw.split(',').map(value => value.trim()).filter(Boolean);
 let trustedProxyError = null;
@@ -235,6 +242,9 @@ function runtimeConfiguration(options = {}) {
   }
   if (!['local', 's3'].includes(storageMode)) {
     issues.push({ code: 'invalid_storage_mode', message: 'CONTRACTOR_AI_STORAGE_MODE must be local or s3.' });
+  }
+  if (haiFeedOutputPath && !path.isAbsolute(haiFeedOutputPath)) {
+    issues.push({ code: 'hai_feed_path_invalid', message: 'CONTRACTOR_AI_HAI_FEED_PATH must be an absolute path when configured.' });
   }
   if (hosted && !dashboardAuthRequired) {
     issues.push({ code: 'hosted_auth_required', message: 'Hosted mode requires dashboard/API authentication.' });
@@ -6172,6 +6182,44 @@ app.get('/api/integrations/hai/feed', (req, res) => {
   return res.json(buildHaiFeed(actions, { limit }));
 });
 
+app.get('/api/integrations/hai/status', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can inspect the HAI local-feed publication status.');
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({
+    success: true,
+    publication: inspectHaiFeedPublication(haiFeedOutputPath),
+    externalCommitments: 0,
+    canExecute: false
+  });
+});
+
+app.post('/api/integrations/hai/publish', (req, res) => {
+  if (req.operator?.role !== 'owner') {
+    return sendError(req, res, 403, 'insufficient_role', 'Only an owner can publish the HAI local action feed.');
+  }
+  try {
+    const limit = boundedFeedLimit(req.body?.limit || process.env.CONTRACTOR_AI_HAI_FEED_LIMIT);
+    const actions = operatingLedger.nextActions({
+      includeCrewCapacity: true,
+      includeLastPlanner: true,
+      includeFiveS: true
+    });
+    const publication = publishHaiFeed(actions, { outputFile: haiFeedOutputPath, limit });
+    return res.json({ success: true, publication, externalCommitments: 0, canExecute: false });
+  } catch (error) {
+    return sendError(
+      req,
+      res,
+      error.statusCode || 500,
+      error.code || 'hai_feed_publish_failed',
+      error.statusCode ? error.message : 'The HAI local action feed could not be published.',
+      serializeError(error)
+    );
+  }
+});
+
 app.get('/api/ledger/availability', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
@@ -8155,7 +8203,10 @@ app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
       haiConnector: {
         available: true,
         ...connectorManifest(),
-        exportCommand: 'npm run export:hai'
+        exportCommand: 'npm run export:hai',
+        publication: inspectHaiFeedPublication(haiFeedOutputPath),
+        statusEndpoint: '/api/integrations/hai/status',
+        publishEndpoint: '/api/integrations/hai/publish'
       },
       preconstructionSiteSurvey: {
         available: true,

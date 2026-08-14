@@ -27,12 +27,17 @@ async function reservePort() {
   return port;
 }
 
-async function requestJson(baseUrl, route, token, timeoutMs = 5_000) {
+async function requestJson(baseUrl, route, token, timeoutMs = 5_000, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${baseUrl}${route}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      method: options.method || 'GET',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.body ? { 'Content-Type': 'application/json' } : {})
+      },
+      ...(options.body ? { body: JSON.stringify(options.body) } : {}),
       signal: controller.signal
     });
     const text = await response.text();
@@ -94,6 +99,7 @@ async function verifyWindowsStandalone() {
   const port = await reservePort();
   const ownerToken = crypto.randomBytes(32).toString('base64url');
   const configDirectory = path.join(fixtureRoot, 'config');
+  const haiFeedPath = path.join(fixtureRoot, 'connected-sources', 'contractor-ai.json');
   fs.mkdirSync(configDirectory, { recursive: true });
   fs.writeFileSync(path.join(configDirectory, 'runtime.json'), `${JSON.stringify({
     format: 'contractor-ai-windows-standalone/v1',
@@ -109,7 +115,8 @@ async function verifyWindowsStandalone() {
     env: {
       ...process.env,
       CONTRACTOR_AI_STANDALONE_ROOT: fixtureRoot,
-      CONTRACTOR_AI_OPEN_BROWSER: 'false'
+      CONTRACTOR_AI_OPEN_BROWSER: 'false',
+      CONTRACTOR_AI_HAI_FEED_PATH: haiFeedPath
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
@@ -147,6 +154,18 @@ async function verifyWindowsStandalone() {
     assert.equal(manifest.body?.itemProvider, 'generic_json_feed');
     assert.equal(manifest.body?.itemType, 'document');
     assert.equal(manifest.body?.operationType, 'review_document');
+    const haiStatus = await requestJson(baseUrl, '/api/integrations/hai/status', ownerToken);
+    assert.equal(haiStatus.response.status, 200);
+    assert.equal(haiStatus.body?.publication?.status, 'not_published');
+    const haiPublication = await requestJson(baseUrl, '/api/integrations/hai/publish', ownerToken, 5_000, {
+      method: 'POST',
+      body: { limit: 100 }
+    });
+    assert.equal(haiPublication.response.status, 200);
+    assert.equal(haiPublication.body?.publication?.status, 'published');
+    assert.equal(haiPublication.body?.canExecute, false);
+    assert.equal(haiPublication.body?.externalCommitments, 0);
+    assert.ok(fs.existsSync(haiFeedPath));
     assert.equal(stdout.includes(ownerToken), false, 'A retained standalone owner key must not reappear in startup output.');
 
     return {
@@ -157,7 +176,8 @@ async function verifyWindowsStandalone() {
       operatorRegisterRedacted: true,
       privacyRegisterAvailable: true,
       haiReadOnly: true,
-      haiContract: manifest.body.schema
+      haiContract: manifest.body.schema,
+      haiLocalFeedPublished: true
     };
   } finally {
     await stopChild(child);

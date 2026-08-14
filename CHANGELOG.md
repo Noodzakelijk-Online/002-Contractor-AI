@@ -5,6 +5,11 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- Added owner-visible HAI local-feed status and direct publication. Configured
+  feeds are atomically replaced, read back, schema-validated, and checksummed;
+  relative paths fail production readiness and every response retains the
+  read-only, zero-external-commitment boundary. Windows and bilingual browser
+  gates now exercise the complete publication path.
 - Localized the complete workforce-readiness chain: retained crew records,
   qualification requirements and credential evidence, operational availability,
   assignment safeguards, and governed work permits through approval, worker

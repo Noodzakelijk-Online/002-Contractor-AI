@@ -9,8 +9,8 @@ Starting revision: `d1a89fbc73be714b6cb05bb7fbf554309c3387ea`
 Contractor.AI is a mature local-first contractor operating ledger, not a greenfield
 prototype. The canonical product is a Node 22 Express service, a React/Vite client,
 SQLite for local operation, PostgreSQL for hosted operation, and local or private
-S3-compatible evidence storage. The current audit found 379 declared HTTP routes,
-72 append-only migrations, 163 Node test files, 52 browser spec files, and 86
+S3-compatible evidence storage. The current audit found 381 declared HTTP routes,
+72 append-only migrations, 163 Node test files, 63 browser spec files, and 86
 unique literal API path prefixes in the main dashboard, plus dynamic child-component calls.
 
 The prompt's 116 phases are primarily a production-readiness method. The practical
@@ -33,6 +33,11 @@ implementation revisions, backup/export/diagnostic coverage, PostgreSQL parity,
 due-review command/HAI integration, and a lazy-loaded searchable Performance
 workspace. This is a governed method register, not 671 separate certification or
 external-provider engines.
+
+The HAI connector now also has an owner-only local publication lifecycle. It
+requires an absolute configured path, atomically replaces the bounded feed,
+validates the file after writing, and exposes checksummed status without granting
+execution or external-commitment authority.
 
 ## Runtime map
 
@@ -72,7 +77,7 @@ external-provider engines.
    Job-scoped sequence guards and native disabled loading controls now close those
    races, including programmatic browser interaction during loading.
 8. The previous browser runner reused runtime state between specs. It now discovers
-   all 89 tests from the Playwright AST and runs bounded isolated batches against
+   all 101 tests from the Playwright AST and runs bounded isolated batches against
    separate ports and databases after one production build.
 9. The broad framework inventory was documentation-only. Migration 069 and the
    framework workspace now retain every family membership and provide scoped,

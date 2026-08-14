@@ -2,7 +2,7 @@
 
 Audit date: 2026-08-13
 
-The source declares 379 Express routes. The primary React dashboard has 86 unique
+The source declares 381 Express routes. The primary React dashboard has 86 unique
 literal API path prefixes plus dynamic and child-component calls. Route presence alone is not considered
 evidence of usability; release evidence combines route contract tests, UI action
 mapping, browser flows, and the release-contract scan.
@@ -36,7 +36,7 @@ guidance. The production service serves the built Vite client for non-API routes
 | Documents | controlled revisions, SDS, drawings, transmittals, meetings, NCRs |
 | Performance | scorecard, governed framework catalog/revisions, feedback, energy/environment, lessons and learning |
 | Approvals | approval queue, decisions, package and communication gates |
-| Operations | identity, readiness, safety stop, backup/export/restore, audit, previewed QA archive |
+| Operations | identity, readiness, safety stop, backup/export/restore, HAI feed status/publication, audit, previewed QA archive |
 | Client portal | approved job summary, documents, change responses, feedback |
 
 ## Error and replay contract
@@ -58,6 +58,9 @@ guidance. The production service serves the built Vite client for non-API routes
   write requires a current plan hash and reason, verifies a backup, and rechecks
   membership inside the archive transaction.
 - The support bundle is owner-only and aggregate/minimized by construction.
+- HAI status and publication are owner-only; publication requires an absolute
+  configured path, atomically replaces and verifies the read-only feed, and
+  cannot execute a command or create an external commitment.
 - Evidence reads pass through authenticated ledger routes; upload and portal routes
   enforce resource ownership and narrow capability.
 - Detailed provider and database state is not exposed by the public health route.

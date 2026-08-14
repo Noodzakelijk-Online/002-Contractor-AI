@@ -75,7 +75,9 @@ key. See [ngrok operation](docs/NGROK.md).
 The owner-only HAI connector exposes deterministic, read-only internal action
 summaries through `/api/integrations/hai/feed`. `npm run export:hai` writes that
 `accountfeed.GenericItem` JSON feed atomically to an absolute operator-selected
-path. HAI can register it as its existing `generic_json_feed` /
+path. When `CONTRACTOR_AI_HAI_FEED_PATH` is configured, the Operations screen
+shows the verified publication state and lets the owner atomically publish the
+current read-only feed directly. HAI can register it as its existing `generic_json_feed` /
 `local_json_file` source and derives `review_document` from the retained
 `document` item type. It cannot execute a Contractor.AI command or create an
 external commitment. Run `npm run verify:hai-contract` for the native contract,

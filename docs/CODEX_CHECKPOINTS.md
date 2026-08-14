@@ -3,6 +3,20 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-26 Verified HAI local-feed publication
+
+- Operations now exposes owner-only HAI status and direct publication when
+  `CONTRACTOR_AI_HAI_FEED_PATH` identifies an absolute local path.
+- Publication is bounded, atomic, read-back verified, checksummed, and explicitly
+  read-only with zero external commitments; non-owners cannot inspect the path.
+- Windows standalone verification publishes a real file with bundled Node 22.23.2.
+  The maintained HAI parser accepts the same `accountfeed.GenericItem` root array.
+- Verification: 3,553 unique specialist translation keys; 11 frontend tests;
+  537 Node tests; 101 Chromium workflows in 26 isolated batches; release/HAI,
+  build/bundle, production benchmark, hardened container, and Windows gates pass.
+- External boundary: actual HAI feed registration, polling, and owner mapping still
+  require an operator-controlled HAI installation and are not claimed by this gate.
+
 ## CP-25 Bilingual workforce readiness and governed work permits
 
 - Crew records, qualifications, availability, assignment safeguards, and governed

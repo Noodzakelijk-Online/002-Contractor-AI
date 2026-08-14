@@ -20,7 +20,7 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 | Finance | job costing, cost-to-complete, forecasts, billing, invoice/credit/payable evidence | Wired and bilingual for the practical-core cost review; no transfer or ledger posting claim |
 | Performance | scorecard and governed framework search, method basis, scope, evidence, measures, review and history | Wired and persisted; starters never fabricate evidence and make no method certification claim |
 | Approvals | inspect source, approve/reject, follow resulting action | Wired; source changes fail closed |
-| Operations | identity, readiness, audit, backup/export/archive/restore | Wired; owner safety, support, and previewed QA-maintenance controls added |
+| Operations | identity, readiness, audit, backup/export/archive/restore, HAI status/publish | Wired; owner safety, support, previewed QA maintenance, and read-back-verified local HAI publication added |
 | Client portal | inspect approved job data and submit scoped responses | Wired; token/job/action bounded |
 
 ## Enhancements in this release
@@ -69,7 +69,11 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
   return quarantine, inspection, maintenance, and approval-gated retirement in
   Dutch or English without rewriting retained evidence. Its resource metadata and
   custody labels pass the same axe contrast gate.
-- The responsive production UI is exercised by 98 isolated Chromium tests across
+- Operations reports whether the configured HAI feed is ready, published, or needs
+  attention and lets only an owner publish the review-only feed. Download remains
+  available independently; an invalid or missing publication path disables the
+  direct command without hiding the configuration requirement.
+- The responsive production UI is exercised by 101 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised

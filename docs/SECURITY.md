@@ -58,13 +58,16 @@ unless both ngrok agent authentication and strong Contractor.AI owner
 authentication are present. It trusts only the local proxy hop and configures
 the exact returned HTTPS origin.
 
-The HAI connector is export-only. Its owner endpoint and local exporter expose
+The HAI connector is read-only. Its owner endpoints and local exporter expose
 bounded internal action summaries without evidence bodies, arbitrary ledger
 payloads, credentials, or write-back authority. Each item explicitly declares
 that it cannot execute and creates zero external commitments. Exported records
 use HAI's maintained `accountfeed.GenericItem` input fields; the compatibility
 verifier can execute HAI's parser from a temporary copy without modifying the
-HAI checkout or granting either system command authority.
+HAI checkout or granting either system command authority. Direct publication is
+owner-only, requires an absolute configured path, atomically replaces the bounded
+file, and validates its structure and checksum after writing. Other roles cannot
+inspect the configured local path.
 
 ## Operational safety stop
 

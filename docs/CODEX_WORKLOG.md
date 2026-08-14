@@ -1,5 +1,22 @@
 # Codex Worklog
 
+## 2026-08-14 - Verified HAI local-feed publication
+
+- Added an owner-only HAI publication lifecycle that inspects the configured
+  absolute local-feed path, atomically replaces the bounded JSON feed, reads it
+  back through the native contract validator, and reports its item count, SHA-256,
+  and publication time in Operations.
+- Kept the integration review-only: every response and feed item declares no
+  execution authority and zero external commitments. Hosted startup rejects a
+  relative feed path, and non-owners cannot inspect or publish the configured path.
+- Added unit, API-role, startup, Windows standalone, and bilingual browser coverage.
+  The packaged Node 22.23.2 runtime published and verified a real local file, and
+  the maintained HAI parser accepted the same `accountfeed.GenericItem` contract.
+- Current-source gates pass: 3,553 unique specialist translation keys with zero
+  duplicates; 11 frontend tests; 537 Node tests (501 passed and 36 PostgreSQL or
+  environment skips); all 101 Chromium workflows in 26 isolated batches; release,
+  HAI, build, bundle, performance, container, and Windows standalone verification.
+
 ## 2026-08-14 - Workforce readiness and governed permits bilingual pass
 
 - Localized crew creation/editing/retirement, qualification requirements,
